@@ -85,6 +85,7 @@ MODULE DevCPC486;
 		(* sysflag *)
 		untagged = 1; callback = 2; noAlign = 3; union = 7;
 		interface = 10; ccall = -10; guarded = 10; noframe = 16;
+		exclusive = 32;	(* [exclusive]: Kernel.Lock/Unlock в прологе/эпилоге *)
 		nilBit = 1; enumBits = 8; new = 1; iid = 2;
 		stackArray = 120;
 		
@@ -2200,6 +2201,64 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		RETURN FALSE
 	END NeedOutPtrInit;
 	
+	(* --- [exclusive]: монитор в прологе и на общем выходе (этап 6.3) ----- *)
+
+	PROCEDURE MonitorArg (proc: DevCPT.Object; VAR x, r: DevCPL486.Item);
+	(** Операнд объекта-монитора: [EBP + получатель] у метода, адрес
+		скрытой глобальной модуля у процедуры верхнего уровня. *)
+	BEGIN
+		IF proc.mode = TProc THEN
+			x.mode := Ind; x.reg := BP; x.offset := proc.link.adr; x.scale := 0; x.form := Pointer
+		ELSE
+			x.mode := Abs; x.obj := DevCPT.ModuleMonitor(); x.offset := x.obj.adr;
+			x.scale := 0; x.form := Pointer;
+			DevCPL486.MakeReg(r, AX, Pointer);
+			DevCPL486.GenLoadAdr(x, r);
+			x := r
+		END
+	END MonitorArg;
+
+	PROCEDURE LockEntry (proc: DevCPT.Object);
+	(** Kernel.Lock(монитор) после кадра процедуры. BX (статическая связь)
+		сохраняется: Lock — обычная CP-процедура. *)
+		VAR x, r: DevCPL486.Item;
+	BEGIN
+		DevCPT.EnsureKernel; DevCPT.kLock.used := TRUE;
+		DevCPL486.MakeReg(r, BX, Pointer); DevCPL486.GenPush(r);
+		MonitorArg(proc, x, r);
+		DevCPL486.GenPush(x);
+		x.mode := XProc; x.obj := DevCPT.kLock; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPL486.GenCall(x);
+		DevCPL486.MakeReg(r, BX, Pointer); DevCPL486.GenPop(r)
+	END LockEntry;
+
+	PROCEDURE UnlockExit (proc: DevCPT.Object);
+	(** Kernel.Unlock(монитор) на общем выходе. Результат (AX:DX или ST0)
+		сохраняется на время вызова. *)
+		VAR x, r: DevCPL486.Item; f: SHORTINT;
+	BEGIN
+		DevCPT.EnsureKernel; DevCPT.kUnlock.used := TRUE;
+		f := proc.typ.form;
+		IF f IN {Real32, Real64} THEN
+			DevCPL486.GenCode(83H); DevCPL486.GenCode(0ECH); DevCPL486.GenCode(8);	(* sub esp,8 *)
+			DevCPL486.GenCode(0DDH); DevCPL486.GenCode(1CH); DevCPL486.GenCode(24H)	(* fstp qword [esp] *)
+		ELSIF f # NoTyp THEN
+			DevCPL486.GenCode(50H);	(* push eax *)
+			DevCPL486.GenCode(52H)	(* push edx *)
+		END;
+		MonitorArg(proc, x, r);
+		DevCPL486.GenPush(x);
+		x.mode := XProc; x.obj := DevCPT.kUnlock; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPL486.GenCall(x);
+		IF f IN {Real32, Real64} THEN
+			DevCPL486.GenCode(0DDH); DevCPL486.GenCode(04H); DevCPL486.GenCode(24H);	(* fld qword [esp] *)
+			DevCPL486.GenCode(83H); DevCPL486.GenCode(0C4H); DevCPL486.GenCode(8)	(* add esp,8 *)
+		ELSIF f # NoTyp THEN
+			DevCPL486.GenCode(5AH);	(* pop edx *)
+			DevCPL486.GenCode(58H)	(* pop eax *)
+		END
+	END UnlockExit;
+
 	PROCEDURE Enter* (proc: DevCPT.Object; empty, useFpu: BOOLEAN);
 		VAR sp, fp, r, r1: DevCPL486.Item; par: DevCPT.Object; adr, size, np: INTEGER;
 	BEGIN
@@ -2252,7 +2311,8 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				IF imVar IN proc.conval.setval THEN
 					DevCPL486.MakeReg(r, BX, Pointer); DevCPL486.GenMove(fp, r)
 				END
-			END
+			END;
+			IF ~empty & (proc.sysflag = exclusive) THEN LockEntry(proc) END
 		ELSIF ~empty THEN (* enter module *)
 			DevCPL486.GenPush(fp);
 			DevCPL486.GenMove(sp, fp);
@@ -2267,6 +2327,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	BEGIN
 		DevCPL486.MakeReg(sp, SP, Pointer); DevCPL486.MakeReg(fp, BP, Pointer);
 		IF proc # NIL THEN (* exit proc *)
+			IF ~empty & (proc.sysflag = exclusive) THEN UnlockExit(proc) END;
 			IF proc.sysflag # noframe THEN
 				IF ~empty OR NeedOutPtrInit(proc) THEN
 					IF isGuarded IN proc.conval.setval THEN	(* remove exception frame *)

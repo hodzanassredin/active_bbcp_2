@@ -1193,8 +1193,8 @@ MODULE DevCPT;
 			ELSE err(151)
 			END;
 		ELSIF name = "ACTIVE" THEN
-			IF processor # 12 THEN
-				err(151)	(* расширение реализовано только для amd64 *)
+			IF (processor # 10) & (processor # 12) THEN
+				err(151)	(* расширение реализовано для x86 и amd64 *)
 			ELSE
 				INCL(DevCPM.options, DevCPM.active);
 				Insert(aliasName, obj); obj.mode := Mod; obj.mnolev := 0;

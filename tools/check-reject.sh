@@ -55,8 +55,8 @@ run ExclusiveWithCode.cp "$BB/Test64/Mod/RejCode.cp" "$CC64" Test64RejCode \
 	"[exclusive] вместе с [code]"
 run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC64" 'SystemKeyProbe^' \
 	"ключ точек уступки в модуле каркаса (System)"
-run Key32.cp "$BB/Test64/Mod/KeyProbe.cp" "$CC32" 'Test64KeyProbe^' \
-	"ключ точек уступки на i386"
+run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC32" 'SystemKeyProbe^' \
+	"ключ точек уступки на i386 в модуле каркаса"
 run GuardedAmd64.cp "$BB/Test64/Mod/RejGuarded.cp" "$CC64" Test64RejGuarded \
 	"[guarded] на amd64 (SEH/GetComKernel)"
 

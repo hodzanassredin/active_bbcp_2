@@ -53,11 +53,7 @@ MODULE DevCompiler;
 		(* IF found THEN *) INCL(DevCPM.options, DevCPM.comAware); (* END; *)
 		IF errorTrap IN opt THEN INCL(DevCPM.options, DevCPM.trap) END;
 		IF oberon IN opt THEN INCL(DevCPM.options, DevCPM.oberon) END;
-		IF yieldPts IN opt THEN
-			IF DevCPV.processor = 12 THEN INCL(DevCPM.options, DevCPM.yieldPts)
-			ELSE DevCPM.err(225)	(* точки уступки есть только в amd64-ядре *)
-			END
-		END;
+		IF yieldPts IN opt THEN INCL(DevCPM.options, DevCPM.yieldPts) END;
 		DevCPT.Init(opt);
 		DevCPB.typSize := DevCPV.TypeSize;
 		DevCPT.processor := DevCPV.processor;
