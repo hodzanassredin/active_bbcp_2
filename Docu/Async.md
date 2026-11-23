@@ -383,10 +383,10 @@ returns the socket and has been switched from `select` to `poll`
 backlog. With a thousand open connections at rest, the test process
 uses 7–50 ms of CPU per second.
 
-There is no Zonnon-style channel protocol check yet. `AsyncTask` from
-Ivan's framework is not present in this snapshot; `Tasks.Task` plays
-the role of the automaton, and `Select`/`Park`/`Join` bridge tasks and
-channels.
+A channel may carry an optional Zonnon-style dialogue protocol, see
+"Channel protocol (stage 10)" below. `AsyncTask` from Ivan's framework
+is not present in this snapshot; `Tasks.Task` plays the role of the
+automaton, and `Select`/`Park`/`Join` bridge tasks and channels.
 
 ## OS worker threads (stage 8)
 
@@ -426,9 +426,12 @@ AsyncComputon.Stop;
 
 A computon is serialized with `Stores` and executed in a separate
 BlackBox process (owned heap and collector), so `Do` may use `NEW`.
-The transport is `fork` + `exec` of the same `blackbox-console` with
-three pipes per executor. The computon type must implement
-`Externalize`/`Internalize`.
+The computon type must implement `Externalize`/`Internalize`.
+
+The default transport is `fork` + `exec` of the same
+`blackbox-console` with three pipes per executor. A TCP transport over
+localhost is available as well (see "Computon transports and code
+update" below).
 
 `Pull` from a task is a wait point (`Tasks.Sleep` with a deadline),
 and `AsyncComputon.AltPull` is a `Select` alternative: a `Select` can
@@ -441,7 +444,53 @@ Measured: 12 computons on 1, 4 and 16 local processes, same result; a
 
 MPI is not available in this environment (`mpicc`/`mpirun`/`libmpi`
 absent), so the MPI transport was not implemented; the interface does
-not depend on the transport. TCP transport is also not implemented.
+not depend on the transport.
+
+## Channel protocol (stage 10)
+
+`AsyncProto` builds a deterministic state machine from a compact text
+description; a channel may carry one as an optional dialogue protocol:
+
+```
+start: RequestMsg > wait; wait: ResponseMsg > wait;
+wait: EndMsg > done; done:
+```
+
+```
+p := AsyncProto.New(desc);      (* NIL on a syntax error *)
+AsyncChan.SetProtocol(c, p);    (* debug mode: check every direct Send *)
+```
+
+A clause is `state: Message > state`; `>` and `->` are equivalent,
+clauses are separated by `;` or a newline, and `state:` without an
+arrow declares a state with no outgoing transition (final). The message
+label is the dynamic record type name of `AsyncSelect.Msg`
+(`Kernel.TypeOf`), e.g. `RequestMsg`. A send that is not allowed in the
+current state prints a readable text to the console and traps (code
+21); the text is kept in `AsyncProto.LastViolation`. Without a protocol
+`AsyncSelect.CheckSend` returns after one `NIL` test, so there is no
+overhead. Sends made through `Select` are not checked.
+
+## Computon transports and code update
+
+```
+ok := AsyncComputon.SetTransport("tcp");   (* or "pipe"; before Start *)
+AsyncComputon.Unload("SomeModule");        (* TRUE — reload on next Push *)
+```
+
+The transport is also selected by the external variable
+`ASYNC_TRANSPORT` (`tcp` or `pipe`). In TCP mode the controller listens
+on `127.0.0.1:0`, the executor connects to the address passed as
+`--ASYNC_TCP=...`; frame layout, EOF detection and retry after executor
+death are unchanged. The executor switches its socket back to blocking
+mode (only it reads frames there); the controller keeps it
+non-blocking for `Poller`.
+
+`Unload(module)` asks every live executor to drop the module code so
+that the next `Push` loads the freshly compiled `.ocf`. It returns
+`FALSE` and `LastError() = 20` when a module is busy (the executor's
+own transport module, or a module still imported or present on a
+stack); a module that was not loaded counts as success.
 
 ## Relation to Active Oberon and limits
 
@@ -483,9 +532,13 @@ pipe, `getaddrinfo` and file jobs), `LinThreads`, `LinNative`, the
 
 Implemented in this branch (stage 9): `AsyncComputon` (local BlackBox
 processes over pipes, `Push`/`Pull`/`Try`, retry after executor death,
-error results). MPI and TCP transports are not implemented; the MPI
-toolchain is absent from this machine. The Zonnon-style channel protocol
-is not implemented.
+error results).
+
+Implemented in this branch (stage 10): the Zonnon-style channel
+protocol (`AsyncProto`), the TCP computon transport, `Unload` for code
+update on executors, and deterministic compile timestamps for the
+bootstrap. MPI remains unimplemented because its toolchain is absent
+from this machine.
 
 ### Compiler implementation notes
 
@@ -500,7 +553,9 @@ is not implemented.
 - The condition of `AWAIT` may read variables, fields and array
   elements but must not call procedures or assign; the compiler rejects
   `Ncall`/`Nassign` inside it.
-- `tools/bootstrap.sh` rebuilds the whole `Dev` subsystem twice and
-  checks that the second pass is byte-identical to the first, except
-  for the 12-byte compile timestamp that every `.ocf` carries.
+- `tools/bootstrap.sh` rebuilds `Dev` three times. Passes B and C use
+  `BB_COMPILE_TIME="2000-01-01 00:00:00"`: `DevCPE` writes that fixed
+  timestamp into every `.ocf` instead of the current time, so B and C
+  must be byte-identical without masking. Pass A uses the packed
+  compiler and is only used to build B's compiler.
 - Compile-time rejection cases are checked by `tools/check-reject.sh`.

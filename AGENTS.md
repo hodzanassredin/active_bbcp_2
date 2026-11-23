@@ -192,9 +192,9 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # Unit: 11 модулей, 66 тестов
+tools/test.sh                     # Unit: 13 модулей, 74 теста
 tools/check-reject.sh             # 8 отказов компилятора этапа 6
-tools/bootstrap.sh                # два прохода Dev, сверка .ocf/.osf
+tools/bootstrap.sh                # три прохода Dev, B и C побайтно
 tools/test.sh --list
 tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
@@ -258,6 +258,17 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `fork+exec` `blackbox-console` и три pipe; гибель исполнителя —
   повтор, ошибка `Do` — код. MPI в системе нет, транспорт MPI не
   делался. Тесты — `Test64Computons` (1/4/16 процессов, убийство, `AltPull`).
+- Этап 10: `Async/Mod/Proto.cp` — необязательный протокол канала по
+  образцу Zonnon (автомат из описания, `AsyncChan.SetProtocol`, трап с
+  текстом на нарушение; `SendAlt` пока не проверяется). Транспорт
+  компутонов `pipe`/`tcp` — `SetTransport` или `ASYNC_TRANSPORT`,
+  TCP по localhost, сокет исполнителя блокирующий. `Unload(module)`
+  выгружает код у всех исполнителей (отказ `20`, если занят) —
+  `Test64Unload` перекомпилирует `Test64UnloadCode` и проверяет новый
+  `Do`. Метка времени компиляции — `BB_COMPILE_TIME` в `DevCPE`;
+  `tools/bootstrap.sh` сравнивает проходы B и C побайтно без маски.
+  Тесты — `Test64Protocol`, `Test64Unload`, TCP-варианты в
+  `Test64Computons`.
 - Подсистема `Async` собирается в `tools/build64.sh` **отдельным**
   вызовом `CompileSubs @Lin Async`: в общем списке `CompileSubs`
   спотыкается о псевдомодуль `ACTIVE` («sourcefile for ACTIVE not
@@ -266,7 +277,8 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `.cp`, конвертировать нечего. `DevOnce` заменён на
   `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
   в консольном x64.
-- Открыто: MPI/TCP-транспорты компутонов; Zonnon-протокол канала;
+- Открыто: MPI-транспорт компутонов; проверка протокола для отправок
+  через `Select` (`SendAlt`);
   Windows x64 для рабочих нитей и процессов; GUI-прогоны,
   `pack-dev0-linux` (в снимке отсутствует;
   `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
