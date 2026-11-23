@@ -1,79 +1,53 @@
 MODULE Test64Co;
-(** Обёртки над C-помощником Test64CRaw: переключение стеков в одной нити
-	через ucontext. Библиотека libtest64.so собирается tools/test.sh.
+(** i386-вариант обёрток Test64Co (amd64-вариант — Test64/Mod64/Co.cp).
 
-	Этап 2: обёртки регистрируют стек в реестре ядра (Kernel.RegisterStack)
-	и зовут Kernel.SwitchSave/SwitchRestore вокруг «сырого» переключения —
-	так контекст Kernel.Try, tryCount и trapStack остаются у своего стека. *)
+	32-битного помощника libtest64.so (ucontext) в стенде нет — нет
+	32-битного C-тулчейна. Сопрограммы этапа 2 на i386 не проверяются;
+	единственный нужный Test64Tasks источник времени — co_now, он
+	строится по Kernel.Time (миллисекунды, переведённые в наносекунды).
+	Остальные процедуры оставлены заглушками ради совместимости имён. *)
 
-	IMPORT SYSTEM, Kernel, Test64CRaw;
+	IMPORT SYSTEM, Kernel;
 
-	VAR reg: Kernel.Stack;	(* результат RegisterStack (вызов функции как оператора запрещён) *)
-
-	(** Создать контекст на стеке из mmap (со сторожевой страницей). *)
 	PROCEDURE co_create* (entry, arg: SYSTEM.ADDRESS; size: LONGINT): INTEGER;
-		VAR res: INTEGER; lo: SYSTEM.ADDRESS;
 	BEGIN
-		res := Test64CRaw.c_create(entry, arg, size);
-		IF res = 0 THEN
-			lo := Test64CRaw.c_stack_low();
-			reg := Kernel.RegisterStack(lo, lo + Test64CRaw.c_stack_size())
-		END;
-		RETURN res
+		RETURN -1
 	END co_create;
 
-	(** Создать контекст на готовом стеке (например, NEW-массиве в куче). *)
 	PROCEDURE co_create_on* (base: SYSTEM.ADDRESS; size: LONGINT;
 		entry, arg: SYSTEM.ADDRESS): INTEGER;
-		VAR res: INTEGER;
 	BEGIN
-		res := Test64CRaw.c_create_on(base, size, entry, arg);
-		IF res = 0 THEN reg := Kernel.RegisterStack(base, base + size) END;
-		RETURN res
+		RETURN -1
 	END co_create_on;
 
-	(** Войти/продолжить сопрограмму (сохранить текущий контекст). *)
 	PROCEDURE co_resume* (): INTEGER;
-		VAR res: INTEGER;
 	BEGIN
-		Kernel.SwitchSave;
-		res := Test64CRaw.c_resume();
-		Kernel.SwitchRestore;
-		RETURN res
+		RETURN -1
 	END co_resume;
 
-	(** Вернуться из сопрограммы на главный стек. *)
 	PROCEDURE co_yield* (): INTEGER;
-		VAR res: INTEGER;
 	BEGIN
-		Kernel.SwitchSave;
-		res := Test64CRaw.c_yield();
-		Kernel.SwitchRestore;
-		RETURN res
+		RETURN -1
 	END co_yield;
 
 	PROCEDURE co_stack_base* (): SYSTEM.ADDRESS;
 	BEGIN
-		RETURN Test64CRaw.c_stack_base()
+		RETURN 0
 	END co_stack_base;
 
 	PROCEDURE co_stack_size* (): LONGINT;
 	BEGIN
-		RETURN Test64CRaw.c_stack_size()
+		RETURN 0
 	END co_stack_size;
 
 	PROCEDURE co_release* (): INTEGER;
-		VAR res: INTEGER; lo: SYSTEM.ADDRESS;
 	BEGIN
-		lo := Test64CRaw.c_stack_low();
-		Kernel.UnregisterStackAt(lo);
-		res := Test64CRaw.c_release();
-		RETURN res
+		RETURN -1
 	END co_release;
 
 	PROCEDURE co_now* (): LONGINT;
 	BEGIN
-		RETURN Test64CRaw.c_now()
+		RETURN Kernel.Time() * 1000000
 	END co_now;
 
 END Test64Co.
