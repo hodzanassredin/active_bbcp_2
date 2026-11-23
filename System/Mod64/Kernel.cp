@@ -82,6 +82,12 @@ MODULE Kernel;
 		   индекса кластеров. *)
 		stackIndexMax = 16384;
 
+		(* Мониторы (этап 4): побочная таблица по адресу объекта.
+		   monHash — число корзин; mainToken — токен владельца для главного
+		   стека (адреса объектов и задач выровнены, 1 не совпадёт). *)
+		monHash = 64;
+		mainToken = 1;
+
 		(* kernel flags in module desc *)
 		init = 16; dyn = 17; dll = 24; iptrs = 30; 
 		monoCluster = 25; (* memory model with only one huge heap cluster; used for .exe, not used for .dll *)
@@ -244,6 +250,65 @@ MODULE Kernel;
 			trapped: BOOLEAN
 		END;
 
+		(* Мониторы (этап 4, схема Мюллера для AWAIT).
+
+		   Monitor — запись на объект: владелец (токен задачи), глубина
+		   повторного входа, очередь входящих и очередь ждущих условия.
+		   Записи лежат в корзинах по адресу объекта, пока объект занят
+		   или его ждут; после освобождения запись удаляется.
+
+		   CondProc — процедура условия: компилятор (этап 6) передаёт
+		   сюда адрес локальной процедуры и её кадр (статическую связь).
+		   Ручной Wait имеет cond = NIL.
+
+		   LockRec не нужен: цепочка взятых мониторов — сами записи
+		   Monitor через lockNext (объект может быть занят только одной
+		   задачей, поэтому запись входит в цепочку не более раза). *)
+		CondProc* = PROCEDURE (frame: S.ADDRESS): BOOLEAN;
+
+		TaskRef = POINTER TO RECORD
+			task: S.ADDRESS;	(* токен ждущей/входящей задачи *)
+			next: TaskRef
+		END;
+
+		WaitRef = POINTER TO RECORD
+			task: S.ADDRESS;
+			cond: CondProc;		(* NIL — ручной Wait *)
+			frame: S.ADDRESS;
+			trap: INTEGER;		(* трап при вычислении условия: переадресуется *)
+			next: WaitRef
+		END;
+
+		Monitor = POINTER TO MonitorRec;
+		MonitorRec = RECORD
+			next: Monitor;		(* цепочка корзины *)
+			obj: S.ADDRESS;		(* объект; S.ADDRESS, чтобы не полагаться на скан ANYPTR *)
+			owner: S.ADDRESS;	(* токен владельца; 0 — свободен *)
+			count: INTEGER;		(* глубина повторного входа *)
+			enter, enterTail: TaskRef;
+			wait, waitTail: WaitRef
+		END;
+
+		(* Одно взятие монитора: запись в цепочке текущего стека. Отдельная
+		   запись нужна и для повторного входа (тот же монитор), и чтобы
+		   трап снял ровно взятия внутри Kernel.Try (lockDepth). *)
+		LockRec = POINTER TO RECORD
+			next: LockRec;
+			mon: Monitor
+		END;
+
+		(* Набор процедур планировщика, который ставит Tasks. Ядро не
+		   импортирует Tasks (циклическая зависимость), поэтому ожидание
+		   и пробуждение идут через эти указатели. Без Tasks ядро всё
+		   равно берёт и отдаёт свободные замки, а ожидание — трап. *)
+		SchedCurrent* = PROCEDURE (): S.ADDRESS;
+		SchedPark* = PROCEDURE;
+		SchedUnpark* = PROCEDURE (task: S.ADDRESS);
+		SchedReady* = PROCEDURE (): BOOLEAN;
+		SchedDeadline* = PROCEDURE (): LONGINT;
+		SchedName* = PROCEDURE (task: S.ADDRESS; OUT name: ARRAY OF CHAR);
+		SchedStack* = PROCEDURE (task: S.ADDRESS): Stack;
+
 		(* Реестр стеков (этап 2). Одна запись на любой стек: главный,
 		   сопрограмма/задача (этап 3), сигнальный. Общий для будущих нитей:
 		   никаких особых случаев «главный + сопрограммы». *)
@@ -254,6 +319,8 @@ MODULE Kernel;
 			sp: S.ADDRESS;			(* сохранённый SP, пока стек не текущий; hi — пустой *)
 			tryContext: S.ADDRESS;	(* платформенный контекст последнего Kernel.Try *)
 			trapStack: TrapCleaner;	(* цепочка уборщиков на этом стеке *)
+			lockChain: LockRec;		(* цепочка взятых мониторов (этап 4) *)
+			lockDepth: INTEGER;		(* глубина цепочки: Kernel.Try снимает до неё *)
 			tryCount: INTEGER;
 			signal: BOOLEAN;		(* сигнальный стек: сканировать прерванный стек по Kernel.sp *)
 			main: BOOLEAN			(* главный стек процесса *)
@@ -392,6 +459,29 @@ MODULE Kernel;
 		stacks: Stack;		(* реестр стеков; первый — главный *)
 		mainStack: Stack;
 		mainStackRec: StackDesc;	(* статическая запись: регистрация до кучи *)
+
+		(* Мониторы (этап 4). *)
+		monBuckets: ARRAY monHash OF Monitor;
+		nofMonitors: INTEGER;	(* записей в таблице, диагностика *)
+
+		(* Планировщик: ставится Tasks.SetScheduler. *)
+		schedCurrent: SchedCurrent;
+		schedPark: SchedPark;
+		schedUnpark: SchedUnpark;
+		schedReady: SchedReady;
+		schedDeadline: SchedDeadline;
+		schedName: SchedName;
+		schedStack: SchedStack;
+		schedInstalled: BOOLEAN;
+
+		(* Вычисление чужого условия внутри Unlock/Await: трап ловится
+		   и переадресуется ждущей задаче, уборка стека не запускается. *)
+		condP: CondProc;
+		condF: S.ADDRESS;
+		condResult, condCompleted: BOOLEAN;
+		quietCleanup: INTEGER;	(* >0 — трап в чужом условии *)
+		lockChain: LockRec;		(* взятия мониторов текущим стеком (этап 4) *)
+		lockDepth: INTEGER;
 
 		trapViewer, trapChecker: Handler;
 		guarded: BOOLEAN; (** guarded => trap viewer (reporter) should not be called; this suppresses trap reporting *)
@@ -1614,7 +1704,7 @@ MODULE Kernel;
 	BEGIN
 		NEW(s);
 		s.lo := lo; s.hi := hi; s.sp := hi;	(* пустой стек *)
-		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
+		s.tryContext := 0; s.trapStack := NIL; s.lockChain := NIL; s.lockDepth := 0; s.tryCount := 0;
 		s.signal := signal; s.main := FALSE;
 		s.next := stacks; stacks := s;
 		StackIndexInsert(s);
@@ -1687,10 +1777,12 @@ MODULE Kernel;
 			s.sp := sp;
 			IF platform # NIL THEN s.tryContext := platform.GetTryContext() END;
 			s.trapStack := trapStack;
+			s.lockChain := lockChain;
+			s.lockDepth := lockDepth;
 			s.tryCount := tryCount
 		END;
 		IF platform # NIL THEN platform.SetTryContext(0) END;
-		trapStack := NIL; tryCount := 0
+		trapStack := NIL; lockChain := NIL; lockDepth := 0; tryCount := 0
 	END SwitchSave;
 
 	PROCEDURE SwitchRestore*;
@@ -1703,10 +1795,12 @@ MODULE Kernel;
 		IF s # NIL THEN
 			IF platform # NIL THEN platform.SetTryContext(s.tryContext) END;
 			trapStack := s.trapStack;
+			lockChain := s.lockChain;
+			lockDepth := s.lockDepth;
 			tryCount := s.tryCount
 		ELSE
 			IF platform # NIL THEN platform.SetTryContext(0) END;
-			trapStack := NIL; tryCount := 0
+			trapStack := NIL; lockChain := NIL; lockDepth := 0; tryCount := 0
 		END
 	END SwitchRestore;
 
@@ -2163,6 +2257,574 @@ MODULE Kernel;
 		RETURN InHeap(p)
 	END InHeapAddr;
 
+	PROCEDURE ^ Try* (h: TryHandler; a, b, c: S.ADDRESS);
+
+	(* -------------------- мониторы (этап 4) ------------------------------- *)
+
+	(* Диагностика без буфера журнала: platform.String идёт прямо в консоль
+	   и не выделяет память (BString/BInt растят blog.buf через NewBlock). *)
+	PROCEDURE MonStr (IN s: ARRAY OF CHAR);
+	BEGIN
+		IF (platform # NIL) & (platform.String # NIL) THEN platform.String(s) END
+	END MonStr;
+
+	PROCEDURE MonLn;
+	BEGIN
+		IF (platform # NIL) & (platform.Ln # NIL) THEN platform.Ln END
+	END MonLn;
+
+	PROCEDURE MonInt (x: LONGINT);
+		VAR a: ARRAY 24 OF CHAR; b: ARRAY 24 OF CHAR; i, j, k: INTEGER; y: LONGINT; neg: BOOLEAN;
+	BEGIN
+		neg := x < 0; IF neg THEN x := -x END;
+		i := 0; REPEAT y := x MOD 10; b[i] := CHR(SHORT(y) + ORD('0')); INC(i); x := x DIV 10 UNTIL x = 0;
+		k := 0;
+		IF neg THEN a[k] := '-'; INC(k) END;
+		j := i - 1;
+		WHILE j >= 0 DO a[k] := b[j]; INC(k); DEC(j) END;
+		a[k] := 0X;
+		MonStr(a)
+	END MonInt;
+
+	PROCEDURE MonHex (x: LONGINT);
+		CONST digits = "0123456789ABCDEF";
+		VAR a: ARRAY 20 OF CHAR; dg: ARRAY 17 OF CHAR; i, y: INTEGER;
+	BEGIN
+		dg := digits;
+		i := 15;
+		REPEAT
+			y := SHORT(x MOD 16); IF y < 0 THEN y := y + 16 END;
+			a[i] := dg[y]; DEC(i); x := x DIV 16
+		UNTIL (x = 0) OR (i < 0);
+		a[16] := 0X;
+		MonStr(a)
+	END MonHex;
+
+	PROCEDURE MonFail (IN msg: ARRAY OF CHAR);
+	BEGIN
+		MonStr("Kernel: "); MonStr(msg); MonLn;
+		HALT(20)
+	END MonFail;
+
+	PROCEDURE TaskName (t: S.ADDRESS; OUT s: ARRAY OF CHAR);
+	BEGIN
+		IF t = 0 THEN s := "?"
+		ELSIF t = mainToken THEN s := "main"
+		ELSIF schedInstalled & (schedName # NIL) THEN schedName(t, s)
+		ELSE s := "?"
+		END
+	END TaskName;
+
+	PROCEDURE CurrentToken (): S.ADDRESS;
+		VAR t: S.ADDRESS;
+	BEGIN
+		IF schedInstalled & (schedCurrent # NIL) THEN
+			t := schedCurrent();
+			IF t = 0 THEN RETURN mainToken ELSE RETURN t END
+		ELSE
+			RETURN mainToken
+		END
+	END CurrentToken;
+
+	PROCEDURE IsTask (): BOOLEAN;
+	BEGIN
+		RETURN schedInstalled & (schedCurrent # NIL) & (schedCurrent() # 0)
+	END IsTask;
+
+	PROCEDURE UnparkTask (t: S.ADDRESS);
+	BEGIN
+		IF schedInstalled & (schedUnpark # NIL) & (t # 0) THEN schedUnpark(t) END
+	END UnparkTask;
+
+	PROCEDURE SchedParkNow;
+	BEGIN
+		IF schedInstalled & (schedPark # NIL) THEN schedPark()
+		ELSE MonFail("wait outside a task")
+		END
+	END SchedParkNow;
+
+	PROCEDURE MonIndex (p: S.ADDRESS): INTEGER;
+	BEGIN
+		RETURN SHORT(S.VAL(LONGINT, p) DIV 16 MOD monHash)
+	END MonIndex;
+
+	PROCEDURE FindMon (obj: S.ADDRESS): Monitor;
+		VAR m: Monitor;
+	BEGIN
+		m := monBuckets[MonIndex(obj)];
+		WHILE (m # NIL) & (m.obj # obj) DO m := m.next END;
+		RETURN m
+	END FindMon;
+
+	PROCEDURE NewMon (obj: S.ADDRESS): Monitor;
+		VAR m: Monitor; i: INTEGER;
+	BEGIN
+		i := MonIndex(obj);
+		NEW(m);
+		m.next := monBuckets[i]; monBuckets[i] := m;
+		m.obj := obj; m.owner := 0; m.count := 0;
+		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
+		INC(nofMonitors);
+		RETURN m
+	END NewMon;
+
+	PROCEDURE GetMon (obj: S.ADDRESS): Monitor;
+		VAR m: Monitor;
+	BEGIN
+		m := FindMon(obj);
+		IF m = NIL THEN m := NewMon(obj) END;
+		RETURN m
+	END GetMon;
+
+	PROCEDURE DropMon (m: Monitor);
+		VAR i: INTEGER; p: Monitor;
+	BEGIN
+		i := MonIndex(m.obj);
+		IF monBuckets[i] = m THEN
+			monBuckets[i] := m.next
+		ELSE
+			p := monBuckets[i];
+			WHILE (p # NIL) & (p.next # m) DO p := p.next END;
+			IF p # NIL THEN p.next := m.next END
+		END;
+		m.next := NIL; m.obj := 0; m.owner := 0; m.count := 0;
+		DEC(nofMonitors)
+	END DropMon;
+
+	PROCEDURE DropIfUnused (m: Monitor);
+	BEGIN
+		IF (m # NIL) & (m.owner = 0) & (m.enter = NIL) & (m.wait = NIL) THEN DropMon(m) END
+	END DropIfUnused;
+
+	PROCEDURE AppendWait (m: Monitor; w: WaitRef);
+	BEGIN
+		w.next := NIL;
+		IF m.waitTail = NIL THEN m.wait := w ELSE m.waitTail.next := w END;
+		m.waitTail := w
+	END AppendWait;
+
+	PROCEDURE RemoveWait (m: Monitor; w: WaitRef);
+		VAR p: WaitRef;
+	BEGIN
+		IF m.wait = w THEN
+			m.wait := w.next;
+			IF m.wait = NIL THEN m.waitTail := NIL END
+		ELSE
+			p := m.wait;
+			WHILE (p # NIL) & (p.next # w) DO p := p.next END;
+			IF p # NIL THEN
+				p.next := w.next;
+				IF m.waitTail = w THEN m.waitTail := p END
+			END
+		END;
+		w.next := NIL
+	END RemoveWait;
+
+	PROCEDURE AppendEnter (m: Monitor; q: TaskRef);
+	BEGIN
+		q.next := NIL;
+		IF m.enterTail = NIL THEN m.enter := q ELSE m.enterTail.next := q END;
+		m.enterTail := q
+	END AppendEnter;
+
+	PROCEDURE RemoveEnter (m: Monitor; q: TaskRef);
+		VAR p: TaskRef;
+	BEGIN
+		IF m.enter = q THEN
+			m.enter := q.next;
+			IF m.enter = NIL THEN m.enterTail := NIL END
+		ELSE
+			p := m.enter;
+			WHILE (p # NIL) & (p.next # q) DO p := p.next END;
+			IF p # NIL THEN
+				p.next := q.next;
+				IF m.enterTail = q THEN m.enterTail := p END
+			END
+		END;
+		q.next := NIL
+	END RemoveEnter;
+
+	PROCEDURE ChainPush (m: Monitor);
+		VAR r: LockRec;
+	BEGIN
+		NEW(r); r.mon := m; r.next := lockChain; lockChain := r; INC(lockDepth)
+	END ChainPush;
+
+	PROCEDURE PushTo (t: S.ADDRESS; m: Monitor);
+	(** Записать взятие в цепочку спящей задачи: монитор передан ей
+		вместе с владением. Нужно, чтобы отмена/трап на пробуждении
+		освободил монитор, даже если задача ещё не вернулась из Park. *)
+		VAR s: Stack; r: LockRec;
+	BEGIN
+		s := NIL;
+		IF schedInstalled & (schedStack # NIL) THEN s := schedStack(t) END;
+		IF s # NIL THEN
+			NEW(r); r.mon := m; r.next := s.lockChain; s.lockChain := r; INC(s.lockDepth)
+		END
+	END PushTo;
+
+	(* Условие исполняется в кадре ждущей задачи: Unlock/Await передают
+	   сюда адрес процедуры и её статическую связь (кадр). Трап внутри
+	   условия не должен разбирать стек уходящей задачи — quietCleanup
+	   выключает уборку, а код трапа переадресуется ждущей задаче. *)
+	PROCEDURE CondBody (a, b, c: S.ADDRESS);
+	BEGIN
+		condCompleted := FALSE;
+		condResult := condP(condF);
+		condCompleted := TRUE
+	END CondBody;
+
+	PROCEDURE EvalCond (p: CondProc; frame: S.ADDRESS; OUT ok: BOOLEAN; OUT code: INTEGER): BOOLEAN;
+	BEGIN
+		condP := p; condF := frame; condResult := FALSE; condCompleted := FALSE; code := 0;
+		INC(quietCleanup);
+		Try(CondBody, 0, 0, 0);
+		DEC(quietCleanup);
+		ok := condCompleted;
+		IF ~ok THEN code := err END;
+		RETURN condResult
+	END EvalCond;
+
+	(* Передать монитор: сначала ждущий с истинным условием, затем ручной
+	   Wait, затем первый входящий, иначе объект свободен. Условия
+	   вычисляются под удерживаемым монитором — новый владелец получает
+	   его атомарно и не может «перехватить» (семантика Active Oberon). *)
+	PROCEDURE HandOff (m: Monitor; skip: S.ADDRESS);
+	(** skip — задача, которая сама уходит в ожидание (Wait/Await): ей
+		монитор не передаётся, иначе она получила бы его обратно и
+		ожидание стало бы холостым циклом. *)
+		VAR w, nx: WaitRef; e: TaskRef; t: S.ADDRESS; ok: BOOLEAN; code: INTEGER;
+	BEGIN
+		w := m.wait;
+		WHILE w # NIL DO
+			nx := w.next;
+			IF (w.cond # NIL) & (w.task # skip) THEN
+				IF EvalCond(w.cond, w.frame, ok, code) THEN
+					RemoveWait(m, w);
+					m.owner := w.task; m.count := 1;
+					UnparkTask(w.task); RETURN
+				ELSIF ~ok THEN
+					(* трап в условии: будим ждущего, его Await трапует *)
+					RemoveWait(m, w);
+					w.trap := code;
+					m.owner := w.task; m.count := 1;
+					UnparkTask(w.task); RETURN
+				END
+			END;
+			w := nx
+		END;
+		(* Уходящий ждущий (skip # 0) не смог продолжить по своему условию:
+		   он уступает сначала входящим, иначе два ждущих передают друг
+		   другу пустой монитор и входящие голодают (пинг-понг). *)
+		IF skip # 0 THEN
+			e := m.enter;
+			IF e # NIL THEN
+				m.enter := e.next;
+				IF m.enter = NIL THEN m.enterTail := NIL END;
+				t := e.task; e.next := NIL;
+				m.owner := t; m.count := 1;
+				PushTo(t, m);
+				UnparkTask(t); RETURN
+			END
+		END;
+		(* ручной Wait: первый ждущий без условия *)
+		w := m.wait;
+		WHILE (w # NIL) & ((w.cond # NIL) OR (w.task = skip)) DO w := w.next END;
+		IF w # NIL THEN
+			RemoveWait(m, w);
+			m.owner := w.task; m.count := 1;
+			UnparkTask(w.task); RETURN
+		END;
+		(* входящий *)
+		e := m.enter;
+		IF e # NIL THEN
+			m.enter := e.next;
+			IF m.enter = NIL THEN m.enterTail := NIL END;
+			t := e.task; e.next := NIL;
+			m.owner := t; m.count := 1;
+			PushTo(t, m);	(* входящий ещё не имеет записи о взятии *)
+			UnparkTask(t); RETURN
+		END;
+		m.owner := 0; m.count := 0;
+		DropIfUnused(m)
+	END HandOff;
+
+	(* Снять мониторы, взятые внутри Kernel.Try, до сохранённой глубины.
+	   Монитор, которым сейчас владеет другая задача (ждём в Await),
+	   снимается из цепочки без передачи. *)
+	PROCEDURE ReleaseTo (depth: INTEGER);
+		VAR r: LockRec; m: Monitor; me: S.ADDRESS;
+	BEGIN
+		me := CurrentToken();
+		WHILE lockDepth > depth DO
+			r := lockChain;
+			IF r = NIL THEN lockDepth := depth; RETURN END;
+			lockChain := r.next; DEC(lockDepth);
+			m := r.mon;
+			(* Монитор, которым владеет другая задача (мы ждём в Await),
+			   только снимаем из цепочки — его счётчик не наш. *)
+			IF m.owner = me THEN
+				DEC(m.count);
+				IF m.count <= 0 THEN
+					m.count := 0; m.owner := 0; HandOff(m, 0)
+				END
+			END
+		END
+	END ReleaseTo;
+
+	(* Трап в задаче: её записи в очередях мониторов больше не действительны.
+	   Сами мониторы освобождает ReleaseTo (Try). *)
+	PROCEDURE PurgeCurrent;
+		VAR me: S.ADDRESS; i: INTEGER; m, nx: Monitor; w, wn: WaitRef; e, en: TaskRef;
+	BEGIN
+		me := CurrentToken();
+		i := 0;
+		WHILE i < monHash DO
+			m := monBuckets[i];
+			WHILE m # NIL DO
+				nx := m.next;
+				w := m.wait;
+				WHILE w # NIL DO
+					wn := w.next;
+					IF w.task = me THEN RemoveWait(m, w) END;
+					w := wn
+				END;
+				e := m.enter;
+				WHILE e # NIL DO
+					en := e.next;
+					IF e.task = me THEN RemoveEnter(m, e) END;
+					e := en
+				END;
+				DropIfUnused(m);
+				m := nx
+			END;
+			INC(i)
+		END
+	END PurgeCurrent;
+
+	PROCEDURE MarkLocks;
+	(** Цепочки взятий — корни сборщика: записи LockRec живут в куче,
+		а монитор, взятый вручную, может держать объект без других ссылок. *)
+		VAR r: LockRec; s: Stack;
+	BEGIN
+		r := lockChain;
+		WHILE r # NIL DO
+			IF InHeap(S.VAL(LONGINT, r) - 8) THEN
+				Mark(S.VAL(Block, S.VAL(LONGINT, r) - 8))
+			END;
+			r := r.next
+		END;
+		s := stacks;
+		WHILE s # NIL DO
+			r := s.lockChain;
+			WHILE r # NIL DO
+				IF InHeap(S.VAL(LONGINT, r) - 8) THEN
+					Mark(S.VAL(Block, S.VAL(LONGINT, r) - 8))
+				END;
+				r := r.next
+			END;
+			s := s.next
+		END
+	END MarkLocks;
+
+	PROCEDURE MarkMonitors;
+		VAR i: INTEGER; m: Monitor;
+	BEGIN
+		MarkLocks;
+		i := 0;
+		WHILE i < monHash DO
+			m := monBuckets[i];
+			WHILE m # NIL DO
+				IF InHeap(S.VAL(LONGINT, m) - 8) THEN
+					Mark(S.VAL(Block, S.VAL(LONGINT, m) - 8))
+				END;
+				IF (m.obj # 0) & InHeap(S.VAL(LONGINT, m.obj) - 8) THEN
+					Mark(S.VAL(Block, S.VAL(LONGINT, m.obj) - 8))
+				END;
+				m := m.next
+			END;
+			INC(i)
+		END
+	END MarkMonitors;
+
+	PROCEDURE SetScheduler* (current: SchedCurrent; park: SchedPark; unpark: SchedUnpark;
+			ready: SchedReady; deadline: SchedDeadline; name: SchedName; stackOf: SchedStack);
+	(** Ставится модулем Tasks: ядро зовёт эти процедуры в Lock/Wait/Await. *)
+	BEGIN
+		schedCurrent := current; schedPark := park; schedUnpark := unpark;
+		schedReady := ready; schedDeadline := deadline; schedName := name;
+		schedStack := stackOf;
+		schedInstalled := (current # NIL) & (park # NIL) & (unpark # NIL)
+	END SetScheduler;
+
+	PROCEDURE Lock* (obj: ANYPTR);
+	(** Взять монитор объекта. Повторный вход разрешён (счётчик).
+		Занятый чужим монитор: задача ждёт; главный стек или отсутствие
+		Tasks — трап. *)
+		VAR me: S.ADDRESS; m: Monitor; q: TaskRef;
+	BEGIN
+		IF obj = NIL THEN MonFail("Lock: NIL object") END;
+		me := CurrentToken();
+		m := GetMon(S.VAL(S.ADDRESS, obj));
+		IF m.owner = me THEN
+			INC(m.count); ChainPush(m)
+		ELSIF m.owner = 0 THEN
+			m.owner := me; m.count := 1; ChainPush(m)
+		ELSIF IsTask() THEN
+			NEW(q); q.task := me; AppendEnter(m, q);
+			SchedParkNow;
+			IF m.owner # me THEN MonFail("Lock: woken without the monitor") END
+			(* запись о взятии уже добавлена PushTo при передаче *)
+		ELSE
+			MonFail("Lock: monitor is held by another task")
+		END
+	END Lock;
+
+	PROCEDURE Unlock* (obj: ANYPTR);
+	(** Отпустить монитор. Вложенные мониторы снимаются в порядке LIFO;
+		если счётчик стал нулём, монитор передаётся ждущему или входящему. *)
+		VAR me: S.ADDRESS; m: Monitor; r: LockRec;
+	BEGIN
+		me := CurrentToken();
+		m := FindMon(S.VAL(S.ADDRESS, obj));
+		IF (m = NIL) OR (m.owner # me) THEN
+			MonFail("Unlock: monitor is not held by the caller")
+		END;
+		r := lockChain;
+		IF (r = NIL) OR (r.mon # m) THEN
+			MonFail("Unlock: monitors must be released in LIFO order")
+		END;
+		lockChain := r.next; DEC(lockDepth);
+		DEC(m.count);
+		IF m.count = 0 THEN
+			m.owner := 0;
+			HandOff(m, 0)
+		END
+	END Unlock;
+
+	PROCEDURE Wait* (obj: ANYPTR);
+	(** Ручное ожидание на мониторе: отпустить его и спать до передачи
+		монитора (Unlock) или до отмены. Вызывающий перепроверяет условие
+		в цикле WHILE. *)
+		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
+	BEGIN
+		IF ~IsTask() THEN MonFail("Wait: wait outside a task") END;
+		me := CurrentToken();
+		m := FindMon(S.VAL(S.ADDRESS, obj));
+		IF (m = NIL) OR (m.owner # me) THEN
+			MonFail("Wait: monitor is not held by the caller")
+		END;
+		NEW(w); w.task := me; w.cond := NIL; w.frame := 0; w.trap := 0;
+		AppendWait(m, w);
+		saved := m.count;
+		m.count := 0;
+		m.owner := 0;
+		HandOff(m, me);
+		SchedParkNow;
+		IF m.owner # me THEN MonFail("Wait: woken without the monitor") END;
+		m.count := saved
+	END Wait;
+
+	PROCEDURE Await* (cond: CondProc; frame: S.ADDRESS; obj: ANYPTR);
+	(** Условное ожидание (схема Мюллера): cond читает состояние в кадре
+		ждущего; если оно ложно, монитор отпускается и задача спит. Условия
+		перевычисляет уходящий (Unlock/Await) в кадрах ждущих; монитор
+		получает первый, чьё условие истинно, раньше новых входящих.
+		Трап в условии переадресуется ждущей задаче. *)
+		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
+	BEGIN
+		IF ~IsTask() THEN MonFail("Await: wait outside a task") END;
+		IF cond = NIL THEN MonFail("Await: NIL condition") END;
+		me := CurrentToken();
+		m := FindMon(S.VAL(S.ADDRESS, obj));
+		IF (m = NIL) OR (m.owner # me) THEN
+			MonFail("Await: monitor is not held by the caller")
+		END;
+		IF cond(frame) THEN RETURN END;	(* компилятор тоже проверяет до вызова *)
+		NEW(w); w.task := me; w.cond := cond; w.frame := frame; w.trap := 0;
+		AppendWait(m, w);
+		saved := m.count;
+		m.count := 0;
+		m.owner := 0;
+		HandOff(m, me);
+		SchedParkNow;
+		IF w.trap # 0 THEN
+			(* Трап случился в чужом условии; переадресуем его этой задаче.
+			   HALT требует константу, поэтому исходный код — в журнал. *)
+			MonStr("Kernel: Await: trap "); MonInt(w.trap);
+			MonStr(" in the condition"); MonLn;
+			HALT(121)
+		END;
+		IF m.owner # me THEN MonFail("Await: woken without the monitor") END;
+		m.count := saved
+	END Await;
+
+	(* Запросы для тестов и отладки. *)
+	PROCEDURE IsLocked* (obj: ANYPTR): BOOLEAN;
+		VAR m: Monitor;
+	BEGIN
+		IF obj = NIL THEN RETURN FALSE END;
+		m := FindMon(S.VAL(S.ADDRESS, obj));
+		RETURN (m # NIL) & (m.owner # 0)
+	END IsLocked;
+
+	PROCEDURE MonitorCount* (): INTEGER;
+	(** Число записей в таблице мониторов. *)
+	BEGIN
+		RETURN nofMonitors
+	END MonitorCount;
+
+	PROCEDURE WaitersCount* (): INTEGER;
+		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef;
+	BEGIN
+		n := 0; i := 0;
+		WHILE i < monHash DO
+			m := monBuckets[i];
+			WHILE m # NIL DO
+				w := m.wait; WHILE w # NIL DO INC(n); w := w.next END;
+				e := m.enter; WHILE e # NIL DO INC(n); e := e.next END;
+				m := m.next
+			END;
+			INC(i)
+		END;
+		RETURN n
+	END WaitersCount;
+
+	PROCEDURE DumpMonitors*;
+	(** Журнал «кто чего ждёт»: все занятые мониторы и их очереди. *)
+		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef; nm: ARRAY 64 OF CHAR;
+	BEGIN
+		MonStr("Kernel: monitor dump"); MonLn;
+		n := 0; i := 0;
+		WHILE i < monHash DO
+			m := monBuckets[i];
+			WHILE m # NIL DO
+				INC(n);
+				MonStr("  monitor "); MonHex(S.VAL(LONGINT, m.obj));
+				IF m.owner = 0 THEN MonStr(": free")
+				ELSE
+					TaskName(m.owner, nm);
+					MonStr(": held by "); MonStr(nm); MonStr(" count="); MonInt(m.count)
+				END;
+				MonLn;
+				w := m.wait;
+				WHILE w # NIL DO
+					TaskName(w.task, nm); MonStr("    waits "); MonStr(nm);
+					IF w.cond = NIL THEN MonStr(" (manual)") ELSE MonStr(" (condition)") END;
+					MonLn; w := w.next
+				END;
+				e := m.enter;
+				WHILE e # NIL DO
+					TaskName(e.task, nm); MonStr("    enters "); MonStr(nm); MonLn;
+					e := e.next
+				END;
+				m := m.next
+			END;
+			INC(i)
+		END;
+		IF n = 0 THEN MonStr("  (no monitors)"); MonLn END
+	END DumpMonitors;
+
 	PROCEDURE ClusterBounds* (i: INTEGER; OUT base, size: LONGINT): BOOLEAN;
 	(** Границы i-го кластера в индексе (по возрастанию адреса). *)
 	BEGIN
@@ -2498,6 +3160,7 @@ MODULE Kernel;
 			IF debug & (watcher # NIL) THEN watcher(1) END;
 			MarkGlobals;
 			MarkLocals;
+			MarkMonitors;	(* объекты под мониторами и сами записи таблицы *)
 			CheckFinalizers;
 			Sweep(TRUE);
 			CallFinalizers
@@ -2510,6 +3173,7 @@ MODULE Kernel;
 			IF debug & (watcher # NIL) THEN watcher(2) END;
 			MarkGlobals;
 			MarkLocals;
+			MarkMonitors;
 			MarkFinObj;
 			Sweep(FALSE)
 		END
@@ -2836,14 +3500,20 @@ MODULE Kernel;
 	PROCEDURE TrapCleanup (_, __, ___: S.ADDRESS);
 		VAR t: TrapCleaner; u: INTEGER;
 	BEGIN
-		(*INCL(dirty, cleanup);*)
-		u := unit; unit := cleanup;
-		WHILE trapStack # NIL DO
-			t := trapStack; trapStack := trapStack.next; t.Cleanup
-		END;
-		IF (trapChecker # NIL) & (err # silentTrap) THEN trapChecker END;
-		unit := u
-		(*EXCL(dirty, cleanup)*)
+		(* quietCleanup > 0: трап в чужом условии (EvalCond). Он не должен
+		   снимать уборщики уходящей задачи и вычищать её очереди — его
+		   переадресуют ждущей задаче. *)
+		IF quietCleanup = 0 THEN
+			(*INCL(dirty, cleanup);*)
+			u := unit; unit := cleanup;
+			WHILE trapStack # NIL DO
+				t := trapStack; trapStack := trapStack.next; t.Cleanup
+			END;
+			IF (trapChecker # NIL) & (err # silentTrap) THEN trapChecker END;
+			PurgeCurrent;	(* задача, трапнувшая в ожидании, уходит из очередей *)
+			unit := u
+			(*EXCL(dirty, cleanup)*)
+		END
 	END TrapCleanup;
 
 	PROCEDURE SetTrapGuard* (on: BOOLEAN);
@@ -2852,11 +3522,17 @@ MODULE Kernel;
 	END SetTrapGuard;
 
 	PROCEDURE Try* (h: TryHandler; a, b, c: S.ADDRESS);
+	(** Запоминает глубину цепочки мониторов: при трапе снимаются все
+		мониторы, взятые внутри h (этап 4, п.3). Нормальный выход оставляет
+		сбалансированную цепочку — ReleaseTo тогда ничего не делает. *)
+		VAR depth: INTEGER;
 	BEGIN
 		IF ~platform.initialized THEN
 			BString('Fatal: No Platform hook installed into Kernel'); BLn; Quit(1)
 		ELSE
-			INC(tryCount); platform.Try(h, a, b, c); DEC(tryCount)
+			depth := lockDepth;
+			INC(tryCount); platform.Try(h, a, b, c); DEC(tryCount);
+			ReleaseTo(depth)
 		END
 	END Try;
 	
@@ -2961,22 +3637,26 @@ MODULE Kernel;
 			ELSE
 				INC(trapCount);
 				InitFpu;
-				
-				SigRepHeader(pc, fp, sp, err, recursive);
-				IF ~(defLogger IN dirty) THEN LogThisStack(pc, fp) END;
-				SigRepFooter();
-				(* репорт в stdout и при GUI trapViewer'е тоже (иначе виден только в окне) *)
-				IF (trapViewer # NIL) & (blog.buf # NIL) THEN platform.String(blog.buf^) END;
 
-				IF (err # silentTrap) & (trapViewer = NIL) THEN
-					platform.FatalError(trapMessage, blog.buf)
+				(* Трап в чужом условии (EvalCond) не печатается: он будет
+				   переадресован ждущей задаче и напечатан уже там. *)
+				IF quietCleanup = 0 THEN
+					SigRepHeader(pc, fp, sp, err, recursive);
+					IF ~(defLogger IN dirty) THEN LogThisStack(pc, fp) END;
+					SigRepFooter();
+					(* репорт в stdout и при GUI trapViewer'е тоже (иначе виден только в окне) *)
+					IF (trapViewer # NIL) & (blog.buf # NIL) THEN platform.String(blog.buf^) END;
+
+					IF (err # silentTrap) & (trapViewer = NIL) THEN
+						platform.FatalError(trapMessage, blog.buf)
+					END
 				END;
-				
-				IF (err = keyboardInterrupt) & (tryCount = 0) THEN 
-					BString("SIGINT received, preparing to quit"); BLn; Quit(1) 
-				ELSE 
+
+				IF (err = keyboardInterrupt) & (tryCount = 0) THEN
+					BString("SIGINT received, preparing to quit"); BLn; Quit(1)
+				ELSE
 					IF ~(cleanup IN dirty) THEN Try(TrapCleanup, -1, -1, -1) END;
-					IF ~(viewer IN dirty) THEN Try(Report, -1, -1, -1) END
+					IF ~(viewer IN dirty) & (quietCleanup = 0) THEN Try(Report, -1, -1, -1) END
 				END
 				
 			END
@@ -3050,7 +3730,7 @@ MODULE Kernel;
 		mainStack := S.VAL(Stack, S.ADR(mainStackRec));
 		mainStack.lo := baseStack - maxStackScan; mainStack.hi := baseStack;
 		mainStack.sp := baseStack; mainStack.tryContext := 0;
-		mainStack.trapStack := NIL; mainStack.tryCount := 0;
+		mainStack.trapStack := NIL; mainStack.lockChain := NIL; mainStack.lockDepth := 0; mainStack.tryCount := 0;
 		mainStack.signal := FALSE; mainStack.main := TRUE;
 		mainStack.next := NIL; stacks := mainStack;
 		nofStackIndex := 0; stackIndexFull := FALSE;

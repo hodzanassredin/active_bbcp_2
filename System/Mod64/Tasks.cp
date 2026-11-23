@@ -56,7 +56,7 @@ MODULE Tasks;
 			deadline: LONGINT;	(* до какого Kernel.Time спать *)
 			timeSlice: LONGINT;
 			stackSize: INTEGER;
-			cancel, wake, failed: BOOLEAN;
+			cancel, wake, failed, bodyOk: BOOLEAN;
 			group: Group;
 			own: Group;
 			name: ARRAY nameLen OF CHAR
@@ -78,8 +78,8 @@ MODULE Tasks;
 		scheduled, inStep: BOOLEAN;
 		alive: INTEGER;		(* незавершённых задач *)
 		slice: LONGINT;
-		bodyOk: BOOLEAN;	(* Run дошёл до конца (не трапнул) *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
+		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
 
@@ -184,7 +184,7 @@ MODULE Tasks;
 	PROCEDURE MakeReady (t: Task);
 	BEGIN
 		IF (t.state IN {Sleeping, Waiting, Parked}) THEN
-			t.state := Ready; Enqueue(t); EnsureScheduled
+			t.state := Ready; Enqueue(t); deadlocked := FALSE; EnsureScheduled
 		END
 	END MakeReady;
 
@@ -253,9 +253,12 @@ MODULE Tasks;
 	END Finish;
 
 	PROCEDURE TaskBody (a, b, c: S.ADDRESS);
+	(** bodyOk — поле задачи, а не глобал: иначе завершившаяся соседняя
+		задача выставила бы «успех» трапнувшей (общий счётчик этапа 3). *)
 	BEGIN
+		current.bodyOk := FALSE;
 		current.Run;
-		bodyOk := TRUE
+		current.bodyOk := TRUE
 	END TaskBody;
 
 	PROCEDURE WaitOwnGroup (t: Task);
@@ -281,11 +284,11 @@ MODULE Tasks;
 		IF t.cancel THEN
 			t.state := Cancelled
 		ELSE
-			bodyOk := FALSE;
+			t.bodyOk := FALSE;
 			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TaskBody)), 0, 0, 0);
 			IF t.cancel THEN
 				t.state := Cancelled
-			ELSIF ~bodyOk THEN
+			ELSIF ~t.bodyOk THEN
 				t.failed := TRUE;
 				t.state := Finished;
 				IF t.group # NIL THEN
@@ -336,7 +339,7 @@ MODULE Tasks;
 		IF ~InitStack(t) THEN Fail("no stack memory (platform does not support it)") END;
 		IF t.timeSlice <= 0 THEN t.timeSlice := defaultSlice END;
 		IF g # NIL THEN t.group := g; INC(g.alive) END;
-		t.state := Ready; Enqueue(t);
+		t.state := Ready; Enqueue(t); deadlocked := FALSE;
 		t.next := all; all := t;
 		INC(alive);
 		EnsureScheduled
@@ -491,6 +494,21 @@ MODULE Tasks;
 		END
 	END EnsureScheduled;
 
+	PROCEDURE CheckDeadlock;
+	(** Все живые задачи ждут, будить их нечем и сроков нет: печатаем
+		журнал ядра «кто чего ждёт» один раз до следующего пробуждения. *)
+	BEGIN
+		IF (alive > 0) & (readyHead = NIL) & (NextDeadline() < 0) THEN
+			IF ~deadlocked THEN
+				deadlocked := TRUE;
+				Msg("deadlock: no ready tasks and no wake-up deadlines");
+				Kernel.DumpMonitors
+			END
+		ELSE
+			deadlocked := FALSE
+		END
+	END CheckDeadlock;
+
 	PROCEDURE Step*;
 	(** Исполнить готовые задачи, не дольше slice мс. Вызывается со дна
 		главного цикла (действие планировщика) или тестом. *)
@@ -504,7 +522,7 @@ MODULE Tasks;
 		LOOP
 			WakeSleepers(Kernel.Time());
 			t := Dequeue();
-			IF t = NIL THEN EXIT END;
+			IF t = NIL THEN CheckDeadlock; EXIT END;
 			current := t; t.state := Running;
 			SwitchTo(schedSP, t.sp);
 			current := NIL;
@@ -569,6 +587,12 @@ MODULE Tasks;
 		RETURN alive
 	END Count;
 
+	PROCEDURE Deadlocked* (): BOOLEAN;
+	(** Планировщик упёрся в «все ждут, сроков нет» и напечатал журнал. *)
+	BEGIN
+		RETURN deadlocked
+	END Deadlocked;
+
 	PROCEDURE Switches* (): LONGINT;
 	BEGIN
 		RETURN switches
@@ -599,8 +623,58 @@ MODULE Tasks;
 		END
 	END List;
 
+(* --- связь с ядром: мониторы этапа 4 ---------------------------------- *)
+
+	PROCEDURE CurHook (): S.ADDRESS;
+	(** Токен текущей задачи для Kernel.Lock/Wait/Await; 0 — главный стек. *)
+	BEGIN
+		IF current # NIL THEN RETURN S.VAL(S.ADDRESS, S.ADR(current^)) ELSE RETURN 0 END
+	END CurHook;
+
+	PROCEDURE UnparkHook (a: S.ADDRESS);
+	(** Пробуждение ядром (передача монитора): НЕ трогать пользовательский
+		флаг wake — иначе следующий Tasks.Park вернулся бы сразу и Wait
+		стал бы холостым циклом. *)
+		VAR t: Task;
+	BEGIN
+		IF a # 0 THEN
+			t := S.VAL(Task, a);
+			IF t.state IN {Sleeping, Waiting, Parked} THEN MakeReady(t) END
+		END
+	END UnparkHook;
+
+	PROCEDURE ReadyHook (): BOOLEAN;
+	BEGIN
+		RETURN HasReady()
+	END ReadyHook;
+
+	PROCEDURE DeadlineHook (): LONGINT;
+	BEGIN
+		RETURN NextDeadline()
+	END DeadlineHook;
+
+	PROCEDURE NameHook (a: S.ADDRESS; OUT s: ARRAY OF CHAR);
+	BEGIN
+		IF a = 0 THEN s := "?"
+		ELSE GetName(S.VAL(Task, a), s)
+		END
+	END NameHook;
+
+	PROCEDURE StackHook (a: S.ADDRESS): Kernel.Stack;
+	(** Запись стека задачи: ядро добавляет взятие монитора в её цепочку
+		при передаче владения спящей задаче. *)
+		VAR t: Task;
+	BEGIN
+		IF a # 0 THEN
+			t := S.VAL(Task, a); RETURN t.stackRec
+		ELSE
+			RETURN NIL
+		END
+	END StackHook;
+
 BEGIN
 	NEW(sched);
 	slice := defaultSlice;
-	scheduled := FALSE; inStep := FALSE
+	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
+	Kernel.SetScheduler(CurHook, Park, UnparkHook, ReadyHook, DeadlineHook, NameHook, StackHook)
 END Tasks.
