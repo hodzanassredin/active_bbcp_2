@@ -720,8 +720,10 @@ MODULE AsyncComputon;
 
 	PROCEDURE UnloadModule (len: INTEGER): INTEGER;
 	(** Выгрузить модуль в процессе-исполнителе. 0 — выгружен или не был
-		загружен, unloadBusy — занят (импортирован или код есть на стеке). *)
-		VAR name: ARRAY 128 OF CHAR; res: INTEGER; m, self: Kernel.Module;
+		загружен, unloadBusy — занят (импортирован или код есть на стеке).
+		Свой модуль отдельно не проверяется: его кадр (WorkerLoop) видит
+		ядро в StackUsesModule, как и любой другой. *)
+		VAR name: ARRAY 128 OF CHAR; res: INTEGER; m: Kernel.Module;
 	BEGIN
 		IF (len <= 0) OR (len >= LEN(payload)) THEN RETURN -1 END;
 		payload[len] := 0X;
@@ -729,10 +731,6 @@ MODULE AsyncComputon;
 		IF res # 0 THEN RETURN -1 END;
 		m := Kernel.ThisLoadedMod(name);
 		IF m = NIL THEN RETURN 0 END;
-		(* Свой транспортный модуль исполняется прямо сейчас (кадр
-		   WorkerLoop на стеке): выгружать его нельзя. *)
-		self := Kernel.ThisLoadedMod("AsyncComputon");
-		IF m = self THEN RETURN unloadBusy END;
 		Kernel.UnloadMod(m);
 		IF Kernel.ThisLoadedMod(name) = NIL THEN RETURN 0 ELSE RETURN unloadBusy END
 	END UnloadModule;
