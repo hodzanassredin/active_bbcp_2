@@ -49,7 +49,7 @@ MODULE AsyncChan;
 	PROCEDURE [exclusive] (c: Chan) Send* (m: AsyncSelect.Msg), NEW;
 		VAR done: BOOLEAN;
 	BEGIN
-		AsyncSelect.CheckSend(c, m);
+		IF c.proto # NIL THEN AsyncSelect.CheckSend(c, m) END;
 		done := FALSE;
 		LOOP
 			ACTIVE.AWAIT((c.waitR # NIL) OR ~c.deposit);
@@ -77,7 +77,7 @@ MODULE AsyncChan;
 
 	PROCEDURE [exclusive] (c: Buffer) Send* (m: AsyncSelect.Msg), NEW;
 	BEGIN
-		AsyncSelect.CheckSend(c, m);
+		IF c.proto # NIL THEN AsyncSelect.CheckSend(c, m) END;
 		ACTIVE.AWAIT(c.count < c.capacity);
 		AsyncSelect.PutItem(c, m)
 	END Send;
@@ -92,7 +92,7 @@ MODULE AsyncChan;
 
 	PROCEDURE [exclusive] (c: Mailbox) Send* (m: AsyncSelect.Msg), NEW;
 	BEGIN
-		AsyncSelect.CheckSend(c, m);
+		IF c.proto # NIL THEN AsyncSelect.CheckSend(c, m) END;
 		AsyncSelect.PutItem(c, m)
 	END Send;
 
