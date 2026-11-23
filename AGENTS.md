@@ -170,3 +170,48 @@ echo "DemoExternalVariable.Do" | ./dev0Linux --PAR_NAME1="some data" --PAR_NAME2
 Don't use spaces for tabulation.
 
 Put empty line before new sources block (IMPORT, CONST, TYPE, PROCEDURE).
+
+## Стенд active2 (наши дополнения)
+
+Ветка `active2` — снимок DIA261123 плюс этапы 1–2 из ветки `active`,
+перенесённые на `.cp`. Правила выше (`.cp`, `OLD/` не собирать, `Mod64`
+через `DevLibrarian`, табы, ручной drag-and-drop) действуют полностью.
+Ветка `active` на `.odc` не переписывалась; её правила и `tools/sync-odc.sh`
+остаются там.
+
+- Каталог установки по умолчанию — `.work/BB64LIN` (в git не входит,
+  `BB64INSTALL` переопределяет). Отдельного мира-скелета нет: сборка идёт
+  прямо туда, `dev0Linux` запускается из корня репозитория.
+- Консоль — `blackbox-console` (`LinIntInit`), GUI — `blackbox`
+  (`LinLoader`); `blackbox --console` консольный режим не выбирает.
+
+```sh
+tools/build64.sh                  # все подсистемы, консоль + GUI
+tools/build64.sh --clean          # стереть .ocf/.osf установки
+tools/build64.sh --console-only   # только консоль
+echo 'Команда' | tools/run64.sh
+tools/go64.sh Test64Basic         # amd64 CompileThis
+tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
+tools/test.sh                     # 6 тестов Test64 (сейчас 6/6)
+tools/test.sh --list
+tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
+```
+
+- Тесты: подсистема `Test64/Mod/*.cp`, манифест `Test64/tests.txt`.
+  `Test64Support` ставит пустой `trapViewer` — иначе консольный x64
+  считает фатальным любой трап, даже внутри `Kernel.Try`.
+- Этап 1: `Services.Post/Wake/NextDeadline`, `Console.WaitInput`,
+  `ConsInterp.Run` крутит `Services.actionHook.Step`.
+- Этап 2: реестр `Kernel.Stack` (`RegisterStack`,
+  `RegisterSignalStack`, `UnregisterStack(At)`, `SwitchSave/Restore`),
+  `Get/SetTryContext` в `LinKernel`; `UnloadMod` не выгружает занятый
+  стеком модуль.
+- `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
+  `.cp`, конвертировать нечего. `DevOnce` заменён на
+  `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
+  в консольном x64.
+- Открыто: GUI-прогоны, `pack-dev0-linux` (в снимке отсутствует),
+  отдельный `[code]`-переключатель стеков, задачи/нити ОС, отложенные
+  финализаторы, нагрузочный тест «1000 задач час».
+- Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица
+  изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер).
