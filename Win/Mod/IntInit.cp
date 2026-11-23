@@ -27,7 +27,10 @@ MODULE WinIntInit;
 		Converters.Register("StdTextConv.ImportText", "StdTextConv.ExportText", "TextViews.View", "txt", {});
 		
 		Windows.Init;  (* neet to set hooks *)
-		
+
+		(* Пул рабочих нитей этапа 8: фасад AsyncWork и делегат CreateThread. *)
+		Dialog.Call("AsyncWorkWin.Install", "Failed to start worker pool", res);
+
 		Dialog.Call("ConsInterp.Run", " ", res)
 		
 	END Init;

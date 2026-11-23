@@ -46,8 +46,8 @@ if [ "$rebuild" -eq 1 ] || [ ! -f "$OUT/System/Code/Kernel.ocf" ]; then
 		grep -nE 'error:|not found|~TRAP|[0-9]+ error' "$OUT/build.log" | head -20 >&2; exit 1; }
 fi
 
-# 2. Unit, Tasks (System/Mod64) и Win-тест задач.
-printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis Test64WinTasks\nDevLibrarian.DisableDevLib\n" \
+# 2. Unit, Tasks (System/Mod64), пул нитей и Win-тесты задач.
+printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis AsyncWinSock\nDevCompiler64.CompileThis AsyncWork\nDevCompiler64.CompileThis AsyncWorkWin\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis Test64WinTasks\nDevCompiler64.CompileThis Test64WinWorkers\nDevLibrarian.DisableDevLib\n" \
 	| timeout 600 "$DEV0" >"$OUT/unit-build.log" 2>&1 || {
 		echo "test-win64: компиляция Unit/Tasks не удалась:" >&2
 		tail -30 "$OUT/unit-build.log" >&2; exit 1; }
@@ -91,4 +91,5 @@ run() {
 
 run UnitTests "" "passed 4"
 run Test64WinTasks proc "passed 5"
+run Test64WinWorkers proc "passed 4"
 exit 0

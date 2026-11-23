@@ -107,7 +107,10 @@ MODULE WinInit;
 	BEGIN
 		WinClipboard.Install;
 		WinShowHook.SetShowHook;
-		
+
+		(* Пул рабочих нитей этапа 8: фасад AsyncWork и делегат CreateThread. *)
+		Dialog.Call("AsyncWorkWin.Install", "Failed to start worker pool", res_);
+
 		Dialog.Call("WinGui.InstallCtrlBreakInterrupt", "Failed to set Ctrl+Break interrupt", res_);
 		
 		m := Kernel.ThisMod("DevDebug");
