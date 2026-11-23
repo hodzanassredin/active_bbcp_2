@@ -44,6 +44,10 @@ echo "build64: компиляция подсистем:$subs"
 	if [ -d "$BB/Async/Mod" ] || [ -d "$BB/Async/Mod64" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Async"
 	fi
+	# Robust — фасад RobustParallel над AsyncComputon (этап 9).
+	if [ -d "$BB/Robust/Mod" ] || [ -d "$BB/Robust/Mod64" ]; then
+		echo "DevCompiler64.CompileSubs @Lin Robust"
+	fi
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$BB/dev0Linux" < "$LOG.cmd" > "$LOG" 2>&1; then

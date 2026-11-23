@@ -70,6 +70,22 @@ if [ "$runresolver" -eq 1 ]; then
 	esac
 fi
 
+runrobust=1
+if [ -n "$only" ]; then
+	case " $only " in *" Test64RobustParallel "*) ;; *) runrobust=0;; esac
+fi
+if [ "$runrobust" -eq 1 ]; then
+	total=$((total + 1))
+	echo "test: Test64RobustParallel (marks='proc', RobustParallel 1/4/16)"
+	if "$BB/tools/test-robust.sh"; then
+		ok=$((ok + 1)); echo "PASS Test64RobustParallel"; summary="$summary
+  OK   Test64RobustParallel"
+	else
+		bad=$((bad + 1)); echo "FAIL Test64RobustParallel"; summary="$summary
+  BAD  Test64RobustParallel"
+	fi
+fi
+
 echo "== test: всего $total, прошло $ok, провалов $bad, пропущено $skipped"
 [ -n "$summary" ] && printf '%s\n' "$summary"
 [ $bad -eq 0 ]
