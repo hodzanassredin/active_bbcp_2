@@ -50,6 +50,8 @@ echo "build32: компиляция подсистем"
 	echo "DevCompiler.CompileThis Test64Active"
 	echo "DevCompiler.CompileThis Test64Files"
 	echo "DevCompiler.CompileThis Test64Yield ^"
+	echo "DevCompiler.CompileThis Test64UnloadGuardCode"
+	echo "DevCompiler.CompileThis Test64UnloadGuard"
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$DEV0" < "$LOG.cmd" > "$LOG" 2>&1; then

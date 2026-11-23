@@ -21,7 +21,8 @@ Test64Files|proc slow|600
 Test64Tasks|proc slow|900
 Test64Monitors|proc|300
 Test64Active|proc|300
-Test64Yield|proc|300'
+Test64Yield|proc|300
+Test64UnloadGuard|proc|300'
 
 LIST=0; only=""
 for a in "$@"; do

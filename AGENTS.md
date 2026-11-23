@@ -193,7 +193,7 @@ echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
 tools/build32.sh                  # i386-мир + консоль в build/BB32LIN
-tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield
+tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield, UnloadGuard
 tools/test.sh                     # 19 этапов, 86 проверок
 tools/test-resolver.sh            # этап 8: резолвер в unshare -rmn
 tools/test-robust.sh              # RobustParallel на 1/4/16 процессах
@@ -221,9 +221,9 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   без MPICH — `SKIP`), `Test64Gui` (под `gtk4-broadwayd`, без него —
   `SKIP`). Модуль `Test64Files` (`proc slow`) занимает все 100000
   имён `odcNNNNN` и проверяет уникальные временные имена `LinFiles`.
-  `tools/test32.sh` гоняет Unit, Files, Tasks, Monitors, Active и Yield
-  на i386 (`tools/build32.sh`, ELF32 `blackbox-console`). Итог —
-  19 этапов, 86 проверок.
+  `tools/test32.sh` гоняет Unit, Files, Tasks, Monitors, Active, Yield
+  и UnloadGuard на i386 (`tools/build32.sh`, ELF32 `blackbox-console`).
+  Итог — 19 этапов, 86 проверок.
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
   прежний viewer восстанавливается (`Kernel.GetTrapViewer`).

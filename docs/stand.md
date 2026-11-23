@@ -17,7 +17,7 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
 | Тесты без окон | `tools/test.sh` (Unit) | 19 этапов, 86 проверок, все зелёные |
 | Временные файлы `LinFiles` | `Test64Files` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
-| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | UnitTests 4/4, Tasks 13/13, Monitors 9/9, Active 6/6, Yield 3/3, Files 3/3 |
+| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | UnitTests 4/4, Tasks 13/13, Monitors 9/9, Active 6/6, Yield 3/3, Files 3/3, UnloadGuard 2/2 |
 | Бутстрап i386 | `tools/bootstrap.sh` | три прохода, 98 файлов, B и C — 0 различий |
 | Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
 | Этап 1/3: GUI | `tools/test-gui.sh` (gtk4-broadwayd) | `ok=1`, 20 тиков, maxgap 108 мс |
@@ -234,7 +234,7 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 
 ```sh
 tools/build32.sh              # мир и консоль в build/BB32LIN
-tools/test32.sh               # сборка + UnitTests, Files, Tasks, Monitors, Active, Yield
+tools/test32.sh               # сборка + UnitTests, Files, Tasks, Monitors, Active, Yield, UnloadGuard
 tools/test32.sh --list
 tools/test32.sh Test64Tasks   # только указанные модули (без сборки)
 ```
@@ -252,7 +252,10 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
 `CallCond` (кадр в `BX`), `Tasks` со своим стеком (mmap + сторожевая
 страница в `LinKernel`), `[exclusive]` (пролог/эпилог `CPC486`),
 `ACTIVE.AWAIT` и ключ `^`. Тест `Test64Files` и временные имена
-проверены и на i386. `Test64Co` для i386 — без C-помощника: `co_now`
+проверены и на i386. `Test64UnloadGuard` подтверждает и на i386, что
+`Kernel.UnloadMod` не выгружает модуль с живым кадром на главном стеке
+и на стеке спящей задачи (положительный контроль — без кадров модуль
+выгружается). `Test64Co` для i386 — без C-помощника: `co_now`
 строится по `Kernel.Time`, сопрограммы этапа 2 не проверяются
 (32-битного `libtest64.so` нет); для amd64 обёртки лежат в
 `Test64/Mod64/Co.cp`.
