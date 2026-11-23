@@ -9,7 +9,7 @@ MODULE AsyncChan;
 
 	Сообщение (AsyncSelect.Msg) после отправки не меняется. *)
 
-	IMPORT ACTIVE, AsyncSelect;
+	IMPORT ACTIVE, AsyncSelect, AsyncProto;
 
 	TYPE
 		Chan* = POINTER TO RECORD (AsyncSelect.Core) END;
@@ -49,6 +49,7 @@ MODULE AsyncChan;
 	PROCEDURE [exclusive] (c: Chan) Send* (m: AsyncSelect.Msg), NEW;
 		VAR done: BOOLEAN;
 	BEGIN
+		AsyncSelect.CheckSend(c, m);
 		done := FALSE;
 		LOOP
 			ACTIVE.AWAIT((c.waitR # NIL) OR ~c.deposit);
@@ -76,6 +77,7 @@ MODULE AsyncChan;
 
 	PROCEDURE [exclusive] (c: Buffer) Send* (m: AsyncSelect.Msg), NEW;
 	BEGIN
+		AsyncSelect.CheckSend(c, m);
 		ACTIVE.AWAIT(c.count < c.capacity);
 		AsyncSelect.PutItem(c, m)
 	END Send;
@@ -90,6 +92,7 @@ MODULE AsyncChan;
 
 	PROCEDURE [exclusive] (c: Mailbox) Send* (m: AsyncSelect.Msg), NEW;
 	BEGIN
+		AsyncSelect.CheckSend(c, m);
 		AsyncSelect.PutItem(c, m)
 	END Send;
 
@@ -98,6 +101,16 @@ MODULE AsyncChan;
 		ACTIVE.AWAIT(c.count > 0);
 		IF ~AsyncSelect.TakeItem(c, m) THEN m := NIL END
 	END Recv;
+
+	(* --- протокол -------------------------------------------------------- *)
+
+	PROCEDURE SetProtocol* (c: AsyncSelect.Core; p: AsyncProto.Protocol);
+	(** Проверять прямые Send по протоколу диалога (отладочный режим).
+		NIL снимает проверку; без протокола накладных расходов нет.
+		Отправки через Select пока не проверяются. *)
+	BEGIN
+		AsyncSelect.SetProtocol(c, p)
+	END SetProtocol;
 
 	(* --- альтернативы ----------------------------------------------------- *)
 

@@ -12,7 +12,7 @@ MODULE AsyncSelect;
 	Только одна нить ОС: все переходы состояния — под монитором ядра,
 	между проверкой и Park нет точки уступки. *)
 
-	IMPORT Kernel, Tasks, Services;
+	IMPORT Kernel, Tasks, Services, Console, AsyncProto;
 
 	CONST
 		maxAlt = 32;
@@ -61,7 +61,9 @@ MODULE AsyncSelect;
 			directTask*: Tasks.Task;
 			waitS*, waitR*: Offer;	(* головы очередей ожидающих *)
 			waitST, waitRT: Offer;
-			ih, it: Item				(* очередь Bounded/Mailbox *)
+			ih, it: Item;				(* очередь Bounded/Mailbox *)
+			proto*: AsyncProto.Protocol;	(* необязательный протокол диалога *)
+			protoState*: INTEGER
 		END;
 
 		(** Внешний сигнал: Alt, который будит не канал, а владелец
@@ -115,6 +117,43 @@ MODULE AsyncSelect;
 	BEGIN
 		RETURN ctx.task
 	END CtxTask;
+
+	(* --- протокол диалога ------------------------------------------------- *)
+
+	PROCEDURE SetProtocol* (c: Core; p: AsyncProto.Protocol);
+	(** Прикрепить протокол диалога: каждая прямая отправка проверяется
+		(отладочный режим). NIL снимает протокол. *)
+	BEGIN
+		c.proto := p;
+		IF p # NIL THEN c.protoState := AsyncProto.Start(p) ELSE c.protoState := 0 END
+	END SetProtocol;
+
+	PROCEDURE MessageLabel (m: Msg; OUT label: Kernel.Name);
+	(** Вид сообщения — имя его динамического типа записи. В описании
+		протокола — имя без служебного суффикса "^" (так записан тип
+		указателя в метаданных BlackBox). *)
+		VAR t: Kernel.Type; i: INTEGER;
+	BEGIN
+		IF m = NIL THEN label := "NIL"; RETURN END;
+		t := Kernel.TypeOf(m^);
+		IF t # NIL THEN Kernel.GetTypeName(t, label) ELSE label := "?" END;
+		i := 0; WHILE (label[i] # 0X) DO INC(i) END;
+		IF (i > 0) & (label[i-1] = "^") THEN label[i-1] := 0X END
+	END MessageLabel;
+
+	PROCEDURE CheckSend* (c: Core; m: Msg);
+	(** Проверить отправку по протоколу. Без протокола — один тест NIL. *)
+		VAR label: Kernel.Name; ok: BOOLEAN; msg: AsyncProto.Message;
+	BEGIN
+		IF c.proto = NIL THEN RETURN END;
+		MessageLabel(m, label);
+		AsyncProto.Step(c.proto, c.protoState, label$, ok);
+		IF ~ok THEN
+			AsyncProto.LastViolation(c.proto, msg);
+			Console.WriteStr("AsyncChan protocol: "); Console.WriteStr(msg$); Console.WriteLn;
+			ASSERT(FALSE, 21)
+		END
+	END CheckSend;
 
 	PROCEDURE Enqueue (VAR head, tail: Offer; o: Offer);
 	BEGIN
