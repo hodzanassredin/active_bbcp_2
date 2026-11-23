@@ -202,6 +202,19 @@ MODULE AsyncSelect;
 		PruneQueue(c.waitR, c.waitRT)
 	END Prune;
 
+	PROCEDURE ReceiverWaiting (c: Core): BOOLEAN;
+	(** Есть живое предложение-приём в очереди встречи. Под монитором;
+		между проверкой и DeliverToReceiver нет точки уступки. *)
+		VAR o: Offer;
+	BEGIN
+		o := c.waitR;
+		WHILE o # NIL DO
+			IF OfferAlive(o) & (o.kind = RecvKind) THEN RETURN TRUE END;
+			o := o.next
+		END;
+		RETURN FALSE
+	END ReceiverWaiting;
+
 	PROCEDURE PopLive (VAR head, tail: Offer; wantSend: BOOLEAN): Offer;
 	(** Снять первое живое предложение нужного вида. Под монитором. *)
 		VAR o: Offer;
@@ -272,6 +285,7 @@ MODULE AsyncSelect;
 			s := PopLive(c.waitS, c.waitST, TRUE);
 			IF s = NIL THEN RETURN END;
 			m := s.msg;
+			CheckSend(c, m);	(* отложенная отправка совершается здесь *)
 			AppendItem(c, m);
 			Decide(s.ctx, s.idx);
 			CompleteRecv(c)
@@ -335,6 +349,7 @@ MODULE AsyncSelect;
 		END;
 		s := PopLive(c.waitS, c.waitST, TRUE);
 		IF s # NIL THEN
+			CheckSend(c, s.msg);	(* отправка предложения совершается здесь *)
 			m := s.msg;
 			Decide(s.ctx, s.idx);
 			RETURN TRUE
@@ -345,11 +360,18 @@ MODULE AsyncSelect;
 	(* --- регистрация альтернатив ------------------------------------------ *)
 
 	PROCEDURE Register (c: Core; o: Offer): BOOLEAN;
-	(** Попробовать исполнить предложение. Под монитором. *)
+	(** Попробовать исполнить предложение. Под монитором.
+		Протокол проверяется в тот момент, когда отправка действительно
+		совершается: прямое исполнение здесь или снятие отложенного
+		предложения в TakeRendezvous/CompleteSend. Проигравшее
+		предложение состояние протокола не меняет. *)
 	BEGIN
 		IF o.kind = SendKind THEN
 			IF c.kind = Rendezvous THEN
-				IF DeliverToReceiver(c, o.msg) THEN RETURN TRUE END;
+				IF ReceiverWaiting(c) THEN
+					CheckSend(c, o.msg);
+					IF DeliverToReceiver(c, o.msg) THEN RETURN TRUE END
+				END;
 				IF ~c.deposit THEN
 					c.item := o.msg; c.deposit := TRUE; c.depOffer := o;
 					c.direct := FALSE; c.directTask := NIL; c.taken := FALSE;
@@ -357,10 +379,12 @@ MODULE AsyncSelect;
 				END;
 				Enqueue(c.waitS, c.waitST, o); RETURN FALSE
 			ELSIF c.kind = Bounded THEN
-				IF c.count < c.capacity THEN PutItem(c, o.msg); RETURN TRUE END;
+				IF c.count < c.capacity THEN
+					CheckSend(c, o.msg); PutItem(c, o.msg); RETURN TRUE
+				END;
 				Enqueue(c.waitS, c.waitST, o); RETURN FALSE
 			ELSE
-				PutItem(c, o.msg); RETURN TRUE
+				CheckSend(c, o.msg); PutItem(c, o.msg); RETURN TRUE
 			END
 		ELSE
 			IF c.kind = Rendezvous THEN

@@ -5,7 +5,7 @@ MODULE Test64Protocol;
 	последовательность проходит; сообщение не по порядку трапует с
 	текстом нарушения. Канал без протокола принимает любой порядок. *)
 
-	IMPORT AsyncProto, AsyncChan, AsyncSelect, UnitAssert;
+	IMPORT AsyncProto, AsyncChan, AsyncSelect, Tasks, Services, Kernel, UnitAssert;
 
 	CONST
 		desc = "start: RequestMsg > wait; wait: ResponseMsg > wait; wait: EndMsg > done; done:";
@@ -15,9 +15,14 @@ MODULE Test64Protocol;
 		ResponseMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 		EndMsg = POINTER TO RECORD (AsyncSelect.Msg) END;
 
+		AltSendTask = POINTER TO RECORD (Tasks.Task)
+			m: AsyncSelect.Msg; idx, done: INTEGER
+		END;
+
 	VAR
 		box: AsyncChan.Mailbox;
 		proto: AsyncProto.Protocol;
+		altSend: AltSendTask;
 
 	PROCEDURE Contains (IN s, pattern: ARRAY OF CHAR): BOOLEAN;
 		VAR i, j: INTEGER; found: BOOLEAN;
@@ -104,5 +109,72 @@ MODULE Test64Protocol;
 		AsyncProto.LastError(msg);
 		UnitAssert.True(Length(msg) > 0, "parse error has text")
 	END TestParseError;
+
+	(* --- отправка через Select -------------------------------------------- *)
+
+	PROCEDURE (t: AltSendTask) Run;
+		VAR ops: ARRAY 1 OF AsyncSelect.Op;
+	BEGIN
+		AsyncChan.SendAlt(box, t.m, ops[0]);
+		t.idx := AsyncChan.Select(ops);
+		t.done := 1
+	END Run;
+
+	PROCEDURE TaskOver (): BOOLEAN;
+		VAR st: INTEGER;
+	BEGIN
+		IF altSend = NIL THEN RETURN TRUE END;
+		st := Tasks.State(altSend);
+		RETURN (st = Tasks.Finished) OR (st = Tasks.Cancelled)
+	END TaskOver;
+
+	PROCEDURE PumpUntil (ms: LONGINT; cond: PROCEDURE (): BOOLEAN): BOOLEAN;
+		VAR t0: LONGINT;
+	BEGIN
+		t0 := Kernel.Time();
+		WHILE ~cond() & (Kernel.Time() - t0 <= ms) DO Services.actionHook.Step END;
+		RETURN cond()
+	END PumpUntil;
+
+	PROCEDURE TestAltSendCorrect*;
+	(** Select-отправка идёт через тот же автомат: правильный порядок
+		переводит состояние дальше. *)
+		VAR t: AltSendTask; m: RequestMsg; name: AsyncProto.Message; state: INTEGER;
+	BEGIN
+		proto := AsyncProto.New(desc);
+		UnitAssert.NotNil(proto, "protocol description parsed");
+		box := AsyncChan.NewMailbox();
+		AsyncChan.SetProtocol(box, proto);
+		NEW(m); m.n := 1;
+		NEW(t); t.m := m; t.idx := -1; t.done := 0; altSend := t;
+		Tasks.Start(t);
+		UnitAssert.True(PumpUntil(5000, TaskOver), "alt send finishes");
+		UnitAssert.EqualInt(1, t.done, "select completed");
+		UnitAssert.EqualInt(0, t.idx, "send alternative won");
+		state := box.protoState;
+		AsyncProto.StateName(proto, state, name);
+		UnitAssert.EqualStr("wait", name, "select send advanced the protocol");
+		altSend := NIL
+	END TestAltSendCorrect;
+
+	PROCEDURE TestAltSendBadOrder*;
+	(** Нарушение порядка в Select-отправке — трап в задаче; состояние
+		протокола не меняется, текст нарушения остаётся. *)
+		VAR t: AltSendTask; m: EndMsg; msg: AsyncProto.Message; state: INTEGER;
+	BEGIN
+		proto := AsyncProto.New(desc);
+		box := AsyncChan.NewMailbox();
+		AsyncChan.SetProtocol(box, proto);
+		state := box.protoState;
+		NEW(m); NEW(t); t.m := m; t.idx := -1; t.done := 0; altSend := t;
+		Tasks.Start(t);
+		UnitAssert.True(PumpUntil(5000, TaskOver), "violating alt send task ends");
+		UnitAssert.EqualInt(0, t.done, "violating alt send did not complete");
+		UnitAssert.True(Tasks.Failed(t), "task trapped on protocol violation");
+		UnitAssert.EqualInt(state, box.protoState, "protocol state unchanged");
+		AsyncProto.LastViolation(proto, msg);
+		UnitAssert.True(Contains(msg, "EndMsg"), "violation names the message");
+		altSend := NIL
+	END TestAltSendBadOrder;
 
 END Test64Protocol.

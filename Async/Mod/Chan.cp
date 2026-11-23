@@ -107,7 +107,8 @@ MODULE AsyncChan;
 	PROCEDURE SetProtocol* (c: AsyncSelect.Core; p: AsyncProto.Protocol);
 	(** Проверять прямые Send по протоколу диалога (отладочный режим).
 		NIL снимает проверку; без протокола накладных расходов нет.
-		Отправки через Select пока не проверяются. *)
+		Отправки через Select проверяются в момент, когда предложение
+		действительно исполняется. *)
 	BEGIN
 		AsyncSelect.SetProtocol(c, p)
 	END SetProtocol;
