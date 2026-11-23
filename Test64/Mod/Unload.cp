@@ -119,6 +119,7 @@ MODULE Test64Unload;
 	PROCEDURE TestUnloadCode*;
 		VAR t: RunTask; ok, reached, busy: BOOLEAN;
 	BEGIN
+		IF ~AsyncComputon.SetTransport("pipe") THEN ASSERT(FALSE, 20) END;
 		AsyncComputon.Start(2);
 		UnitAssert.EqualInt(2, AsyncComputon.Size(), "two executors");
 

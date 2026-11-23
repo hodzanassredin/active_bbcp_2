@@ -14,7 +14,8 @@ MODULE AsyncComputon;
 	запрос повторяется на живом; ошибка Do возвращается вызывающему. *)
 
 	IMPORT S := SYSTEM, Kernel, Tasks, Services, Poller, Stores, Files,
-		LinNative, LinLibc, Dialog, Console, Strings, AsyncSelect, Utf;
+		LinNative, LinLibc, Dialog, Console, Strings, AsyncSelect, Utf,
+		CommStreams, CommTCP;
 
 	CONST
 		maxPool = 16;
@@ -23,6 +24,8 @@ MODULE AsyncComputon;
 		kindWork = 0; kindStop = 1; kindUnload = 2;
 		unloadBusy = 20;
 		pullTimeout = 10000;
+		trPipe = 0; trTcp = 1;
+		tcpTimeout = 5000;
 
 	TYPE
 		Computon* = POINTER TO ABSTRACT RECORD (Stores.Store) END;
@@ -45,6 +48,7 @@ MODULE AsyncComputon;
 			pid, inFd, outFd, inLen: INTEGER;
 			dead: BOOLEAN;
 			waiter: WWait;
+			stream: CommStreams.Stream;	(* TCP: сокет; pipe: NIL *)
 			buf: ARRAY maxFrame OF SHORTCHAR	(* накопитель ответов *)
 		END;
 
@@ -62,6 +66,7 @@ MODULE AsyncComputon;
 		workers: ARRAY maxPool OF WState;
 		nworkers: INTEGER;
 		started: BOOLEAN;
+		transport: INTEGER;	(* trPipe или trTcp; выбор до Start *)
 		reqs: ARRAY maxReq OF RReq;
 		lastErr: INTEGER;
 		hook: Hook;
@@ -75,6 +80,7 @@ MODULE AsyncComputon;
 		exePath: ARRAY [untagged] 512 OF SHORTCHAR;
 		procPath: ARRAY [untagged] 16 OF SHORTCHAR;
 		argIn, argOut: ARRAY [untagged] 32 OF SHORTCHAR;
+		argTcp: ARRAY [untagged] 64 OF SHORTCHAR;
 		argv: ARRAY [untagged] 4 OF LinLibc.PtrSTR;
 		cmdLine: ARRAY [untagged] 32 OF SHORTCHAR;
 
@@ -150,13 +156,23 @@ MODULE AsyncComputon;
 	(* --- запись в дескриптор ---------------------------------------------- *)
 
 	PROCEDURE WriteAll (fd: INTEGER; VAR b: ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
-		VAR off, n: INTEGER;
+		VAR off, n, errno, tries, res: INTEGER;
 	BEGIN
-		off := 0;
+		off := 0; tries := 0;
 		WHILE off < len DO
 			n := S.VAL(INTEGER, LinLibc.write(fd, S.ADR(b[off]), len - off));
-			IF n <= 0 THEN RETURN FALSE END;
-			INC(off, n)
+			IF n > 0 THEN
+				INC(off, n)
+			ELSIF n < 0 THEN
+				S.GET(LinLibc.__errno_location(), errno);
+				IF errno = LinLibc.EAGAIN THEN	(* TCP: буфер отправки занят *)
+					INC(tries);
+					IF tries > 1000 THEN RETURN FALSE END;
+					res := LinNative.usleep(1000)
+				ELSE RETURN FALSE
+				END
+			ELSE RETURN FALSE
+			END
 		END;
 		RETURN TRUE
 	END WriteAll;
@@ -192,7 +208,51 @@ MODULE AsyncComputon;
 		dst[i] := 0X
 	END MakeArg;
 
-	PROCEDURE Spawn (idx: INTEGER): BOOLEAN;
+	PROCEDURE MakeArgStr (IN prefix, value: ARRAY OF CHAR; OUT dst: ARRAY OF SHORTCHAR);
+		VAR i, j: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(dst) - 1) & (prefix[i] # 0X) DO dst[i] := SHORT(prefix[i]); INC(i) END;
+		j := 0;
+		WHILE (i < LEN(dst) - 1) & (value[j] # 0X) DO dst[i] := SHORT(value[j]); INC(i); INC(j) END;
+		dst[i] := 0X
+	END MakeArgStr;
+
+	PROCEDURE SetTransport* (IN name: ARRAY OF CHAR): BOOLEAN;
+	(** Выбрать транспорт до Start: "pipe" (локальные pipe, по умолчанию)
+		или "tcp" (соединение по localhost). Программа Push/Pull не
+		меняется. *)
+	BEGIN
+		IF name = "tcp" THEN transport := trTcp; RETURN TRUE
+		ELSIF (name = "pipe") OR (name = "") THEN transport := trPipe; RETURN TRUE
+		ELSE RETURN FALSE
+		END
+	END SetTransport;
+
+	PROCEDURE CloseWorker (idx: INTEGER);
+	(* Закрыть сокет или оба pipe; для TCP один дескриптор — общий. *)
+	BEGIN
+		IF workers[idx].stream # NIL THEN
+			workers[idx].stream.Close; workers[idx].stream := NIL
+		ELSE
+			CloseFd(workers[idx].inFd); CloseFd(workers[idx].outFd)
+		END
+	END CloseWorker;
+
+	PROCEDURE AcceptOne (l: CommStreams.Listener; OUT s: CommStreams.Stream): BOOLEAN;
+	(** Принять одно соединение с тайм-аутом (Start идёт вне задачи). *)
+		VAR t0: LONGINT; res: INTEGER;
+	BEGIN
+		s := NIL; t0 := Kernel.Time();
+		LOOP
+			l.Accept(s);
+			IF s # NIL THEN RETURN TRUE END;
+			IF Kernel.Time() - t0 > tcpTimeout THEN RETURN FALSE END;
+			res := LinNative.usleep(1000)
+		END
+	END AcceptOne;
+
+	PROCEDURE SpawnPipe (idx: INTEGER): BOOLEAN;
 		VAR cmdP, reqP, respP: ARRAY 2 OF INTEGER; res, fl, pid, i: INTEGER; ok: BOOLEAN;
 	BEGIN
 		res := LinNative.pipe(S.VAL(LinNative.IntPtr, S.ADR(cmdP[0])));
@@ -224,12 +284,59 @@ MODULE AsyncComputon;
 		END;
 		workers[idx].pid := pid; workers[idx].inFd := reqP[1];
 		workers[idx].outFd := respP[0]; workers[idx].dead := FALSE;
-		workers[idx].inLen := 0;
+		workers[idx].inLen := 0; workers[idx].stream := NIL;
 		fl := LinNative.fcntl(workers[idx].outFd, LinNative.F_GETFL, 0);
 		res := LinNative.fcntl(workers[idx].outFd, LinNative.F_SETFL, fl + LinNative.O_NONBLOCK);
 		NEW(workers[idx].waiter); workers[idx].waiter.idx := idx;
 		Poller.Add(workers[idx].outFd, Poller.In, workers[idx].waiter);
 		RETURN TRUE
+	END SpawnPipe;
+
+	PROCEDURE SpawnTcp (idx: INTEGER): BOOLEAN;
+	(** Исполнитель подключается к слушателю управляющего процесса по
+		localhost; дальше тот же поток кадров, что и на pipe. *)
+		VAR cmdP: ARRAY 2 OF INTEGER; res, pid, i: INTEGER; ok: BOOLEAN;
+			l: CommStreams.Listener; s: CommStreams.Stream; adr: CommStreams.Adr;
+	BEGIN
+		res := LinNative.pipe(S.VAL(LinNative.IntPtr, S.ADR(cmdP[0])));
+		i := 0; WHILE cmdLine[i] # 0X DO INC(i) END;
+		ok := WriteAll(cmdP[1], cmdLine, i);
+		CommTCP.NewListener("127.0.0.1:0", l, res);
+		IF (res # CommStreams.done) OR (l = NIL) THEN
+			CloseFd(cmdP[0]); CloseFd(cmdP[1]); RETURN FALSE
+		END;
+		adr := l.LocalAdr();
+		MakeArgStr("--ASYNC_TCP=", adr^, argTcp);
+		argv[0] := S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0]));
+		argv[1] := S.VAL(LinLibc.PtrSTR, S.ADR(argTcp[0]));
+		argv[2] := NIL;
+		pid := LinLibc.fork();
+		IF pid = 0 THEN	(* ребёнок: команда — на stdin, кадры — по TCP *)
+			res := LinNative.dup2(cmdP[0], 0);
+			CloseFd(cmdP[0]); CloseFd(cmdP[1]);
+			res := LinLibc.execv(S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0])),
+				S.VAL(Argv, S.ADR(argv[0])));
+			LinNative._exit(127)
+		END;
+		CloseFd(cmdP[0]); CloseFd(cmdP[1]);
+		IF pid < 0 THEN l.Close(); RETURN FALSE END;
+		IF ~AcceptOne(l, s) THEN
+			l.Close();
+			res := LinNative.kill(pid, LinNative.SIGKILL);
+			RETURN FALSE
+		END;
+		l.Close();
+		workers[idx].pid := pid; workers[idx].stream := s;
+		workers[idx].inFd := s.Handle(); workers[idx].outFd := workers[idx].inFd;
+		workers[idx].dead := FALSE; workers[idx].inLen := 0;
+		NEW(workers[idx].waiter); workers[idx].waiter.idx := idx;
+		Poller.Add(workers[idx].outFd, Poller.In, workers[idx].waiter);
+		RETURN TRUE
+	END SpawnTcp;
+
+	PROCEDURE Spawn (idx: INTEGER): BOOLEAN;
+	BEGIN
+		IF transport = trTcp THEN RETURN SpawnTcp(idx) ELSE RETURN SpawnPipe(idx) END
 	END Spawn;
 
 	PROCEDURE WorkerAlive (rank: INTEGER): BOOLEAN;
@@ -500,7 +607,7 @@ MODULE AsyncComputon;
 				IF workers[i].waiter # NIL THEN Poller.Remove(workers[i].waiter) END;
 				IF ~workers[i].dead THEN
 					ok := SendFrame(i, 0, kindStop, NIL, 0);
-					CloseFd(workers[i].inFd); CloseFd(workers[i].outFd);
+					CloseWorker(i);
 					res := LinNative.kill(workers[i].pid, LinNative.SIGKILL);
 					workers[i].dead := TRUE
 				END
@@ -528,7 +635,7 @@ MODULE AsyncComputon;
 	BEGIN
 		IF workers[idx].dead THEN RETURN END;
 		workers[idx].dead := TRUE;
-		CloseFd(workers[idx].inFd); CloseFd(workers[idx].outFd);
+		CloseWorker(idx);
 		FOR i := 0 TO maxReq - 1 DO
 			IF reqs[i].used & ~reqs[i].done & (reqs[i].rank = idx) THEN
 				(* выгрузку не повторяем на другом исполнителе *)
@@ -631,18 +738,30 @@ MODULE AsyncComputon;
 
 	PROCEDURE WorkerLoop*;
 	(** Точка входа процесса-исполнителя; fds — из --ASYNC_IN/--ASYNC_OUT. *)
-		VAR inFd, outFd, len, tag, kind, err, res, i: INTEGER;
-			val: ARRAY 32 OF CHAR; c: Computon; ok: BOOLEAN;
-			tmp: POINTER TO ARRAY OF SHORTCHAR;
+		VAR inFd, outFd, len, tag, kind, err, res, i, fl: INTEGER;
+			val: ARRAY 64 OF CHAR; c: Computon; ok: BOOLEAN;
+			tmp: POINTER TO ARRAY OF SHORTCHAR; tcps: CommStreams.Stream;
 	BEGIN
 		(* консольный x64 иначе считает фатальным любой трап, даже в Try *)
 		Kernel.InstallTrapViewer(NoopViewer);
-		Dialog.GetPar("ASYNC_IN", val, res);
-		inFd := 0;
-		IF res = 0 THEN Strings.StringToInt(val, inFd, res) END;
-		Dialog.GetPar("ASYNC_OUT", val, res);
-		outFd := 1;
-		IF res = 0 THEN Strings.StringToInt(val, outFd, res) END;
+		Dialog.GetPar("ASYNC_TCP", val, res);
+		IF res = 0 THEN
+			(* TCP: один сокет на оба направления, адрес дал управляющий.
+			   Сокет из CommTCP неблокирующий; в исполнителе кадры читает
+			   только он сам, поэтому возвращаем блокирующий режим. *)
+			CommTCP.NewStream("", val, tcps, res);
+			IF (res # CommStreams.done) OR (tcps = NIL) THEN RETURN END;
+			inFd := tcps.Handle(); outFd := inFd;
+			fl := LinNative.fcntl(inFd, LinNative.F_GETFL, 0);
+			res := LinNative.fcntl(inFd, LinNative.F_SETFL, fl - LinNative.O_NONBLOCK)
+		ELSE
+			Dialog.GetPar("ASYNC_IN", val, res);
+			inFd := 0;
+			IF res = 0 THEN Strings.StringToInt(val, inFd, res) END;
+			Dialog.GetPar("ASYNC_OUT", val, res);
+			outFd := 1;
+			IF res = 0 THEN Strings.StringToInt(val, outFd, res) END
+		END;
 		LOOP
 			IF ~ReadAll(inFd, hdr, 12) THEN EXIT END;
 			len := GetInt(hdr, 0); tag := GetInt(hdr, 4); kind := GetInt(hdr, 8);
@@ -679,13 +798,17 @@ MODULE AsyncComputon;
 	(* --- инициализация ---------------------------------------------------- *)
 
 	PROCEDURE Init;
-		VAR i, n: INTEGER;
+		VAR i, n, res: INTEGER; val: ARRAY 32 OF CHAR;
 	BEGIN
 		FOR i := 0 TO maxReq - 1 DO reqs[i].used := FALSE END;
 		FOR i := 0 TO maxPool - 1 DO
-			workers[i].dead := TRUE; workers[i].pid := 0; workers[i].inLen := 0
+			workers[i].dead := TRUE; workers[i].pid := 0; workers[i].inLen := 0;
+			workers[i].stream := NIL
 		END;
 		started := FALSE; nworkers := 0; nextWorker := 0; lastErr := 0; hook := NIL;
+		transport := trPipe;
+		Dialog.GetPar("ASYNC_TRANSPORT", val, res);
+		IF res = 0 THEN IF ~SetTransport(val) THEN transport := trPipe END END;
 		procPath := "/proc/self/exe";
 		n := S.VAL(INTEGER, LinLibc.readlink(S.VAL(LinLibc.PtrSTR, S.ADR(procPath[0])),
 			S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0])), 511));

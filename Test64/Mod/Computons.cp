@@ -115,9 +115,13 @@ MODULE Test64Computons;
 		doneFlag := 1
 	END Run;
 
-	PROCEDURE RunSquares (n: INTEGER);
-		VAR t: SquareTask;
+	PROCEDURE RunSquares (n: INTEGER; tcp: BOOLEAN);
+		VAR t: SquareTask; ok: BOOLEAN;
 	BEGIN
+		IF tcp THEN ok := AsyncComputon.SetTransport("tcp")
+		ELSE ok := AsyncComputon.SetTransport("pipe")
+		END;
+		UnitAssert.True(ok, "transport selected");
 		AsyncComputon.Start(n);
 		UnitAssert.EqualInt(n, AsyncComputon.Size(), "all workers started");
 		goodCount := 0; badCount := 0; doneFlag := 0;
@@ -129,18 +133,35 @@ MODULE Test64Computons;
 
 	PROCEDURE TestSquares1*;
 	BEGIN
-		RunSquares(1)
+		RunSquares(1, FALSE)
 	END TestSquares1;
 
 	PROCEDURE TestSquares4*;
 	BEGIN
-		RunSquares(4)
+		RunSquares(4, FALSE)
 	END TestSquares4;
 
 	PROCEDURE TestSquares16*;
 	BEGIN
-		RunSquares(16)
+		RunSquares(16, FALSE)
 	END TestSquares16;
+
+	PROCEDURE TestSquaresTcp4*;
+	(** Те же 12 квадратов на 4 исполнителях по TCP (localhost). *)
+	BEGIN
+		RunSquares(4, TRUE)
+	END TestSquaresTcp4;
+
+	PROCEDURE TestTransportSetting*;
+	(** Неизвестное имя транспорта отвергается, прежний выбор сохраняется. *)
+		VAR ok: BOOLEAN;
+	BEGIN
+		ok := AsyncComputon.SetTransport("pipe");
+		IF ~ok THEN ASSERT(FALSE, 20) END;
+		UnitAssert.True(~AsyncComputon.SetTransport("mpi"), "unknown transport rejected");
+		ok := AsyncComputon.SetTransport("tcp");
+		UnitAssert.True(ok, "tcp accepted")
+	END TestTransportSetting;
 
 	(* --- гибель исполнителя ----------------------------------------------- *)
 
@@ -156,9 +177,13 @@ MODULE Test64Computons;
 		doneFlag := 1
 	END Run;
 
-	PROCEDURE TestKillRetry*;
-		VAR c: Sleeper; pid, res: INTEGER; t: ResultTask;
+	PROCEDURE KillRetry (tcp: BOOLEAN);
+		VAR c: Sleeper; pid, res: INTEGER; t: ResultTask; ok: BOOLEAN;
 	BEGIN
+		IF tcp THEN ok := AsyncComputon.SetTransport("tcp")
+		ELSE ok := AsyncComputon.SetTransport("pipe")
+		END;
+		UnitAssert.True(ok, "transport selected");
 		AsyncComputon.Start(2);
 		UnitAssert.EqualInt(2, AsyncComputon.Size(), "two executors");
 		NEW(c); c.ms := 400; c.y := -1;
@@ -172,13 +197,25 @@ MODULE Test64Computons;
 		UnitAssert.True(PumpUntil(30000, DoneCond), "retry completes");
 		UnitAssert.True(resultOk, "result returned after executor died");
 		UnitAssert.EqualInt(400, resultY, "retried computon computed")
+	END KillRetry;
+
+	PROCEDURE TestKillRetry*;
+	BEGIN
+		KillRetry(FALSE)
 	END TestKillRetry;
+
+	PROCEDURE TestKillRetryTcp*;
+	(** Гибель исполнителя по TCP: повтор на живом. *)
+	BEGIN
+		KillRetry(TRUE)
+	END TestKillRetryTcp;
 
 	(* --- ошибка Do -------------------------------------------------------- *)
 
 	PROCEDURE TestDoError*;
 		VAR c: Boomer; r: AsyncComputon.Computon;
 	BEGIN
+		IF ~AsyncComputon.SetTransport("pipe") THEN ASSERT(FALSE, 20) END;
 		AsyncComputon.Start(1);
 		NEW(c);
 		AsyncComputon.Push(c, 0, 9);
@@ -222,6 +259,7 @@ MODULE Test64Computons;
 	PROCEDURE TestAltPull*;
 		VAR c: Sleeper; t: AltTask; s: ChanSender;
 	BEGIN
+		IF ~AsyncComputon.SetTransport("pipe") THEN ASSERT(FALSE, 20) END;
 		AsyncComputon.Start(1);
 		NEW(c); c.ms := 200; c.y := -1;
 		AsyncComputon.Push(c, 0, 42);
