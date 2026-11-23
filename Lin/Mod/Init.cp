@@ -85,6 +85,7 @@ MODULE LinInit;
 
 	PROCEDURE Init;
 		VAR res_: INTEGER; m: Kernel.Module; configCmd: Kernel.Name; environment: Fenv.Environment;
+			runCmd: Kernel.Name;
 	BEGIN
 		res_ := Fenv.feholdexcept(environment);
 		LinClipboard.Install;
@@ -100,6 +101,14 @@ MODULE LinInit;
 		Dialog.Call("LinConfig.SetupBefore", "Failed to call LinConfig.SetupBefore", res_);
 		Dialog.Call(configCmd, "Failed to call " + configCmd, res_);
 		Dialog.Call("LinConfig.SetupAfter", "Failed to call LinConfig.SetupAfter", res_);
+
+		(* Тестовый хук: команда до главного цикла (например,
+		   --BB_RUN=Test64Gui.Run). Она только заводит задачи и действия;
+		   дальше работает Loop.Start. *)
+		Dialog.GetPar("BB_RUN", runCmd, res_);
+		IF res_ = 0 THEN
+			Dialog.Call(runCmd, "Failed to call BB_RUN command", res_)
+		END;
 		
 		res_ := GLib.g_timeout_add(Dialog.idlePeriod, Fake, 0);
 		

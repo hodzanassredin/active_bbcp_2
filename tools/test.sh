@@ -110,6 +110,30 @@ if [ "$runmpi" -eq 1 ]; then
 	esac
 fi
 
+rungui=1
+if [ -n "$only" ]; then
+	case " $only " in *" Test64Gui "*) ;; *) rungui=0;; esac
+fi
+if [ "$rungui" -eq 1 ]; then
+	total=$((total + 1))
+	echo "test: Test64Gui (GUI под gtk4-broadwayd, без экрана)"
+	rout=$("$BB/tools/test-gui.sh" 2>&1); rrc=$?
+	printf '%s\n' "$rout"
+	case "$rout" in
+		SKIP*)
+			skipped=$((skipped + 1)); echo "SKIP Test64Gui"; summary="$summary
+  SKIP Test64Gui" ;;
+		*)
+			if [ $rrc -eq 0 ]; then
+				ok=$((ok + 1)); echo "PASS Test64Gui"; summary="$summary
+  OK   Test64Gui"
+			else
+				bad=$((bad + 1)); echo "FAIL Test64Gui"; summary="$summary
+  BAD  Test64Gui"
+			fi ;;
+	esac
+fi
+
 echo "== test: всего $total, прошло $ok, провалов $bad, пропущено $skipped"
 [ -n "$summary" ] && printf '%s\n' "$summary"
 [ $bad -eq 0 ]
