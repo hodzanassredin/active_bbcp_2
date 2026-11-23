@@ -14,13 +14,14 @@ MODULE AsyncComputon;
 	запрос повторяется на живом; ошибка Do возвращается вызывающему. *)
 
 	IMPORT S := SYSTEM, Kernel, Tasks, Services, Poller, Stores, Files,
-		LinNative, LinLibc, Dialog, Console, Strings, AsyncSelect;
+		LinNative, LinLibc, Dialog, Console, Strings, AsyncSelect, Utf;
 
 	CONST
 		maxPool = 16;
 		maxReq = 128;
 		maxFrame = 60000;
-		kindWork = 0; kindStop = 1;
+		kindWork = 0; kindStop = 1; kindUnload = 2;
+		unloadBusy = 20;
 		pullTimeout = 10000;
 
 	TYPE
@@ -35,7 +36,7 @@ MODULE AsyncComputon;
 			waiting: Tasks.Task;
 			wctx: AsyncSelect.Ctx;
 			widx: INTEGER;
-			used, done: BOOLEAN
+			used, done, unload: BOOLEAN
 		END;
 
 		WWait = POINTER TO RECORD (Poller.Waiter) idx: INTEGER END;
@@ -55,6 +56,7 @@ MODULE AsyncComputon;
 		DoAction = RECORD (Services.SafeAction) c: Computon END;
 
 		Argv = POINTER [untagged] TO ARRAY [untagged] OF LinLibc.PtrSTR;
+		ShBuf = POINTER TO ARRAY OF SHORTCHAR;
 
 	VAR
 		workers: ARRAY maxPool OF WState;
@@ -307,7 +309,7 @@ MODULE AsyncComputon;
 				reqs[i].done := FALSE; reqs[i].c := NIL;
 				reqs[i].buf := NIL; reqs[i].len := 0; reqs[i].status := 0;
 				reqs[i].waiting := NIL; reqs[i].wctx := NIL; reqs[i].widx := 0;
-				reqs[i].rank := -1;
+				reqs[i].rank := -1; reqs[i].unload := FALSE;
 				RETURN ReqAt(i)
 			END
 		END;
@@ -420,10 +422,51 @@ MODULE AsyncComputon;
 		Console.WriteStr("Computon: "); Console.WriteStr(msg); Console.WriteLn
 	END LogMsg;
 
-	PROCEDURE Unload* (IN module: ARRAY OF CHAR);
-	(** Заглушка: выгрузка кода у исполнителей — остановка пула. *)
+	PROCEDURE Unload* (IN module: ARRAY OF CHAR): BOOLEAN;
+	(** Выгрузить код модуля у всех живых исполнителей, чтобы следующий
+		Push загрузил обновлённый .ocf. FALSE — хотя бы один исполнитель
+		отказал (модуль занят: импортирован или его кадр есть на стеке)
+		или не ответил; код отказа — в LastError.
+		Звать можно вне задачи: ответы собираются через Poller. *)
+		VAR i, tag, len: INTEGER; deadline: LONGINT; req: Req; all, ready: BOOLEAN;
+			buf: ShBuf;
 	BEGIN
-		LogMsg("Unload: перезапустите пул (Stop/Start)")
+		lastErr := 0;
+		IF ~started OR (nworkers = 0) THEN RETURN TRUE END;
+		len := 0;
+		WHILE (len < maxFrame - 1) & (module[len] # 0X) DO INC(len) END;
+		IF len = 0 THEN lastErr := -1; RETURN FALSE END;
+		NEW(buf, len);
+		FOR i := 0 TO len - 1 DO buf[i] := SHORT(module[i]) END;
+		all := TRUE;
+		FOR i := 0 TO nworkers - 1 DO
+			IF WorkerAlive(i) THEN
+				tag := -1 - i;
+				req := NewReq(tag);
+				IF req = NIL THEN lastErr := -1; all := FALSE
+				ELSE
+					req.unload := TRUE; req.rank := i;
+					IF ~SendFrame(i, tag, kindUnload, buf, len) THEN FailReq(req, -3) END
+				END
+			END
+		END;
+		deadline := Kernel.Time() + pullTimeout;
+		LOOP
+			ready := TRUE;
+			FOR i := 0 TO maxReq - 1 DO
+				IF reqs[i].used & reqs[i].unload & ~reqs[i].done THEN ready := FALSE END
+			END;
+			IF ready OR (Kernel.Time() >= deadline) THEN EXIT END;
+			IF Poller.Wait(1) THEN END
+		END;
+		FOR i := 0 TO maxReq - 1 DO
+			IF reqs[i].used & reqs[i].unload THEN
+				IF ~reqs[i].done THEN reqs[i].status := -4; reqs[i].done := TRUE END;
+				IF reqs[i].status # 0 THEN all := FALSE; lastErr := reqs[i].status END;
+				reqs[i].used := FALSE; reqs[i].buf := NIL; reqs[i].c := NIL
+			END
+		END;
+		RETURN all
 	END Unload;
 
 	PROCEDURE Size* (): INTEGER;
@@ -487,7 +530,10 @@ MODULE AsyncComputon;
 		workers[idx].dead := TRUE;
 		CloseFd(workers[idx].inFd); CloseFd(workers[idx].outFd);
 		FOR i := 0 TO maxReq - 1 DO
-			IF reqs[i].used & ~reqs[i].done & (reqs[i].rank = idx) THEN Resend(ReqAt(i)) END
+			IF reqs[i].used & ~reqs[i].done & (reqs[i].rank = idx) THEN
+				(* выгрузку не повторяем на другом исполнителе *)
+				IF reqs[i].unload THEN FailReq(ReqAt(i), -2) ELSE Resend(ReqAt(i)) END
+			END
 		END
 	END MarkDead;
 
@@ -504,7 +550,8 @@ MODULE AsyncComputon;
 			IF workers[idx].inLen - off < 12 + len THEN EXIT END;
 			req := FindReq(tag);
 			IF (req # NIL) & ~req.done THEN
-				IF st = 0 THEN
+				IF req.unload THEN req.status := st	(* ответ без нагрузки *)
+				ELSIF st = 0 THEN
 					FOR i := 0 TO len - 1 DO payload[i] := workers[idx].buf[off + 12 + i] END;
 					req.c := Deserialize(payload, len);
 					IF req.c = NIL THEN req.status := -5 ELSE req.status := 0 END
@@ -563,6 +610,25 @@ MODULE AsyncComputon;
 		IF a.trapped THEN err := 1 ELSE err := 0 END
 	END RunDo;
 
+	PROCEDURE UnloadModule (len: INTEGER): INTEGER;
+	(** Выгрузить модуль в процессе-исполнителе. 0 — выгружен или не был
+		загружен, unloadBusy — занят (импортирован или код есть на стеке). *)
+		VAR name: ARRAY 128 OF CHAR; res: INTEGER; m, self: Kernel.Module;
+	BEGIN
+		IF (len <= 0) OR (len >= LEN(payload)) THEN RETURN -1 END;
+		payload[len] := 0X;
+		Utf.Utf8ToString(payload, name, res);
+		IF res # 0 THEN RETURN -1 END;
+		m := Kernel.ThisLoadedMod(name);
+		IF m = NIL THEN RETURN 0 END;
+		(* Свой транспортный модуль исполняется прямо сейчас (кадр
+		   WorkerLoop на стеке): выгружать его нельзя. *)
+		self := Kernel.ThisLoadedMod("AsyncComputon");
+		IF m = self THEN RETURN unloadBusy END;
+		Kernel.UnloadMod(m);
+		IF Kernel.ThisLoadedMod(name) = NIL THEN RETURN 0 ELSE RETURN unloadBusy END
+	END UnloadModule;
+
 	PROCEDURE WorkerLoop*;
 	(** Точка входа процесса-исполнителя; fds — из --ASYNC_IN/--ASYNC_OUT. *)
 		VAR inFd, outFd, len, tag, kind, err, res, i: INTEGER;
@@ -582,20 +648,30 @@ MODULE AsyncComputon;
 			len := GetInt(hdr, 0); tag := GetInt(hdr, 4); kind := GetInt(hdr, 8);
 			IF kind = kindStop THEN EXIT END;
 			IF (len < 0) OR (len > maxFrame) THEN EXIT END;
-			IF (len > 0) & ~ReadAll(inFd, payload, len) THEN EXIT END;
-			c := Deserialize(payload, len);
-			IF c = NIL THEN err := -1 ELSE RunDo(c, err) END;
-			outLen := 0;
-			IF err = 0 THEN
-				Serialize(c, tmp, outLen);
-				IF (tmp # NIL) & (outLen <= maxFrame) THEN
-					FOR i := 0 TO outLen - 1 DO outBuf[i] := tmp^[i] END
-				ELSE err := -6; outLen := 0
+			IF kind = kindUnload THEN
+				IF (len > 0) & ReadAll(inFd, payload, len) THEN
+					err := UnloadModule(len); outLen := 0
+				ELSE err := -1; outLen := 0
+				END
+			ELSE
+				IF (len > 0) & ~ReadAll(inFd, payload, len) THEN EXIT END;
+				c := Deserialize(payload, len);
+				IF c = NIL THEN err := -1 ELSE RunDo(c, err) END;
+				outLen := 0;
+				IF err = 0 THEN
+					Serialize(c, tmp, outLen);
+					IF (tmp # NIL) & (outLen <= maxFrame) THEN
+						FOR i := 0 TO outLen - 1 DO outBuf[i] := tmp^[i] END
+					ELSE err := -6; outLen := 0
+					END
 				END
 			END;
 			PutInt(hdr, 0, outLen); PutInt(hdr, 4, tag); PutInt(hdr, 8, err);
 			ok := WriteAll(outFd, hdr, 12);
 			IF ok & (outLen > 0) THEN ok := WriteAll(outFd, outBuf, outLen) END;
+			(* не держать в кадре объект выгруженного модуля: иначе
+			   следующий Collect разыменует его таблицу методов *)
+			c := NIL;
 			IF ~ok THEN EXIT END
 		END
 	END WorkerLoop;
