@@ -13,8 +13,15 @@ System/Mod/      Poller.cp
 Lin/Mod64/       Threads.cp Native.cp
 ```
 
-`Async/Mod64` компилируется только для AMD64; 32-битная цель библиотеку
-не собирает. `LinThreads` и `LinNative` — отдельные модули объявлений:
+`Async/Mod64` компилируется только для AMD64; 32-битная цель эту
+библиотеку не собирает. При этом ядро расширения на i386 работает:
+`System/Mod/Kernel.cp` получил реестр стеков, мониторы, `Poll` и
+`CallCond`, `System/Mod/Tasks.cp` — переключатель x86, `CPC486` —
+пролог/эпилог `[exclusive]`; `tools/test32.sh` гоняет Unit, Files,
+Tasks, Monitors, Active и Yield на ELF32-консоли. Поэтому каналы,
+рабочие нити и компутоны доступны только на amd64, а задачи, мониторы,
+`ACTIVE.AWAIT` и ключ `^` — на обеих целях. `LinThreads` и `LinNative`
+— отдельные модули объявлений:
 `LinLibc` загружен в хост-процесс (`dev0Linux`, `blackbox-console`), и его
 символьный файл нельзя расширить новыми процедурами, не пересобрав мир.
 

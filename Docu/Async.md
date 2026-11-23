@@ -11,6 +11,10 @@ switched only in explicit wait points, the framework still runs on the
 main (only) OS thread, and there is no preemption and no parallel
 execution of Component Pascal code on the shared heap.
 
+The core extension (tasks, monitors, `[exclusive]`, `ACTIVE.AWAIT`, the
+`^` key) works on Linux AMD64 and i386. The optional `Async` add-on
+library (channels, worker threads, computons) is built for AMD64 only.
+
 ## Tasks
 
 A task is an extensible record with a `Run` method and its own stack.
@@ -45,7 +49,8 @@ receives a normal trap and unwinds, so finalisers and `Unlock` run.
 A trap in one task does not affect the others.
 
 Stack memory is allocated by the kernel (`Kernel.AllocStack`, `mmap`
-with a guard page on Linux x64) and released after the task finishes.
+with a guard page on Linux x64 and i386) and released after the task
+finishes.
 The default size is 256 KB; pages are committed on touch.
 
 ## Monitors
@@ -243,7 +248,8 @@ the back edge of `WHILE`, `REPEAT`, `LOOP` and `FOR`. The key is the
 character `^` after the module name:
 
 ```sh
-echo 'DevCompiler64.CompileThis Test64Yield ^' | ./dev0Linux
+echo 'DevCompiler64.CompileThis Test64Yield ^' | ./dev0Linux   # amd64
+echo 'DevCompiler.CompileThis Test64Yield ^' | ./dev0Linux     # i386
 # or: echo "DevCompiler.CompileOpt('^')" ...
 ```
 
@@ -262,8 +268,9 @@ caller need not know whether the callee has yield points.
   subsystems Lin/Win) must not be compiled with the key: the compiler
   rejects the option with an error. A framework call from a task is
   atomic with respect to other tasks.
-- The key is implemented for the AMD64 target only; the 32-bit
-  compiler rejects it.
+- The key is implemented for AMD64 and i386 targets; other targets
+  reject it. On i386 the compiler inserts `Kernel.Poll` on backward
+  loop jumps in the same way (`CPC486`/`CPV486`).
 - There is no signal-driven preemption; the key is the only implicit
   yield point, and code compiled with it must protect shared data.
 

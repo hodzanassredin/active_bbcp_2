@@ -192,7 +192,9 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # 18 этапов, 84 проверки
+tools/build32.sh                  # i386-мир + консоль в build/BB32LIN
+tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield
+tools/test.sh                     # 19 этапов, 86 проверок
 tools/test-resolver.sh            # этап 8: резолвер в unshare -rmn
 tools/test-robust.sh              # RobustParallel на 1/4/16 процессах
 tools/test-mpi.sh                 # MPI-транспорт, mpiexec -n 5
@@ -217,7 +219,11 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `unshare -rmn`; без прав — `SKIP`), `Test64RobustParallel`
   (1/4/16 процессов через `ROBUST_SIZE`), `Test64Mpi` (`mpiexec -n 5`,
   без MPICH — `SKIP`), `Test64Gui` (под `gtk4-broadwayd`, без него —
-  `SKIP`). Итог — 18 этапов, 84 проверки.
+  `SKIP`). Модуль `Test64Files` (`proc slow`) занимает все 100000
+  имён `odcNNNNN` и проверяет уникальные временные имена `LinFiles`.
+  `tools/test32.sh` гоняет Unit, Files, Tasks, Monitors, Active и Yield
+  на i386 (`tools/build32.sh`, ELF32 `blackbox-console`). Итог —
+  19 этапов, 86 проверок.
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
   прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
@@ -247,7 +253,11 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   переходе циклов), скрытый импорт `"$$"`. Тесты — `Test64Active`,
   `Test64Yield`; отказы — `tools/check-reject.sh`; бутстрап —
   `tools/bootstrap.sh` (второй проход совпадает, кроме 12-байтовой
-  метки времени в `.ocf`).
+  метки времени в `.ocf`). На i386 то же расширение работает:
+  `CPT.Import`/`Compiler` разрешают `ACTIVE` и `^` для `processor = 10`,
+  `CPC486` содержит пролог/эпилог `[exclusive]`, ядро `System/Mod` —
+  стеки, мониторы, `Poll`, `CallCond` (кадр в `BX`), `System/Mod/Tasks`
+  — переключатель x86. Тесты — `tools/test32.sh`.
 - Этап 7: подсистема `Async/Mod` — `AsyncOnce` (Fill/Read),
   `AsyncChan` (`Chan`-встреча, `Buffer`, `Mailbox`) на
   `[exclusive]`+`ACTIVE.AWAIT`, `AsyncSelect` (`Alt`/`Select`:
@@ -318,11 +328,11 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   отдельного теста под wine нет); повтор и `Unload` в MPI-транспорте
   (mpiexec гасит мир); `pack-dev0-linux` (в снимке отсутствует;
   `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
-  сигналу и нити ОС, `[exclusive]` на 32-битной цели — по решению
-  владельца: компилятор отвергает `ACTIVE`/`[exclusive]`/`^`, в
-  i386-ядре нет `Lock/Unlock/Wait/Await/Poll`, в `CPC486` нет
-  пролога/эпилога, объём — сотни строк ядра и генератора; отложенные
-  финализаторы, нагрузочный тест «1000 задач час».
+  сигналу и нити ОС; библиотека `Async/Mod64` (каналы, рабочие нити,
+  компутоны) на i386 не собирается, C-помощник сопрограмм
+  `libtest64.so` 32-битный не собран (`Test64Co` на i386 — заглушка,
+  `co_now` по `Kernel.Time`), индекс кластеров шага 2а остался только
+  в Mod64; отложенные финализаторы, нагрузочный тест «1000 задач час».
 - Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица
   изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер),
   `docs/async-library.md` (каналы, рабочие нити, компутоны).
