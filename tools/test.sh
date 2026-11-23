@@ -26,7 +26,7 @@ if [ "$LIST" -eq 1 ]; then
 fi
 [ -x "$INTERP" ] || { echo "test: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
-ok=0; bad=0; total=0; summary=""
+ok=0; bad=0; skipped=0; total=0; summary=""
 while IFS='|' read -r mod marks tmo deps opts; do
 	case "$mod" in ''|\#*) continue;; esac
 	case "$tmo" in ''|*[!0-9]*) tmo=300;; esac
@@ -44,6 +44,32 @@ while IFS='|' read -r mod marks tmo deps opts; do
 	fi
 done < "$manifest"
 
-echo "== test: всего $total, прошло $ok, провалов $bad"
+# Тест этапа 8 требует отдельного сетевого пространства (unshare -rmn).
+# Нет прав/утилит — обвязка печатает SKIP с причиной; это не провал.
+runresolver=1
+if [ -n "$only" ]; then
+	case " $only " in *" Test64Resolver "*) ;; *) runresolver=0;; esac
+fi
+if [ "$runresolver" -eq 1 ]; then
+	total=$((total + 1))
+	echo "test: Test64Resolver (marks='proc', сеть и mount без root)"
+	rout=$("$BB/tools/test-resolver.sh" 2>&1); rrc=$?
+	printf '%s\n' "$rout"
+	case "$rout" in
+		SKIP*)
+			skipped=$((skipped + 1)); echo "SKIP Test64Resolver"; summary="$summary
+  SKIP Test64Resolver" ;;
+		*)
+			if [ $rrc -eq 0 ]; then
+				ok=$((ok + 1)); echo "PASS Test64Resolver"; summary="$summary
+  OK   Test64Resolver"
+			else
+				bad=$((bad + 1)); echo "FAIL Test64Resolver"; summary="$summary
+  BAD  Test64Resolver"
+			fi ;;
+	esac
+fi
+
+echo "== test: всего $total, прошло $ok, провалов $bad, пропущено $skipped"
 [ -n "$summary" ] && printf '%s\n' "$summary"
 [ $bad -eq 0 ]
