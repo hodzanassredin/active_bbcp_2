@@ -423,6 +423,8 @@ MODULE Kernel;
 		root: Cluster;	(* cluster list *)
 		modList-: Module;	(* root of module list *)
 		trapCount-: INTEGER;
+		inWorker-: BOOLEAN;	(* отладка этапа 8: сейчас исполняет рабочая нить *)
+		workerAllocs-: INTEGER;	(* обращений к куче из рабочих нитей *)
 		err-: INTEGER;
 		pc-, sp-, fp-, val-: S.ADDRESS;	(* 64-бит: адреса ловушки не влезают в INTEGER (стек 0x7FFF...) *)
 		
@@ -1255,6 +1257,7 @@ MODULE Kernel;
 	PROCEDURE NewRec* (typ: S.ADDRESS): S.ADDRESS;	(* implementation of NEW(ptr) *)
 		VAR size: INTEGER; b: Block; tag: Type; l: FList;
 	BEGIN
+		IF inWorker THEN INC(workerAllocs) END;	(* отладка этапа 8 *)
 		IF ODD(typ) THEN	(* record contains interface pointers *)
 			tag := S.VAL(Type, typ - 1);
 			b := NewBlock(tag.size);
@@ -1281,6 +1284,7 @@ MODULE Kernel;
 	PROCEDURE NewArr* (eltyp, nofelem, nofdim: INTEGER): S.ADDRESS;	(* impl. of NEW(ptr, dim0, dim1, ...) *)
 		VAR b: Block; size, headSize: INTEGER; t: Type; fin: BOOLEAN; l: FList;
 	BEGIN
+		IF inWorker THEN INC(workerAllocs) END;	(* отладка этапа 8 *)
 		IF (nofdim < 0) OR (nofdim > (MAX(INTEGER) - 24) DIV 4) THEN RETURN 0 END;
 		headSize := 4 * nofdim + 24;	(* len[0] по +0x18 от b.last, данные по +0x18+4*nofdim (4-полевой Block: tag,last,actual,first) *)
 		fin := FALSE;
@@ -1354,6 +1358,23 @@ MODULE Kernel;
 	BEGIN
 		RETURN trapViewer
 	END GetTrapViewer;
+
+	PROCEDURE EnterWorker*;
+	(** Отладка этапа 8: рабочая нить вошла в исполнение тела. *)
+	BEGIN
+		inWorker := TRUE
+	END EnterWorker;
+
+	PROCEDURE LeaveWorker*;
+	BEGIN
+		inWorker := FALSE
+	END LeaveWorker;
+
+	PROCEDURE WorkerAllocs* (): INTEGER;
+	(** Сколько раз NEW был вызван из рабочей нити (отладочный счётчик). *)
+	BEGIN
+		RETURN workerAllocs
+	END WorkerAllocs;
 
 	PROCEDURE InstallTrapChecker* (h: Handler);
 	BEGIN
