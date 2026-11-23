@@ -12,7 +12,7 @@ MODULE DevCPE;
 
 **)
 
-	IMPORT SYSTEM, Dates, DevCPM, DevCPT, DevCPUnwind;
+	IMPORT SYSTEM, Dates, DevCPM, DevCPT, DevCPUnwind, Dialog;
 
 
 	CONST
@@ -781,6 +781,42 @@ MODULE DevCPE;
 		END
 	END OutDesc;
 
+	PROCEDURE ParseDec (IN s: ARRAY OF CHAR; pos, n: INTEGER; OUT x: INTEGER; OUT ok: BOOLEAN);
+		VAR i, d: INTEGER;
+	BEGIN
+		x := 0; ok := TRUE;
+		FOR i := pos TO pos + n - 1 DO
+			d := ORD(s[i]) - ORD("0");
+			IF (d < 0) OR (d > 9) THEN ok := FALSE; RETURN END;
+			x := x * 10 + d
+		END
+	END ParseDec;
+
+	PROCEDURE CompileTime (OUT d: Dates.Date; OUT t: Dates.Time);
+	(** Метка времени компиляции. Если задан внешний параметр
+		BB_COMPILE_TIME="ГГГГ-ММ-ДД ЧЧ:ММ:СС", пишется он — тогда .ocf
+		двух проходов бутстрапа совпадают побайтно. Иначе — текущее
+		время. *)
+		VAR val: ARRAY 32 OF CHAR; res, i: INTEGER; ok: BOOLEAN;
+	BEGIN
+		Dialog.GetPar("BB_COMPILE_TIME", val, res);
+		IF res = 0 THEN
+			i := 0; WHILE (i < LEN(val)) & (val[i] # 0X) DO INC(i) END;
+			ok := i >= 19;
+			IF ok THEN ParseDec(val, 0, 4, d.year, ok) END;
+			IF ok THEN ParseDec(val, 5, 2, d.month, ok) END;
+			IF ok THEN ParseDec(val, 8, 2, d.day, ok) END;
+			IF ok THEN ParseDec(val, 11, 2, t.hour, ok) END;
+			IF ok THEN ParseDec(val, 14, 2, t.minute, ok) END;
+			IF ok THEN ParseDec(val, 17, 2, t.second, ok) END;
+			IF ok & (1 <= d.month) & (d.month <= 12) & (1 <= d.day) & (d.day <= 31)
+					& (0 <= t.hour) & (t.hour < 24) & (t.minute < 60) & (t.second < 60) THEN
+				RETURN
+			END
+		END;
+		Dates.GetDate(d); Dates.GetTime(t)
+	END CompileTime;
+
 	PROCEDURE OutModDesc (nofptr, refSize, namePos, ptrPos, expPos, impPos: INTEGER);
 		VAR i: INTEGER; t: Dates.Time; d: Dates.Date;
 	BEGIN
@@ -788,7 +824,7 @@ MODULE DevCPE;
 			Out4(0); Out4(0);	(* next @0 *)
 			Out4(ORD(options));	(* opts @8 *)
 			Out4(0);	(* refcnt @12 *)
-			Dates.GetDate(d); Dates.GetTime(t); 	(* compile time @16, 12 bytes *)
+			CompileTime(d, t); 	(* compile time @16, 12 bytes *)
 			Out2(d.year); Out2(d.month); Out2(d.day);
 			Out2(t.hour); Out2(t.minute); Out2(t.second);
 			Out4(0); Out4(0); Out4(0); 	(* load time @28, 12 bytes *)
@@ -824,7 +860,7 @@ MODULE DevCPE;
 			Out4(0);	(* link *)
 			Out4(ORD(options));	(* opts *)
 			Out4(0);	(* refcnt *)
-			Dates.GetDate(d); Dates.GetTime(t); 	(* compile time *)
+			CompileTime(d, t); 	(* compile time *)
 			Out2(d.year); Out2(d.month); Out2(d.day);
 			Out2(t.hour); Out2(t.minute); Out2(t.second);
 			Out4(0); Out4(0); Out4(0); 	(* load time *)
