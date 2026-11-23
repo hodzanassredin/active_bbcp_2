@@ -385,23 +385,35 @@ Zonnon — см. «Протокол канала (этап 10)» ниже. `Asyn
 
 ## Рабочие нити ОС (этап 8)
 
-`AsyncWork` исполняет блокирующие вызовы ОС в пуле pthread-нитей. Тело
-нити — `[ccall]`-процедура над `[untagged]`-памятью: без `NEW`, без
-`Kernel.Try`, без каркаса и журнала. Задания и результаты лежат в
-статических слотах под pthread-мьютексом; о готовности нить пишет байт
-в pipe, главный цикл видит его через `Poller` и будит задачу:
+`AsyncWork` исполняет блокирующие вызовы ОС в пуле рабочих нитей.
+Клиентский интерфейс, `[untagged]`-записи запросов и `[ccall]`-процедуры
+заданий лежат в переносимом фасаде (`Async/Mod64/Work.cp`); делегата
+ставит платформенный init:
+
+- `AsyncWorkLin` (Linux x64): четыре pthread-нити, статические слоты
+  под pthread-мьютексом; о готовности нить пишет байт в pipe, главный
+  цикл видит его через `Poller` и будит задачу. SIGINT/SIGTERM в нитях
+  закрыты.
+- `AsyncWorkWin` (Windows x64): четыре нити `CreateThread`, статические
+  `[untagged]`-слоты под `CRITICAL_SECTION`, очередь ждёт manual-reset
+  событие, готовность — флаг `done` и auto-reset событие. Главный цикл
+  забирает результат действием `Services` (переставляется через 5 мс,
+  пока слоты заняты), поэтому окна и цикл сообщений не блокируются.
+  Файлы — `CreateFileA`/`ReadFile`/`WriteFile`, имена — `getaddrinfo` из
+  `AsyncWinSock` (interface-модуль WS2_32); `WSAStartup(2.2)` при
+  установке пула.
 
 ```
 id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* из задачи *)
 status := AsyncWork.Result(id);
 ```
 
-Есть задания `ReadFileJob`, `WriteFileJob`, `ResolveJob`
-(`getaddrinfo`). `Kernel.EnterWorker`/`WorkerAllocs()` — отладочный
-счётчик обращений к куче из рабочей нити. SIGINT/SIGTERM в нитях
-закрыты. Пул — только Linux AMD64; Windows не сделан. Блокирующий
-вызов прямо из задачи по-прежнему замораживает каркас — его нужно
-уводить в рабочую нить.
+Делегата регистрируют `LinIntInit`, `WinIntInit` и `WinInit` вызовом
+`Dialog.Call("<Модуль>.Install", ...)` до главного цикла. Есть задания
+`ReadFileJob`, `WriteFileJob`, `ResolveJob` (`getaddrinfo`).
+`Kernel.EnterWorker`/`WorkerAllocs()` — отладочный счётчик обращений к
+куче из рабочей нити. Блокирующий вызов прямо из задачи по-прежнему
+замораживает каркас — его нужно уводить в рабочую нить.
 
 Худший случай проверяет `tools/test-resolver.sh`: в `unshare -rmn` с
 dummy-интерфейсом и своим resolv.conf, где сервер имён недоступен
@@ -409,6 +421,8 @@ dummy-интерфейсом и своим resolv.conf, где сервер им
 для несуществующего имени ждёт 10 010 мс, а главный цикл делает
 9 449 шагов. Без `unshare`/`ip`/`mount` сценарий печатает `SKIP` с
 причиной; `tools/test.sh` включает его отдельным этапом.
+`Test64WinWorkers` повторяет проверки медленного вызова, файла и
+`getaddrinfo` под wine (4/4).
 
 ## Компутоны (этап 9)
 
@@ -568,9 +582,11 @@ EOF и повтор при гибели те же. В исполнителе с�
 `Buffer`, `Mailbox`), `AsyncSelect` (`Alt`/`Select` с предложениями,
 nack и тайм-аутом), `Poller` и `AsyncIO`.
 
-Реализовано (этап 8): `AsyncWork` (пул pthread, pipe результатов,
-`getaddrinfo` и файловые задания), `LinThreads`, `LinNative`, счётчик
-`Kernel.WorkerAllocs`.
+Реализовано (этап 8): фасад `AsyncWork` с делегатами `AsyncWorkLin`
+(пул pthread, pipe результатов, `Poller`) и `AsyncWorkWin`
+(`CreateThread`, критическая секция, события, действие `Services`,
+`CreateFile`/`ReadFile`/`WriteFile`, `getaddrinfo` через WS2_32),
+`LinThreads`, `LinNative`, счётчик `Kernel.WorkerAllocs`.
 
 Реализовано (этап 9): `AsyncComputon` (локальные процессы BlackBox
 через pipe и TCP, `Push`/`Pull`/`Try`, повтор после гибели
@@ -584,10 +600,11 @@ TCP-транспорт компутонов, `Unload` для обновлени�
 детерминированная метка времени компиляции в бутстрапе.
 
 Кроме того: стеки задач Windows x64 (`VirtualAlloc` +
-`PAGE_NOACCESS`), контекст `Try` на стеке, консольные тесты Unit/Tasks
-под wine (`tools/test-win64.sh`); рабочие нити Windows и опрос
-готовности не сделаны. GUI-сценарий проверяется без экрана под
-`gtk4-broadwayd` (`tools/test-gui.sh`).
+`PAGE_NOACCESS`), контекст `Try` на стеке, пул рабочих нитей
+`CreateThread` с выдачей готовности действием `Services` и консольные
+тесты Unit/Tasks/Workers под wine (`tools/test-win64.sh`).
+GUI-сценарий проверяется без экрана под `gtk4-broadwayd`
+(`tools/test-gui.sh`).
 
 ### Замечания о реализации компилятора
 

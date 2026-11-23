@@ -31,7 +31,7 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Этап 2: стеки | `Test64Tests.TestProcGcStack`, `TestProcTrapStack` | зелёные |
 | Шаг 2а: индекс кластеров | `Test64Tests.TestProcInHeap` | зелёный |
 | Замер 1/10/50 млн | `tools/bench-gc.sh Test64GcBench.DoSmall` / `.Do` | выполнен |
-| Windows x64 | `tools/test-win64.sh` (wine) | UnitTests 4/4, Test64WinTasks 5/5 |
+| Windows x64 | `tools/test-win64.sh` (wine) | UnitTests 4/4, Test64WinTasks 5/5, Test64WinWorkers 4/4 |
 
 ## 2. Раскладка
 
@@ -41,7 +41,10 @@ active_bb/                     репозиторий (ветка active2)
   Unit/Mod/*.cp                UnitAssert, UnitRunner, UnitTests
   Test64/Mod/*.cp              сценарии Test64, Test64Tests, Test64Tasks
   System/Mod64/Tasks.cp        задачи со своим стеком (этап 3)
-  Async/Mod64/Work.cp          pthread-пул (этап 8)
+  Async/Mod64/Work.cp          фасад пула рабочих нитей (этап 8)
+  Async/Mod64/WorkLin.cp       делегат pthread/pipe/Poller (Linux)
+  Async/Mod64/WorkWin.cp       делегат CreateThread/события (Windows)
+  Async/Mod64/WinSock.cp       WS2_32: getaddrinfo для ResolveJob
   Async/Mod64/Computon.cp      компутоны: pipe/TCP/внешний транспорт (этап 9)
   Async/Mod64/Mpi.cp           MPI-транспорт через MPICH (этап 9)
   Robust/Mod64/Parallel.cp     фасад RobustParallel (этап 9)
@@ -159,7 +162,11 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   модулей;
 - `Test64UnloadGuard` (marks=proc): модуль-мишень загружен через `Meta`
   (refcnt = 0) и не выгружается, пока его кадр на главном стеке или на
-  стеке спящей задачи; без кадров — выгружается (`Test64/Mod/UnloadGuard.cp`).
+  стеке спящей задачи; без кадров — выгружается (`Test64/Mod/UnloadGuard.cp`);
+- `Test64WinWorkers` (отдельный сценарий `tools/test-win64.sh`): под
+  wine — медленный `Sleep(300)` в рабочей нити (задача ждёт, главный
+  цикл делает шаги), запись/чтение файла, `getaddrinfo("localhost")` и
+  4 нити пула (`Test64/Mod/WinWorkers.cp`).
 
 `Test64Support` остался адаптером: `Check`/`Fail` учитываются в
 `UnitAssert`, маркеры `TEST64-PASS/FAIL` сохранены для `bench-gc.sh`.
@@ -270,6 +277,7 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 | `Test64Mpi` | 12 квадратов, `mpiexec -n 5` | 252 мс, 0 ошибок |
 | `Test64Gui` | 100 элементов, тикер 100 мс | 2 015 мс, maxgap 111 мс |
 | `Test64WinTasks` (wine) | Yield, буфер, трап, Join, стек | 5/5, 32 мс худший |
+| `Test64WinWorkers` (wine) | Sleep 300 мс в нити, файл, getaddrinfo | 4/4, 304 мс медленный |
 | `UnitTests` (wine) | самопроверка Unit | 4/4 |
 
 ## 8. Что открыто
@@ -293,12 +301,14 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   отказ. `AsyncTask` из фреймворка Ивана в снимке отсутствует (его
   роль играют `Tasks.Task` и `Select`).
 - Windows x64: стеки задач (`VirtualAlloc` + `PAGE_NOACCESS`), контекст
-  `Try` на стеке и переключение сделаны; под wine идут UnitTests и
-  Test64WinTasks. Рабочие нити `CreateThread` и опрос готовности не
-  сделаны: `AsyncWork` написан на pthread/pipe и `Poller`, а
-  `DevLibrarian` выбирает только `Mod64` — нужен фасад с
-  платформенными делегатами (`AsyncWorkLin`/`AsyncWorkWin`) и
-  регистрация пула из `LinIntInit`/`WinInit`.
+  `Try` на стеке, переключение и рабочие нити этапа 8 сделаны. Фасад
+  `AsyncWork` с делегатами `AsyncWorkLin`/`AsyncWorkWin`; регистрация —
+  из `LinIntInit`, `WinIntInit` и `WinInit`. `AsyncWorkWin` держит
+  очередь под `CRITICAL_SECTION`, готовность забирает действие
+  `Services` (окна не блокируются), файлы и `getaddrinfo` — через
+  `CreateFileA`/WS2_32. Под wine идут UnitTests 4/4, Test64WinTasks 5/5
+  и Test64WinWorkers 4/4. GUI-прогон Windows отдельным тестом не
+  проверяется.
 - `[exclusive]` не поддерживается на 32-битной цели: компилятор
   отвергает `IMPORT ACTIVE`, `[exclusive]` и ключ `^` (проверено
   `tools/go32.sh`), в `System/Mod/Kernel.cp` нет ни `Lock/Unlock/
@@ -357,4 +367,4 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 | Фасад `RobustParallel` | тонкий модуль `Robust/Mod64/Parallel.cp`; `Computon`/`Hook` — синонимы `AsyncComputon`, ранги MPI: 0 — управляющий, 1..size-1 — исполнители (`Push`/`Pull` сдвигают на −1); размер мира — `ROBUST_SIZE` | собственный тип с копированием методов |
 | Запуск GUI-команды | внешняя переменная `BB_RUN=Модуль.Процедура` в `LinInit`, вызов до `Loop.Start` | отдельный модуль-автозапуск |
 | Стеки задач на Windows | `VirtualAlloc` + `PAGE_NOACCESS`; `Get/SetTryContext` = голова цепочки `current` | `PAGE_GUARD` и `_resetstkoflw` |
-| Рабочие нити Windows | не сделаны; нужен фасад пула с делегатами `AsyncWorkLin`/`AsyncWorkWin` (сейчас `AsyncWork` привязан к pthread/pipe/Poller) | отдельная подсистема `AsyncWin` |
+| Рабочие нити Windows | фасад `AsyncWork` (`Async/Mod64/Work.cp`) с делегатами `AsyncWorkLin`/`AsyncWorkWin`; Win64: `CreateThread`, `CRITICAL_SECTION`/события в куче, готовность — действие `Services`, файлы и `getaddrinfo` через WinApi/`AsyncWinSock`; `Install` зовут `LinIntInit`/`WinIntInit`/`WinInit` | отдельная подсистема `AsyncWin` |

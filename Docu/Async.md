@@ -390,24 +390,35 @@ automaton, and `Select`/`Park`/`Join` bridge tasks and channels.
 
 ## OS worker threads (stage 8)
 
-`AsyncWork` runs blocking OS calls in a pool of pthread worker threads.
-The body of a worker is a `[ccall]` procedure over `[untagged]` memory:
-no `NEW`, no `Kernel.Try`, no framework calls and no logging. Jobs and
-results live in static slots protected by a pthread mutex; a worker
-writes one byte into a pipe, the main loop sees it through `Poller` and
-wakes the waiting task:
+`AsyncWork` runs blocking OS calls in a pool of worker threads. The
+client API, the `[untagged]` request records and the `[ccall]` job
+procedures live in the portable facade (`Async/Mod64/Work.cp`); the
+platform delegate is installed by the platform init:
+
+- `AsyncWorkLin` (Linux x64): four pthreads, static slots under a
+  pthread mutex, a worker writes one byte into a pipe, the main loop
+  sees it through `Poller` and wakes the waiting task. SIGINT/SIGTERM
+  are blocked in the workers.
+- `AsyncWorkWin` (Windows x64): four `CreateThread` threads, static
+  `[untagged]` slots under a `CRITICAL_SECTION`, the queue waits on a
+  manual-reset event, completion is a `done` flag plus an auto-reset
+  event. The main loop picks results up with a `Services` action
+  (re-posted every 5 ms while slots are busy), so windows and the
+  message loop are never blocked. Files use `CreateFileA`/`ReadFile`/
+  `WriteFile`, names use `getaddrinfo` from `AsyncWinSock` (a WS2_32
+  interface module); `WSAStartup(2.2)` runs at install.
 
 ```
 id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* from a task *)
 status := AsyncWork.Result(id);
 ```
 
+`LinIntInit`, `WinIntInit` and `WinInit` register the delegate by
+calling `Dialog.Call("<Module>.Install", ...)` before the main loop.
 `ReadFileJob`, `WriteFileJob` and `ResolveJob` (`getaddrinfo`) are
 provided. `Kernel.EnterWorker`/`WorkerAllocs()` is a debug counter for
-heap accesses from workers. SIGINT and SIGTERM are blocked in the
-worker threads. The pool is Linux AMD64 only; Windows is not
-implemented. A blocking call made directly from a task still freezes
-the framework — move it to a worker.
+heap accesses from workers. A blocking call made directly from a task
+still freezes the framework — move it to a worker.
 
 The worst case is covered by `tools/test-resolver.sh`: inside
 `unshare -rmn` with a dummy interface and a private resolv.conf whose
@@ -415,7 +426,8 @@ name server is unreachable (packets are dropped silently, default
 timeout and attempts), `ResolveJob` for a nonexistent name waits
 10,010 ms, while the main loop makes 9,449 steps. Without
 `unshare`/`ip`/`mount` the scenario prints `SKIP` with the reason.
-`tools/test.sh` runs it as a separate stage.
+`tools/test.sh` runs it as a separate stage. `Test64WinWorkers` repeats
+the slow-call, file and `getaddrinfo` checks under Wine (4/4).
 
 ## Computons (stage 9)
 
@@ -575,9 +587,12 @@ Implemented in this branch (stage 7): `AsyncOnce`, `AsyncChan` (`Chan`,
 `Buffer`, `Mailbox`), `AsyncSelect` (`Alt`/`Select` with offers, nack
 and timeout), `Poller` and `AsyncIO`.
 
-Implemented in this branch (stage 8): `AsyncWork` (pthread pool, result
-pipe, `getaddrinfo` and file jobs), `LinThreads`, `LinNative`, the
-`Kernel` worker allocation counter.
+Implemented in this branch (stage 8): the `AsyncWork` facade with the
+`AsyncWorkLin` (pthread pool, result pipe, `Poller`) and `AsyncWorkWin`
+(`CreateThread`, critical section, events, `Services` action,
+`CreateFile`/`ReadFile`/`WriteFile`, `getaddrinfo` through WS2_32)
+delegates, `LinThreads`, `LinNative`, and the `Kernel` worker allocation
+counter.
 
 Implemented in this branch (stage 9): `AsyncComputon` (local BlackBox
 processes over pipes and TCP, `Push`/`Pull`/`Try`, retry after executor
@@ -591,10 +606,11 @@ TCP computon transport, `Unload` for code update on executors, and
 deterministic compile timestamps for the bootstrap.
 
 Also implemented: Windows x64 task stacks (`VirtualAlloc` +
-`PAGE_NOACCESS`), per-stack `Try` context, and console Unit/Tasks tests
-under wine (`tools/test-win64.sh`). Windows worker threads and readiness
-polling are not implemented. The GUI scenario is checked headlessly
-under `gtk4-broadwayd` (`tools/test-gui.sh`).
+`PAGE_NOACCESS`), per-stack `Try` context, the `CreateThread` worker
+pool with readiness delivered by a `Services` action, and console
+Unit/Tasks/Workers tests under wine (`tools/test-win64.sh`). The GUI
+scenario is checked headlessly under `gtk4-broadwayd`
+(`tools/test-gui.sh`).
 
 ### Compiler implementation notes
 

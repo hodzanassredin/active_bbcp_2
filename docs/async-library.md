@@ -6,7 +6,8 @@
 
 ```
 Async/Mod/       Select.cp  Chan.cp  Once.cp  IO.cp  Proto.cp
-Async/Mod64/     Work.cp    Computon.cp  Mpi.cp
+Async/Mod64/     Work.cp    WorkLin.cp  WorkWin.cp  WinSock.cp
+                 Computon.cp  Mpi.cp
 Robust/Mod64/    Parallel.cp      (* фасад RobustParallel *)
 System/Mod/      Poller.cp
 Lin/Mod64/       Threads.cp Native.cp
@@ -129,11 +130,36 @@ AsyncWork.Submit(procAdr, arg);    (* без ожидания *)
 AsyncWork.Release(id);
 ```
 
-Пул — 4 нити pthread. Тело — `[ccall]`-процедура над `[untagged]`-памятью:
-задания и результаты лежат в статических слотах, очередь под
-pthread-мьютексом, о готовности нить пишет байт в pipe. Главный цикл
-видит его через `Poller` и в `Scan` будит задачу. В рабочих нитях
-закрыты SIGINT/SIGTERM.
+`AsyncWork` (`Async/Mod64/Work.cp`) — фасад, клиентский код от платформы
+не зависит. Форматы `FileReq`/`AddrReq` и `[ccall]`-процедуры заданий
+объявлены в фасаде; реализацию ставит делегат `AsyncWork.Impl`:
+
+- `AsyncWorkLin` (`Async/Mod64/WorkLin.cp`) — 4 нити pthread, статические
+  слоты под pthread-мьютексом, готовность — байт в pipe, `Poller` будит
+  задачу. Сигналы SIGINT/SIGTERM в нитях закрыты.
+- `AsyncWorkWin` (`Async/Mod64/WorkWin.cp`) — 4 нити `CreateThread`,
+  статические слоты в `[untagged]`-памяти под `CRITICAL_SECTION`,
+  очередь ждёт manual-reset событие, готовность — счётчик `done` и
+  auto-reset событие. Главный цикл забирает результат действием
+  `Services` (переставляется через 5 мс, пока есть занятые слоты) —
+  окна и цикл сообщений не блокируются. Файлы — `CreateFileA`/
+  `ReadFile`/`WriteFile`, имена — `getaddrinfo` из `AsyncWinSock`
+  (`Async/Mod64/WinSock.cp`, interface-модуль WS2_32). При запуске
+  `WSAStartup(2.2)`; динамическая загрузка WS2_32 идёт через
+  `LoadLibraryW` в `WinKernel.WkResolve`.
+
+Регистрация делегата — платформенный init: `LinIntInit`, `WinIntInit` и
+`WinInit` зовут `Dialog.Call("<Модуль>.Install", ...)` до главного цикла.
+Клиентский код (`Execute`, `ReadFileJob`, `WriteFileJob`, `ResolveJob`)
+не меняется.
+
+Выбор исходников под платформу. `DevLibrarian` умеет один каталог поверх
+`Mod` (`Mod64`), а `CompileSubs` обходит только `<Sub>/Mod`; поэтому
+файлы `WorkLin.cp`/`WorkWin.cp` вне списка и собираются явным
+`CompileThis` в своём стенде: `tools/build64.sh` — `AsyncWork` и
+`AsyncWorkLin`, `tools/test-win64.sh` — `AsyncWinSock`, `AsyncWork` и
+`AsyncWorkWin`. Фасад при этом общий, а платформенный модуль попадает
+только в свою сборку.
 
 Готовые задания: `ReadFileJob`, `WriteFileJob`, `ResolveJob`
 (`getaddrinfo`). `Kernel.EnterWorker/LeaveWorker` и
@@ -141,9 +167,12 @@ pthread-мьютексом, о готовности нить пишет байт
 увеличивает его. Это именно счётчик (не запрет): `NEW` по-прежнему
 выделяет, поэтому тест дисциплины гоняют при почти пустом главном цикле.
 
-Замер: `SlowJob` (usleep 300 мс) в рабочей нити; задача ждёт `Execute`,
-главный цикл за это время сделал 285 шагов, тест занял 301 мс. Значит,
-заморозки нет. Разрешение `localhost` и файловый обмен — 1–2 мс.
+Замер (Linux): `SlowJob` (usleep 300 мс) в рабочей нити; задача ждёт
+`Execute`, главный цикл за это время сделал 285 шагов, тест занял
+301 мс. Значит, заморозки нет. Разрешение `localhost` и файловый обмен —
+1–2 мс. Windows (`Test64WinWorkers` под wine): `Sleep(300)` — 304 мс,
+главный цикл делает шаги; файл и `getaddrinfo("localhost")` — 2 мс;
+`AsyncWork.Workers() = 4`.
 
 `tools/test-resolver.sh` проверяет худший случай: `unshare -rmn` с
 dummy-интерфейсом и своим resolv.conf, где сервер имён недоступен
@@ -153,10 +182,15 @@ dummy-интерфейсом и своим resolv.conf, где сервер им
 `AsyncIO.Poll`). Без `unshare`/`ip`/`mount` сценарий печатает `SKIP` с
 причиной. Обычный прогон `tools/test.sh` включает его отдельным этапом.
 
-Ограничения: пул — Linux AMD64; Windows x64 не сделан. Рабочая нить не
-имеет права трогать кучу, `Kernel.Try`, журнал и каркас; это правило
-ревью и отладочного счётчика, а не барьера. Вызовы ОС, которые могут
-блокироваться, уводятся целиком в нить.
+Ограничения: пул — Linux AMD64 и Windows x64. Рабочая нить не имеет
+права трогать кучу, `Kernel.Try`, журнал и каркас; это правило ревью и
+отладочного счётчика, а не барьера. Вызовы ОС, которые могут
+блокироваться, уводятся целиком в нить. Примитивы синхронизации лежат в
+куче (`Sync`), а не в глобальных записях модуля: глобальные записи не
+получают гарантированного выравнивания, а futex/`CRITICAL_SECTION` его
+требуют. На Windows готовность забирает действие `Services`, поэтому в
+чисто консольном вводе с блокирующим `ReadLn` пул работает только пока
+крутится цикл (`UnitRunner`, `ConsInterp` с `WaitInput`, GUI).
 
 ## Этап 9: компутоны
 
@@ -364,11 +398,11 @@ wait: EndMsg > done; done:
 
 ## Открыто
 
-- Windows x64: рабочие нити `CreateThread` и опрос готовности; нужен
-  фасад пула с делегатами (`AsyncWork` сейчас привязан к
-  pthread/pipe/`Poller`), а `DevLibrarian` выбирает только `Mod64`.
-  Стеки задач, контекст `Try` и консольные тесты задач под wine уже
-  сделаны — `tools/test-win64.sh`.
+- Windows x64: пул рабочих нитей `CreateThread` и опрос готовности
+  сделаны — фасад `AsyncWork` с делегатами `AsyncWorkLin`/`AsyncWorkWin`,
+  регистрация из `LinIntInit`/`WinIntInit`/`WinInit`; под wine идут
+  `Test64WinWorkers` 4/4. GUI-прогон Windows (`WinInit`) собирается, но
+  отдельного теста под wine нет.
 - MPI: нет повтора при гибели ранга и `Unload` (mpiexec гасит мир).
 - Перемещение `Reliable`-повторов на уровень транспорта (сейчас повтор
   один: при смерти исполнителя).

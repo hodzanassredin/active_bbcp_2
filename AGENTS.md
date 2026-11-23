@@ -257,12 +257,17 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   stdin и его одним `poll`. `CommTCP__Lin` переведён с `select` на
   `poll` (fd_set < 1024), очередь accept — 128. Тесты —
   `Test64Channels`, `Test64IO` (эхо/HTTP, 1000 соединений, покой).
-- Этап 8: `Async/Mod64/Work.cp` — пул pthread-нитей; задания и
-  результаты в статических слотах, готовность — байт в pipe,
-  `Poller` будит задачу. `Execute` из задачи — точка ожидания.
-  `LinThreads`/`LinNative` — отдельные модули объявлений (символы
-  `LinLibc` в хосте не обновить). `Kernel.WorkerAllocs` — отладочный
-  счётчик `NEW` из рабочей нити. Тесты — `Test64Workers`. Худший случай
+- Этап 8: `Async/Mod64/Work.cp` — фасад `AsyncWork` с делегатом
+  `AsyncWork.Impl`; `Async/Mod64/WorkLin.cp` — пул pthread (задания и
+  результаты в статических слотах, готовность — байт в pipe, `Poller`
+  будит задачу); `Async/Mod64/WorkWin.cp` — пул `CreateThread`
+  (очередь под `CRITICAL_SECTION`, готовность забирает действие
+  `Services`); `Async/Mod64/WinSock.cp` — `getaddrinfo`. Делегата
+  ставят `LinIntInit`/`WinIntInit`/`WinInit` через `Dialog.Call`.
+  `Execute` из задачи — точка ожидания. `LinThreads`/`LinNative` —
+  отдельные модули объявлений (символы `LinLibc` в хосте не обновить).
+  `Kernel.WorkerAllocs` — отладочный счётчик `NEW` из рабочей нити.
+  Тесты — `Test64Workers`, `Test64WinWorkers`. Худший случай
   (недоступный сервер имён) — `Test64Resolver` в `unshare -rmn`:
   10 010 мс ожидания в нити, 9 449 шагов главного цикла.
 - Этап 9: `Async/Mod64/Computon.cp` — `Computon = Stores.Store` с
@@ -299,18 +304,19 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `gtk4-broadwayd` (пакет `libgtk-4-bin`, в стенде распакован в
   `.work/gtk4-bin`). Мышь не эмулируется.
 - Windows x64: `WinKernel` получил `AllocateStackMem` (`VirtualAlloc`
-  + `PAGE_NOACCESS`) и `Get/SetTryContext`; `tools/test-win64.sh`
+  + `PAGE_NOACCESS`), `Get/SetTryContext` и загрузку библиотек
+  динамически загружаемых interface-модулей; `tools/test-win64.sh`
   собирает @Win, линкует консольный PE (`WinIntInit`, подсистема
-  правится на console) и под wine гоняет `UnitTests` 4/4 и
-  `Test64WinTasks` 5/5.
+  правится на console) и под wine гоняет `UnitTests` 4/4,
+  `Test64WinTasks` 5/5 и `Test64WinWorkers` 4/4 (пул `CreateThread`,
+  файл, `getaddrinfo`).
 - `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
   `.cp`, конвертировать нечего. `DevOnce` заменён на
   `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
   в консольном x64.
-- Открыто: Windows x64 для рабочих нитей `CreateThread` и опроса
-  готовности (нужен фасад пула с делегатами `AsyncWorkLin`/
-  `AsyncWorkWin`); повтор и `Unload` в MPI-транспорте (mpiexec гасит
-  мир); `pack-dev0-linux` (в снимке отсутствует;
+- Открыто: GUI-прогон Windows (пул регистрируется из `WinInit`, но
+  отдельного теста под wine нет); повтор и `Unload` в MPI-транспорте
+  (mpiexec гасит мир); `pack-dev0-linux` (в снимке отсутствует;
   `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
   сигналу и нити ОС, `[exclusive]` на 32-битной цели — по решению
   владельца: компилятор отвергает `ACTIVE`/`[exclusive]`/`^`, в
