@@ -295,7 +295,7 @@ MODULE AsyncComputon;
 	PROCEDURE SpawnTcp (idx: INTEGER): BOOLEAN;
 	(** Исполнитель подключается к слушателю управляющего процесса по
 		localhost; дальше тот же поток кадров, что и на pipe. *)
-		VAR cmdP: ARRAY 2 OF INTEGER; res, pid, i: INTEGER; ok: BOOLEAN;
+		VAR cmdP: ARRAY 2 OF INTEGER; res, pid, i, listenFd: INTEGER; ok: BOOLEAN;
 			l: CommStreams.Listener; s: CommStreams.Stream; adr: CommStreams.Adr;
 	BEGIN
 		res := LinNative.pipe(S.VAL(LinNative.IntPtr, S.ADR(cmdP[0])));
@@ -306,6 +306,7 @@ MODULE AsyncComputon;
 			CloseFd(cmdP[0]); CloseFd(cmdP[1]); RETURN FALSE
 		END;
 		adr := l.LocalAdr();
+		listenFd := l.Handle();	(* читаем до fork: в ребёнке только close *)
 		MakeArgStr("--ASYNC_TCP=", adr^, argTcp);
 		argv[0] := S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0]));
 		argv[1] := S.VAL(LinLibc.PtrSTR, S.ADR(argTcp[0]));
@@ -313,7 +314,7 @@ MODULE AsyncComputon;
 		pid := LinLibc.fork();
 		IF pid = 0 THEN	(* ребёнок: команда — на stdin, кадры — по TCP *)
 			res := LinNative.dup2(cmdP[0], 0);
-			CloseFd(cmdP[0]); CloseFd(cmdP[1]);
+			CloseFd(cmdP[0]); CloseFd(cmdP[1]); CloseFd(listenFd);
 			res := LinLibc.execv(S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0])),
 				S.VAL(Argv, S.ADR(argv[0])));
 			LinNative._exit(127)
