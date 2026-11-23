@@ -30,6 +30,7 @@ skip() {
 
 command -v wine >/dev/null 2>&1 || skip "нет wine"
 [ -x "$DEV0" ] || { echo "test-win64: нет $DEV0" >&2; exit 2; }
+clean_host_temp
 [ -x "$INSTALL/blackbox-console" ] || { echo "test-win64: соберите сначала tools/build64.sh" >&2; exit 2; }
 mkdir -p "$OUT" "$PREFIX" || exit 1
 export WINEPREFIX="$PREFIX" WINEARCH=win64

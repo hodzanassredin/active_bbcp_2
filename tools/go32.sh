@@ -21,6 +21,7 @@ else
 	set -- $(tr '\n' ' ' < /tmp/compile1.txt)
 fi
 [ -x "$DEV0" ] || { echo "go32: нет $DEV0" >&2; exit 2; }
+clean_host_temp
 
 run_cmds() {
 	if ! "$DEV0" < "$1" > "$2" 2>&1; then

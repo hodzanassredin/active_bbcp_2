@@ -24,6 +24,7 @@ done
 [ -z "$subs" ] && subs="$DEFAULT_SUBSYSTEMS"
 
 [ -x "$DEV0" ] || { echo "build64: нет $DEV0" >&2; exit 2; }
+clean_host_temp
 mkdir -p "$INSTALL"
 if [ "$clean" -eq 1 ]; then
 	echo "build64: стираю .ocf/.osf в $INSTALL"

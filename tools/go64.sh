@@ -19,6 +19,7 @@ fi
 [ $# -gt 0 ] || { echo "go64: пустой список модулей" >&2; exit 2; }
 [ -x "$DEV0" ] || { echo "go64: нет $DEV0" >&2; exit 2; }
 [ -d "$INSTALL" ] || { echo "go64: нет $INSTALL — соберите tools/build64.sh" >&2; exit 2; }
+clean_host_temp
 
 LOG="${TMPDIR:-/tmp}/go64-$$"
 MARK=$(mktemp)

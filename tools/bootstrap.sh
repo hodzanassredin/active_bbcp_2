@@ -15,6 +15,7 @@ set -e
 . "$(dirname "$0")/env.sh"
 
 [ -x "$DEV0" ] || { echo "bootstrap: нет $DEV0" >&2; exit 2; }
+clean_host_temp
 BASE="$BB/.work/i386"
 A="$BB/.work/bootA"
 B="$BB/.work/bootB"
