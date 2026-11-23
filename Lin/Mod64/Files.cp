@@ -15,7 +15,8 @@ MODULE LinFiles;
 		Libc := LinLibc, HostEnv := LinEnv, LibW := LinLibW;
 
 	CONST
-		tempName = "odcxxxxx";
+		(* Имя временного файла: "odc" + 9 цифр (см. Lin/Mod/Files.cp). *)
+		tempName = "odcxxxxxxxxx";
 		pre = "Lin";
 
 		pathLen* = 260;
@@ -132,6 +133,7 @@ MODULE LinFiles;
 		startupLen, customLen: INTEGER;
 		isCustomDir, isUseDir: BOOLEAN;
 		res: INTEGER;
+		tempSeq: LONGINT;	(* счётчик временных имён процесса *)
 	
 	(* debugging functions*)
 	
@@ -465,24 +467,36 @@ MODULE LinFiles;
 	END OpenFile;
 	
 	PROCEDURE GetTempFileName (IN path: FullName; OUT name: FullName; num: INTEGER);
-		VAR i: INTEGER; str: ARRAY 16 OF CHAR;
+		VAR i: INTEGER; str: ARRAY 20 OF CHAR;
 	BEGIN
-		str := tempName; i := 7;
+		str := tempName; i := 11;
 		WHILE i > 2 DO
 			str[i] := CHR(num MOD 10 + ORD("0")); DEC(i); num := num DIV 10
 		END;
-		Append(path, str, "", 8, name)
+		Append(path, str, "", 255, name)
 	END GetTempFileName;
-	
+
+	PROCEDURE TempSeed (): INTEGER;
+	(* Стартовый номер: процессорное время, время суток и счётчик
+	   процесса; предела попыток нет (см. Lin/Mod/Files.cp). *)
+		VAR t: LONGINT;
+	BEGIN
+		t := Libc.clock();
+		t := t * 1000 + Libc.time(NIL) + tempSeq;
+		RETURN SHORT(t MOD 1000000000)
+	END TempSeed;
+
 	PROCEDURE CreateFile (f: File; VAR res: INTEGER);
-		VAR num, n: INTEGER;
+		VAR num: INTEGER;
 	BEGIN
 		IF f.name = "" THEN
-			num := SHORT(Libc.clock()); n := 200;
+			num := TempSeed();
 			REPEAT
-				GetTempFileName(f.loc.path, f.name, num); INC(num); DEC(n);
+				GetTempFileName(f.loc.path, f.name, num); INC(num);
+				IF num >= 1000000000 THEN num := 0 END;
+				INC(tempSeq);
 				OpenFile(create, f.name, f.ref, res)
-			UNTIL (res # fileExistsErr) OR (n = 0)
+			UNTIL res # fileExistsErr
 		ELSE
 			OpenFile(f.state, f.name, f.ref, res)
 		END
@@ -506,12 +520,14 @@ MODULE LinFiles;
 			Stat(f.name, buf, res);
 			ModeToAttr(buf.st_mode, attr, isDir);
 			IF (res = ok) & ~(Files.readOnly IN attr) THEN
-				num := SHORT(Libc.clock()); n := 200;
+				num := TempSeed();
 				REPEAT
-					GetTempFileName(path, new, num); INC(num); DEC(n);
+					GetTempFileName(path, new, num); INC(num);
+					IF num >= 1000000000 THEN num := 0 END;
+					INC(tempSeq);
 					Utf.StringToUtf8(new, nn, ok1);
 					MoveFile(fn, nn, res);
-				UNTIL (res # fileExistsErr) OR (n = 0);
+				UNTIL (res # fileExistsErr) & (res # alreadyExistsErr) & (res # paramErr);
 				IF res = ok THEN
 					f.state := hidden; f.name := new$
 				END
