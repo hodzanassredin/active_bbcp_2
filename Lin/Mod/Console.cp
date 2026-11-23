@@ -7,7 +7,7 @@ MODULE LinConsole;
 		Change iconv to Strings UTF-8
 	*)
 
-	IMPORT Console, Utf, Libc := LinLibc;
+	IMPORT S := SYSTEM, Console, Utf, Libc := LinLibc;
 
 	TYPE
 		Cons = POINTER TO RECORD (Console.Console) END;
@@ -32,6 +32,20 @@ MODULE LinConsole;
 			ASSERT(res = 0, 60)
 		ELSE s[0] := 0X END
 	END ReadLn;
+
+	PROCEDURE (cons: Cons) WaitInput (timeout: LONGINT): BOOLEAN;
+		(* Есть ли ввод? poll на stdin даёт циклу возможность исполнять
+		   действия, пока пользователь не ввёл строку. stdin переведён в
+		   небуферизованный режим (setvbuf), иначе stdio прочитал бы
+		   несколько строк вперёд и poll врал бы. *)
+		VAR p: Libc.pollfd; res: INTEGER;
+	BEGIN
+		p.fd := Libc.fileno(input);
+		p.events := 1;	(* POLLIN *)
+		p.revents := 0;
+		res := Libc.poll(S.ADR(p), 1, SHORT(timeout));
+		RETURN res > 0
+	END WaitInput;
 
 	PROCEDURE Printf (IN s: ARRAY OF CHAR; len: INTEGER);
 		VAR res, i, n: INTEGER; tmp: ARRAY 64 OF CHAR;
@@ -76,6 +90,10 @@ MODULE LinConsole;
 	BEGIN
 		input := Libc.fdopen(Libc.STDIN_FILENO, "rb");
 		ASSERT(input # Libc.NULL, 100);
+		(* без буфера: poll(fd) должен видеть ровно то, что ещё не прочитано *)
+		IF Libc.setvbuf(input, 0, 2, 0) # 0 THEN	(* _IONBF = 2 *)
+			(* не фатально: цикл просто будет реже исполнять действия *)
+		END;
 		NEW(cons);
 		Console.SetConsole(cons)
 	END Init;

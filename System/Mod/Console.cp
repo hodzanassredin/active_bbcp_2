@@ -25,6 +25,15 @@ MODULE Console;
 	*)
 	PROCEDURE (c: Console) ReadLn- (OUT s: ARRAY OF CHAR), NEW, ABSTRACT;
 
+	(** Есть ли ввод в пределах timeout мс? По умолчанию — да: ReadLn
+		блокирующий, цикл просто дождётся строки (прежнее поведение).
+		Платформа с poll (LinConsole) перекрывает метод и даёт циклу
+		исполнять действия, пока ввода нет. *)
+	PROCEDURE (c: Console) WaitInput- (timeout: LONGINT): BOOLEAN, NEW, EXTENSIBLE;
+	BEGIN
+		RETURN TRUE
+	END WaitInput;
+
 	PROCEDURE WriteStr* (IN text: ARRAY OF CHAR);
 	BEGIN
 		cons.WriteStr(text)
@@ -44,6 +53,11 @@ MODULE Console;
 	BEGIN
 		cons.ReadLn(text)
 	END ReadLn;
+
+	PROCEDURE WaitInput* (timeout: LONGINT): BOOLEAN;
+	BEGIN
+		RETURN cons.WaitInput(timeout)
+	END WaitInput;
 
 
 	PROCEDURE SetConsole* (c: Console);

@@ -359,6 +359,13 @@ MODULE LinLibc ["libc.so.6"];
 		sigset_t* = ARRAY [untagged] 128 OF BYTE;
 		PtrSigset_t* = POINTER [untagged] TO sigset_t;
 
+		(* struct pollfd: int fd; short events; short revents *)
+		pollfd* = RECORD [untagged]
+			fd*: int;
+			events*: SHORTINT;
+			revents*: SHORTINT
+		END;
+
 
 		tm* = POINTER TO tmDesc;
 		tmDesc* = RECORD [untagged]
@@ -722,6 +729,12 @@ MODULE LinLibc ["libc.so.6"];
 
 	(* POSIX.1 *)
 		PROCEDURE [ccall] fileno* (stream: PtrFILE): int;
+
+	(* ANSI C 89 *)
+		PROCEDURE [ccall] setvbuf* (stream: PtrFILE; buf: PtrVoid; mode: int; size: size_t): int;
+
+	(* POSIX.1: ждать готовности fd; timeout в мс, -1 — бесконечно *)
+		PROCEDURE [ccall] poll* (fds: POINTER [untagged] TO pollfd; nfds: ulong; timeout: int): int;
 
 	(* POSIX.1 *)
 		PROCEDURE [ccall] rename* (from, to: PtrSTR): int;

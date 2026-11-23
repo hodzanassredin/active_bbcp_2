@@ -7,6 +7,7 @@ MODULE ConsInterp;
 	IMPORT
 		Console, Dialog,
 		DevCommanders, TextModels,
+		Services,
 		StdLog;
 
 	VAR
@@ -114,13 +115,19 @@ MODULE ConsInterp;
 	END Call;
 
 	PROCEDURE Run*;
-		VAR s: ARRAY 4096 OF CHAR; res_: INTEGER;
+		VAR s: ARRAY 4096 OF CHAR; res_: INTEGER; done: BOOLEAN;
 	BEGIN
 		Dialog.Call("DevCompiler.InitLogMarks", "", res_);
-		Console.ReadLn(s);
-		WHILE Call(s) DO
-			Console.ReadLn(s)
-		END
+		done := FALSE;
+		REPEAT
+			(* Действия исполняются и между командами, и пока ждём ввода:
+			   это консольный вариант главного цикла (этап 1). *)
+			Services.actionHook.Step;
+			IF Console.WaitInput(100) THEN
+				Console.ReadLn(s);
+				done := ~Call(s)	(* Call = FALSE на конце ввода *)
+			END
+		UNTIL done
 	END Run;
 
 BEGIN

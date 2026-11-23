@@ -27,6 +27,16 @@ MODULE Services;
 		END;
 		InsistentAction* = POINTER TO ABSTRACT RECORD (Action) END;
 
+		(** Работа, отложенная в главный цикл. Единственная точка входа для
+			будущих задач (этап 8): задача кладёт сюда процедуру, а главный
+			цикл исполняет её на своём стеке. Сейчас очередь однонитевая;
+			при переходе на нити ОС сюда добавится блокировка. *)
+		Work* = PROCEDURE;
+		WorkItem = POINTER TO RECORD
+			next: WorkItem;
+			work: Work
+		END;
+
 		SafeAction* = ABSTRACT RECORD
 			(** Type-safe and extensible replacement for TryHandler *)
 			trapped-: BOOLEAN
@@ -47,6 +57,10 @@ MODULE Services;
 		hasImmediates: BOOLEAN;	(* this is a hint: one or more actions in some ring may be immediate actions *)
 		trapCnt: INTEGER;
 		actionsInTheQueue-: INTEGER;
+
+		workHead, workTail: WorkItem;	(* FIFO отложенной работы *)
+		executing: Action;				(* действие внутри Exec; переживает трап *)
+		wakeHook: PROCEDURE;			(* платформенный «разбудить цикл» *)
 
 	PROCEDURE Ticks* (): LONGINT;
 		VAR t: LONGINT;
@@ -101,6 +115,13 @@ MODULE Services;
 			p := candidates; WHILE p.next # NIL DO p := p.next END;	(* find last element of candidates list *)
 			p.next := actions; actions := candidates; candidates := NIL	(* prepend candidates list to actions list *)
 		END;
+		IF executing # NIL THEN	(* трап внутри Exec: действие уже вынуто из candidates,
+			но DoLater ещё не вызвано — возвращаем его в очередь, а не теряем молча *)
+			IF ~In(actions, executing) & ~In(candidates, executing) THEN
+				Incl(actions, executing)
+			END;
+			executing := NIL
+		END;
 		actionsInTheQueue := 0; p := actions;
 		WHILE p # NIL DO p := p.next; INC(actionsInTheQueue); END;
 		trapCnt := Kernel.trapCount	(* all traps are handled now *)
@@ -126,6 +147,65 @@ MODULE Services;
 		END
 	END RemoveAction;
 
+	(** --- очередь в главный цикл (задел под задачи, этап 8) --- **)
+
+	PROCEDURE Post* (w: Work);
+	(** Отложить работу w до ближайшего шага главного цикла.
+		Единственная точка входа для будущих задач: каркас однонитевой,
+		задача не трогает модель напрямую, а кладёт сюда процедуру. **)
+		VAR i: WorkItem;
+	BEGIN
+		IF w # NIL THEN
+			NEW(i); i.work := w; i.next := NIL;
+			IF workTail = NIL THEN workHead := i ELSE workTail.next := i END;
+			workTail := i
+		END
+	END Post;
+
+	PROCEDURE RunPosted;
+	(** Исполнить всё, что накопилось в очереди. Вызывается со дна цикла. **)
+		VAR i: WorkItem; w: Work;
+	BEGIN
+		WHILE workHead # NIL DO
+			i := workHead; workHead := i.next;
+			IF workHead = NIL THEN workTail := NIL END;
+			w := i.work; i.work := NIL; i.next := NIL;
+			w()	(* может снова вызвать Post; очередь подхватится этим же циклом *)
+		END
+	END RunPosted;
+
+	PROCEDURE NextDeadline* (): LONGINT;
+	(** Ближайший срок среди действий, в тиках Services.Ticks; -1 — ждать
+		нечего. Немедленные действия (notBefore < 0) и отложенная работа
+		означают «сейчас». Нужна главному циклу, чтобы не просыпаться
+		20 раз в секунду на таймере. **)
+		VAR p: Action; t, min: LONGINT;
+	BEGIN
+		IF workHead # NIL THEN RETURN Ticks() END;
+		min := -1; p := actions;
+		WHILE p # NIL DO
+			t := p.notBefore;
+			IF t < 0 THEN RETURN Ticks()
+			ELSIF (min < 0) OR (t < min) THEN min := t
+			END;
+			p := p.next
+		END;
+		RETURN min
+	END NextDeadline;
+
+	PROCEDURE SetWakeHook* (h: PROCEDURE);
+	(** Установить платформенную процедуру «разбудить главный цикл». **)
+	BEGIN
+		wakeHook := h
+	END SetWakeHook;
+
+	PROCEDURE Wake*;
+	(** Разбудить главный цикл (точка входа из другой нити, этап 8):
+		например, записать байт в eventfd/pipe, который ждёт главный цикл. **)
+	BEGIN
+		IF wakeHook # NIL THEN wakeHook END
+	END Wake;
+
 	PROCEDURE IterateOverActions (time: LONGINT; onlyInsistentActions: BOOLEAN);
 		VAR p: Action;
 	BEGIN
@@ -137,8 +217,10 @@ MODULE Services;
 			IF (~onlyInsistentActions OR (p IS InsistentAction))
 				& ((0 <= p.notBefore) & (p.notBefore <= time)
 					OR (p.notBefore <= time) & (time < 0)) THEN
-				p.next := NIL; Exec(p);	(* warning: p may call DoLater or RemoveAction,
-																		which change the lists! *)
+				p.next := NIL;
+				executing := p;	(* если Do трапает, Cleanup вернёт p в очередь *)
+				Exec(p);
+				executing := NIL
 			ELSE
 				p.next := actions; actions := p		(* move to actions list for later processing *)
 			END
@@ -154,6 +236,7 @@ MODULE Services;
 
 	PROCEDURE (h: StdHook) Step;
 	BEGIN
+		RunPosted;	(* очередь главного цикла: работы будущих задач *)
 		IF (candidates = NIL) OR (trapCnt < Kernel.trapCount) THEN
 			IterateOverActions(Ticks(), ~onlyInsistentActions)
 		END
@@ -168,6 +251,7 @@ MODULE Services;
 
 	PROCEDURE (h: StdHook) Loop;
 	BEGIN
+		RunPosted;	(* очередь главного цикла *)
 		IF hasImmediates THEN
 			ASSERT((candidates = NIL) OR (trapCnt < Kernel.trapCount), 100);
 			hasImmediates := FALSE;
