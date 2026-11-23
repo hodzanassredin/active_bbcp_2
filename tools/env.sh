@@ -13,7 +13,7 @@ INTERP="$INSTALL/blackbox-console"
 DEV0="$BB/dev0Linux"
 
 # Подсистемы, которые собираются по умолчанию (порядок как у Ивана).
-DEFAULT_SUBSYSTEMS="Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket"
+DEFAULT_SUBSYSTEMS="Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit"
 
 # Запуск консольного 64-битного BlackBox из каталога установки: StdLoader
 # ищет <Подсистема>/Code рядом с процессом.

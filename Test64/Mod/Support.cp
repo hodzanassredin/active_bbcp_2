@@ -3,7 +3,7 @@ MODULE Test64Support;
 	Каждый тест печатает  TEST64-PASS <имя>  или  TEST64-FAIL <имя> ...
 	Вывод идёт через Console (сразу в stdout, не через StdLog). *)
 
-	IMPORT Console, Strings, Kernel;
+	IMPORT Console, Strings, Kernel, UnitAssert;
 
 	VAR failures: INTEGER;
 		name: ARRAY 64 OF CHAR;
@@ -27,12 +27,13 @@ MODULE Test64Support;
 	PROCEDURE Fail* (IN what: ARRAY OF CHAR);
 	BEGIN
 		INC(failures);
+		UnitAssert.Fail(what);	(* подсистема Unit: провал и счётчик проверок *)
 		Console.WriteStr("  FAIL "); Console.WriteStr(what); Console.WriteLn
 	END Fail;
 
 	PROCEDURE Check* (cond: BOOLEAN; IN what: ARRAY OF CHAR);
 	BEGIN
-		IF ~cond THEN Fail(what) END
+		IF cond THEN UnitAssert.Checked ELSE Fail(what) END
 	END Check;
 
 	PROCEDURE Int* (IN what: ARRAY OF CHAR; x: LONGINT);

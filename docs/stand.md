@@ -15,10 +15,10 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Сборка x64 из `.cp` | `tools/build64.sh` | работает, проверено на чистом `.work/BB64LIN` |
 | Консольный запуск | `echo 'Команда' \| tools/run64.sh` | работает |
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
-| Тесты без окон | `tools/test.sh` | 7 из 7 зелёные |
-| Этап 1: очередь и цикл | `Test64ActionTrap` | зелёный |
-| Этап 2: стеки | `Test64GcStack`, `Test64TrapStack` | зелёные |
-| Шаг 2а: индекс кластеров | `Test64InHeap` | зелёный |
+| Тесты без окон | `tools/test.sh` (Unit) | 3 модуля, 14 тестов, все зелёные |
+| Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
+| Этап 2: стеки | `Test64Tests.TestProcGcStack`, `TestProcTrapStack` | зелёные |
+| Шаг 2а: индекс кластеров | `Test64Tests.TestProcInHeap` | зелёный |
 | Замер 1/10/50 млн | `tools/bench-gc.sh Test64GcBench.DoSmall` / `.Do` | выполнен |
 | GUI | `blackbox` линкуется | не запускался (стенд без GUI) |
 
@@ -27,7 +27,8 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 ```
 active_bb/                     репозиторий (ветка active2)
   <Подсистема>/Mod/*.cp        исходники (Mod64 — приоритетный вариант amd64)
-  Test64/Mod/*.cp              тесты Test64
+  Unit/Mod/*.cp                UnitAssert, UnitRunner, UnitTests
+  Test64/Mod/*.cp              сценарии Test64 и точки входа Test64Tests
   tools/                       стенд
   .work/BB64LIN/               каталог установки (в git не входит)
     <Подсистема>/{Code,Sym}    .ocf/.osf, собранные dev0Linux
@@ -75,22 +76,34 @@ tools/go32.sh DevCPE DevCPT        # i386: DevCompiler.CompileThis
 ## 5. Тесты
 
 ```sh
-tools/test.sh              # все из Test64/tests.txt
+tools/test.sh              # все модули из Test64/tests.txt
 tools/test.sh --list
-tools/test.sh Test64Basic.Do
+tools/test.sh CheckTests   # выборочно
 ```
 
-Подсистема `Test64`, модуль `Test64Support` — маркеры
-`TEST64-PASS`/`TEST64-FAIL`, `Check`, `Int`, `Hex`. `tools/test.sh`
-собирает `libtest64.so`, компилирует все `Test64*` через `go64` (до трёх
-проходов, пока модули не сойдутся), запускает каждый тест отдельным
-процессом `blackbox-console` и классифицирует PASS/FAIL/CRASH.
+Тесты идут через подсистему `Unit` (`UnitAssert`, `UnitRunner`,
+правила — `Unit/Docu/ru/Testing.md`). Манифест `Test64/tests.txt`:
+`<модуль>|<marks>|<таймаут>|<доп. модули>`. `tools/test.sh` для каждого
+модуля зовёт `tools/unit.sh`: тот собирает `libtest64.so`, компилирует
+модуль и зависимости через `go64` (до трёх проходов), запускает
+отдельный процесс `blackbox-console` командой
+`UnitRunner.Run <модуль> <marks>` и требует итог `failed 0` и код 0.
+TestProc-сценарии (ядро, сборщик, стеки, сигналы) помечены `proc` и
+потому не уносят остальные модули.
 
-Результат после шага 2а: **7/7 pass** — `Basic`, `Heap`, `Trap`,
-`ActionTrap`, `GcStack`, `TrapStack`, `InHeap`.
+Результат: **3 модуля, 14 тестов, 0 провалов** —
+- `Test64Tests` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
+  TrapStack, InHeap (сценарии `Test64*`, точки входа в
+  `Test64/Mod/Tests.cp`);
+- `UnitTests`: самопроверка Unit, включая вложенный прогон
+  `UnitTestsProbe` (PASS/FAIL/EMPTY/SKIP);
+- `CheckTests` (marks=proc): три пробы Ивана — RealFormat, Math,
+  CCallAlias.
 
-`Test64Pump` в манифест не входит (нужен интервал ожидания ввода);
-`Test64GcBench` — тоже, он запускается `tools/bench-gc.sh`.
+`Test64Support` остался адаптером: `Check`/`Fail` учитываются в
+`UnitAssert`, маркеры `TEST64-PASS/FAIL` сохранены для `bench-gc.sh`.
+`Test64Pump` и `Test64GcBench` в манифест не входят; замер —
+`tools/bench-gc.sh`.
 
 ### Ловушка консоли
 
@@ -156,3 +169,5 @@ tools/test.sh Test64Basic.Do
   зовут обёртки `Test64Co`.
 - Нет нагрузочного теста «1000 задач час», проверки трапа в чужой нити
   ОС, отложенных финализаторов вне главного стека.
+- `UnitRunner.TempDir` только возвращает путь `UnitTmp`: каталог создаёт
+  внешний `tools/unit.sh` (в процессе BlackBox нет переносимого mkdir).

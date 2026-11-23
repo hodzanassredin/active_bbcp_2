@@ -1072,6 +1072,11 @@ MODULE Kernel;
 		trapViewer := h
 	END InstallTrapViewer;
 
+	PROCEDURE GetTrapViewer* (): Handler;
+	BEGIN
+		RETURN trapViewer
+	END GetTrapViewer;
+
 	PROCEDURE InstallTrapChecker* (h: Handler);
 	BEGIN
 		trapChecker := h

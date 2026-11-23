@@ -1,15 +1,9 @@
-# Тесты стенда. Формат: <команда>|<ожидание>|<таймаут, с>
+# Тесты стенда через подсистему Unit.
+# Формат: <модуль>|<marks>|<таймаут, с>|<доп. модули для компиляции>
 #
-# Зелёные: то, что сегодня работает и не должно ломаться.
-Test64Basic.Do|pass|60
-Test64Heap.Do|pass|180
-Test64Trap.Do|pass|60
-# Действие, трапнувшее без DoLater, возвращается в очередь (этап 1, Services.Cleanup).
-Test64ActionTrap.Do|pass|180
-# Этап 2: реестр стеков и контекст Kernel.Try на стек.
-# Test64GcStack   - сборка на зарегистрированном втором стеке сохраняет объекты.
-# Test64TrapStack - трап главного стека ловится своим Try, а не чужим.
-Test64GcStack.Do|pass|120
-Test64TrapStack.Do|pass|120
-# Шаг 2а: InHeap с индексом кластеров — границы, вне кучи, после освобождения.
-Test64InHeap.Do|pass|120
+# marks: slow, gui, proc — какие пометки TestSlow/TestGui/TestProc включать.
+# Каждый модуль запускается отдельным процессом (tools/unit.sh);
+# TestProc-сценарии трогают ядро/сборщик/стеки и потому помечены proc.
+Test64Tests|proc|900|Test64Support Test64CRaw Test64Co Test64Basic Test64Heap Test64Trap Test64ActionTrap Test64GcStack Test64TrapStack Test64InHeap
+UnitTests||180|UnitTestsProbe
+CheckTests|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias

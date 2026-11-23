@@ -1232,6 +1232,13 @@ MODULE Kernel;
 		trapViewer := h
 	END InstallTrapViewer;
 
+	PROCEDURE GetTrapViewer* (): Handler;
+	(** Текущий обработчик трапов; по нему UnitRunner отличает консоль
+		(viewer = NIL) от GUI и восстанавливает прежний viewer. *)
+	BEGIN
+		RETURN trapViewer
+	END GetTrapViewer;
+
 	PROCEDURE InstallTrapChecker* (h: Handler);
 	BEGIN
 		trapChecker := h

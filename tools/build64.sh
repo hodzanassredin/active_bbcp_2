@@ -44,7 +44,7 @@ if ! "$BB/dev0Linux" < "$LOG.cmd" > "$LOG" 2>&1; then
 	echo "build64: dev0Linux завершился с ошибкой, лог: $LOG" >&2
 	tail -20 "$LOG" >&2; cp "$LOG" /tmp/build64-fail.log; exit 1
 fi
-COMPILE_ERR='~TRAP|[0-9]+ error[s]? detected|error:|syntax error|compilation failed|not found|undeclared|undefined'
+COMPILE_ERR='~TRAP|[0-9]+ error[s]? detected|error detected|error:|syntax error|compilation failed|not found|undeclared|undefined| missing$'
 if grep -qE "$COMPILE_ERR" "$LOG"; then
 	echo "build64: в журнале компиляции есть ошибки:" >&2
 	grep -nE "$COMPILE_ERR" "$LOG" | head -20 >&2
@@ -78,7 +78,7 @@ if [ "$gui" -eq 1 ]; then
 		mkdir -p "$INSTALL/$sub"
 		cp -a "$BB/$sub/Rsrc/." "$INSTALL/$sub/Rsrc/"
 	done
-	for d in Docu Obx/Docu Lin/Docu; do
+	for d in Docu Obx/Docu Lin/Docu Unit/Docu; do
 		[ -d "$BB/$d" ] || continue
 		mkdir -p "$INSTALL/$d"
 		cp -a "$BB/$d/." "$INSTALL/$d/"

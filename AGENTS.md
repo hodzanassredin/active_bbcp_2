@@ -87,7 +87,7 @@ Example how to enable Librarian for x64 (take modules from `Mod64` if exists) an
 
 ```bash
 echo "DevLibrarian.EnableDevLib('build/BB64LIN', 'Mod64');
-DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket;
+DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit;
 DevLinker1.LinkElfExe64 'build/BB64LIN/blackbox' := Kernel+ LinKernel Files LinFiles StdLoader LinLoader" | ./dev0Linux
 for subsystem in Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket; do
 	if [ -d "$subsystem/Rsrc" ]; then
@@ -192,14 +192,20 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # 6 тестов Test64 (сейчас 6/6)
+tools/test.sh                     # Unit: Test64Tests, UnitTests, CheckTests
 tools/test.sh --list
+tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
 ```
 
-- Тесты: подсистема `Test64/Mod/*.cp`, манифест `Test64/tests.txt`.
-  `Test64Support` ставит пустой `trapViewer` — иначе консольный x64
-  считает фатальным любой трап, даже внутри `Kernel.Try`.
+- Тесты: подсистема `Unit` (`UnitAssert`, `UnitRunner`; правила —
+  `Unit/Docu/ru/Testing.md`), манифест `Test64/tests.txt` в формате
+  `<модуль>|<marks>|<таймаут>|<доп. модули>`. `tools/test.sh` зовёт
+  `tools/unit.sh` на каждый модуль: отдельный процесс, итог `failed 0`.
+  Test64-сценарии — `Test64Tests` с пометкой `proc`.
+- `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
+  консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
+  прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
 - Этап 1: `Services.Post/Wake/NextDeadline`, `Console.WaitInput`,
   `ConsInterp.Run` крутит `Services.actionHook.Step`.
 - Этап 2: реестр `Kernel.Stack` (`RegisterStack`,
