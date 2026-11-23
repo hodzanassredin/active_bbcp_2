@@ -5,5 +5,6 @@
 # Каждый модуль запускается отдельным процессом (tools/unit.sh);
 # TestProc-сценарии трогают ядро/сборщик/стеки и потому помечены proc.
 Test64Tests|proc|900|Test64Support Test64CRaw Test64Co Test64Basic Test64Heap Test64Trap Test64ActionTrap Test64GcStack Test64TrapStack Test64InHeap
+Test64Tasks|proc slow|900|Test64Co
 UnitTests||180|UnitTestsProbe
 CheckTests|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias

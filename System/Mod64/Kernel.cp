@@ -76,6 +76,12 @@ MODULE Kernel;
 		   16384 записей по 8 байт = 128 КБ статических данных. *)
 		clusterIndexMax = 16384;
 
+		(* Индекс стеков: StackOf вызывается на каждом переключении задач
+		   и на уборке трапов; при тысячах задач линейный обход реестра
+		   стоит микросекунды. Ёмкость и запасной линейный путь — как у
+		   индекса кластеров. *)
+		stackIndexMax = 16384;
+
 		(* kernel flags in module desc *)
 		init = 16; dyn = 17; dll = 24; iptrs = 30; 
 		monoCluster = 25; (* memory model with only one huge heap cluster; used for .exe, not used for .dll *)
@@ -369,6 +375,9 @@ MODULE Kernel;
 		clusterIndex: ARRAY clusterIndexMax OF Cluster;	(* отсортирован по адресу *)
 		nofClusterIndex: INTEGER;
 		clusterIndexFull: BOOLEAN;	(* индекс переполнен: InHeap идёт по root *)
+		stackIndex: ARRAY stackIndexMax OF Stack;	(* отсортирован по lo *)
+		nofStackIndex: INTEGER;
+		stackIndexFull: BOOLEAN;
 		ttotal: LONGINT;	(* current total size of BlackBox heap *)	(* committed heap size *)
 		(* total is used only in monocluster mode; it stands for the committed heap size; in monocluster mode, all of heap is in root. The committed size of root is root.size. So, total is not needed? *)
 		used: LONGINT;	(* bytes allocated on system heap *)
@@ -441,6 +450,20 @@ MODULE Kernel;
 	Pre:
 		monoClusterMem, 20
 		base was earlier returned by AllocateClusterMem, 21 *)
+
+	PROCEDURE (VAR p: Platform) AllocateStackMem* (size: INTEGER; OUT lo, hi: S.ADDRESS), NEW, EXTENSIBLE;
+	(** Память под стек задачи: [lo, hi), ниже lo — сторожевая страница
+		(PROT_NONE / PAGE_NOACCESS). Платформа без поддержки возвращает 0;
+		Tasks тогда отказывается запускать задачи. Память ленивая: страницы
+		физически выделяются по касанию. *)
+	BEGIN
+		lo := 0; hi := 0
+	END AllocateStackMem;
+
+	PROCEDURE (VAR p: Platform) DeallocateStackMem* (lo, hi: S.ADDRESS), NEW, EXTENSIBLE;
+	BEGIN
+	END DeallocateStackMem;
+
 	(* Trap handling *)
 	(*PROCEDURE (VAR p: Platform) Try* (h: TryHandler; a, b, c: INTEGER), NEW, ABSTRACT;
 	(* hook for implementation of PROCEDURE Try *)*)
@@ -1505,21 +1528,73 @@ MODULE Kernel;
 	(* Один реестр для любых стеков. Никакого особого случая «главный плюс
 	   сопрограммы»: главный — просто запись с main = TRUE. *)
 
+	PROCEDURE StackIndexFind (adr: S.ADDRESS): INTEGER;
+	(* первая запись с lo > adr *)
+		VAR lo, hi, mid: INTEGER;
+	BEGIN
+		lo := 0; hi := nofStackIndex;
+		WHILE lo < hi DO
+			mid := (lo + hi) DIV 2;
+			IF S.VAL(LONGINT, stackIndex[mid].lo) <= S.VAL(LONGINT, adr) THEN lo := mid + 1 ELSE hi := mid END
+		END;
+		RETURN lo
+	END StackIndexFind;
+
+	PROCEDURE StackIndexInsert (s: Stack);
+		VAR i, pos: INTEGER;
+	BEGIN
+		IF stackIndexFull OR (s = NIL) THEN RETURN END;
+		IF nofStackIndex >= stackIndexMax THEN stackIndexFull := TRUE; RETURN END;
+		pos := StackIndexFind(s.lo);
+		i := nofStackIndex;
+		WHILE i > pos DO stackIndex[i] := stackIndex[i-1]; DEC(i) END;
+		stackIndex[pos] := s; INC(nofStackIndex)
+	END StackIndexInsert;
+
+	PROCEDURE StackIndexRemove (s: Stack);
+		VAR i, pos: INTEGER; found: BOOLEAN;
+	BEGIN
+		IF stackIndexFull OR (s = NIL) THEN RETURN END;
+		pos := StackIndexFind(s.lo);
+		found := (pos > 0) & (stackIndex[pos-1] = s);
+		IF found THEN
+			DEC(pos);
+			i := pos;
+			WHILE i < nofStackIndex - 1 DO stackIndex[i] := stackIndex[i+1]; INC(i) END;
+			DEC(nofStackIndex); stackIndex[nofStackIndex] := NIL
+		END
+	END StackIndexRemove;
+
 	PROCEDURE StackOf* (adr: S.ADDRESS): Stack;
 	(* Запись, в диапазон [lo, hi) которой попадает adr. Если диапазоны
 	   пересекаются (номинальный запас главного стека), выбирается самый
-	   узкий — так mmap-стек сопрограммы не путается с главным. *)
-		VAR s, best: Stack; span, bestSpan: S.ADDRESS;
+	   узкий — так mmap-стек задачи не путается с главным. *)
+		VAR s, best: Stack; span, bestSpan: S.ADDRESS; pos, j: INTEGER;
 	BEGIN
-		best := NIL; bestSpan := 0; s := stacks;
-		WHILE s # NIL DO
-			IF (s.lo <= adr) & (adr < s.hi) THEN
-				span := s.hi - s.lo;
-				IF (best = NIL) OR (span < bestSpan) THEN best := s; bestSpan := span END
+		IF ~stackIndexFull THEN
+			best := NIL; bestSpan := 0;
+			pos := StackIndexFind(adr); j := pos - 1;
+			WHILE j >= 0 DO
+				s := stackIndex[j];
+				IF (s.lo <= adr) & (adr < s.hi) THEN
+					span := s.hi - s.lo;
+					IF (best = NIL) OR (span < bestSpan) THEN best := s; bestSpan := span END
+				END;
+				(* стек с lo ниже adr - maxStackScan заведомо не достаёт до adr *)
+				IF S.VAL(LONGINT, s.lo) < S.VAL(LONGINT, adr) - maxStackScan THEN j := -1 ELSE DEC(j) END
 			END;
-			s := s.next
-		END;
-		RETURN best
+			RETURN best
+		ELSE
+			best := NIL; bestSpan := 0; s := stacks;
+			WHILE s # NIL DO
+				IF (s.lo <= adr) & (adr < s.hi) THEN
+					span := s.hi - s.lo;
+					IF (best = NIL) OR (span < bestSpan) THEN best := s; bestSpan := span END
+				END;
+				s := s.next
+			END;
+			RETURN best
+		END
 	END StackOf;
 
 	PROCEDURE InRegisteredStack* (adr: S.ADDRESS): BOOLEAN;
@@ -1542,6 +1617,7 @@ MODULE Kernel;
 		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
 		s.signal := signal; s.main := FALSE;
 		s.next := stacks; stacks := s;
+		StackIndexInsert(s);
 		RETURN s
 	END NewStack;
 
@@ -1561,6 +1637,20 @@ MODULE Kernel;
 		RETURN NewStack(lo, hi, TRUE)
 	END RegisterSignalStack;
 
+	PROCEDURE AllocStack* (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(** Память под стек задачи у платформы: mmap + сторожевая страница. *)
+	BEGIN
+		lo := 0; hi := 0;
+		IF (size <= 0) OR (size > maxStackScan) THEN RETURN FALSE END;
+		platform.AllocateStackMem(size, lo, hi);
+		RETURN lo # 0
+	END AllocStack;
+
+	PROCEDURE FreeStack* (lo, hi: S.ADDRESS);
+	BEGIN
+		IF lo # 0 THEN platform.DeallocateStackMem(lo, hi) END
+	END FreeStack;
+
 	PROCEDURE UnregisterStack* (s: Stack);
 		VAR p: Stack;
 	BEGIN
@@ -1571,7 +1661,8 @@ MODULE Kernel;
 				WHILE (p # NIL) & (p.next # s) DO p := p.next END;
 				IF p # NIL THEN p.next := s.next END
 			END;
-			s.next := NIL
+			s.next := NIL;
+			StackIndexRemove(s)
 		END
 	END UnregisterStack;
 
@@ -2961,7 +3052,9 @@ MODULE Kernel;
 		mainStack.sp := baseStack; mainStack.tryContext := 0;
 		mainStack.trapStack := NIL; mainStack.tryCount := 0;
 		mainStack.signal := FALSE; mainStack.main := TRUE;
-		mainStack.next := NIL; stacks := mainStack
+		mainStack.next := NIL; stacks := mainStack;
+		nofStackIndex := 0; stackIndexFull := FALSE;
+		StackIndexInsert(mainStack)
 	END SetPlatform;
 	
 	

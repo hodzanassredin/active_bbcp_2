@@ -216,6 +216,36 @@ MODULE LinKernel;
 		ASSERT(res = 0, 102)
 	END DeallocateClusterMem;
 
+	PROCEDURE (VAR p: Platform) AllocateStackMem (size: INTEGER; OUT lo, hi: S.ADDRESS);
+	(* Стек задачи: mmap + одна сторожевая страница PROT_NONE снизу.
+	   Страницы физически выделяются по касанию, поэтому 1000 задач стоят
+	   адресного пространства, а не памяти. *)
+		CONST protection = Libc.PROT_READ + Libc.PROT_WRITE;
+			flags = Libc.MAP_PRIVATE + Libc.MAP_ANON;
+		VAR guard, total: S.ADDRESS; base: S.ADDRESS; res: INTEGER;
+	BEGIN
+		guard := p.PageSize();
+		total := ((size + guard - 1) DIV guard) * guard + guard;
+		base := Libc.mmap(0, total, protection, flags, -1, 0);
+		IF base = Libc.MAP_FAILED THEN lo := 0; hi := 0; RETURN END;
+		res := Libc.mprotect(base, guard, Libc.PROT_NONE);
+		IF res # 0 THEN
+			res := Libc.munmap(base, total);
+			lo := 0; hi := 0; RETURN
+		END;
+		lo := base + guard; hi := base + total
+	END AllocateStackMem;
+
+	PROCEDURE (VAR p: Platform) DeallocateStackMem (lo, hi: S.ADDRESS);
+		VAR guard, res: INTEGER;
+	BEGIN
+		IF lo # 0 THEN
+			guard := p.PageSize();
+			res := Libc.munmap(lo - guard, hi - lo + guard);
+			ASSERT(res = 0, 103)
+		END
+	END DeallocateStackMem;
+
 	PROCEDURE (VAR p: Platform) LoadDll (IN name: ARRAY OF CHAR; VAR ok: BOOLEAN);
 		VAR h: Dl.HANDLE; res: INTEGER; s: ARRAY Kernel.nameLen OF SHORTCHAR;
 	BEGIN

@@ -261,6 +261,12 @@ MODULE Models;
 		END
 	END Broadcast;
 
+	PROCEDURE InDomainCast* (): BOOLEAN;
+	(** Идёт рассылка сообщения по домену: задача не должна в ней ждать. *)
+	BEGIN
+		RETURN domainGuard # 0
+	END InDomainCast;
+
 BEGIN
 	domainGuard := 0
 END Models.

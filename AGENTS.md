@@ -192,7 +192,7 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # Unit: Test64Tests, UnitTests, CheckTests
+tools/test.sh                     # Unit: Test64Tests, Test64Tasks, UnitTests, CheckTests
 tools/test.sh --list
 tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
@@ -202,7 +202,8 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `Unit/Docu/ru/Testing.md`), манифест `Test64/tests.txt` в формате
   `<модуль>|<marks>|<таймаут>|<доп. модули>`. `tools/test.sh` зовёт
   `tools/unit.sh` на каждый модуль: отдельный процесс, итог `failed 0`.
-  Test64-сценарии — `Test64Tests` с пометкой `proc`.
+  Test64-сценарии — `Test64Tests` с пометкой `proc`; задачи —
+  `Test64Tasks` (`proc slow`).
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
   прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
@@ -211,13 +212,22 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
 - Этап 2: реестр `Kernel.Stack` (`RegisterStack`,
   `RegisterSignalStack`, `UnregisterStack(At)`, `SwitchSave/Restore`),
   `Get/SetTryContext` в `LinKernel`; `UnloadMod` не выгружает занятый
-  стеком модуль.
+  стеком модуль. `StackOf` ищет по отсортированному индексу стеков.
+- Этап 3: `System/Mod64/Tasks.cp` — задачи со своим стеком:
+  `Start/StartIn`, `Yield`, `Sleep`, `Join`, `Cancel`, `Park/Unpark`,
+  группы, отмена трапом в точке ожидания, планировщик —
+  `Services.Action`, переключатель — [code] на amd64 (без .so). Стеки:
+  `Kernel.AllocStack/FreeStack` (в `LinKernel` mmap + сторожевая
+  страница), `Platform.AllocateStackMem` по умолчанию возвращает 0.
+  Тесты — `Test64Tasks` (`Test64/Mod/Tasks.cp`), подробности —
+  `docs/tasks.md`.
 - `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
   `.cp`, конвертировать нечего. `DevOnce` заменён на
   `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
   в консольном x64.
 - Открыто: GUI-прогоны, `pack-dev0-linux` (в снимке отсутствует),
-  отдельный `[code]`-переключатель стеков, задачи/нити ОС, отложенные
+  вытеснение задач и нити ОС, мониторы (`Kernel.Lock/Wait`, этап 4),
+  `Platform.AllocateStackMem` для Windows x64, отложенные
   финализаторы, нагрузочный тест «1000 задач час».
 - Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица
   изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер).

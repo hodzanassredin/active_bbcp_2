@@ -47,6 +47,7 @@ MODULE Services;
 
 		ActionHook* = POINTER TO ABSTRACT RECORD END;
 		StdHook = POINTER TO RECORD (ActionHook) END;
+		GuardCleaner = POINTER TO RECORD (Kernel.TrapCleaner) END;
 
 
 	VAR
@@ -59,8 +60,10 @@ MODULE Services;
 		actionsInTheQueue-: INTEGER;
 
 		workHead, workTail: WorkItem;	(* FIFO отложенной работы *)
-		executing: Action;				(* действие внутри Exec; переживает трап *)
+		executing-: Action;				(* действие внутри Exec; переживает трап *)
+		executingAction-: BOOLEAN;		(* идёт Do действия: задача не должна ждать *)
 		wakeHook: PROCEDURE;			(* платформенный «разбудить цикл» *)
+		guardCleaner: GuardCleaner;	(* снять флаг при трапе внутри Do *)
 
 	PROCEDURE Ticks* (): LONGINT;
 		VAR t: LONGINT;
@@ -99,18 +102,37 @@ MODULE Services;
 		END
 	END Excl;
 
+	PROCEDURE SetTrapGuardCleanup*;
+	(** Снять флаг обработчика, если он остался после трапа в чужом
+		контексте (страховка к GuardCleaner). *)
+	BEGIN
+		executingAction := FALSE	(* executing оставить: Cleanup вернёт действие в очередь *)
+	END SetTrapGuardCleanup;
+
+	PROCEDURE (c: GuardCleaner) Cleanup;
+	(** Трап внутри Do: снять флаг обработчика, иначе задача навсегда
+		считает, что ждать нельзя. *)
+	BEGIN
+		executingAction := FALSE	(* executing нужен Services.Cleanup *)
+	END Cleanup;
+
 	PROCEDURE Exec (a: Action);
 		VAR t: Kernel.Type;
 	BEGIN
 		t := Kernel.TypeOf(a);
 		IF t.mod.refcnt >= 0 THEN	(* execute action if its module is not unloaded *)
-			a.Do	(* warning: here the actions and candidates lists may be modified, or a trap may occur! *)
+			Kernel.PushTrapCleaner(guardCleaner);
+			executingAction := TRUE;
+			a.Do;	(* warning: here the actions and candidates lists may be modified, or a trap may occur! *)
+			executingAction := FALSE;
+			Kernel.PopTrapCleaner(guardCleaner)
 		END
 	END Exec;
 
 	PROCEDURE Cleanup;
 		VAR p: Action;
 	BEGIN
+		executingAction := FALSE;	(* трап внутри Do не должен оставить флаг *)
 		IF candidates # NIL THEN	(* trap handling *)
 			p := candidates; WHILE p.next # NIL DO p := p.next END;	(* find last element of candidates list *)
 			p.next := actions; actions := candidates; candidates := NIL	(* prepend candidates list to actions list *)
@@ -397,7 +419,8 @@ MODULE Services;
 		VAR h: StdHook;
 	BEGIN
 		actionsInTheQueue := 0;
-		NEW(h); actionHook := h
+		NEW(h); actionHook := h;
+		NEW(guardCleaner)
 	END Init;
 
 BEGIN

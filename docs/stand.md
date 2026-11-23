@@ -15,7 +15,7 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Сборка x64 из `.cp` | `tools/build64.sh` | работает, проверено на чистом `.work/BB64LIN` |
 | Консольный запуск | `echo 'Команда' \| tools/run64.sh` | работает |
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
-| Тесты без окон | `tools/test.sh` (Unit) | 3 модуля, 14 тестов, все зелёные |
+| Тесты без окон | `tools/test.sh` (Unit) | 4 модуля, 27 тестов, все зелёные |
 | Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
 | Этап 2: стеки | `Test64Tests.TestProcGcStack`, `TestProcTrapStack` | зелёные |
 | Шаг 2а: индекс кластеров | `Test64Tests.TestProcInHeap` | зелёный |
@@ -28,7 +28,8 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 active_bb/                     репозиторий (ветка active2)
   <Подсистема>/Mod/*.cp        исходники (Mod64 — приоритетный вариант amd64)
   Unit/Mod/*.cp                UnitAssert, UnitRunner, UnitTests
-  Test64/Mod/*.cp              сценарии Test64 и точки входа Test64Tests
+  Test64/Mod/*.cp              сценарии Test64, Test64Tests, Test64Tasks
+  System/Mod64/Tasks.cp        задачи со своим стеком (этап 3)
   tools/                       стенд
   .work/BB64LIN/               каталог установки (в git не входит)
     <Подсистема>/{Code,Sym}    .ocf/.osf, собранные dev0Linux
@@ -91,10 +92,14 @@ tools/test.sh CheckTests   # выборочно
 TestProc-сценарии (ядро, сборщик, стеки, сигналы) помечены `proc` и
 потому не уносят остальные модули.
 
-Результат: **3 модуля, 14 тестов, 0 провалов** —
+Результат: **4 модуля, 27 тестов, 0 провалов** —
 - `Test64Tests` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
   TrapStack, InHeap (сценарии `Test64*`, точки входа в
   `Test64/Mod/Tests.cp`);
+- `Test64Tasks` (marks=proc slow): 13 тестов задач — Yield,
+  производитель-потребитель, философы, отмена, изоляция трапа,
+  проверки ожидания, группа, действие планировщика, нагрузка
+  1 тыс. и 10 тыс. задач (`Test64/Mod/Tasks.cp`, см. `docs/tasks.md`);
 - `UnitTests`: самопроверка Unit, включая вложенный прогон
   `UnitTestsProbe` (PASS/FAIL/EMPTY/SKIP);
 - `CheckTests` (marks=proc): три пробы Ивана — RealFormat, Math,
@@ -133,6 +138,11 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   (`IndexInsert/IndexRemove`, отладочные `InHeapAddr`, `ClusterBounds`,
   `ClusterIndexCheck`), счётчик `AllocCount`; `System/Mod/Loop.cp` —
   пропуск периодической сборки без выделений, диагностика `Loop.Stats`.
+- Этап 3: `System/Mod64/Tasks.cp` — задачи и [code]-переключатель;
+  `Kernel.AllocStack/FreeStack` и `Platform.AllocateStackMem`
+  (в `LinKernel` — mmap + сторожевая страница); индекс `Kernel.StackOf`;
+  `Services.executingAction`/`executing` и trap-cleaner;
+  `Models.InDomainCast`. Подробности — `docs/tasks.md`.
 
 Конфликтов с правками Ивана нет: его `InitSignalStack`/`InstallSignals`
 сохранены, регистрация сигнального стека добавлена после
@@ -160,6 +170,20 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 пропускает периодическую сборку без выделений. Подробности и таблица
 «до/после» — `docs/gc-bench.md`.
 
+### Задачи (этап 3)
+
+`UnitRunner.Run Test64Tasks proc slow`:
+
+| Задачи | Стек | Setup | Шаги | Переключений | На переключение | RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 000 | 64 КБ | 7.1 мс | 6.9 мс | 4 000 | 1.7 мкс | — |
+| 10 000 | 64 КБ | 120 мс | 185 мс | 40 000 | 4.6 мкс | 47.7 МБ |
+
+Виртуально под стеки — 64 МБ и 640 МБ (страницы по касанию),
+процесс с 10 тыс. задач занимает 0.33 с. После индекса `StackOf`
+переключение перестало зависеть от числа зарегистрированных стеков
+линейно.
+
 ## 8. Что открыто
 
 - GUI не запускался; GTK4-сборка только линкуется.
@@ -171,3 +195,6 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   ОС, отложенных финализаторов вне главного стека.
 - `UnitRunner.TempDir` только возвращает путь `UnitTmp`: каталог создаёт
   внешний `tools/unit.sh` (в процессе BlackBox нет переносимого mkdir).
+- `Tasks`: Windows x64 без `Platform.AllocateStackMem` (нужен
+  `VirtualAlloc` + `PAGE_NOACCESS`); вытеснения нет; мониторов нет
+  (этап 4).
