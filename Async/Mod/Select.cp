@@ -1,0 +1,412 @@
+MODULE AsyncSelect;
+(** Выбор из нескольких ожиданий (Alt/Select) по образцу Hopac/CML (этап 7).
+
+	Предложение (offer) — запись операции над «ядром» канала (Core).
+	Все предложения одного Select делят флаг решения (Ctx). Первый канал,
+	готовый исполнить предложение, под своим монитором ставит флаг и
+	будит задачу через Tasks.Unpark; проигравшие предложения снимает
+	владелец (nack). Активно положенное предложение отправителя
+	откатывается, если решение принял другой канал: это делает любая
+	операция, наткнувшаяся на предложение с решённым Ctx (Prune).
+
+	Только одна нить ОС: все переходы состояния — под монитором ядра,
+	между проверкой и Park нет точки уступки. *)
+
+	IMPORT Kernel, Tasks, Services;
+
+	CONST
+		maxAlt = 32;
+
+		(** вид операции **)
+		SendKind* = 0; RecvKind* = 1; TimeoutKind* = 2;
+		(** вид ядра **)
+		Rendezvous* = 0; Bounded* = 1; Mailbox* = 2;
+
+	TYPE
+		(** Сообщение канала. После отправки не меняется (дисциплина
+			Clojure/Erlang): получателю достаётся копия или передача
+			владения, но не общий изменяемый объект. *)
+		Msg* = POINTER TO ABSTRACT RECORD END;
+
+		Ctx = POINTER TO RECORD
+			task: Tasks.Task;
+			decided: BOOLEAN;
+			winner: INTEGER	(* индекс альтернативы; -1 — ещё нет *)
+		END;
+
+		Item = POINTER TO RItem;
+
+		Offer* = POINTER TO RECORD
+			next: Offer;
+			ctx: Ctx;
+			idx: INTEGER;
+			kind: INTEGER;
+			msg, got: Msg
+		END;
+
+		RItem = RECORD
+			next: Item;
+			msg: Msg
+		END;
+
+		Core* = POINTER TO EXTENSIBLE RECORD
+			kind*: INTEGER;
+			capacity*: INTEGER;
+			count*: INTEGER;		(* для Bounded и Mailbox *)
+			item*: Msg;				(* активный вклад Rendezvous *)
+			deposit*: BOOLEAN;
+			taken*: BOOLEAN;		(* забрали вклад прямого отправителя *)
+			depOffer*: Offer;		(* вклад предложения Select *)
+			direct*: BOOLEAN;		(* вклад прямого Send *)
+			directTask*: Tasks.Task;
+			waitS*, waitR*: Offer;	(* головы очередей ожидающих *)
+			waitST, waitRT: Offer;
+			ih, it: Item				(* очередь Bounded/Mailbox *)
+		END;
+
+		(** Альтернатива Select. *)
+		Op* = RECORD
+			kind*: INTEGER;
+			core*: Core;
+			msg*: Msg;		(* для отправки *)
+			got*: Msg;		(* результат приёма *)
+			ms*: LONGINT	(* для тайм-аута *)
+		END;
+
+		Timer = POINTER TO RECORD (Services.Action) ctx: Ctx; idx: INTEGER END;
+
+	(* --- вспомогательное -------------------------------------------------- *)
+
+	PROCEDURE TaskDone (t: Tasks.Task): BOOLEAN;
+	BEGIN
+		RETURN (t = NIL) OR (Tasks.State(t) IN {Tasks.Finished, Tasks.Cancelled})
+	END TaskDone;
+
+	PROCEDURE OfferAlive (o: Offer): BOOLEAN;
+	BEGIN
+		RETURN (o # NIL) & (o.ctx # NIL) & ~o.ctx.decided & ~TaskDone(o.ctx.task)
+	END OfferAlive;
+
+	PROCEDURE Decide (ctx: Ctx; idx: INTEGER);
+	BEGIN
+		IF (ctx # NIL) & ~ctx.decided THEN
+			ctx.decided := TRUE; ctx.winner := idx;
+			Tasks.Unpark(ctx.task)
+		END
+	END Decide;
+
+	PROCEDURE Enqueue (VAR head, tail: Offer; o: Offer);
+	BEGIN
+		o.next := NIL;
+		IF tail = NIL THEN head := o ELSE tail.next := o END;
+		tail := o
+	END Enqueue;
+
+	PROCEDURE RemoveOffer (VAR head, tail: Offer; o: Offer);
+		VAR p, q: Offer;
+	BEGIN
+		p := NIL; q := head;
+		WHILE (q # NIL) & (q # o) DO p := q; q := q.next END;
+		IF q = o THEN
+			IF p = NIL THEN head := q.next ELSE p.next := q.next END;
+			IF tail = q THEN tail := p END;
+			q.next := NIL
+		END
+	END RemoveOffer;
+
+	PROCEDURE PruneQueue (VAR head, tail: Offer);
+		VAR o, nx: Offer;
+	BEGIN
+		o := head;
+		WHILE o # NIL DO
+			nx := o.next;
+			IF ~OfferAlive(o) THEN RemoveOffer(head, tail, o) END;
+			o := nx
+		END
+	END PruneQueue;
+
+	PROCEDURE Prune* (c: Core);
+	(** Убрать протухшие предложения и откатить чужой вклад. Под монитором. *)
+	BEGIN
+		IF c.deposit THEN
+			IF c.depOffer # NIL THEN
+				IF ~OfferAlive(c.depOffer) THEN
+					c.deposit := FALSE; c.item := NIL; c.depOffer := NIL; c.taken := FALSE
+				END
+			ELSIF c.direct & TaskDone(c.directTask) THEN
+				c.deposit := FALSE; c.item := NIL; c.direct := FALSE;
+				c.directTask := NIL; c.taken := FALSE
+			END
+		END;
+		PruneQueue(c.waitS, c.waitST);
+		PruneQueue(c.waitR, c.waitRT)
+	END Prune;
+
+	PROCEDURE PopLive (VAR head, tail: Offer; wantSend: BOOLEAN): Offer;
+	(** Снять первое живое предложение нужного вида. Под монитором. *)
+		VAR o: Offer;
+	BEGIN
+		LOOP
+			o := head;
+			IF o = NIL THEN RETURN NIL END;
+			head := o.next; o.next := NIL;
+			IF head = NIL THEN tail := NIL END;
+			IF OfferAlive(o) & ((o.kind = SendKind) = wantSend) THEN RETURN o END
+		END
+	END PopLive;
+
+	(* --- очередь сообщений ------------------------------------------------ *)
+
+	PROCEDURE AppendItem (c: Core; m: Msg);
+		VAR x: Item;
+	BEGIN
+		NEW(x); x.msg := m; x.next := NIL;
+		IF c.it = NIL THEN c.ih := x ELSE c.it.next := x END;
+		c.it := x; c.count := c.count + 1
+	END AppendItem;
+
+	PROCEDURE PopItem (c: Core; OUT m: Msg): BOOLEAN;
+		VAR x: Item;
+	BEGIN
+		x := c.ih;
+		IF x = NIL THEN RETURN FALSE END;
+		c.ih := x.next;
+		IF c.ih = NIL THEN c.it := NIL END;
+		m := x.msg; c.count := c.count - 1;
+		RETURN TRUE
+	END PopItem;
+
+	PROCEDURE CompleteRecv (c: Core);
+	(** Есть данные: исполнить ждущие предложения-приёма. *)
+		VAR r: Offer; m: Msg;
+	BEGIN
+		LOOP
+			IF c.kind = Rendezvous THEN
+				IF ~c.deposit THEN RETURN END;
+				r := PopLive(c.waitR, c.waitRT, FALSE);
+				IF r = NIL THEN RETURN END;
+				r.got := c.item; c.item := NIL; c.deposit := FALSE;
+				IF c.depOffer # NIL THEN
+					Decide(c.depOffer.ctx, c.depOffer.idx); c.depOffer := NIL
+				ELSE
+					c.taken := TRUE
+				END;
+				Decide(r.ctx, r.idx)
+			ELSE
+				IF c.count = 0 THEN RETURN END;
+				r := PopLive(c.waitR, c.waitRT, FALSE);
+				IF r = NIL THEN RETURN END;
+				IF ~PopItem(c, m) THEN RETURN END;
+				r.got := m;
+				Decide(r.ctx, r.idx)
+			END
+		END
+	END CompleteRecv;
+
+	PROCEDURE CompleteSend (c: Core);
+	(** Освободилось место: исполнить ждущие предложения-отправки. *)
+		VAR s: Offer; m: Msg;
+	BEGIN
+		LOOP
+			IF (c.kind = Rendezvous) OR (c.count >= c.capacity) THEN RETURN END;
+			s := PopLive(c.waitS, c.waitST, TRUE);
+			IF s = NIL THEN RETURN END;
+			m := s.msg;
+			AppendItem(c, m);
+			Decide(s.ctx, s.idx);
+			CompleteRecv(c)
+		END
+	END CompleteSend;
+
+	PROCEDURE PutItem* (c: Core; m: Msg);
+	(** Положить сообщение. Для Rendezvous — вклад (не завершает Send сам). *)
+	BEGIN
+		IF c.kind = Rendezvous THEN
+			c.item := m; c.deposit := TRUE; c.depOffer := NIL; c.direct := FALSE;
+			c.directTask := NIL; c.taken := FALSE
+		ELSE
+			AppendItem(c, m)
+		END;
+		CompleteRecv(c)
+	END PutItem;
+
+	PROCEDURE TakeItem* (c: Core; OUT m: Msg): BOOLEAN;
+	(** Взять сообщение из очереди; разбудить ждущего отправителя. *)
+	BEGIN
+		IF ~PopItem(c, m) THEN RETURN FALSE END;
+		CompleteSend(c);
+		RETURN TRUE
+	END TakeItem;
+
+	(* --- Rendezvous ------------------------------------------------------- *)
+
+	PROCEDURE DeliverToReceiver* (c: Core; m: Msg): BOOLEAN;
+		VAR r: Offer;
+	BEGIN
+		r := PopLive(c.waitR, c.waitRT, FALSE);
+		IF r = NIL THEN RETURN FALSE END;
+		r.got := m;
+		Decide(r.ctx, r.idx);
+		RETURN TRUE
+	END DeliverToReceiver;
+
+	PROCEDURE DepositDirect* (c: Core; m: Msg);
+	(** Прямой Send кладёт вклад и ждёт, пока его заберут (taken). *)
+	BEGIN
+		Prune(c);
+		c.item := m; c.deposit := TRUE; c.depOffer := NIL;
+		c.direct := TRUE; c.directTask := Tasks.Current(); c.taken := FALSE
+	END DepositDirect;
+
+	PROCEDURE TakeRendezvous* (c: Core; OUT m: Msg): BOOLEAN;
+	(** Забрать вклад: прямого Send или предложения; или из очереди waitS. *)
+		VAR s: Offer;
+	BEGIN
+		Prune(c);
+		IF c.deposit THEN
+			m := c.item; c.item := NIL; c.deposit := FALSE;
+			IF c.depOffer # NIL THEN
+				Decide(c.depOffer.ctx, c.depOffer.idx); c.depOffer := NIL
+			ELSE
+				c.taken := TRUE	(* условие прямого Send *)
+			END;
+			c.direct := FALSE; c.directTask := NIL;
+			RETURN TRUE
+		END;
+		s := PopLive(c.waitS, c.waitST, TRUE);
+		IF s # NIL THEN
+			m := s.msg;
+			Decide(s.ctx, s.idx);
+			RETURN TRUE
+		END;
+		RETURN FALSE
+	END TakeRendezvous;
+
+	(* --- регистрация альтернатив ------------------------------------------ *)
+
+	PROCEDURE Register (c: Core; o: Offer): BOOLEAN;
+	(** Попробовать исполнить предложение. Под монитором. *)
+	BEGIN
+		IF o.kind = SendKind THEN
+			IF c.kind = Rendezvous THEN
+				IF DeliverToReceiver(c, o.msg) THEN RETURN TRUE END;
+				IF ~c.deposit THEN
+					c.item := o.msg; c.deposit := TRUE; c.depOffer := o;
+					c.direct := FALSE; c.directTask := NIL; c.taken := FALSE;
+					RETURN FALSE
+				END;
+				Enqueue(c.waitS, c.waitST, o); RETURN FALSE
+			ELSIF c.kind = Bounded THEN
+				IF c.count < c.capacity THEN PutItem(c, o.msg); RETURN TRUE END;
+				Enqueue(c.waitS, c.waitST, o); RETURN FALSE
+			ELSE
+				PutItem(c, o.msg); RETURN TRUE
+			END
+		ELSE
+			IF c.kind = Rendezvous THEN
+				IF TakeRendezvous(c, o.got) THEN RETURN TRUE END
+			ELSIF TakeItem(c, o.got) THEN RETURN TRUE
+			END;
+			Enqueue(c.waitR, c.waitRT, o); RETURN FALSE
+		END
+	END Register;
+
+	PROCEDURE Withdraw* (c: Core; o: Offer);
+	(** Снять предложение в конце Select (idempotent). Под монитором. *)
+	BEGIN
+		IF c.deposit & (c.depOffer = o) THEN
+			c.deposit := FALSE; c.item := NIL; c.depOffer := NIL; c.taken := FALSE
+		END;
+		RemoveOffer(c.waitS, c.waitST, o);
+		RemoveOffer(c.waitR, c.waitRT, o)
+	END Withdraw;
+
+	(* --- тайм-аут --------------------------------------------------------- *)
+
+	PROCEDURE (a: Timer) Do;
+	BEGIN
+		IF ~a.ctx.decided THEN
+			a.ctx.decided := TRUE; a.ctx.winner := a.idx;
+			Tasks.Unpark(a.ctx.task)
+		END
+	END Do;
+
+	(* --- альтернативы ----------------------------------------------------- *)
+
+	PROCEDURE AltSend* (core: Core; msg: Msg; OUT op: Op);
+	BEGIN
+		op.kind := SendKind; op.core := core; op.msg := msg; op.got := NIL; op.ms := 0
+	END AltSend;
+
+	PROCEDURE AltRecv* (core: Core; OUT op: Op);
+	BEGIN
+		op.kind := RecvKind; op.core := core; op.msg := NIL; op.got := NIL; op.ms := 0
+	END AltRecv;
+
+	PROCEDURE AltTimeout* (ms: LONGINT; OUT op: Op);
+	BEGIN
+		op.kind := TimeoutKind; op.core := NIL; op.msg := NIL; op.got := NIL; op.ms := ms
+	END AltTimeout;
+
+	(* --- Select ----------------------------------------------------------- *)
+
+	PROCEDURE Select* (VAR ops: ARRAY OF Op): INTEGER;
+	(** Дождаться ровно одной альтернативы; вернуть её индекс.
+		Результат приёма — ops[i].got. Только из задачи. *)
+		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer;
+			i, n, tIdx, winner: INTEGER; tMs: LONGINT; timer: Timer; done: BOOLEAN;
+	BEGIN
+		ASSERT(Tasks.InTask(), 20);
+		n := LEN(ops); ASSERT(n <= maxAlt, 21);
+		tIdx := -1; tMs := -1;
+		NEW(ctx); ctx.task := Tasks.Current(); ctx.decided := FALSE; ctx.winner := -1;
+		FOR i := 0 TO n - 1 DO offers[i] := NIL END;
+		i := 0;
+		WHILE (i < n) & ~ctx.decided DO
+			IF ops[i].kind = TimeoutKind THEN
+				IF (tIdx < 0) OR (ops[i].ms < tMs) THEN tIdx := i; tMs := ops[i].ms END
+			ELSE
+				NEW(offers[i]);
+				offers[i].ctx := ctx; offers[i].idx := i;
+				offers[i].kind := ops[i].kind; offers[i].msg := ops[i].msg;
+				offers[i].got := NIL; offers[i].next := NIL;
+				Kernel.Lock(ops[i].core);
+				Prune(ops[i].core);
+				IF Register(ops[i].core, offers[i]) THEN
+					ctx.decided := TRUE; ctx.winner := i
+				END;
+				Kernel.Unlock(ops[i].core)
+			END;
+			INC(i)
+		END;
+		IF ~ctx.decided & (tIdx >= 0) & (tMs <= 0) THEN
+			ctx.decided := TRUE; ctx.winner := tIdx
+		END;
+		IF ~ctx.decided THEN
+			timer := NIL;
+			IF tIdx >= 0 THEN
+				NEW(timer); timer.ctx := ctx; timer.idx := tIdx;
+				Services.DoLater(timer, Services.Ticks() + tMs)
+			END;
+			WHILE ~ctx.decided DO Tasks.Park END;
+			IF timer # NIL THEN Services.RemoveAction(timer) END
+		END;
+		(* снять проигравшие (и победителя — Withdraw идемпотентен) *)
+		FOR i := 0 TO n - 1 DO
+			IF offers[i] # NIL THEN
+				Kernel.Lock(ops[i].core);
+				Withdraw(ops[i].core, offers[i]);
+				Kernel.Unlock(ops[i].core)
+			END
+		END;
+		winner := ctx.winner;
+		done := (0 <= winner) & (winner < n);
+		IF done THEN
+			IF (ops[winner].kind = RecvKind) & (offers[winner] # NIL) THEN
+				ops[winner].got := offers[winner].got
+			END
+		END;
+		RETURN winner
+	END Select;
+
+END AsyncSelect.

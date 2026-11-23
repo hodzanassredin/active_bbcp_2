@@ -38,6 +38,12 @@ echo "build64: компиляция подсистем:$subs"
 	echo 'DevCompiler64.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
 	echo "DevCompiler64.CompileSubs @Lin $subs"
+	# Async — отдельным вызовом: в общем списке CompileSubs спотыкается
+	# о псевдомодуль ACTIVE («sourcefile for ACTIVE not found»), хотя
+	# по отдельности подсистема собирается.
+	if [ -d "$BB/Async/Mod" ] || [ -d "$BB/Async/Mod64" ]; then
+		echo "DevCompiler64.CompileSubs @Lin Async"
+	fi
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$BB/dev0Linux" < "$LOG.cmd" > "$LOG" 2>&1; then

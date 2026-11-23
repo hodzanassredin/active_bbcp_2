@@ -11,3 +11,5 @@ UnitTests||180|UnitTestsProbe
 CheckTests|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
 Test64Active|proc|300|
 Test64Yield|proc|300||^
+Test64Channels|proc|300|AsyncSelect AsyncChan AsyncOnce
+Test64IO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
