@@ -14,7 +14,7 @@ MODULE AsyncComputon;
 	запрос повторяется на живом; ошибка Do возвращается вызывающему. *)
 
 	IMPORT S := SYSTEM, Kernel, Tasks, Services, Poller, Stores, Files,
-		LinNative, LinLibc, Dialog, Console, Strings;
+		LinNative, LinLibc, Dialog, Console, Strings, AsyncSelect;
 
 	CONST
 		maxPool = 16;
@@ -33,6 +33,8 @@ MODULE AsyncComputon;
 			buf: POINTER TO ARRAY OF SHORTCHAR;
 			c: Computon;
 			waiting: Tasks.Task;
+			wctx: AsyncSelect.Ctx;
+			widx: INTEGER;
 			used, done: BOOLEAN
 		END;
 
@@ -43,6 +45,11 @@ MODULE AsyncComputon;
 			dead: BOOLEAN;
 			waiter: WWait;
 			buf: ARRAY maxFrame OF SHORTCHAR	(* накопитель ответов *)
+		END;
+
+		PullSignal = POINTER TO RECORD (AsyncSelect.Signal)
+			rank, tag: INTEGER;
+			req: Req; ctx: AsyncSelect.Ctx
 		END;
 
 		DoAction = RECORD (Services.SafeAction) c: Computon END;
@@ -248,6 +255,17 @@ MODULE AsyncComputon;
 		RETURN S.VAL(Req, S.ADR(reqs[i]))
 	END ReqAt;
 
+	PROCEDURE WakeReq (req: Req);
+		VAR t: Tasks.Task; ctx: AsyncSelect.Ctx; idx: INTEGER;
+	BEGIN
+		IF req.wctx # NIL THEN
+			ctx := req.wctx; idx := req.widx; req.wctx := NIL;
+			AsyncSelect.SignalReady(ctx, idx)
+		ELSIF req.waiting # NIL THEN
+			t := req.waiting; req.waiting := NIL; Tasks.Unpark(t)
+		END
+	END WakeReq;
+
 	PROCEDURE FindReq (tag: INTEGER): Req;
 		VAR i: INTEGER;
 	BEGIN
@@ -257,6 +275,29 @@ MODULE AsyncComputon;
 		RETURN NIL
 	END FindReq;
 
+	PROCEDURE (s: PullSignal) Arm (ctx: AsyncSelect.Ctx; idx: INTEGER): BOOLEAN;
+	BEGIN
+		s.ctx := ctx;
+		s.req := FindReq(s.tag);
+		IF s.req = NIL THEN RETURN TRUE END;	(* решения не будет: ошибка *)
+		IF s.req.done THEN RETURN TRUE END;
+		s.req.wctx := ctx; s.req.widx := idx;
+		RETURN FALSE
+	END Arm;
+
+	PROCEDURE (s: PullSignal) Disarm;
+	BEGIN
+		IF (s.req # NIL) & (s.req.wctx = s.ctx) THEN s.req.wctx := NIL END
+	END Disarm;
+
+	PROCEDURE AltPull* (rank, tag: INTEGER): AsyncSelect.Signal;
+	(** Альтернатива Select: готовность Pull(rank, tag). *)
+		VAR s: PullSignal;
+	BEGIN
+		NEW(s); s.rank := rank; s.tag := tag; s.req := NIL; s.ctx := NIL;
+		RETURN s
+	END AltPull;
+
 	PROCEDURE NewReq (tag: INTEGER): Req;
 		VAR i: INTEGER;
 	BEGIN
@@ -265,7 +306,8 @@ MODULE AsyncComputon;
 				reqs[i].used := TRUE; reqs[i].tag := tag;
 				reqs[i].done := FALSE; reqs[i].c := NIL;
 				reqs[i].buf := NIL; reqs[i].len := 0; reqs[i].status := 0;
-				reqs[i].waiting := NIL; reqs[i].rank := -1;
+				reqs[i].waiting := NIL; reqs[i].wctx := NIL; reqs[i].widx := 0;
+				reqs[i].rank := -1;
 				RETURN ReqAt(i)
 			END
 		END;
@@ -289,8 +331,7 @@ MODULE AsyncComputon;
 	BEGIN
 		IF (req # NIL) & ~req.done THEN
 			req.status := err; req.done := TRUE;
-			t := req.waiting; req.waiting := NIL;
-			IF t # NIL THEN Tasks.Unpark(t) END
+			WakeReq(req)
 		END
 	END FailReq;
 
@@ -470,9 +511,7 @@ MODULE AsyncComputon;
 				ELSE req.status := st
 				END;
 				req.done := TRUE;
-				IF req.waiting # NIL THEN
-					Tasks.Unpark(req.waiting); req.waiting := NIL
-				END
+				WakeReq(req)
 			END;
 			INC(off, 12 + len)
 		END;

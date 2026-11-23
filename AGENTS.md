@@ -192,7 +192,7 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # Unit: 7 модулей, 45 тестов
+tools/test.sh                     # Unit: 11 модулей, 66 тестов
 tools/check-reject.sh             # 8 отказов компилятора этапа 6
 tools/bootstrap.sh                # два прохода Dev, сверка .ocf/.osf
 tools/test.sh --list
@@ -238,14 +238,41 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `Test64Yield`; отказы — `tools/check-reject.sh`; бутстрап —
   `tools/bootstrap.sh` (второй проход совпадает, кроме 12-байтовой
   метки времени в `.ocf`).
+- Этап 7: подсистема `Async/Mod` — `AsyncOnce` (Fill/Read),
+  `AsyncChan` (`Chan`-встреча, `Buffer`, `Mailbox`) на
+  `[exclusive]`+`ACTIVE.AWAIT`, `AsyncSelect` (`Alt`/`Select`:
+  предложения в каналах, общий флаг решения, nack, тайм-аут) и
+  `AsyncIO` («читать/писать или ждать»). `System/Mod/Poller.cp` —
+  реестр готовности дескрипторов; `LinConsole.WaitInput` опрашивает
+  stdin и его одним `poll`. `CommTCP__Lin` переведён с `select` на
+  `poll` (fd_set < 1024), очередь accept — 128. Тесты —
+  `Test64Channels`, `Test64IO` (эхо/HTTP, 1000 соединений, покой).
+- Этап 8: `Async/Mod64/Work.cp` — пул pthread-нитей; задания и
+  результаты в статических слотах, готовность — байт в pipe,
+  `Poller` будит задачу. `Execute` из задачи — точка ожидания.
+  `LinThreads`/`LinNative` — отдельные модули объявлений (символы
+  `LinLibc` в хосте не обновить). `Kernel.WorkerAllocs` — отладочный
+  счётчик `NEW` из рабочей нити. Тесты — `Test64Workers`.
+- Этап 9: `Async/Mod64/Computon.cp` — `Computon = Stores.Store` с
+  `Do`, `Push/Pull/Try/Wait/Stop/SetHook/Unload`, транспорт —
+  `fork+exec` `blackbox-console` и три pipe; гибель исполнителя —
+  повтор, ошибка `Do` — код. MPI в системе нет, транспорт MPI не
+  делался. Тесты — `Test64Computons` (1/4/16 процессов, убийство, `AltPull`).
+- Подсистема `Async` собирается в `tools/build64.sh` **отдельным**
+  вызовом `CompileSubs @Lin Async`: в общем списке `CompileSubs`
+  спотыкается о псевдомодуль `ACTIVE` («sourcefile for ACTIVE not
+  found»).
 - `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
   `.cp`, конвертировать нечего. `DevOnce` заменён на
   `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
   в консольном x64.
-- Открыто: GUI-прогоны, `pack-dev0-linux` (в снимке отсутствует;
+- Открыто: MPI/TCP-транспорты компутонов; Zonnon-протокол канала;
+  Windows x64 для рабочих нитей и процессов; GUI-прогоны,
+  `pack-dev0-linux` (в снимке отсутствует;
   `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
   сигналу и нити ОС, `[exclusive]` на 32-битной цели,
   `Platform.AllocateStackMem` для Windows x64, отложенные
   финализаторы, нагрузочный тест «1000 задач час».
 - Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица
-  изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер).
+  изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер),
+  `docs/async-library.md` (каналы, рабочие нити, компутоны).

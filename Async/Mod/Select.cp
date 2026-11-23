@@ -18,7 +18,7 @@ MODULE AsyncSelect;
 		maxAlt = 32;
 
 		(** вид операции **)
-		SendKind* = 0; RecvKind* = 1; TimeoutKind* = 2;
+		SendKind* = 0; RecvKind* = 1; TimeoutKind* = 2; SignalKind* = 3;
 		(** вид ядра **)
 		Rendezvous* = 0; Bounded* = 1; Mailbox* = 2;
 
@@ -28,7 +28,7 @@ MODULE AsyncSelect;
 			владения, но не общий изменяемый объект. *)
 		Msg* = POINTER TO ABSTRACT RECORD END;
 
-		Ctx = POINTER TO RECORD
+		Ctx* = POINTER TO RECORD
 			task: Tasks.Task;
 			decided: BOOLEAN;
 			winner: INTEGER	(* индекс альтернативы; -1 — ещё нет *)
@@ -64,16 +64,26 @@ MODULE AsyncSelect;
 			ih, it: Item				(* очередь Bounded/Mailbox *)
 		END;
 
+		(** Внешний сигнал: Alt, который будит не канал, а владелец
+			(например, готовность Pull компутона). *)
+		Signal* = POINTER TO ABSTRACT RECORD END;
+
 		(** Альтернатива Select. *)
 		Op* = RECORD
 			kind*: INTEGER;
 			core*: Core;
 			msg*: Msg;		(* для отправки *)
 			got*: Msg;		(* результат приёма *)
+			sig*: Signal;
 			ms*: LONGINT	(* для тайм-аута *)
 		END;
 
 		Timer = POINTER TO RECORD (Services.Action) ctx: Ctx; idx: INTEGER END;
+
+	PROCEDURE (s: Signal) Arm* (ctx: Ctx; idx: INTEGER): BOOLEAN, NEW, ABSTRACT;
+	(** TRUE — сигнал уже готов; иначе владелец позовёт SignalReady. *)
+
+	PROCEDURE (s: Signal) Disarm*, NEW, ABSTRACT;
 
 	(* --- вспомогательное -------------------------------------------------- *)
 
@@ -94,6 +104,17 @@ MODULE AsyncSelect;
 			Tasks.Unpark(ctx.task)
 		END
 	END Decide;
+
+	PROCEDURE SignalReady* (ctx: Ctx; idx: INTEGER);
+	(** Владелец сигнала: альтернатива готова. *)
+	BEGIN
+		Decide(ctx, idx)
+	END SignalReady;
+
+	PROCEDURE CtxTask* (ctx: Ctx): Tasks.Task;
+	BEGIN
+		RETURN ctx.task
+	END CtxTask;
 
 	PROCEDURE Enqueue (VAR head, tail: Offer; o: Offer);
 	BEGIN
@@ -335,18 +356,27 @@ MODULE AsyncSelect;
 
 	PROCEDURE AltSend* (core: Core; msg: Msg; OUT op: Op);
 	BEGIN
-		op.kind := SendKind; op.core := core; op.msg := msg; op.got := NIL; op.ms := 0
+		op.kind := SendKind; op.core := core; op.msg := msg; op.got := NIL;
+		op.sig := NIL; op.ms := 0
 	END AltSend;
 
 	PROCEDURE AltRecv* (core: Core; OUT op: Op);
 	BEGIN
-		op.kind := RecvKind; op.core := core; op.msg := NIL; op.got := NIL; op.ms := 0
+		op.kind := RecvKind; op.core := core; op.msg := NIL; op.got := NIL;
+		op.sig := NIL; op.ms := 0
 	END AltRecv;
 
 	PROCEDURE AltTimeout* (ms: LONGINT; OUT op: Op);
 	BEGIN
-		op.kind := TimeoutKind; op.core := NIL; op.msg := NIL; op.got := NIL; op.ms := ms
+		op.kind := TimeoutKind; op.core := NIL; op.msg := NIL; op.got := NIL;
+		op.sig := NIL; op.ms := ms
 	END AltTimeout;
+
+	PROCEDURE AltSignal* (sig: Signal; OUT op: Op);
+	BEGIN
+		op.kind := SignalKind; op.core := NIL; op.msg := NIL; op.got := NIL;
+		op.sig := sig; op.ms := 0
+	END AltSignal;
 
 	(* --- Select ----------------------------------------------------------- *)
 
@@ -365,6 +395,10 @@ MODULE AsyncSelect;
 		WHILE (i < n) & ~ctx.decided DO
 			IF ops[i].kind = TimeoutKind THEN
 				IF (tIdx < 0) OR (ops[i].ms < tMs) THEN tIdx := i; tMs := ops[i].ms END
+			ELSIF ops[i].kind = SignalKind THEN
+				IF ops[i].sig # NIL THEN
+					IF ops[i].sig.Arm(ctx, i) THEN ctx.decided := TRUE; ctx.winner := i END
+				END
 			ELSE
 				NEW(offers[i]);
 				offers[i].ctx := ctx; offers[i].idx := i;
@@ -397,6 +431,8 @@ MODULE AsyncSelect;
 				Kernel.Lock(ops[i].core);
 				Withdraw(ops[i].core, offers[i]);
 				Kernel.Unlock(ops[i].core)
+			ELSIF (ops[i].kind = SignalKind) & (ops[i].sig # NIL) THEN
+				ops[i].sig.Disarm
 			END
 		END;
 		winner := ctx.winner;

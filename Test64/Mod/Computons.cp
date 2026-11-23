@@ -6,7 +6,7 @@ MODULE Test64Computons;
 	после убитого исполнителя (Sleeper) и возврат ошибки Do (Boomer). *)
 
 	IMPORT S := SYSTEM, Kernel, Services, Tasks, Stores, AsyncComputon,
-		AsyncIO, LinNative, UnitAssert;
+		AsyncIO, AsyncChan, AsyncSelect, LinNative, UnitAssert;
 
 	CONST
 		m = 12;
@@ -19,13 +19,15 @@ MODULE Test64Computons;
 
 		SquareTask = POINTER TO RECORD (Tasks.Task) n, done, bad: INTEGER END;
 		ResultTask = POINTER TO RECORD (Tasks.Task) rank, tag: INTEGER; ok: BOOLEAN; y: INTEGER END;
+		ChanSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
+		AltTask = POINTER TO RECORD (Tasks.Task) tag, idx1, idx2, y: INTEGER END;
 
 	VAR
 		badCount, goodCount, doneFlag: INTEGER;
 		resultOk: BOOLEAN;
 		resultY: INTEGER;
 		resultErr: INTEGER;
-		boomTask: ResultTask;
+		boomTask: ResultTask; altTask: AltTask; altDone, altIdx1, altIdx2, altY: INTEGER; altChan: AsyncChan.Chan;
 
 	PROCEDURE (c: Square) Do;
 	BEGIN
@@ -187,5 +189,50 @@ MODULE Test64Computons;
 		UnitAssert.True(~resultOk, "Do error gives NIL");
 		UnitAssert.True(resultErr # 0, "error code returned")
 	END TestDoError;
+
+	(* --- Alt ждёт Pull ---------------------------------------------------- *)
+
+	PROCEDURE (t: ChanSender) Run;
+	BEGIN
+		Tasks.Sleep(10);
+		t.c.Send(NIL)
+	END Run;
+
+	PROCEDURE (t: AltTask) Run;
+		VAR ops: ARRAY 2 OF AsyncSelect.Op; c: AsyncComputon.Computon;
+	BEGIN
+		AsyncChan.RecvAlt(altChan, ops[0]);
+		AsyncSelect.AltSignal(AsyncComputon.AltPull(0, t.tag), ops[1]);
+		altIdx1 := AsyncChan.Select(ops);
+
+		AsyncSelect.AltSignal(AsyncComputon.AltPull(0, t.tag), ops[0]);
+		AsyncChan.TimeoutAlt(5000, ops[1]);
+		altIdx2 := AsyncChan.Select(ops);
+
+		altY := -1;
+		IF AsyncComputon.Try(0, t.tag, c) THEN
+			WITH c: Sleeper DO altY := c.y END
+		END;
+		altDone := 1
+	END Run;
+
+	PROCEDURE AltDoneCond (): BOOLEAN;
+	BEGIN RETURN altDone = 1 END AltDoneCond;
+
+	PROCEDURE TestAltPull*;
+		VAR c: Sleeper; t: AltTask; s: ChanSender;
+	BEGIN
+		AsyncComputon.Start(1);
+		NEW(c); c.ms := 200; c.y := -1;
+		AsyncComputon.Push(c, 0, 42);
+		altChan := AsyncChan.NewChan();
+		NEW(s); s.c := altChan; Tasks.Start(s);
+		altDone := 0; altIdx1 := -1; altIdx2 := -1; altY := -1;
+		NEW(t); t.tag := 42; Tasks.Start(t);
+		UnitAssert.True(PumpUntil(20000, AltDoneCond), "alt+pull finishes");
+		UnitAssert.EqualInt(0, altIdx1, "channel wins the first select");
+		UnitAssert.EqualInt(0, altIdx2, "pull signal wins the second select");
+		UnitAssert.EqualInt(200, altY, "computon result after alt")
+	END TestAltPull;
 
 END Test64Computons.

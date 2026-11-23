@@ -322,6 +322,127 @@ while waiting and re-enters with the monitor already held.
 module share one monitor, and `AWAIT` reads module globals. Two tasks
 may call `SetLevel` and `WaitLow` without any explicit `Lock`.
 
+## Channels and select (stage 7)
+
+The optional `Async` subsystem is written on the same
+`[exclusive]`/`ACTIVE.AWAIT` extension. Module `AsyncOnce` is a
+single-assignment variable:
+
+```
+o := AsyncOnce.New();
+o.FillInt(42);          (* once only; a second Fill traps *)
+x := o.ReadInt();       (* waits until filled *)
+```
+
+`AsyncChan` provides a rendezvous channel `Chan`, a bounded `Buffer` and
+an unbounded `Mailbox`:
+
+```
+c := AsyncChan.NewChan();  b := AsyncChan.NewBuffer(8);
+m := AsyncChan.NewMailbox();
+c.Send(msg); c.Recv(msg);          (* rendezvous *)
+b.Send(msg); b.Recv(msg);          (* bounded *)
+m.Send(msg); m.Recv(msg);          (* unbounded *)
+```
+
+A message is `AsyncSelect.Msg`, a pointer to an extensible record; the
+receiver dispatches with `WITH`. After sending, a message must not be
+modified (the Clojure/Erlang discipline).
+
+`Select`/`Alt` follows Hopac/CML. Alternatives are descriptions in an
+array; `Select` returns the index of the one that fired:
+
+```
+VAR ops: ARRAY 3 OF AsyncSelect.Op;
+AsyncChan.RecvAlt(a, ops[0]);
+AsyncChan.RecvAlt(b, ops[1]);
+AsyncChan.TimeoutAlt(100, ops[2]);
+i := AsyncChan.Select(ops);
+```
+
+Each alternative leaves an offer in the channel with a shared decision
+flag. The first channel that can execute an offer sets the flag under
+its monitor and wakes the task with `Tasks.Unpark`; the owner withdraws
+the losing offers when it wakes (nack). A deposited send offer is rolled
+back if another alternative won. `Select` may only be called from a
+task.
+
+`Poller` (`System/Mod/Poller.cp`) registers descriptors; the console
+host polls stdin and the registered descriptors in one `poll`. `AsyncIO`
+builds "read or wait" and "write or wait" on top of `CommStreams`:
+
+```
+AsyncIO.Read(s, buf, beg, len, read);
+AsyncIO.Write(s, buf, beg, len, written);
+AsyncIO.Accept(l, s, timeout);
+```
+
+`CommStreams.Stream` and `Listener` have `Handle()`; `CommTCP__Lin`
+returns the socket and has been switched from `select` to `poll`
+(`fd_set` is limited to 1024 descriptors), with a larger accept
+backlog. With a thousand open connections at rest, the test process
+uses 7–50 ms of CPU per second.
+
+There is no Zonnon-style channel protocol check yet. `AsyncTask` from
+Ivan's framework is not present in this snapshot; `Tasks.Task` plays
+the role of the automaton, and `Select`/`Park`/`Join` bridge tasks and
+channels.
+
+## OS worker threads (stage 8)
+
+`AsyncWork` runs blocking OS calls in a pool of pthread worker threads.
+The body of a worker is a `[ccall]` procedure over `[untagged]` memory:
+no `NEW`, no `Kernel.Try`, no framework calls and no logging. Jobs and
+results live in static slots protected by a pthread mutex; a worker
+writes one byte into a pipe, the main loop sees it through `Poller` and
+wakes the waiting task:
+
+```
+id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* from a task *)
+status := AsyncWork.Result(id);
+```
+
+`ReadFileJob`, `WriteFileJob` and `ResolveJob` (`getaddrinfo`) are
+provided. `Kernel.EnterWorker`/`WorkerAllocs()` is a debug counter for
+heap accesses from workers. SIGINT and SIGTERM are blocked in the
+worker threads. The pool is Linux AMD64 only; Windows is not
+implemented. A blocking call made directly from a task still freezes
+the framework — move it to a worker.
+
+## Computons (stage 9)
+
+`AsyncComputon` reproduces the `RobustParallel` interface:
+
+```
+TYPE Computon* = POINTER TO ABSTRACT RECORD (Stores.Store) END;
+     PROCEDURE (c: Computon) Do*, NEW, ABSTRACT;
+
+AsyncComputon.Start(n);
+AsyncComputon.Push(c, rank, tag);
+r := AsyncComputon.Pull(rank, tag);    (* a wait point *)
+AsyncComputon.Try(rank, tag, r);
+AsyncComputon.Stop;
+```
+
+A computon is serialized with `Stores` and executed in a separate
+BlackBox process (owned heap and collector), so `Do` may use `NEW`.
+The transport is `fork` + `exec` of the same `blackbox-console` with
+three pipes per executor. The computon type must implement
+`Externalize`/`Internalize`.
+
+`Pull` from a task is a wait point (`Tasks.Sleep` with a deadline),
+and `AsyncComputon.AltPull` is a `Select` alternative: a `Select` can
+wait for a computon result together with channels and a timeout.
+When an executor dies, `Poller` sees EOF and the request is retried on
+a live executor; a `Do` trap is caught in the worker and returned as an
+error code (`Pull` returns `NIL`, `LastError()` gives the code).
+Measured: 12 computons on 1, 4 and 16 local processes, same result; a
+`SIGKILL`ed executor is retried in 414 ms.
+
+MPI is not available in this environment (`mpicc`/`mpirun`/`libmpi`
+absent), so the MPI transport was not implemented; the interface does
+not depend on the transport. TCP transport is also not implemented.
+
 ## Relation to Active Oberon and limits
 
 - The condition is a procedure plus a frame (Muller's scheme), not a
@@ -333,11 +454,13 @@ may call `SetLevel` and `WaitLow` without any explicit `Lock`.
   counted.
 - `Unlock` and `Await` evaluate the waiters' conditions; a trap there
   is forwarded to the waiter instead of hitting the leaving task.
-- Only one OS thread; no parallel Component Pascal code. A blocking OS
-  call must be moved to an OS worker thread (not implemented yet) or it
-  freezes all tasks and the framework.
-- There is no `Select`/`Alt` yet; it is built on `Tasks.Park`/`Unpark`
-  in the library stage.
+- One OS thread executes Component Pascal; parallel CP code does not
+  exist. Blocking OS calls can be moved to the worker-thread pool of
+  stage 8; a blocking call made directly from a task still freezes all
+  tasks and the framework.
+- `Select`/`Alt`, channels, `Once` and I/O waits are in the optional
+  `Async` subsystem (stage 7), built on `Tasks.Park`/`Unpark` and
+  monitors.
 
 ## Status
 
@@ -349,6 +472,20 @@ Implemented in this branch (stage 6): the `ACTIVE` pseudo-module,
 `ACTIVE.AWAIT` with the Müller condition procedure, `[exclusive]` on
 methods and top-level procedures, module monitors, the `^` yield-point
 key, and the compiler-side trap release through the `Kernel.Try` chain.
+
+Implemented in this branch (stage 7): `AsyncOnce`, `AsyncChan` (`Chan`,
+`Buffer`, `Mailbox`), `AsyncSelect` (`Alt`/`Select` with offers, nack
+and timeout), `Poller` and `AsyncIO`.
+
+Implemented in this branch (stage 8): `AsyncWork` (pthread pool, result
+pipe, `getaddrinfo` and file jobs), `LinThreads`, `LinNative`, the
+`Kernel` worker allocation counter.
+
+Implemented in this branch (stage 9): `AsyncComputon` (local BlackBox
+processes over pipes, `Push`/`Pull`/`Try`, retry after executor death,
+error results). MPI and TCP transports are not implemented; the MPI
+toolchain is absent from this machine. The Zonnon-style channel protocol
+is not implemented.
 
 ### Compiler implementation notes
 
