@@ -158,7 +158,8 @@ MODULE Test64Computons;
 	BEGIN
 		ok := AsyncComputon.SetTransport("pipe");
 		IF ~ok THEN ASSERT(FALSE, 20) END;
-		UnitAssert.True(~AsyncComputon.SetTransport("mpi"), "unknown transport rejected");
+		UnitAssert.True(~AsyncComputon.SetTransport("shm"), "unknown transport rejected");
+		UnitAssert.True(AsyncComputon.SetTransport("mpi"), "mpi transport name accepted");
 		ok := AsyncComputon.SetTransport("tcp");
 		UnitAssert.True(ok, "tcp accepted")
 	END TestTransportSetting;
