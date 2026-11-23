@@ -230,6 +230,21 @@ MODULE Kernel;
 			trapped: BOOLEAN
 		END;
 
+		(* Реестр стеков (этап 2). Одна запись на любой стек: главный,
+		   сопрограмма/задача (этап 3), сигнальный. Общий для будущих нитей:
+		   никаких особых случаев «главный + сопрограммы». *)
+		Stack* = POINTER TO StackDesc;
+		StackDesc* = RECORD
+			next: Stack;
+			lo*, hi*: S.ADDRESS;	(* стек занимает [lo, hi); hi — верх (начальный SP) *)
+			sp: S.ADDRESS;			(* сохранённый SP, пока стек не текущий; hi — пустой *)
+			tryContext: S.ADDRESS;	(* платформенный контекст последнего Kernel.Try *)
+			trapStack: TrapCleaner;	(* цепочка уборщиков на этом стеке *)
+			tryCount: INTEGER;
+			signal: BOOLEAN;		(* сигнальный стек: сканировать прерванный стек по Kernel.sp *)
+			main: BOOLEAN			(* главный стек процесса *)
+		END;
+
 		PtrType = RECORD v: S.PTR END;	(* used for array of pointer *)
 		Char8Type = RECORD v: SHORTCHAR END;
 		Char16Type = RECORD v: CHAR END;
@@ -352,6 +367,10 @@ MODULE Kernel;
 		trapStack: TrapCleaner;
 		actual: Module;	(* valid during module initialization *)
 
+		stacks: Stack;		(* реестр стеков; первый — главный *)
+		mainStack: Stack;
+		mainStackRec: StackDesc;	(* статическая запись: регистрация до кучи *)
+
 		trapViewer, trapChecker: Handler;
 		guarded: BOOLEAN; (** guarded => trap viewer (reporter) should not be called; this suppresses trap reporting *)
 		static, inDll, terminating: BOOLEAN;
@@ -413,6 +432,14 @@ MODULE Kernel;
 	(*PROCEDURE (VAR p: Platform) Try* (h: TryHandler; a, b, c: INTEGER), NEW, ABSTRACT;
 	(* hook for implementation of PROCEDURE Try *)*)
 	PROCEDURE (VAR p: Platform) InActivationStack* (pc: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+	(* Контекст Kernel.Try на текущем стеке: сохраняется/восстанавливается
+	   при переключении стеков (этап 2). По умолчанию пусто; LinKernel
+	   перекрывает currentTryContext. *)
+	PROCEDURE (VAR p: Platform) GetTryContext* (): S.ADDRESS, NEW, EXTENSIBLE;
+	BEGIN RETURN 0 END GetTryContext;
+	PROCEDURE (VAR p: Platform) SetTryContext* (ctx: S.ADDRESS), NEW, EXTENSIBLE;
+	BEGIN
+	END SetTryContext;
 	PROCEDURE (VAR p: Platform) IsReadable* (from, to: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) PrintHeaderInfo*, NEW, EMPTY;	(* EMPTY *)
 	PROCEDURE (VAR p: Platform) GetTrapInfo* (VAR pc, sp, fp: S.ADDRESS; VAR err: INTEGER; VAR val: S.ADDRESS; OUT recursive: BOOLEAN), NEW, ABSTRACT;
@@ -1411,10 +1438,181 @@ MODULE Kernel;
 
 	PROCEDURE^ Collect*;
 
+	(* -------------------- stack registry (этап 2) -------------------- *)
+	(* Один реестр для любых стеков. Никакого особого случая «главный плюс
+	   сопрограммы»: главный — просто запись с main = TRUE. *)
+
+	PROCEDURE StackOf* (adr: S.ADDRESS): Stack;
+	(* Запись, в диапазон [lo, hi) которой попадает adr. Если диапазоны
+	   пересекаются (номинальный запас главного стека), выбирается самый
+	   узкий — так mmap-стек сопрограммы не путается с главным. *)
+		VAR s, best: Stack; span, bestSpan: S.ADDRESS;
+	BEGIN
+		best := NIL; bestSpan := 0; s := stacks;
+		WHILE s # NIL DO
+			IF (s.lo <= adr) & (adr < s.hi) THEN
+				span := s.hi - s.lo;
+				IF (best = NIL) OR (span < bestSpan) THEN best := s; bestSpan := span END
+			END;
+			s := s.next
+		END;
+		RETURN best
+	END StackOf;
+
+	PROCEDURE InRegisteredStack* (adr: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN StackOf(adr) # NIL
+	END InRegisteredStack;
+
+	PROCEDURE CurrentStack* (): Stack;
+		VAR sp: S.ADDRESS;
+	BEGIN
+		S.GETREG(SP, sp);
+		RETURN StackOf(sp)
+	END CurrentStack;
+
+	PROCEDURE NewStack (lo, hi: S.ADDRESS; signal: BOOLEAN): Stack;
+		VAR s: Stack;
+	BEGIN
+		NEW(s);
+		s.lo := lo; s.hi := hi; s.sp := hi;	(* пустой стек *)
+		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
+		s.signal := signal; s.main := FALSE;
+		s.next := stacks; stacks := s;
+		RETURN s
+	END NewStack;
+
+	PROCEDURE RegisterStack* (lo, hi: S.ADDRESS): Stack;
+	(** Зарегистрировать стек [lo, hi). Вызывается владельцем стека
+		(сейчас — помощником сопрограмм, позже — Tasks) до первого входа. *)
+	BEGIN
+		IF (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN NIL END;
+		RETURN NewStack(lo, hi, FALSE)
+	END RegisterStack;
+
+	PROCEDURE RegisterSignalStack* (lo, hi: S.ADDRESS): Stack;
+	(** Сигнальный стек (sigaltstack): MarkLocals сканирует по нему
+		прерванный стек, адрес SP которого лежит в Kernel.sp. *)
+	BEGIN
+		IF (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN NIL END;
+		RETURN NewStack(lo, hi, TRUE)
+	END RegisterSignalStack;
+
+	PROCEDURE UnregisterStack* (s: Stack);
+		VAR p: Stack;
+	BEGIN
+		IF s # NIL THEN
+			IF stacks = s THEN stacks := s.next
+			ELSE
+				p := stacks;
+				WHILE (p # NIL) & (p.next # s) DO p := p.next END;
+				IF p # NIL THEN p.next := s.next END
+			END;
+			s.next := NIL
+		END
+	END UnregisterStack;
+
+	PROCEDURE UnregisterStackAt* (lo: S.ADDRESS);
+	(** Снять регистрацию по нижней границе (для владельца, знающего только адрес). *)
+		VAR s: Stack;
+	BEGIN
+		s := stacks;
+		WHILE (s # NIL) & ((s.lo # lo) OR s.main) DO s := s.next END;
+		IF s # NIL THEN UnregisterStack(s) END
+	END UnregisterStackAt;
+
+	PROCEDURE SwitchSave*;
+	(** Вызывается переключателем ДО ухода с текущего стека: сохранить
+		состояние исполнения в запись стека и очистить глобальное, чтобы
+		следующий стек начал со своего. *)
+		VAR sp: S.ADDRESS; s: Stack;
+	BEGIN
+		S.GETREG(SP, sp);
+		s := StackOf(sp);
+		IF s # NIL THEN
+			s.sp := sp;
+			IF platform # NIL THEN s.tryContext := platform.GetTryContext() END;
+			s.trapStack := trapStack;
+			s.tryCount := tryCount
+		END;
+		IF platform # NIL THEN platform.SetTryContext(0) END;
+		trapStack := NIL; tryCount := 0
+	END SwitchSave;
+
+	PROCEDURE SwitchRestore*;
+	(** Вызывается переключателем ПОСЛЕ входа на стек: восстановить
+		состояние исполнения этого стека. *)
+		VAR sp: S.ADDRESS; s: Stack;
+	BEGIN
+		S.GETREG(SP, sp);
+		s := StackOf(sp);
+		IF s # NIL THEN
+			IF platform # NIL THEN platform.SetTryContext(s.tryContext) END;
+			trapStack := s.trapStack;
+			tryCount := s.tryCount
+		ELSE
+			IF platform # NIL THEN platform.SetTryContext(0) END;
+			trapStack := NIL; tryCount := 0
+		END
+	END SwitchRestore;
+
+	PROCEDURE UpdateMainStack (sp: S.ADDRESS);
+	(* Верх главного стека — самый старший виденный SP. Kernel.Start приходит
+	   с более глубоким (меньшим) SP, чем кадры приложения, поэтому уменьшать
+	   границу нельзя: иначе FP вызывающего окажется вне диапазона. *)
+	BEGIN
+		IF mainStack # NIL THEN
+			IF sp > mainStack.hi THEN mainStack.hi := sp END;
+			mainStack.lo := mainStack.hi - maxStackScan
+		END
+	END UpdateMainStack;
+
+	PROCEDURE FrameInModule (s: Stack; modLo, modHi: S.ADDRESS): BOOLEAN;
+	(* Есть ли в цепочке кадров стека s адрес возврата из кода [modLo, modHi)?
+	   Текущий стек идёт от FP, спящий — от сохранённого SP. Чтения
+	   ограничены диапазоном стека и проверяются IsReadable. *)
+		VAR fp, newfp, p: S.ADDRESS; ar: AdrRef; guard: INTEGER; sp: S.ADDRESS;
+	BEGIN
+		S.GETREG(SP, sp);
+		IF StackOf(sp) = s THEN S.GETREG(FP, fp) ELSE fp := s.sp END;
+		IF fp = 0 THEN RETURN FALSE END;
+		guard := 0;
+		WHILE (s.lo <= fp) & (fp < s.hi) & (guard < 4096) DO
+			IF (fp MOD 8 # 0) OR ~IsReadable(fp, fp + 2 * SIZE(S.ADDRESS)) THEN RETURN FALSE END;
+			ar := S.VAL(AdrRef, fp + SIZE(S.ADDRESS)); p := ar.a;
+			IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
+			ar := S.VAL(AdrRef, fp); newfp := ar.a;
+			IF newfp <= fp THEN RETURN FALSE END;
+			fp := newfp; INC(guard)
+		END;
+		RETURN FALSE
+	END FrameInModule;
+
+	PROCEDURE StackUsesModule (mod: Module): BOOLEAN;
+		VAR s: Stack;
+	BEGIN
+		s := stacks;
+		WHILE s # NIL DO
+			IF FrameInModule(s, mod.code, mod.code + mod.csize) THEN RETURN TRUE END;
+			s := s.next
+		END;
+		RETURN FALSE
+	END StackUsesModule;
+
+
 	PROCEDURE UnloadMod* (mod: Module);
 		VAR i: INTEGER; t: Command; ap: AnyRef; ir: IntRef;
 	BEGIN
 		IF mod.refcnt = 0 THEN
+			(* Запрет выгрузки, пока код модуля есть в кадрах любого стека:
+			   иначе спящая задача вернётся в недействительную память. *)
+			IF StackUsesModule(mod) THEN
+				IF platform # NIL THEN
+					platform.String("Kernel.UnloadMod: module is still used by a stack, not unloaded");
+					platform.Ln
+				END;
+				RETURN
+			END;
 			t := mod.term; mod.term := NIL;
 			IF t # NIL THEN t() END;	(* terminate module *)
 			i := 0;
@@ -1906,26 +2104,21 @@ MODULE Kernel;
 		END
 	END CheckCandidates;
 
-	PROCEDURE MarkLocals;
+	PROCEDURE ScanStack (lo, hi: S.ADDRESS);
+	(* Консервативный скан диапазона стека [lo, hi) с шагом 4. *)
 		VAR stk, p, min, max: LONGINT; c: Cluster; ar: AdrRef;
 	BEGIN
-		S.GETREG(FP, stk);
-		(* 64-бит: GC во время трапа выполняется на сигнальном стеке — его диапазон
-		   [FP, baseStack) огромен, сканирование читает незамапленные страницы и
-		   каскадит трапы (137 stack overflow в MarkLocals до бесконечности).
-		   В таком случае сканируем основной стек от sp трапа (глобаль Kernel.sp).
-		   Если и он вне диапазона — пропускаем скан (лучше, чем падение). *)
-		IF (stk > baseStack) OR (baseStack - stk > maxStackScan) THEN stk := sp END;
-		IF (stk > baseStack) OR (baseStack - stk > maxStackScan) THEN RETURN END;
-		INC(stk, 3); stk := stk DIV 4 * 4;	(* 64-бит: шаг 4, а не 8! Компилятор ПАКУЕТ 8-байтные поля
-			без 8-выравнивания (Cluster.next@4), поэтому указатели на стеке (поля записей-
-			локалов, напр. Stores.Reader) бывают на адресах ≡ 4 (mod 8). Скан с шагом 8
-			(любой фазы) пропускал половину слотов → живые объекты собирались Sweep
-			(use-after-free в StdConfig.Setup: модель жила только в слоте ≡4 (mod 8)). *)
+		IF (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN END;
+		(* 64-бит: шаг 4, а не 8! Компилятор ПАКУЕТ 8-байтные поля
+		   без 8-выравнивания (Cluster.next@4), поэтому указатели на стеке (поля записей-
+		   локалов, напр. Stores.Reader) бывают на адресах ≡ 4 (mod 8). Скан с шагом 8
+		   (любой фазы) пропускал половину слотов → живые объекты собирались Sweep
+		   (use-after-free в StdConfig.Setup: модель жила только в слоте ≡4 (mod 8)). *)
 		nofcand := 0; c := root;
 		WHILE c.next # NIL DO c := c.next END;
 		min := S.VAL(LONGINT, root); max := S.VAL(LONGINT, c) + c.size;
-		WHILE stk < baseStack DO
+		stk := lo; INC(stk, 3); stk := stk DIV 4 * 4;
+		WHILE stk < hi - 7 DO	(* ar.a читает 8 байт: не заходить за верх *)
 			ar := S.VAL(AdrRef, stk); p := ar.a;
 			IF (p > min) & (p < max) & (~strictStackSweep OR (p MOD 16 = 0)) THEN
 				candidates[nofcand] := p; INC(nofcand);
@@ -1935,6 +2128,33 @@ MODULE Kernel;
 		END;
 		candidates[nofcand] := max; INC(nofcand);	(* ensure complete scan for interface mark*)
 		IF nofcand > 0 THEN CheckCandidates END
+	END ScanStack;
+
+	PROCEDURE MarkLocals;
+	(* Скан ВСЕХ зарегистрированных стеков: текущего — от FP до его верха,
+	   спящих — от сохранённого указателя стека до верха. Незнакомый стек —
+	   трап, а не молчаливый пропуск (прежнее поведение теряло объекты). *)
+		VAR s, cur, interrupted: Stack; fp: S.ADDRESS;
+	BEGIN
+		S.GETREG(FP, fp);
+		cur := StackOf(fp);
+		IF cur = NIL THEN HALT(126) END;
+		interrupted := NIL;
+		IF cur.signal THEN
+			(* GC в обработчике трапа: сканируем сигнальный стек и прерванный *)
+			ScanStack(fp, cur.hi);
+			interrupted := StackOf(sp);
+			IF interrupted # NIL THEN ScanStack(sp, interrupted.hi) END
+		ELSE
+			ScanStack(fp, cur.hi)
+		END;
+		s := stacks;
+		WHILE s # NIL DO
+			IF (s # cur) & (s # interrupted) & (s.sp # 0) & (s.sp < s.hi) THEN
+				ScanStack(s.sp, s.hi)
+			END;
+			s := s.next
+		END
 	END MarkLocals;
 
 	PROCEDURE MarkFinObj;
@@ -2302,6 +2522,14 @@ MODULE Kernel;
 		RETURN S.VAL(LONGINT, root)
 	END Root;
 
+	PROCEDURE Clusters* (): INTEGER;	(* число кластеров кучи (замер, диагностика) *)
+		VAR c: Cluster; n: INTEGER;
+	BEGIN
+		n := 0; c := root;
+		WHILE c # NIL DO INC(n); c := c.next END;
+		RETURN n
+	END Clusters;
+
 
 	(* -------------------- Trap Handling --------------------- *)
 
@@ -2311,6 +2539,7 @@ MODULE Kernel;
 	BEGIN
 		ASSERT(cmd # NIL, 20); 
 		S.GETREG(SP, baseStack);	(* save base stack *)
+		UpdateMainStack(baseStack);
 		platform.Start(cmd)
 	END Start;
 
@@ -2604,7 +2833,15 @@ MODULE Kernel;
 		blog.string := platform.String; blog.ln := platform.Ln;
 		platform.initialized := TRUE;
 		(* After platform has been initialized, heap may be initialized *)
-		InitHeap
+		InitHeap;
+		(* Главный стек: статическая запись, NEW здесь ещё не нужен.
+		   Точный верх уточнит Kernel.Start. *)
+		mainStack := S.VAL(Stack, S.ADR(mainStackRec));
+		mainStack.lo := baseStack - maxStackScan; mainStack.hi := baseStack;
+		mainStack.sp := baseStack; mainStack.tryContext := 0;
+		mainStack.trapStack := NIL; mainStack.tryCount := 0;
+		mainStack.signal := FALSE; mainStack.main := TRUE;
+		mainStack.next := NIL; stacks := mainStack
 	END SetPlatform;
 	
 	

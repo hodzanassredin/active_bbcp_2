@@ -42,6 +42,7 @@ MODULE LinKernel;
 
 	TYPE
 		Platform = RECORD (Kernel.Platform) END;
+		TryContext = POINTER TO Libc.sigjmp_buf;
 
 		ErrLog = RECORD
 			string: PROCEDURE (IN string: ARRAY OF CHAR);
@@ -289,8 +290,19 @@ MODULE LinKernel;
 		hi := baseStack;	(* 64-бит: без SHORT *)
 		inMainStack := ((trap.top = pc) OR Below(trap.top, pc)) & Below(pc, hi);
 		inSignalStack := ((sigStack = pc) OR Below(sigStack, pc)) & Below(pc, sigStack + sigStackSize);
-		RETURN inMainStack OR inSignalStack
+		RETURN inMainStack OR inSignalStack OR Kernel.InRegisteredStack(pc)
 	END InActivationStack;
+
+	PROCEDURE (VAR p: Platform) GetTryContext (): S.ADDRESS;
+	(* Контекст Try текущего стека — для Kernel.SwitchSave/SwitchRestore. *)
+	BEGIN
+		RETURN S.VAL(S.ADDRESS, currentTryContext)
+	END GetTryContext;
+
+	PROCEDURE (VAR p: Platform) SetTryContext (ctx: S.ADDRESS);
+	BEGIN
+		currentTryContext := S.VAL(TryContext, ctx)
+	END SetTryContext;
 
 	(* Alexander Shiryaev, 2012.10: Linux: can be implemented through mincore/madvise *)
 	(* This procedure can be called from TrapHandler also *)
@@ -624,6 +636,7 @@ MODULE LinKernel;
 	END ReserveCrossBorder;
 
 	PROCEDURE Init;
+		VAR sigStk: Kernel.Stack;
 	BEGIN
 		log.string := ErrString; log.ln := ErrLn;
 
@@ -653,6 +666,9 @@ MODULE LinKernel;
 		trap.depth := 0; trap.top := -1; pc := 0;
 		platform.tag := S.VAL(LONGINT, S.TYP(Platform));
 		Kernel.SetPlatform(S.VAL(S.PTR, S.ADR(platform.p)));
+		(* Сигнальный стек — в общем реестре: MarkLocals должен уметь
+		   разобрать GC, запущенный в обработчике трапа. *)
+		sigStk := Kernel.RegisterSignalStack(sigStack, sigStack + sigStackSize);
 		Kernel.SetErr(ErrString, ErrLn);
 	END Init;
 
