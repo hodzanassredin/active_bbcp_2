@@ -9,3 +9,5 @@ Test64Tasks|proc slow|900|Test64Co
 Test64Monitors|proc|300|Test64Co
 UnitTests||180|UnitTestsProbe
 CheckTests|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
+Test64Active|proc|300|
+Test64Yield|proc|300||^

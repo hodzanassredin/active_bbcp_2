@@ -52,7 +52,11 @@ trap 'rm -f "$LOG" "$LOG.cmd"' EXIT
 {
 	echo 'DevCompiler.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$I386', 'Mod')"
-	for m in "$@"; do echo "DevCompiler.CompileThis $m"; done
+	for m in "$@"; do
+		opt=""
+		case "$m" in *\^) opt="^"; m="${m%^}";; esac
+		echo "DevCompiler.CompileThis $m $opt"
+	done
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 run_cmds "$LOG.cmd" "$LOG"

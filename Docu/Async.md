@@ -216,23 +216,54 @@ find by text. `SYSTEM` stays clean.
   but must not call procedures or have side effects (enforced by the
   compiler). The condition is evaluated later in the frame of the
   waiting task, possibly while another task is leaving the monitor.
-- Expansion outline: the condition becomes a hidden local procedure
-  `PROCEDURE $CondN (frame: ADDRESS): BOOLEAN`; the statement becomes
-  `IF ~cond THEN Kernel.Await($CondN, frame, receiver) END`, where
-  `frame` is the waiting procedure's static link.
+- Expansion outline: the condition becomes a hidden nested procedure
+  `@awaitN (frame: ADDRESS): BOOLEAN` with the body `RETURN cond`; the
+  statement becomes
+
+  ```
+  SYSTEM.GETREG(BP, @frm);          (* the waiter's frame *)
+  IF ~cond THEN Kernel.Await(@awaitN, @frm, monitor) END
+  ```
+
+  The condition reads the waiter's variables through the CP static
+  link: `Kernel.CallCond` calls `@awaitN` with `@frm` in `BX`, and the
+  frame stays alive on the waiter's stack while it sleeps. A condition
+  that only reads module globals needs no frame, but the frame is
+  passed in the same way.
+- The compiler evaluates the condition once before the call; the
+  kernel evaluates it again in `Await` before parking and the leaving
+  task evaluates it in `Unlock` (`FindCondition`), as in Active
+  Oberon. Only the waiter whose condition is true gets the monitor,
+  and it gets it before new arrivals.
 
 ### Yield points
 
 An optional module compilation key inserts a call to `Kernel.Poll` on
-the back edge of `WHILE`, `REPEAT`, `LOOP` and `FOR`.
+the back edge of `WHILE`, `REPEAT`, `LOOP` and `FOR`. The key is the
+character `^` after the module name:
+
+```sh
+echo 'DevCompiler64.CompileThis Test64Yield ^' | ./dev0Linux
+# or: echo "DevCompiler.CompileOpt('^')" ...
+```
+
+The key is a module option; it is not written to the symbol file, so a
+caller need not know whether the callee has yield points.
 
 - `Poll` yields only when the scheduler raised its flag, the current
   stack is a task, and the task holds no monitor. Inside an
   `[exclusive]` region only an explicit `ACTIVE.AWAIT` may switch
   tasks, so a monitor is a boundary of an atomic update.
+- The scheduler (`Tasks.Step`) raises the flag at most every
+  `pollPeriod` (5 ms); a `Poll` that yields clears it. A cancelled task
+  traps at a `Poll` that actually yields, so the key adds cancellation
+  points as well.
 - Framework modules (System, Std, Text, Form, Host, Dev, platform
-  subsystems) must not be compiled with the key: a framework call from
-  a task is atomic with respect to other tasks.
+  subsystems Lin/Win) must not be compiled with the key: the compiler
+  rejects the option with an error. A framework call from a task is
+  atomic with respect to other tasks.
+- The key is implemented for the AMD64 target only; the 32-bit
+  compiler rejects it.
 - There is no signal-driven preemption; the key is the only implicit
   yield point, and code compiled with it must protect shared data.
 
@@ -314,6 +345,25 @@ Implemented in this branch: tasks, stacks, scheduler, cancellation,
 groups, monitors (`Lock`, `Unlock`, `Wait`, `Await`), trap release,
 GC roots, deadlock journal, event-loop integration.
 
-Compiler features described above (`ACTIVE`, `ACTIVE.AWAIT`,
-`[exclusive]`, yield points, module monitors) are stage 6; check
-`docs/` for the current state before relying on the syntax.
+Implemented in this branch (stage 6): the `ACTIVE` pseudo-module,
+`ACTIVE.AWAIT` with the Müller condition procedure, `[exclusive]` on
+methods and top-level procedures, module monitors, the `^` yield-point
+key, and the compiler-side trap release through the `Kernel.Try` chain.
+
+### Compiler implementation notes
+
+- The kernel entry points for generated code (`Kernel.Lock`, `Unlock`,
+  `Await`, `Poll`) live in a hidden import module `"$$"`; the loader
+  binds it to `Kernel`, so no object-file format or loader change was
+  needed.
+- `[exclusive]` is an ordinary positive procedure flag (32), accepted
+  only with `IMPORT ACTIVE` and only as the sole flag. Misuse is a
+  compile error (compiler error 225, "illegal sys flag"); a non-BOOLEAN
+  condition is error 120.
+- The condition of `AWAIT` may read variables, fields and array
+  elements but must not call procedures or assign; the compiler rejects
+  `Ncall`/`Nassign` inside it.
+- `tools/bootstrap.sh` rebuilds the whole `Dev` subsystem twice and
+  checks that the second pass is byte-identical to the first, except
+  for the 12-byte compile timestamp that every `.ocf` carries.
+- Compile-time rejection cases are checked by `tools/check-reject.sh`.

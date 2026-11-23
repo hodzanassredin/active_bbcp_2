@@ -26,7 +26,12 @@ trap 'rm -f "$MARK" "$LOG" "$LOG.cmd"' EXIT
 : > "$LOG.cmd"
 echo 'DevCompiler64.InitLogMarks' >> "$LOG.cmd"
 echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')" >> "$LOG.cmd"
-for m in "$@"; do echo "DevCompiler64.CompileThis $m" >> "$LOG.cmd"; done
+for m in "$@"; do
+	# Модуль с суффиксом опций: Test64Yield^ -> CompileThis Test64Yield ^
+	opt=""
+	case "$m" in *\^) opt="^"; m="${m%^}";; esac
+	echo "DevCompiler64.CompileThis $m $opt" >> "$LOG.cmd"
+done
 echo 'DevLibrarian.DisableDevLib' >> "$LOG.cmd"
 out=$("$DEV0" < "$LOG.cmd" 2>&1) || {
 	echo "go64: dev0Linux завершился с ошибкой:" >&2

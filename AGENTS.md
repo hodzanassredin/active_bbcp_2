@@ -192,7 +192,9 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # Unit: Test64Tests, Test64Tasks, UnitTests, CheckTests
+tools/test.sh                     # Unit: 7 модулей, 45 тестов
+tools/check-reject.sh             # 8 отказов компилятора этапа 6
+tools/bootstrap.sh                # два прохода Dev, сверка .ocf/.osf
 tools/test.sh --list
 tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
@@ -200,10 +202,12 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
 
 - Тесты: подсистема `Unit` (`UnitAssert`, `UnitRunner`; правила —
   `Unit/Docu/ru/Testing.md`), манифест `Test64/tests.txt` в формате
-  `<модуль>|<marks>|<таймаут>|<доп. модули>`. `tools/test.sh` зовёт
-  `tools/unit.sh` на каждый модуль: отдельный процесс, итог `failed 0`.
+  `<модуль>|<marks>|<таймаут>|<доп. модули>|<опции>`. Пятое поле —
+  опции модуля для `CompileThis` (например, `^` — ключ точек уступки;
+  `tools/unit.sh --opts '^'`). `tools/test.sh` зовёт `tools/unit.sh`
+  на каждый модуль: отдельный процесс, итог `failed 0`.
   Test64-сценарии — `Test64Tests` с пометкой `proc`; задачи —
-  `Test64Tasks` (`proc slow`).
+  `Test64Tasks` (`proc slow`); этап 6 — `Test64Active`, `Test64Yield`.
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
   прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
@@ -221,12 +225,26 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   страница), `Platform.AllocateStackMem` по умолчанию возвращает 0.
   Тесты — `Test64Tasks` (`Test64/Mod/Tasks.cp`), подробности —
   `docs/tasks.md`.
+- Этап 4: `Kernel.Lock/Unlock/Wait/Await`, таблица мониторов по адресу
+  объекта, цепочка взятий у стека, `Kernel.Try` снимает до своей
+  глубины, сборщик держит объекты, журнал тупика, `Tasks.SetScheduler`.
+  Тесты — `Test64Monitors`, описание — `Docu/Async.md`.
+- Этап 5: `Docu/Async.md` и `Docu/ru/Async.md`.
+- Этап 6: компилятор (`Dev/Mod`): псевдомодуль `ACTIVE` и
+  `ACTIVE.AWAIT` (скрытая процедура `@awaitN`, кадр в `BX` через
+  `Kernel.CallCond`), `[exclusive]` (пролог/эпилог `Kernel.Lock/
+  Unlock`, монитор модуля), ключ `^` (`Kernel.Poll` на обратном
+  переходе циклов), скрытый импорт `"$$"`. Тесты — `Test64Active`,
+  `Test64Yield`; отказы — `tools/check-reject.sh`; бутстрап —
+  `tools/bootstrap.sh` (второй проход совпадает, кроме 12-байтовой
+  метки времени в `.ocf`).
 - `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
   `.cp`, конвертировать нечего. `DevOnce` заменён на
   `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
   в консольном x64.
-- Открыто: GUI-прогоны, `pack-dev0-linux` (в снимке отсутствует),
-  вытеснение задач и нити ОС, мониторы (`Kernel.Lock/Wait`, этап 4),
+- Открыто: GUI-прогоны, `pack-dev0-linux` (в снимке отсутствует;
+  `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
+  сигналу и нити ОС, `[exclusive]` на 32-битной цели,
   `Platform.AllocateStackMem` для Windows x64, отложенные
   финализаторы, нагрузочный тест «1000 задач час».
 - Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица

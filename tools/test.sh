@@ -27,7 +27,7 @@ fi
 [ -x "$INTERP" ] || { echo "test: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
 ok=0; bad=0; total=0; summary=""
-while IFS='|' read -r mod marks tmo deps; do
+while IFS='|' read -r mod marks tmo deps opts; do
 	case "$mod" in ''|\#*) continue;; esac
 	case "$tmo" in ''|*[!0-9]*) tmo=300;; esac
 	if [ -n "$only" ]; then
@@ -35,7 +35,7 @@ while IFS='|' read -r mod marks tmo deps; do
 	fi
 	total=$((total + 1))
 	echo "test: $mod (marks='${marks:-}', ${tmo}s)"
-	if "$BB/tools/unit.sh" "$mod" --marks "$marks" --timeout "$tmo" --compile "$deps"; then
+	if "$BB/tools/unit.sh" "$mod" --marks "$marks" --timeout "$tmo" --compile "$deps" --opts "$opts"; then
 		ok=$((ok + 1)); echo "PASS $mod"; summary="$summary
   OK   $mod"
 	else

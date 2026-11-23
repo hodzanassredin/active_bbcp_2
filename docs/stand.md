@@ -1,7 +1,7 @@
 # Стенд active2: снимок Ивана + этапы 1–2
 
 `active2` — ветка от `ivan-dia261123` (снимок Ивана DIA261123 поверх
-`b3e3b9d0`) с перенесёнными нашими этапами 1–2 и тестами. Исходники —
+`b3e3b9d0`) с нашими этапами 1–6 и тестами. Исходники —
 UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 (`LinIntInit`). Ветка `active` не переписывалась и остаётся на `.odc`.
 
@@ -15,8 +15,11 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Сборка x64 из `.cp` | `tools/build64.sh` | работает, проверено на чистом `.work/BB64LIN` |
 | Консольный запуск | `echo 'Команда' \| tools/run64.sh` | работает |
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
-| Тесты без окон | `tools/test.sh` (Unit) | 4 модуля, 27 тестов, все зелёные |
+| Тесты без окон | `tools/test.sh` (Unit) | 7 модулей, 45 тестов, все зелёные |
 | Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
+| Этап 4: мониторы | `Test64Monitors` | 9 тестов, зелёные |
+| Этап 6: `[exclusive]`/`AWAIT` | `Test64Active` | 6 тестов, зелёные |
+| Этап 6: ключ уступок | `Test64Yield` | 3 теста, зелёные |
 | Этап 2: стеки | `Test64Tests.TestProcGcStack`, `TestProcTrapStack` | зелёные |
 | Шаг 2а: индекс кластеров | `Test64Tests.TestProcInHeap` | зелёный |
 | Замер 1/10/50 млн | `tools/bench-gc.sh Test64GcBench.DoSmall` / `.Do` | выполнен |
@@ -92,7 +95,7 @@ tools/test.sh CheckTests   # выборочно
 TestProc-сценарии (ядро, сборщик, стеки, сигналы) помечены `proc` и
 потому не уносят остальные модули.
 
-Результат: **4 модуля, 27 тестов, 0 провалов** —
+Результат: **7 модулей, 45 тестов, 0 провалов** —
 - `Test64Tests` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
   TrapStack, InHeap (сценарии `Test64*`, точки входа в
   `Test64/Mod/Tests.cp`);
@@ -102,6 +105,13 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   1 тыс. и 10 тыс. задач (`Test64/Mod/Tasks.cp`, см. `docs/tasks.md`);
 - `UnitTests`: самопроверка Unit, включая вложенный прогон
   `UnitTestsProbe` (PASS/FAIL/EMPTY/SKIP);
+- `Test64Active` (marks=proc): 6 тестов этапа 6 — AWAIT в методе,
+  в процедуре модуля и с локальным условием, ложное условие не будит,
+  результаты всех видов, RETURN из середины, снятие при трапе и во
+  вложенном Try (`Test64/Mod/Active.cp`);
+- `Test64Yield` (marks=proc, ключ `^`): 3 теста — счётный цикл
+  уступает другим задачам, не уступает в мониторе и вне задачи,
+  отмена срабатывает в точке уступки (`Test64/Mod/Yield.cp`);
 - `CheckTests` (marks=proc): три пробы Ивана — RealFormat, Math,
   CCallAlias.
 
@@ -117,7 +127,7 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 `Test64Support.Begin` ставит пустой viewer — это дефект каркаса, не ядра
 теста. В норме viewer должен ставить консольный init.
 
-## 6. Этапы 1–2 на `.cp`
+## 6. Этапы 1–6 на `.cp`
 
 - `System/Mod/Services.cp`: `Work`, `Post`, `Wake`, `NextDeadline`,
   `SetWakeHook`; `executing` возвращает действие в очередь, если `Do`
@@ -143,6 +153,20 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   (в `LinKernel` — mmap + сторожевая страница); индекс `Kernel.StackOf`;
   `Services.executingAction`/`executing` и trap-cleaner;
   `Models.InDomainCast`. Подробности — `docs/tasks.md`.
+- Этап 4: `System/Mod64/Kernel.cp` — побочная таблица мониторов по
+  адресу объекта (`Lock/Unlock/Wait/Await`, `IsLocked`,
+  `WaitersCount`, `DumpMonitors`), цепочка взятий у стека,
+  `Kernel.Try` снимает до своей глубины, сборщик держит записи и
+  объекты; `Tasks.SetScheduler`, передача владения спящей задаче,
+  журнал тупика. Подробности — `Docu/Async.md`.
+- Этап 5: `Docu/Async.md` и `Docu/ru/Async.md` — описание расширения.
+- Этап 6: компилятор (`Dev/Mod`): псевдомодуль `ACTIVE` и
+  `ACTIVE.AWAIT` (скрытая процедура условия `@awaitN`, кадр в `BX`
+  через `Kernel.CallCond`), `[exclusive]` (пролог/эпилог
+  `Kernel.Lock/Unlock`, монитор модуля), ключ точек уступки `^`
+  (`Kernel.Poll` на обратном переходе циклов), скрытый импорт `"$$"`.
+  Проверки: `tools/bootstrap.sh` (два прохода `Dev`, `.osf` побайтно,
+  `.ocf` без метки времени), `tools/check-reject.sh` (8 отказов).
 
 Конфликтов с правками Ивана нет: его `InitSignalStack`/`InstallSignals`
 сохранены, регистрация сигнального стека добавлена после
@@ -187,8 +211,10 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 ## 8. Что открыто
 
 - GUI не запускался; GTK4-сборка только линкуется.
-- `pack-dev0-linux` в снимке отсутствует; пересборка bootstrap не
-  автоматизирована.
+- `pack-dev0-linux` в снимке отсутствует, поэтому сам `dev0Linux` не
+  пересобирается: бутстрап проверяет только компилятор
+  (`tools/bootstrap.sh` ставит `Dev/Code`, который загрузчик читает
+  раньше упакованного).
 - Отдельного `[code]`-переключателя стеков нет; `SwitchSave/Restore`
   зовут обёртки `Test64Co`.
 - Нет нагрузочного теста «1000 задач час», проверки трапа в чужой нити
@@ -196,5 +222,10 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 - `UnitRunner.TempDir` только возвращает путь `UnitTmp`: каталог создаёт
   внешний `tools/unit.sh` (в процессе BlackBox нет переносимого mkdir).
 - `Tasks`: Windows x64 без `Platform.AllocateStackMem` (нужен
-  `VirtualAlloc` + `PAGE_NOACCESS`); вытеснения нет; мониторов нет
-  (этап 4).
+  `VirtualAlloc` + `PAGE_NOACCESS`); вытеснения по сигналу нет;
+  выгрузка модуля с занятым монитором отдельно не проверяется (её
+  закрывает запрет выгрузки при кадрах на стеках, этап 2).
+- `[exclusive]` не поддерживается на 32-битной цели и не проверяется
+  на `[abstract]`/`[empty]`; условие `AWAIT` не проверяется на
+  обращения к `VAR`-параметрам чужих стеков (задача не может держать
+  ссылку на чужой стек по API `Tasks`).

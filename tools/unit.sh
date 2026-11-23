@@ -11,12 +11,13 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=""; MARKS=""; TMO=300; DEPS=""
+MOD=""; MARKS=""; TMO=300; DEPS=""; OPTS=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--marks) MARKS="${2:-}"; shift 2;;
 		--timeout) TMO="${2:-300}"; shift 2;;
 		--compile) DEPS="${2:-}"; shift 2;;
+		--opts) OPTS="${2:-}"; shift 2;;
 		-*) echo "unit: неизвестный ключ $1" >&2; exit 2;;
 		*) MOD="$1"; shift;;
 	esac
@@ -30,11 +31,14 @@ if command -v cc >/dev/null 2>&1; then
 fi
 
 # Unit — первым: от него зависят адаптеры Test64Support и тесты.
-mods="UnitAssert UnitRunner UnitTestsProbe UnitTests $DEPS $MOD"
+# Тестируемый модуль компилируется отдельно: у него могут быть свои опции
+# (например, ^ — ключ точек уступки).
+mods="UnitAssert UnitRunner UnitTestsProbe UnitTests $DEPS"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))
-	if "$BB/tools/go64.sh" $mods >"${TMPDIR:-/tmp}/unit-compile.log" 2>&1; then
+	if "$BB/tools/go64.sh" $mods >"${TMPDIR:-/tmp}/unit-compile.log" 2>&1 \
+			&& "$BB/tools/go64.sh" "$MOD$OPTS" >>"${TMPDIR:-/tmp}/unit-compile.log" 2>&1; then
 		break
 	fi
 	if [ $pass -eq 3 ]; then
