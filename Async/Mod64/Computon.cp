@@ -1,0 +1,585 @@
+MODULE AsyncComputon;
+(** Распределённые вычисления: компутоны (этап 9, образец RobustParallel).
+
+	Computon — сериализуемый Stores.Store с методом Do. Он копируется в
+	другой процесс BlackBox (своя куча и сборщик) и возвращается
+	обратно; код Do с кучей поэтому исполняется не в рабочей нити этапа 8.
+
+	Транспорт — локальные процессы: fork+exec blackbox-console, три pipe
+	на исполнителя (команда на stdin, запросы, ответы). MPI в системе
+	нет; интерфейс Push/Pull/Try от транспорта не зависит.
+
+	Ожидание Pull из задачи — точка уступки: ответ забирает главный цикл
+	через Poller, задача спит на Tasks.Park. При гибели исполнителя
+	запрос повторяется на живом; ошибка Do возвращается вызывающему. *)
+
+	IMPORT S := SYSTEM, Kernel, Tasks, Services, Poller, Stores, Files,
+		LinNative, LinLibc, Dialog, Console, Strings;
+
+	CONST
+		maxPool = 16;
+		maxReq = 128;
+		maxFrame = 60000;
+		kindWork = 0; kindStop = 1;
+		pullTimeout = 10000;
+
+	TYPE
+		Computon* = POINTER TO ABSTRACT RECORD (Stores.Store) END;
+		Hook* = POINTER TO ABSTRACT RECORD END;
+
+		Req = POINTER TO RReq;
+		RReq = RECORD
+			tag, rank, len, status: INTEGER;
+			buf: POINTER TO ARRAY OF SHORTCHAR;
+			c: Computon;
+			waiting: Tasks.Task;
+			used, done: BOOLEAN
+		END;
+
+		WWait = POINTER TO RECORD (Poller.Waiter) idx: INTEGER END;
+
+		WState = RECORD
+			pid, inFd, outFd, inLen: INTEGER;
+			dead: BOOLEAN;
+			waiter: WWait;
+			buf: ARRAY maxFrame OF SHORTCHAR	(* накопитель ответов *)
+		END;
+
+		DoAction = RECORD (Services.SafeAction) c: Computon END;
+
+		Argv = POINTER [untagged] TO ARRAY [untagged] OF LinLibc.PtrSTR;
+
+	VAR
+		workers: ARRAY maxPool OF WState;
+		nworkers: INTEGER;
+		started: BOOLEAN;
+		reqs: ARRAY maxReq OF RReq;
+		lastErr: INTEGER;
+		hook: Hook;
+		nextWorker: INTEGER;
+
+		hdr: ARRAY 12 OF SHORTCHAR;
+		outLen: INTEGER;
+		payload: ARRAY maxFrame OF SHORTCHAR;	(* кадр на разбор *)
+		outBuf: ARRAY maxFrame OF SHORTCHAR;	(* кадр на отправку *)
+
+		exePath: ARRAY [untagged] 512 OF SHORTCHAR;
+		procPath: ARRAY [untagged] 16 OF SHORTCHAR;
+		argIn, argOut: ARRAY [untagged] 32 OF SHORTCHAR;
+		argv: ARRAY [untagged] 4 OF LinLibc.PtrSTR;
+		cmdLine: ARRAY [untagged] 32 OF SHORTCHAR;
+
+	(* абстрактные методы *)
+
+	PROCEDURE (c: Computon) Do*, NEW, ABSTRACT;
+
+	PROCEDURE (h: Hook) Failed* (rank, tag, err: INTEGER), NEW, ABSTRACT;
+
+	(* --- числа в кадре ---------------------------------------------------- *)
+
+	PROCEDURE PutInt (VAR b: ARRAY OF SHORTCHAR; pos, x: INTEGER);
+	BEGIN
+		b[pos] := S.VAL(SHORTCHAR, x MOD 256);
+		b[pos+1] := S.VAL(SHORTCHAR, (x DIV 256) MOD 256);
+		b[pos+2] := S.VAL(SHORTCHAR, (x DIV 65536) MOD 256);
+		b[pos+3] := S.VAL(SHORTCHAR, (x DIV 16777216) MOD 256)
+	END PutInt;
+
+	PROCEDURE GetInt (VAR b: ARRAY OF SHORTCHAR; pos: INTEGER): INTEGER;
+	BEGIN
+		RETURN (ORD(b[pos]) MOD 256)
+			+ 256 * (ORD(b[pos+1]) MOD 256)
+			+ 65536 * (ORD(b[pos+2]) MOD 256)
+			+ 16777216 * (ORD(b[pos+3]) MOD 256)
+	END GetInt;
+
+	(* --- сериализация ----------------------------------------------------- *)
+
+	PROCEDURE Serialize* (c: Computon; OUT buf: POINTER TO ARRAY OF SHORTCHAR; OUT len: INTEGER);
+	(* через временный файл Files + Stores; buf — копия на куче вызывающего *)
+		VAR f: Files.File; wr: Stores.Writer; rd: Files.Reader;
+			b: BYTE; i: INTEGER;
+	BEGIN
+		len := 0; buf := NIL;
+		IF c = NIL THEN RETURN END;
+		f := Files.dir.Temp();
+		IF f = NIL THEN RETURN END;
+		wr.ConnectTo(f);
+		wr.WriteStore(c);
+		f.Flush();
+		len := f.Length();
+		IF (len > 0) & (len <= maxFrame) THEN
+			NEW(buf, len);
+			rd := f.NewReader(NIL);
+			FOR i := 0 TO len - 1 DO
+				rd.ReadByte(b); buf^[i] := S.VAL(SHORTCHAR, b)
+			END
+		ELSE len := 0
+		END
+	END Serialize;
+
+	PROCEDURE Deserialize* (VAR b: ARRAY OF SHORTCHAR; len: INTEGER): Computon;
+		VAR f: Files.File; wr: Files.Writer; by: BYTE; i: INTEGER;
+			rd: Stores.Reader; st: Stores.Store;
+	BEGIN
+		IF len <= 0 THEN RETURN NIL END;
+		f := Files.dir.Temp();
+		IF f = NIL THEN RETURN NIL END;
+		wr := f.NewWriter(NIL);
+		FOR i := 0 TO len - 1 DO
+			by := S.VAL(BYTE, b[i]); wr.WriteByte(by)
+		END;
+		f.Flush();
+		rd.ConnectTo(f);
+		rd.ReadStore(st);
+		IF st # NIL THEN
+			WITH st: Computon DO RETURN st END
+		END;
+		RETURN NIL
+	END Deserialize;
+
+	(* --- запись в дескриптор ---------------------------------------------- *)
+
+	PROCEDURE WriteAll (fd: INTEGER; VAR b: ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
+		VAR off, n: INTEGER;
+	BEGIN
+		off := 0;
+		WHILE off < len DO
+			n := S.VAL(INTEGER, LinLibc.write(fd, S.ADR(b[off]), len - off));
+			IF n <= 0 THEN RETURN FALSE END;
+			INC(off, n)
+		END;
+		RETURN TRUE
+	END WriteAll;
+
+	PROCEDURE ReadAll (fd: INTEGER; VAR b: ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
+		VAR off, n: INTEGER;
+	BEGIN
+		off := 0;
+		WHILE off < len DO
+			n := S.VAL(INTEGER, LinLibc.read(fd, S.ADR(b[off]), len - off));
+			IF n <= 0 THEN RETURN FALSE END;
+			INC(off, n)
+		END;
+		RETURN TRUE
+	END ReadAll;
+
+	PROCEDURE CloseFd (fd: INTEGER);
+		VAR res: INTEGER;
+	BEGIN
+		res := LinLibc.close(fd)
+	END CloseFd;
+
+	(* --- запуск исполнителей ---------------------------------------------- *)
+
+	PROCEDURE MakeArg (IN prefix: ARRAY OF SHORTCHAR; n: INTEGER; OUT dst: ARRAY OF SHORTCHAR);
+		VAR i, j: INTEGER; d: ARRAY 16 OF CHAR;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(dst) - 1) & (prefix[i] # 0X) DO dst[i] := prefix[i]; INC(i) END;
+		Strings.IntToString(n, d);
+		j := 0;
+		WHILE (i < LEN(dst) - 1) & (d[j] # 0X) DO dst[i] := SHORT(d[j]); INC(i); INC(j) END;
+		dst[i] := 0X
+	END MakeArg;
+
+	PROCEDURE Spawn (idx: INTEGER): BOOLEAN;
+		VAR cmdP, reqP, respP: ARRAY 2 OF INTEGER; res, fl, pid, i: INTEGER; ok: BOOLEAN;
+	BEGIN
+		res := LinNative.pipe(S.VAL(LinNative.IntPtr, S.ADR(cmdP[0])));
+		res := LinNative.pipe(S.VAL(LinNative.IntPtr, S.ADR(reqP[0])));
+		res := LinNative.pipe(S.VAL(LinNative.IntPtr, S.ADR(respP[0])));
+		i := 0; WHILE cmdLine[i] # 0X DO INC(i) END;
+		ok := WriteAll(cmdP[1], cmdLine, i);
+		MakeArg("--ASYNC_IN=", reqP[0], argIn);
+		MakeArg("--ASYNC_OUT=", respP[1], argOut);
+		argv[0] := S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0]));
+		argv[1] := S.VAL(LinLibc.PtrSTR, S.ADR(argIn[0]));
+		argv[2] := S.VAL(LinLibc.PtrSTR, S.ADR(argOut[0]));
+		argv[3] := NIL;
+		pid := LinLibc.fork();
+		IF pid = 0 THEN	(* ребёнок: только async-signal-safe вызовы до exec *)
+			res := LinNative.dup2(cmdP[0], 0);
+			CloseFd(cmdP[0]);
+			CloseFd(reqP[1]);
+			CloseFd(respP[0]);
+			res := LinLibc.execv(S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0])),
+				S.VAL(Argv, S.ADR(argv[0])));
+			LinNative._exit(127)
+		END;
+		CloseFd(cmdP[0]); CloseFd(cmdP[1]);
+		CloseFd(reqP[0]); CloseFd(respP[1]);
+		IF pid < 0 THEN
+			CloseFd(reqP[1]); CloseFd(respP[0]);
+			RETURN FALSE
+		END;
+		workers[idx].pid := pid; workers[idx].inFd := reqP[1];
+		workers[idx].outFd := respP[0]; workers[idx].dead := FALSE;
+		workers[idx].inLen := 0;
+		fl := LinNative.fcntl(workers[idx].outFd, LinNative.F_GETFL, 0);
+		res := LinNative.fcntl(workers[idx].outFd, LinNative.F_SETFL, fl + LinNative.O_NONBLOCK);
+		NEW(workers[idx].waiter); workers[idx].waiter.idx := idx;
+		Poller.Add(workers[idx].outFd, Poller.In, workers[idx].waiter);
+		RETURN TRUE
+	END Spawn;
+
+	PROCEDURE WorkerAlive (rank: INTEGER): BOOLEAN;
+	BEGIN
+		RETURN (rank >= 0) & (rank < nworkers) & ~workers[rank].dead
+	END WorkerAlive;
+
+	PROCEDURE LiveWorker (except: INTEGER): INTEGER;
+		VAR i, k: INTEGER;
+	BEGIN
+		FOR k := 1 TO nworkers DO
+			i := (nextWorker + k) MOD nworkers;
+			IF (i # except) & WorkerAlive(i) THEN
+				nextWorker := i;
+				RETURN i
+			END
+		END;
+		RETURN -1
+	END LiveWorker;
+
+	(* --- запросы ---------------------------------------------------------- *)
+
+	PROCEDURE ReqAt (i: INTEGER): Req;
+	BEGIN
+		RETURN S.VAL(Req, S.ADR(reqs[i]))
+	END ReqAt;
+
+	PROCEDURE FindReq (tag: INTEGER): Req;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO maxReq - 1 DO
+			IF reqs[i].used & (reqs[i].tag = tag) THEN RETURN ReqAt(i) END
+		END;
+		RETURN NIL
+	END FindReq;
+
+	PROCEDURE NewReq (tag: INTEGER): Req;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO maxReq - 1 DO
+			IF ~reqs[i].used THEN
+				reqs[i].used := TRUE; reqs[i].tag := tag;
+				reqs[i].done := FALSE; reqs[i].c := NIL;
+				reqs[i].buf := NIL; reqs[i].len := 0; reqs[i].status := 0;
+				reqs[i].waiting := NIL; reqs[i].rank := -1;
+				RETURN ReqAt(i)
+			END
+		END;
+		RETURN NIL
+	END NewReq;
+
+	PROCEDURE SendFrame (rank, tag, kind: INTEGER; buf: POINTER TO ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
+		VAR ok: BOOLEAN;
+	BEGIN
+		IF ~WorkerAlive(rank) THEN RETURN FALSE END;
+		PutInt(hdr, 0, len); PutInt(hdr, 4, tag); PutInt(hdr, 8, kind);
+		ok := WriteAll(workers[rank].inFd, hdr, 12);
+		IF ok & (len > 0) & (buf # NIL) THEN
+			ok := WriteAll(workers[rank].inFd, buf^, len)
+		END;
+		RETURN ok
+	END SendFrame;
+
+	PROCEDURE FailReq (req: Req; err: INTEGER);
+		VAR t: Tasks.Task;
+	BEGIN
+		IF (req # NIL) & ~req.done THEN
+			req.status := err; req.done := TRUE;
+			t := req.waiting; req.waiting := NIL;
+			IF t # NIL THEN Tasks.Unpark(t) END
+		END
+	END FailReq;
+
+	PROCEDURE Resend (req: Req);
+		VAR r: INTEGER;
+	BEGIN
+		IF (req = NIL) OR req.done THEN RETURN END;
+		r := LiveWorker(req.rank);
+		IF r < 0 THEN
+			FailReq(req, -2);	(* исполнителей не осталось *)
+			IF hook # NIL THEN hook.Failed(req.rank, req.tag, -2) END
+		ELSE
+			req.rank := r;
+			IF ~SendFrame(r, req.tag, kindWork, req.buf, req.len) THEN FailReq(req, -3) END
+		END
+	END Resend;
+
+	PROCEDURE Push* (c: Computon; rank, tag: INTEGER);
+	(** Отправить компутон исполнителю rank (0..Size-1). *)
+		VAR req: Req;
+	BEGIN
+		req := NewReq(tag);
+		IF req = NIL THEN lastErr := -1; RETURN END;
+		Serialize(c, req.buf, req.len);
+		IF (req.buf = NIL) OR (req.len = 0) THEN
+			req.used := FALSE; lastErr := -1; RETURN
+		END;
+		req.rank := rank;
+		IF ~SendFrame(rank, tag, kindWork, req.buf, req.len) THEN Resend(req) END
+	END Push;
+
+	PROCEDURE PullTimeout* (rank, tag: INTEGER; ms: LONGINT): Computon;
+	(** Дождаться результата; при гибели исполнителя — повтор.
+		Ожидание — Sleep с проверкой: у задачи есть срок, журнал тупика
+		не срабатывает ложно на чужом процессе. *)
+		VAR req: Req; c: Computon; deadline: LONGINT;
+	BEGIN
+		ASSERT(Tasks.InTask(), 21);
+		req := FindReq(tag);
+		IF req = NIL THEN lastErr := -1; RETURN NIL END;
+		deadline := Kernel.Time() + ms;
+		WHILE ~req.done & (Kernel.Time() < deadline) DO Tasks.Sleep(10) END;
+		IF ~req.done THEN FailReq(req, -4) END;	(* тайм-аут *)
+		IF req.status = 0 THEN c := req.c; lastErr := 0
+		ELSE lastErr := req.status; c := NIL
+		END;
+		req.used := FALSE; req.c := NIL; req.buf := NIL;
+		IF (lastErr # 0) & (hook # NIL) THEN hook.Failed(rank, tag, lastErr) END;
+		RETURN c
+	END PullTimeout;
+
+	PROCEDURE Pull* (rank, tag: INTEGER): Computon;
+	BEGIN
+		RETURN PullTimeout(rank, tag, pullTimeout)
+	END Pull;
+
+	PROCEDURE Try* (rank, tag: INTEGER; OUT c: Computon): BOOLEAN;
+		VAR req: Req;
+	BEGIN
+		req := FindReq(tag);
+		IF (req = NIL) OR ~req.done THEN c := NIL; RETURN FALSE END;
+		IF req.status = 0 THEN c := req.c; lastErr := 0
+		ELSE lastErr := req.status; c := NIL
+		END;
+		req.used := FALSE; req.c := NIL; req.buf := NIL;
+		RETURN TRUE
+	END Try;
+
+	PROCEDURE Wait*;
+	(** Интерфейс RobustParallel: все ожидания уже выражены Pull/Try. *)
+	BEGIN
+	END Wait;
+
+	PROCEDURE LastError* (): INTEGER;
+	BEGIN
+		RETURN lastErr
+	END LastError;
+
+	PROCEDURE SetHook* (h: Hook);
+	BEGIN
+		hook := h
+	END SetHook;
+
+	PROCEDURE LogMsg* (IN msg: ARRAY OF CHAR);
+	BEGIN
+		Console.WriteStr("Computon: "); Console.WriteStr(msg); Console.WriteLn
+	END LogMsg;
+
+	PROCEDURE Unload* (IN module: ARRAY OF CHAR);
+	(** Заглушка: выгрузка кода у исполнителей — остановка пула. *)
+	BEGIN
+		LogMsg("Unload: перезапустите пул (Stop/Start)")
+	END Unload;
+
+	PROCEDURE Size* (): INTEGER;
+	BEGIN
+		RETURN nworkers
+	END Size;
+
+	PROCEDURE Rank* (): INTEGER;
+	BEGIN
+		RETURN 0	(* управляющий процесс *)
+	END Rank;
+
+	PROCEDURE WorkerPid* (rank: INTEGER): INTEGER;
+	BEGIN
+		IF (rank >= 0) & (rank < nworkers) THEN RETURN workers[rank].pid ELSE RETURN -1 END
+	END WorkerPid;
+
+	PROCEDURE WorkerDead* (rank: INTEGER): BOOLEAN;
+	BEGIN
+		IF (rank >= 0) & (rank < nworkers) THEN RETURN workers[rank].dead ELSE RETURN TRUE END
+	END WorkerDead;
+
+	PROCEDURE Stop*;
+	(** Погасить исполнителей. SIGCHLD в BlackBox игнорируется, поэтому
+		waitpid не нужен (и в консольном x64 он небезопасен): закрываем
+		pipes и убиваем процессы. *)
+		VAR i, res: INTEGER; ok: BOOLEAN;
+	BEGIN
+		IF started THEN
+			FOR i := 0 TO nworkers - 1 DO
+				IF workers[i].waiter # NIL THEN Poller.Remove(workers[i].waiter) END;
+				IF ~workers[i].dead THEN
+					ok := SendFrame(i, 0, kindStop, NIL, 0);
+					CloseFd(workers[i].inFd); CloseFd(workers[i].outFd);
+					res := LinNative.kill(workers[i].pid, LinNative.SIGKILL);
+					workers[i].dead := TRUE
+				END
+			END
+		END;
+		started := FALSE; nworkers := 0
+	END Stop;
+
+	PROCEDURE Start* (n: INTEGER);
+		VAR i: INTEGER;
+	BEGIN
+		ASSERT((1 <= n) & (n <= maxPool), 20);
+		Stop;
+		nworkers := 0;
+		FOR i := 0 TO n - 1 DO
+			IF Spawn(i) THEN INC(nworkers) END
+		END;
+		started := nworkers > 0;
+	END Start;
+
+	(* --- ответы исполнителей ---------------------------------------------- *)
+
+	PROCEDURE MarkDead* (idx: INTEGER);
+		VAR i: INTEGER;
+	BEGIN
+		IF workers[idx].dead THEN RETURN END;
+		workers[idx].dead := TRUE;
+		CloseFd(workers[idx].inFd); CloseFd(workers[idx].outFd);
+		FOR i := 0 TO maxReq - 1 DO
+			IF reqs[i].used & ~reqs[i].done & (reqs[i].rank = idx) THEN Resend(ReqAt(i)) END
+		END
+	END MarkDead;
+
+	PROCEDURE ParseWorker (idx: INTEGER);
+		VAR off, len, tag, st, rem, i: INTEGER; req: Req;
+	BEGIN
+		off := 0;
+		LOOP
+			IF workers[idx].inLen - off < 12 THEN EXIT END;
+			len := GetInt(workers[idx].buf, off);
+			tag := GetInt(workers[idx].buf, off + 4);
+			st := GetInt(workers[idx].buf, off + 8);
+			IF (len < 0) OR (len > maxFrame) THEN MarkDead(idx); RETURN END;
+			IF workers[idx].inLen - off < 12 + len THEN EXIT END;
+			req := FindReq(tag);
+			IF (req # NIL) & ~req.done THEN
+				IF st = 0 THEN
+					FOR i := 0 TO len - 1 DO payload[i] := workers[idx].buf[off + 12 + i] END;
+					req.c := Deserialize(payload, len);
+					IF req.c = NIL THEN req.status := -5 ELSE req.status := 0 END
+				ELSE req.status := st
+				END;
+				req.done := TRUE;
+				IF req.waiting # NIL THEN
+					Tasks.Unpark(req.waiting); req.waiting := NIL
+				END
+			END;
+			INC(off, 12 + len)
+		END;
+		rem := workers[idx].inLen - off;
+		IF rem > 0 THEN
+			FOR i := 0 TO rem - 1 DO workers[idx].buf[i] := workers[idx].buf[off + i] END
+		END;
+		workers[idx].inLen := rem
+	END ParseWorker;
+
+	PROCEDURE (w: WWait) Ready (events: SET);
+		VAR idx, n: INTEGER; eof: BOOLEAN;
+	BEGIN
+		idx := w.idx;
+		IF workers[idx].dead THEN RETURN END;
+		eof := FALSE;
+		LOOP
+			n := S.VAL(INTEGER, LinLibc.read(workers[idx].outFd,
+				S.ADR(workers[idx].buf[workers[idx].inLen]),
+				maxFrame - workers[idx].inLen));
+			IF n > 0 THEN
+				INC(workers[idx].inLen, n);
+				ParseWorker(idx)
+			ELSIF n = 0 THEN eof := TRUE; EXIT
+			ELSE EXIT
+			END
+		END;
+		IF eof THEN MarkDead(idx)
+		ELSIF ~workers[idx].dead THEN Poller.Add(workers[idx].outFd, Poller.In, w)
+		END
+	END Ready;
+
+	(* --- процесс-исполнитель ---------------------------------------------- *)
+
+	PROCEDURE (VAR a: DoAction) Do;
+	BEGIN
+		a.c.Do
+	END Do;
+
+	PROCEDURE NoopViewer;
+	BEGIN
+	END NoopViewer;
+
+	PROCEDURE RunDo (c: Computon; OUT err: INTEGER);
+		VAR a: DoAction;
+	BEGIN
+		a.c := c;
+		Services.Try(a);
+		IF a.trapped THEN err := 1 ELSE err := 0 END
+	END RunDo;
+
+	PROCEDURE WorkerLoop*;
+	(** Точка входа процесса-исполнителя; fds — из --ASYNC_IN/--ASYNC_OUT. *)
+		VAR inFd, outFd, len, tag, kind, err, res, i: INTEGER;
+			val: ARRAY 32 OF CHAR; c: Computon; ok: BOOLEAN;
+			tmp: POINTER TO ARRAY OF SHORTCHAR;
+	BEGIN
+		(* консольный x64 иначе считает фатальным любой трап, даже в Try *)
+		Kernel.InstallTrapViewer(NoopViewer);
+		Dialog.GetPar("ASYNC_IN", val, res);
+		inFd := 0;
+		IF res = 0 THEN Strings.StringToInt(val, inFd, res) END;
+		Dialog.GetPar("ASYNC_OUT", val, res);
+		outFd := 1;
+		IF res = 0 THEN Strings.StringToInt(val, outFd, res) END;
+		LOOP
+			IF ~ReadAll(inFd, hdr, 12) THEN EXIT END;
+			len := GetInt(hdr, 0); tag := GetInt(hdr, 4); kind := GetInt(hdr, 8);
+			IF kind = kindStop THEN EXIT END;
+			IF (len < 0) OR (len > maxFrame) THEN EXIT END;
+			IF (len > 0) & ~ReadAll(inFd, payload, len) THEN EXIT END;
+			c := Deserialize(payload, len);
+			IF c = NIL THEN err := -1 ELSE RunDo(c, err) END;
+			outLen := 0;
+			IF err = 0 THEN
+				Serialize(c, tmp, outLen);
+				IF (tmp # NIL) & (outLen <= maxFrame) THEN
+					FOR i := 0 TO outLen - 1 DO outBuf[i] := tmp^[i] END
+				ELSE err := -6; outLen := 0
+				END
+			END;
+			PutInt(hdr, 0, outLen); PutInt(hdr, 4, tag); PutInt(hdr, 8, err);
+			ok := WriteAll(outFd, hdr, 12);
+			IF ok & (outLen > 0) THEN ok := WriteAll(outFd, outBuf, outLen) END;
+			IF ~ok THEN EXIT END
+		END
+	END WorkerLoop;
+
+	(* --- инициализация ---------------------------------------------------- *)
+
+	PROCEDURE Init;
+		VAR i, n: INTEGER;
+	BEGIN
+		FOR i := 0 TO maxReq - 1 DO reqs[i].used := FALSE END;
+		FOR i := 0 TO maxPool - 1 DO
+			workers[i].dead := TRUE; workers[i].pid := 0; workers[i].inLen := 0
+		END;
+		started := FALSE; nworkers := 0; nextWorker := 0; lastErr := 0; hook := NIL;
+		procPath := "/proc/self/exe";
+		n := S.VAL(INTEGER, LinLibc.readlink(S.VAL(LinLibc.PtrSTR, S.ADR(procPath[0])),
+			S.VAL(LinLibc.PtrSTR, S.ADR(exePath[0])), 511));
+		IF n <= 0 THEN exePath[0] := 0X END;
+		cmdLine := "AsyncComputon.WorkerLoop";
+		i := 0; WHILE cmdLine[i] # 0X DO INC(i) END;
+		cmdLine[i] := S.VAL(SHORTCHAR, 10); cmdLine[i+1] := 0X
+	END Init;
+
+BEGIN
+	Init
+END AsyncComputon.
