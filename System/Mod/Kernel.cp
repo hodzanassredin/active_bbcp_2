@@ -326,6 +326,7 @@ MODULE Kernel;
 		candidates: ARRAY 1024 OF INTEGER;
 		nofcand: INTEGER;
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
+		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock (Loop, этап 2а) *)
 		ttotal: INTEGER;	(* current total size of BlackBox heap *)	(* committed heap size *)
 		(* total is used only in monocluster mode; it stands for the committed heap size; in monocluster mode, all of heap is in root. The committed size of root is root.size. So, total is not needed? *)
 		used: LONGINT;	(* bytes allocated on system heap *)
@@ -2115,7 +2116,7 @@ MODULE Kernel;
 			a := b.size + 4 - tsize;
 			IF a > 0 THEN Insert(S.VAL(FreeBlock, S.VAL(INTEGER, b) + tsize), a) END;
 			IF size > 0 THEN Erase(S.ADR(b.size), (size + 3) DIV 4) END;
-			INC(allocated, tsize)
+			INC(allocated, tsize); INC(allocCount)
 		END;
 		RETURN S.VAL(Block, b)
 	END NewBlock;
@@ -2126,6 +2127,12 @@ MODULE Kernel;
 	BEGIN
 		RETURN allocated
 	END Allocated;
+
+	PROCEDURE AllocCount* (): LONGINT;
+	(** Счётчик успешных NewBlock: Loop не собирает без выделений. *)
+	BEGIN
+		RETURN allocCount
+	END AllocCount;
 
 	PROCEDURE Used* (): LONGINT;
 	BEGIN
@@ -2378,7 +2385,7 @@ MODULE Kernel;
 	BEGIN
 		
 		(* monoClusterMem := FALSE; *)
-		allocated := 0; (*total := 0;*) used := 0;
+		allocated := 0; allocCount := 0; (*total := 0;*) used := 0;
 		sentinelBlock.size := MAX(INTEGER);
 		sentinel := S.ADR(sentinelBlock); 
 		i := N;
