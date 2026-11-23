@@ -38,11 +38,22 @@ echo "build64: компиляция подсистем:$subs"
 	echo 'DevCompiler64.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
 	echo "DevCompiler64.CompileSubs @Lin $subs"
+	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
+	# LinThreads нужны самой подсистеме Async (AsyncSelect, AsyncComputon),
+	# поэтому идут до неё.
+	echo "DevCompiler64.CompileThis Tasks"
+	echo "DevCompiler64.CompileThis LinThreads"
+	echo "DevCompiler64.CompileThis LinNative"
 	# Async — отдельным вызовом: в общем списке CompileSubs спотыкается
 	# о псевдомодуль ACTIVE («sourcefile for ACTIVE not found»), хотя
 	# по отдельности подсистема собирается.
 	if [ -d "$BB/Async/Mod" ] || [ -d "$BB/Async/Mod64" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Async"
+		# Модули Mod64 подсистемы Async: их нет в обходе CompileSubs.
+		echo "DevCompiler64.CompileThis AsyncComputon"
+		echo "DevCompiler64.CompileThis AsyncMpi"
+		echo "DevCompiler64.CompileThis AsyncWork"
+		echo "DevCompiler64.CompileThis AsyncWorkLin"
 	fi
 	# Robust — фасад RobustParallel над AsyncComputon (этап 9).
 	if [ -d "$BB/Robust/Mod" ] || [ -d "$BB/Robust/Mod64" ]; then

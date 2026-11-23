@@ -18,7 +18,7 @@ set -u
 MOD=Test64Resolver
 MARKS=proc
 TMO=180
-DEPS="AsyncWork AsyncIO AsyncSelect AsyncChan AsyncOnce LinThreads LinNative"
+DEPS="LinThreads LinNative AsyncWork AsyncWorkLin AsyncIO AsyncSelect AsyncChan AsyncOnce"
 
 skip() {
 	echo "SKIP $MOD: $*"

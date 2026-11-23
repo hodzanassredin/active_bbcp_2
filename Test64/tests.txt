@@ -13,7 +13,7 @@ Test64Active|proc|300|
 Test64Yield|proc|300||^
 Test64Channels|proc|300|AsyncSelect AsyncChan AsyncOnce
 Test64IO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
-Test64Workers|proc|300|AsyncWork LinThreads LinNative
+Test64Workers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
 Test64Computons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 Test64Protocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
 Test64Unload|proc|600|Test64UnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
