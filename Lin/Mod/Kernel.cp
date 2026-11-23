@@ -41,6 +41,8 @@ MODULE LinKernel;
 		trapReturn = 1; (* Return value for sigsetjmp given from siglongjmp *)
 
 	TYPE
+		TryContext = POINTER TO Libc.sigjmp_buf;
+
 		Platform = RECORD (Kernel.Platform) END;
 
 		ErrLog = RECORD
@@ -257,8 +259,46 @@ MODULE LinKernel;
 		hi := baseStack;
 		inMainStack := ((trap.top = pc) OR Below(trap.top, pc)) & Below(pc, hi);
 		inSignalStack := ((sigStack = pc) OR Below(sigStack, pc)) & Below(pc, sigStack + sigStackSize);
-		RETURN inMainStack OR inSignalStack
+		RETURN inMainStack OR inSignalStack OR Kernel.InRegisteredStack(pc)
 	END InActivationStack;
+
+	PROCEDURE (VAR p: Platform) AllocateStackMem (size: INTEGER; OUT lo, hi: S.ADDRESS);
+	(* Стек задачи: mmap + одна сторожевая страница PROT_NONE снизу. *)
+		CONST protection = Libc.PROT_READ + Libc.PROT_WRITE;
+			flags = Libc.MAP_PRIVATE + Libc.MAP_ANON;
+		VAR guard, total: S.ADDRESS; base: S.ADDRESS; res: INTEGER;
+	BEGIN
+		guard := p.PageSize();
+		total := ((size + guard - 1) DIV guard) * guard + guard;
+		base := Libc.mmap(0, total, protection, flags, -1, 0);
+		IF base = Libc.MAP_FAILED THEN lo := 0; hi := 0; RETURN END;
+		res := Libc.mprotect(base, guard, Libc.PROT_NONE);
+		IF res # 0 THEN
+			res := Libc.munmap(base, total);
+			lo := 0; hi := 0; RETURN
+		END;
+		lo := base + guard; hi := base + total
+	END AllocateStackMem;
+
+	PROCEDURE (VAR p: Platform) DeallocateStackMem (lo, hi: S.ADDRESS);
+		VAR guard, res: INTEGER;
+	BEGIN
+		IF lo # 0 THEN
+			guard := p.PageSize();
+			res := Libc.munmap(lo - guard, hi - lo + guard);
+			ASSERT(res = 0, 103)
+		END
+	END DeallocateStackMem;
+
+	PROCEDURE (VAR p: Platform) GetTryContext (): S.ADDRESS;
+	BEGIN
+		RETURN S.VAL(S.ADDRESS, currentTryContext)
+	END GetTryContext;
+
+	PROCEDURE (VAR p: Platform) SetTryContext (ctx: S.ADDRESS);
+	BEGIN
+		currentTryContext := S.VAL(TryContext, ctx)
+	END SetTryContext;
 
 	(* Alexander Shiryaev, 2012.10: Linux: can be implemented through mincore/madvise *)
 	(* This procedure can be called from TrapHandler also *)
@@ -592,6 +632,7 @@ MODULE LinKernel;
 	END ReserveCrossBorder;
 
 	PROCEDURE Init;
+		VAR sigStk: Kernel.Stack;
 	BEGIN
 		log.string := ErrString; log.ln := ErrLn;
 
@@ -621,6 +662,9 @@ MODULE LinKernel;
 		trap.depth := 0; trap.top := -1; pc := 0;
 		platform.tag := S.TYP(Platform);
 		Kernel.SetPlatform(S.VAL(S.PTR, S.ADR(platform.p)));
+		(* Сигнальный стек — в общем реестре: MarkLocals должен уметь
+		   разобрать GC, запущенный в обработчике трапа. *)
+		sigStk := Kernel.RegisterSignalStack(sigStack, sigStack + sigStackSize);
 	END Init;
 
 BEGIN Init
