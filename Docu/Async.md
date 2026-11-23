@@ -409,6 +409,14 @@ worker threads. The pool is Linux AMD64 only; Windows is not
 implemented. A blocking call made directly from a task still freezes
 the framework — move it to a worker.
 
+The worst case is covered by `tools/test-resolver.sh`: inside
+`unshare -rmn` with a dummy interface and a private resolv.conf whose
+name server is unreachable (packets are dropped silently, default
+timeout and attempts), `ResolveJob` for a nonexistent name waits
+10,010 ms, while the main loop makes 9,449 steps. Without
+`unshare`/`ip`/`mount` the scenario prints `SKIP` with the reason.
+`tools/test.sh` runs it as a separate stage.
+
 ## Computons (stage 9)
 
 `AsyncComputon` reproduces the `RobustParallel` interface:
@@ -442,9 +450,46 @@ error code (`Pull` returns `NIL`, `LastError()` gives the code).
 Measured: 12 computons on 1, 4 and 16 local processes, same result; a
 `SIGKILL`ed executor is retried in 414 ms.
 
-MPI is not available in this environment (`mpicc`/`mpirun`/`libmpi`
-absent), so the MPI transport was not implemented; the interface does
-not depend on the transport.
+### `RobustParallel` facade
+
+`Robust/Mod64/Parallel.cp` exposes the published definition from
+I. Denisov's talk (2017, p. 19) on top of `AsyncComputon`:
+
+```
+CONST tag* = 1;
+TYPE Computon* = AsyncComputon.Computon;   (* Do, NEW, ABSTRACT *)
+     Hook* = AsyncComputon.Hook;           (* Failed(rank, tag, err) *)
+VAR rank-, size-: INTEGER;
+LogMsg, Push, Pull, Try, SetHook, Wait, Stop, Unload
+```
+
+The slide does not show `Hook`; `AsyncComputon.Hook` was chosen. Ranks
+follow MPI: 0 is the controller (the client), 1..size−1 are executor
+processes; `Push`/`Pull`/`Try` shift the rank by −1. The world size is
+the external variable `ROBUST_SIZE` (default 1, controller only); the
+facade does not start a nested pool inside an executor
+(`ASYNC_IN`/`ASYNC_OUT`/`ASYNC_TCP`). `Unload` has no result in the
+definition; a refusal is logged only.
+
+A client written only against this definition in MPI style (rank 0
+splits the work, `Push`es it, `Pull`s the results; the computon's `Do`
+is the "others compute" branch) returns 500500 = 1+...+1000 on 1, 4
+and 16 processes (`tools/test-robust.sh`). Compatibility is proven
+against the published interface; running Ivan's actual code requires
+that code.
+
+### MPI transport
+
+MPICH 5.0.2 is installed into user space (`uv pip install mpich` in
+`.work/venv`); `tools/bbmpi.c` hides MPI behind seven C functions and
+`AsyncMpi` binds them with `LinDl` only when the transport is selected,
+so ordinary runs need no MPI library. World layout: rank 0 is the
+BlackBox controller, ranks 1..n run `AsyncMpi.WorkerLoop`. Frames use
+the same 12-byte header and body over `MPI_Send`/`MPI_Recv`; the main
+loop polls `MPI_Iprobe` from a `Services` action. `Start(n)` requires
+an n+1 world. No retry after a rank dies (mpiexec usually kills the
+job), `Unload` is refused and `WorkerPid` is unknown. Test:
+12 squares on 4 executors under `mpiexec -n 5`, 252 ms.
 
 ## Channel protocol (stage 10)
 
@@ -469,7 +514,11 @@ label is the dynamic record type name of `AsyncSelect.Msg`
 current state prints a readable text to the console and traps (code
 21); the text is kept in `AsyncProto.LastViolation`. Without a protocol
 `AsyncSelect.CheckSend` returns after one `NIL` test, so there is no
-overhead. Sends made through `Select` are not checked.
+overhead. Sends made through `Select` (`SendAlt`) are checked at the
+moment the offer is actually executed — immediately in `Register`, or
+when a deposited offer is taken in `TakeRendezvous`/`CompleteSend`. A
+losing offer does not advance the protocol; a violation traps the task
+performing the operation.
 
 ## Computon transports and code update
 
@@ -531,14 +580,21 @@ pipe, `getaddrinfo` and file jobs), `LinThreads`, `LinNative`, the
 `Kernel` worker allocation counter.
 
 Implemented in this branch (stage 9): `AsyncComputon` (local BlackBox
-processes over pipes, `Push`/`Pull`/`Try`, retry after executor death,
-error results).
+processes over pipes and TCP, `Push`/`Pull`/`Try`, retry after executor
+death, error results), the `RobustParallel` facade, and an MPI transport
+over MPICH installed into user space (`SetTransport("mpi")`,
+`mpiexec -n 5` test).
 
 Implemented in this branch (stage 10): the Zonnon-style channel
-protocol (`AsyncProto`), the TCP computon transport, `Unload` for code
-update on executors, and deterministic compile timestamps for the
-bootstrap. MPI remains unimplemented because its toolchain is absent
-from this machine.
+protocol (`AsyncProto`) with checks for direct sends and `SendAlt`, the
+TCP computon transport, `Unload` for code update on executors, and
+deterministic compile timestamps for the bootstrap.
+
+Also implemented: Windows x64 task stacks (`VirtualAlloc` +
+`PAGE_NOACCESS`), per-stack `Try` context, and console Unit/Tasks tests
+under wine (`tools/test-win64.sh`). Windows worker threads and readiness
+polling are not implemented. The GUI scenario is checked headlessly
+under `gtk4-broadwayd` (`tools/test-gui.sh`).
 
 ### Compiler implementation notes
 

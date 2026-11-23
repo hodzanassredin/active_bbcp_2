@@ -192,7 +192,12 @@ tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
-tools/test.sh                     # Unit: 13 модулей, 74 теста
+tools/test.sh                     # 18 этапов, 84 проверки
+tools/test-resolver.sh            # этап 8: резолвер в unshare -rmn
+tools/test-robust.sh              # RobustParallel на 1/4/16 процессах
+tools/test-mpi.sh                 # MPI-транспорт, mpiexec -n 5
+tools/test-gui.sh                 # GUI под gtk4-broadwayd, без экрана
+tools/test-win64.sh               # Win64 под wine: UnitTests, WinTasks
 tools/check-reject.sh             # 8 отказов компилятора этапа 6
 tools/bootstrap.sh                # три прохода Dev, B и C побайтно
 tools/test.sh --list
@@ -208,6 +213,11 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   на каждый модуль: отдельный процесс, итог `failed 0`.
   Test64-сценарии — `Test64Tests` с пометкой `proc`; задачи —
   `Test64Tasks` (`proc slow`); этап 6 — `Test64Active`, `Test64Yield`.
+  Отдельные этапы `tools/test.sh`: `Test64Resolver` (резолвер в
+  `unshare -rmn`; без прав — `SKIP`), `Test64RobustParallel`
+  (1/4/16 процессов через `ROBUST_SIZE`), `Test64Mpi` (`mpiexec -n 5`,
+  без MPICH — `SKIP`), `Test64Gui` (под `gtk4-broadwayd`, без него —
+  `SKIP`). Итог — 18 этапов, 84 проверки.
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
   прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
@@ -252,15 +262,23 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `Poller` будит задачу. `Execute` из задачи — точка ожидания.
   `LinThreads`/`LinNative` — отдельные модули объявлений (символы
   `LinLibc` в хосте не обновить). `Kernel.WorkerAllocs` — отладочный
-  счётчик `NEW` из рабочей нити. Тесты — `Test64Workers`.
+  счётчик `NEW` из рабочей нити. Тесты — `Test64Workers`. Худший случай
+  (недоступный сервер имён) — `Test64Resolver` в `unshare -rmn`:
+  10 010 мс ожидания в нити, 9 449 шагов главного цикла.
 - Этап 9: `Async/Mod64/Computon.cp` — `Computon = Stores.Store` с
   `Do`, `Push/Pull/Try/Wait/Stop/SetHook/Unload`, транспорт —
   `fork+exec` `blackbox-console` и три pipe; гибель исполнителя —
-  повтор, ошибка `Do` — код. MPI в системе нет, транспорт MPI не
-  делался. Тесты — `Test64Computons` (1/4/16 процессов, убийство, `AltPull`).
+  повтор, ошибка `Do` — код. Фасад `Robust/Mod64/Parallel.cp`
+  (`RobustParallel`, ранги MPI: 0 — управляющий, 1..size−1 —
+  исполнители, размер мира — `ROBUST_SIZE`). MPI-транспорт —
+  `Async/Mod64/Mpi.cp` поверх MPICH из `.work/venv`
+  (`SetTransport("mpi")`, ранг 0 — тест, ранги 1..n —
+  `AsyncMpi.WorkerLoop`). Тесты — `Test64Computons` (1/4/16 процессов,
+  убийство, `AltPull`), `tools/test-robust.sh`, `tools/test-mpi.sh`.
 - Этап 10: `Async/Mod/Proto.cp` — необязательный протокол канала по
   образцу Zonnon (автомат из описания, `AsyncChan.SetProtocol`, трап с
-  текстом на нарушение; `SendAlt` пока не проверяется). Транспорт
+  текстом на нарушение; проверяются и прямые `Send`, и `SendAlt` в
+  точке исполнения предложения). Транспорт
   компутонов `pipe`/`tcp` — `SetTransport` или `ASYNC_TRANSPORT`,
   TCP по localhost, сокет исполнителя блокирующий. `Unload(module)`
   выгружает код у всех исполнителей (отказ `20`, если занят) —
@@ -272,18 +290,32 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
 - Подсистема `Async` собирается в `tools/build64.sh` **отдельным**
   вызовом `CompileSubs @Lin Async`: в общем списке `CompileSubs`
   спотыкается о псевдомодуль `ACTIVE` («sourcefile for ACTIVE not
-  found»).
+  found»). Следом так же отдельно собирается `Robust` (фасад
+  `RobustParallel` зависит от `AsyncComputon`).
+- GUI-прогон: `LinInit` читает внешнюю переменную `BB_RUN=Модуль.
+  Процедура` и зовёт команду до `Loop.Start`; `tools/test-gui.sh`
+  поднимает `gtk4-broadwayd` в своём `XDG_RUNTIME_DIR`. Системный
+  `broadwayd` — от GTK3 и с клиентом GTK4 падает; нужен
+  `gtk4-broadwayd` (пакет `libgtk-4-bin`, в стенде распакован в
+  `.work/gtk4-bin`). Мышь не эмулируется.
+- Windows x64: `WinKernel` получил `AllocateStackMem` (`VirtualAlloc`
+  + `PAGE_NOACCESS`) и `Get/SetTryContext`; `tools/test-win64.sh`
+  собирает @Win, линкует консольный PE (`WinIntInit`, подсистема
+  правится на console) и под wine гоняет `UnitTests` 4/4 и
+  `Test64WinTasks` 5/5.
 - `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
   `.cp`, конвертировать нечего. `DevOnce` заменён на
   `DevCompiler64.CompileThis`, потому что `Views.Old` не открывает `.cp`
   в консольном x64.
-- Открыто: MPI-транспорт компутонов; проверка протокола для отправок
-  через `Select` (`SendAlt`);
-  Windows x64 для рабочих нитей и процессов; GUI-прогоны,
-  `pack-dev0-linux` (в снимке отсутствует;
+- Открыто: Windows x64 для рабочих нитей `CreateThread` и опроса
+  готовности (нужен фасад пула с делегатами `AsyncWorkLin`/
+  `AsyncWorkWin`); повтор и `Unload` в MPI-транспорте (mpiexec гасит
+  мир); `pack-dev0-linux` (в снимке отсутствует;
   `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
-  сигналу и нити ОС, `[exclusive]` на 32-битной цели,
-  `Platform.AllocateStackMem` для Windows x64, отложенные
+  сигналу и нити ОС, `[exclusive]` на 32-битной цели — по решению
+  владельца: компилятор отвергает `ACTIVE`/`[exclusive]`/`^`, в
+  i386-ядре нет `Lock/Unlock/Wait/Await/Poll`, в `CPC486` нет
+  пролога/эпилога, объём — сотни строк ядра и генератора; отложенные
   финализаторы, нагрузочный тест «1000 задач час».
 - Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица
   изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер),
