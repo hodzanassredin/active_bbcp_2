@@ -1,0 +1,634 @@
+MODULE ObsdLibc ["libc.so.102"];
+
+	(*
+		OpenBSD 7.8
+		i386
+	*)
+
+	CONST
+		NULL* = 0H;
+		FALSE* = 0;
+		TRUE* = 1;
+
+		CLOCKS_PER_SEC* = 100;
+
+		MAP_FAILED* = -1;
+
+		(* MAP_PRIVATE, MAP_ANON (intFlags) *)
+		MAP_SHARED* = {0};
+		MAP_PRIVATE* = {1};
+		MAP_FIXED* = {4};
+		MAP_ANON* = {12};
+
+		(* PROT_NONE, PROT_READ, PROT_WRITE, PROT_EXEC (intFlags) *)
+		PROT_NONE* = {};
+		PROT_READ* = {0};
+		PROT_WRITE* = {1};
+		PROT_EXEC* = {2};
+
+		(* SIG_UNBLOCK, SIG_SETMASK (int) *)
+		SIG_BLOCK* = 1;
+		SIG_UNBLOCK* = 2;
+		SIG_SETMASK* = 3;
+
+		(* SIG_DFL, SIG_IGN, SIG_ERR *)
+		SIG_DFL* = 0;
+		SIG_IGN* = 1;
+		SIG_ERR* = -1;
+
+		(* FPE_INTDIV, FPE_INTOVF, FPE_FLTDIV, FPE_FLTOVF, FPE_FLTUND, FPE_FLTRES, FPE_FLTINV, FPE_FLTSUB (int) *)
+		FPE_FLTDIV* = 3;
+		FPE_FLTINV* = 7;
+		FPE_FLTOVF* = 4;
+		FPE_FLTRES* = 6;
+		FPE_FLTSUB* = 8;
+		FPE_FLTUND* = 5;
+		FPE_INTDIV* = 1;
+		FPE_INTOVF* = 2;
+
+		(* SA_SIGINFO (intFlags) *)
+		SA_NOCLDSTOP* = {3};
+		SA_NOCLDWAIT* = {5};
+		SA_NODEFER* = {4};
+		SA_ONSTACK* = {0};
+		SA_RESETHAND* = {2};
+		SA_RESTART* = {1};
+		SA_SIGINFO* = {6};
+
+		SIGSTKSZ* = 28672;
+
+		(* SIGINT, SIGILL, SIGFPE, SIGSEGV, SIGKILL, SIGSTOP, SIGWINCH, SIGTHR (int) *)
+		SIGABRT* = 6;
+		SIGALRM* = 14;
+		SIGBUS* = 10;
+		SIGCHLD* = 20;
+		SIGCONT* = 19;
+		SIGEMT* = 7;
+		SIGFPE* = 8;
+		SIGHUP* = 1;
+		SIGILL* = 4;
+		SIGINFO* = 29;
+		SIGINT* = 2;
+		SIGIO* = 23;
+		SIGIOT* = SIGABRT;
+		SIGKILL* = 9;
+		SIGPIPE* = 13;
+		SIGPROF* = 27;
+		SIGQUIT* = 3;
+		SIGSEGV* = 11;
+		SIGSTOP* = 17;
+		SIGSYS* = 12;
+		SIGTERM* = 15;
+		SIGTHR* = 32;
+		SIGTRAP* = 5;
+		SIGTSTP* = 18;
+		SIGTTIN* = 21;
+		SIGTTOU* = 22;
+		SIGURG* = 16;
+		SIGUSR1* = 30;
+		SIGUSR2* = 31;
+		SIGVTALRM* = 26;
+		SIGWINCH* = 28;
+		SIGXCPU* = 24;
+		SIGXFSZ* = 25;
+		_NSIG* = 33;
+
+(*
+		PAGE_SIZE* = 4096;
+*)
+		_SC_PAGESIZE* = 28;
+
+		(* ENOENT, EEXIST, EACCES, ENOMEM, EDQUOT, EMFILE, ENOTDIR (int) *)
+		E2BIG* = 7;
+		EACCES* = 13;
+		EADDRINUSE* = 48;
+		EADDRNOTAVAIL* = 49;
+		EAFNOSUPPORT* = 47;
+		EAGAIN* = 35;
+		EALREADY* = 37;
+		EAUTH* = 80;
+		EBADF* = 9;
+		EBADMSG* = 92;
+		EBADRPC* = 72;
+		EBUSY* = 16;
+		ECANCELED* = 88;
+		ECHILD* = 10;
+		ECONNABORTED* = 53;
+		ECONNREFUSED* = 61;
+		ECONNRESET* = 54;
+		EDEADLK* = 11;
+		EDESTADDRREQ* = 39;
+		EDOM* = 33;
+		EDQUOT* = 69;
+		EEXIST* = 17;
+		EFAULT* = 14;
+		EFBIG* = 27;
+		EFTYPE* = 79;
+		EHOSTDOWN* = 64;
+		EHOSTUNREACH* = 65;
+		EIDRM* = 89;
+		EILSEQ* = 84;
+		EINPROGRESS* = 36;
+		EINTR* = 4;
+		EINVAL* = 22;
+		EIO* = 5;
+		EIPSEC* = 82;
+		EISCONN* = 56;
+		EISDIR* = 21;
+		ELAST* = 95;
+		ELOOP* = 62;
+		EMEDIUMTYPE* = 86;
+		EMFILE* = 24;
+		EMLINK* = 31;
+		EMSGSIZE* = 40;
+		ENAMETOOLONG* = 63;
+		ENEEDAUTH* = 81;
+		ENETDOWN* = 50;
+		ENETRESET* = 52;
+		ENETUNREACH* = 51;
+		ENFILE* = 23;
+		ENOATTR* = 83;
+		ENOBUFS* = 55;
+		ENODEV* = 19;
+		ENOENT* = 2;
+		ENOEXEC* = 8;
+		ENOLCK* = 77;
+		ENOMEDIUM* = 85;
+		ENOMEM* = 12;
+		ENOMSG* = 90;
+		ENOPROTOOPT* = 42;
+		ENOSPC* = 28;
+		ENOSYS* = 78;
+		ENOTBLK* = 15;
+		ENOTCONN* = 57;
+		ENOTDIR* = 20;
+		ENOTEMPTY* = 66;
+		ENOTRECOVERABLE* = 93;
+		ENOTSOCK* = 38;
+		ENOTSUP* = 91;
+		ENOTTY* = 25;
+		ENXIO* = 6;
+		EOPNOTSUPP* = 45;
+		EOVERFLOW* = 87;
+		EOWNERDEAD* = 94;
+		EPERM* = 1;
+		EPFNOSUPPORT* = 46;
+		EPIPE* = 32;
+		EPROCLIM* = 67;
+		EPROCUNAVAIL* = 76;
+		EPROGMISMATCH* = 75;
+		EPROGUNAVAIL* = 74;
+		EPROTO* = 95;
+		EPROTONOSUPPORT* = 43;
+		EPROTOTYPE* = 41;
+		ERANGE* = 34;
+		EREMOTE* = 71;
+		EROFS* = 30;
+		ERPCMISMATCH* = 73;
+		ESHUTDOWN* = 58;
+		ESOCKTNOSUPPORT* = 44;
+		ESPIPE* = 29;
+		ESRCH* = 3;
+		ESTALE* = 70;
+		ETIMEDOUT* = 60;
+		ETOOMANYREFS* = 59;
+		ETXTBSY* = 26;
+		EUSERS* = 68;
+		EWOULDBLOCK* = EAGAIN;
+		EXDEV* = 18;
+
+		WAIT_ANY* = -1;
+		WCONTINUED* = {3};
+		WNOHANG* = {0};
+		WUNTRACED* = {1};
+
+		NAME_MAX* = 255;
+
+		SEEK_SET* = 0;
+		SEEK_CUR* = 1;
+		SEEK_END* = 2;
+
+		STDIN_FILENO* = 0;
+		STDOUT_FILENO* = 1;
+		STDERR_FILENO* = 2;
+
+		P_tmpdir* = "/tmp";
+
+		(* O_RDWR, O_NONBLOCK (intFlags) *)
+		O_ACCMODE* = {0,1};
+		O_APPEND* = {3};
+		O_ASYNC* = {6};
+		O_CLOEXEC* = {16};
+		O_CLOFORK* = {18};
+		O_CREAT* = {9};
+		O_DIRECTORY* = {17};
+		O_SYNC* = {7};
+		O_DSYNC* = O_SYNC;
+		O_EXCL* = {11};
+		O_EXLOCK* = {5};
+		O_FSYNC* = {7};
+		O_NONBLOCK* = {2};
+		O_NDELAY* = O_NONBLOCK;
+		O_NOCTTY* = {15};
+		O_NOFOLLOW* = {8};
+		O_RDONLY* = {};
+		O_RDWR* = {1};
+		O_RSYNC* = O_SYNC;
+		O_SHLOCK* = {4};
+		O_TRUNC* = {10};
+		O_WRONLY* = {0};
+
+		CLOCK_BOOTTIME* = 6;
+		CLOCK_MONOTONIC* = 3;
+		CLOCK_PROCESS_CPUTIME_ID* = 2;
+		CLOCK_REALTIME* = 0;
+		CLOCK_THREAD_CPUTIME_ID* = 4;
+		CLOCK_UPTIME* = 5;
+
+		RLIMIT_CORE* = 4;
+		RLIMIT_CPU* = 0;
+		RLIMIT_DATA* = 2;
+		RLIMIT_FSIZE* = 1;
+		RLIMIT_MEMLOCK* = 6;
+		RLIMIT_NOFILE* = 8;
+		RLIMIT_NPROC* = 7;
+		RLIMIT_RSS* = 5;
+		RLIMIT_STACK* = 3;
+
+		UTIME_NOW* = -2;
+		UTIME_OMIT* = -1;
+
+	TYPE
+		StrArray* = POINTER TO ARRAY [untagged] OF PtrSTR;
+		PtrSTR* = POINTER TO ARRAY [untagged] OF SHORTCHAR;
+
+		(* PtrVoid, int, long, size_t, ssize_t, off_t, time_t, clock_t, sigjmp_buf *)
+		(* mode_t, rlim_t, intFlags, sigset_t (set) *)
+		PtrVoid* = INTEGER;
+		int* = INTEGER;
+		long* = INTEGER;
+		ulong* = INTEGER;
+		size_t* = INTEGER;
+		ssize_t* = INTEGER;
+		off_t* = LONGINT;
+		clock_t* = LONGINT;
+		clockid_t* = INTEGER;
+		time_t* = LONGINT;
+		mode_t* = SET;
+		pid_t* = INTEGER;
+		uid_t* = INTEGER;
+		gid_t* = INTEGER;
+		dev_t* = INTEGER;
+		ino_t* = LONGINT;
+		nlink_t* = INTEGER;
+		blkcnt_t = LONGINT;
+		blksize_t = INTEGER;
+		int8_t* = SHORTCHAR;
+		uint8_t* = SHORTCHAR;
+		int16_t* = SHORTINT;
+		uint16_t* = SHORTINT;
+		int32_t* = INTEGER;
+		uint32_t* = INTEGER;
+		int64_t* = LONGINT;
+		uint64_t* = LONGINT;
+		wchar_t* = INTEGER;
+		rlim_t* = LONGINT;
+		sigjmp_buf* = ARRAY [untagged] 11 OF INTEGER;
+		intFlags* = SET;
+		sigset_t* = ARRAY [untagged] 4 OF BYTE;
+		PtrSigset_t* = POINTER [untagged] TO sigset_t;
+
+
+		tm* = POINTER TO tmDesc;
+		tmDesc* = RECORD [untagged]
+			(* NOTE: check record size *)
+			(* tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec, tm_wday [ , tm_gmtoff ] *)
+			(* OpenBSD 7.8 /usr/include/time.h *)
+				tm_sec*: int; (* seconds after the minute [0-60] *)
+				tm_min*: int; (* minutes after the hour [0-59] *)
+				tm_hour*: int; (* hours since midnight [0-23] *)
+				tm_mday*: int; (* day of the month [1-31] *)
+				tm_mon*: int; (* months since January [0-11] *)
+				tm_year*: int; (* years since 1900 *)
+				tm_wday*: int; (* days since Sunday [0-6] *)
+				tm_yday*: int; (* days since January 1 [0-365] *)
+				tm_isdst*: int; (* Daylight Saving Time flag *)
+				tm_gmtoff*: long; (* offset from UTC in seconds *)
+				tm_zone*: PtrSTR; (* timezone abbreviation *)
+		END;
+
+		Ptrsiginfo_t* = POINTER TO siginfo_t;
+		siginfo_t = RECORD [untagged]
+			(* si_code, fault address *)
+			(* OpenBSD 7.8 /usr/include/sys/siginfo.h *)
+				si_signo*: int; (* signal from signal.h *)
+				si_code*: int; (* code from above *)
+				si_errno*: int; (* error from errno.h *)
+				_data*: RECORD [union]
+					_pad*: ARRAY [untagged] 29 (* SI_PAD *) OF int; (* for future growth *)
+					_proc*: RECORD [untagged] (* kill(), SIGCLD, siqqueue() *)
+						_pid*: pid_t; (* process ID *)
+						_uid*: uid_t;
+						_pdata*: RECORD [union]
+							_kill*: RECORD [untagged]
+(*
+								_value*: sigval;
+*)
+								_value*: int
+							END;
+							_cld*: RECORD [untagged]
+								_utime*: clock_t;
+								_stime*: clock_t;
+								_status*: int;
+							END;
+						END;
+					END;
+					_fault*: RECORD [untagged] (* SIGSEGV, SIGBUS, SIGILL and SIGFPE *)
+						_addr*: PtrVoid; (* faulting address *)
+						_trapno*: int; (* illegal trap number *)
+					END;
+				END;
+		END;
+
+		Ptrucontext_t* = POINTER TO ucontext_t;
+		ucontext_t = RECORD [untagged]
+			(* IP, SP, FP *)
+			(* OpenBSD 7.8 /usr/include/i386/signal.h struct sigcontext *)
+				sc_gs*: int;
+				sc_fs*: int;
+				sc_es*: int;
+				sc_ds*: int;
+				sc_edi*: int;
+				sc_esi*: int;
+				sc_ebp*: int;
+				sc_ebx*: int;
+				sc_edx*: int;
+				sc_ecx*: int;
+				sc_eax*: int;
+				(* XXX *)
+				sc_eip*: int;
+				sc_cs*: int;
+				sc_eflags*: int;
+				sc_esp*: int;
+				sc_ss*: int;
+
+				sc_cookie*: long;
+				sc_mask*: int; (* signal mask to restore *)
+
+				sc_trapno*: int; (* XXX should be above *)
+				sc_err*: int;
+
+				sc_fpstate*: RECORD [union]
+					(* OpenBSD 7.8 /usr/include/i386/npx.h union savefpu *)
+(*
+						sv_87*: RECORD [untagged]
+							...
+						END;
+						sv_xmm*: RECORD [untagged]
+							...
+						END;
+*)
+				END;
+		END;
+
+		sa_sigaction_t* = PROCEDURE [ccall] (sig: int; siginfo: Ptrsiginfo_t; context: Ptrucontext_t);
+		sigaction_t* = RECORD [untagged]
+(*
+			sa_sigaction*: sa_sigaction_t,
+			sa_flags*: intFlags, sa_mask*: sigset_t
+*)
+			(* OpenBSD 7.8 /usr/include/sys/signal.h *)
+				sa_sigaction*: PROCEDURE [ccall] (sig: int; siginfo: Ptrsiginfo_t; ctx: Ptrucontext_t);
+				sa_mask*: sigset_t;
+				sa_flags*: intFlags;
+		END;
+
+		stack_t* = RECORD [untagged]
+(*
+			ss_sp*: PtrVoid, ss_size*: size_t, ss_flags*: intFlags
+*)
+			(* OpenBSD 7.8 /usr/include/sys/signal.h *)
+				ss_sp*: PtrVoid; (* signal stack base *)
+				ss_size*: size_t; (* signal stack length *)
+				ss_flags*: intFlags; (* SS_DISABLE and/or SS_ONSTACK *)
+		END;
+
+		stat_t* = RECORD [untagged]
+(*
+			NOTE: check record size
+			st_mode*: mode_t, st_size*: off_t, st_mtime*: time_t
+*)
+			(* OpenBSD 7.8 /usr/include/sys/stat.h *)
+				st_mode*: mode_t;
+				st_dev*: dev_t;
+				st_ino*: ino_t;
+				st_nlink*: nlink_t;
+				st_uid*: uid_t;
+				st_gid*: gid_t;
+				st_rdev*: dev_t;
+
+				st_atim*: timespec_t;
+				st_mtim*: timespec_t;
+				st_ctim*: timespec_t;
+
+				st_size*: off_t;
+				st_blocks*: blkcnt_t;
+				st_blksize*: blksize_t;
+				st_flags*: uint32_t;
+				st_gen*: uint32_t;
+
+				__st_birthtim*: timespec_t
+		END;
+
+		PtrFILE* = PtrVoid;
+		PtrDIR* = PtrVoid;
+
+		PtrDirent* = POINTER TO Dirent;
+		Dirent = RECORD [untagged]
+(*
+			d_name*: ARRAY [untagged] NAME_MAX + 1 OF SHORTCHAR
+*)
+			(* OpenBSD 7.8 /usr/include/sys/dirent.h *)
+				d_fileno*: ino_t; (* file number of entry *)
+				d_off*: off_t; (* offset after this entry *)
+				d_reclen*: uint16_t; (* length of this record *)
+				d_type*: uint8_t; (* file type, see below *)
+				d_namlen*: uint8_t; (* length of string in d_name *)
+				__d_padding: ARRAY [untagged] 4 OF uint8_t; (* suppress padding after d_name *)
+				d_name*: ARRAY [untagged] 255 + 1 OF SHORTCHAR;
+		END;
+
+		timespec_t* = RECORD [untagged]
+			(* OpenBSD 7.8 /usr/include/sys/_time.h *)
+				tv_sec*: time_t; (* seconds *)
+				tv_nsec*: long; (* and nanoseconds *)
+		END;
+
+		rlimit* = RECORD [untagged]
+			rlim_cur*, rlim_max*: rlim_t
+		END;
+
+		TVP* = RECORD [untagged] access*, modification*: timespec_t END;
+
+(*
+	VAR
+		stdin*: INTEGER;
+		timezone*: INTEGER; (* or tm.tm_gmtoff *)
+*)
+(*
+	PROCEDURE [ccall] __errno_location* (): PtrVoid;
+*)
+(*
+	(* POSIX.1 *)
+		PROCEDURE [ccall] stat* (path: PtrSTR; VAR sp: stat_t): int;
+*)
+(*
+	VAR
+		(* OpenBSD: stdin, stdout, stderr *)
+			__sF*: ARRAY [untagged] 3 OF FILE; (* OpenBSD 5.8 /usr/include/stdio.h *)
+				(*
+					stdin = SYSTEM.ADR(__sF[0])
+					stdout = SYSTEM.ADR(__sF[1])
+					stderr = SYSTEM.ADR(__sF[2])
+				*)
+*)
+
+	PROCEDURE [ccall] __errno_location* ["__errno"] (): PtrVoid;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] stat* (path: PtrSTR; VAR sp: stat_t): int;
+
+		PROCEDURE [ccall] lseek* (d: int; offset: off_t; whence: int): off_t;
+
+	(* XPG4 *)
+		PROCEDURE [ccall] fseeko* (stream: PtrFILE; offset: off_t; whence: int): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] sigsetjmp* (VAR env: sigjmp_buf; savemask: int): int;
+
+
+	(* ANSI C 89 *)
+		PROCEDURE [ccall] clock* (): clock_t;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] clock_gettime* (clock_id: clockid_t; VAR tp: timespec_t): int;
+
+	(* AT&T UNIX *)
+		PROCEDURE [ccall] time* (VAR [nil] tloc: time_t): time_t;
+
+	(* AT&T UNIX *)
+		PROCEDURE [ccall] gmtime* (VAR [nil] clock: time_t): tm;
+		PROCEDURE [ccall] localtime* (VAR [nil] clock: time_t): tm;
+		PROCEDURE [ccall] mktime* (VAR tm: tmDesc): time_t;
+
+	PROCEDURE [ccall] mmap* (adr: PtrVoid; len: size_t; prot: intFlags; flags: intFlags; fd: int; offset: off_t): PtrVoid;
+	(* BSD *)
+		PROCEDURE [ccall] munmap* (adr: PtrVoid; len: size_t): int;
+		PROCEDURE [ccall] mprotect* (adr: PtrVoid; len: size_t; prot: intFlags): int;
+
+	PROCEDURE [ccall] calloc* (nmemb: size_t; size: size_t): PtrVoid;
+(*	(* ANSI C 89 *)
+		PROCEDURE [ccall] malloc* (size: size_t): PtrVoid;
+*)
+		PROCEDURE [ccall] free* (ptr: PtrVoid);
+
+
+	(* POSIX.1 *)
+(*
+		PROCEDURE [ccall] sigsetjmp* (VAR env: sigjmp_buf; savemask: int): int;
+*)
+		PROCEDURE [ccall] siglongjmp* (VAR env: sigjmp_buf; val: int);
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] sigemptyset* (set: PtrSigset_t): int;
+		PROCEDURE [ccall] sigfillset* (set: PtrSigset_t): int;
+		PROCEDURE [ccall] sigaddset* (set: PtrSigset_t; signo: int): int;
+		PROCEDURE [ccall] sigprocmask* (how: int; set: PtrSigset_t; oset: PtrSigset_t): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] sigaction* (sig: int; VAR [nil] act: sigaction_t; VAR [nil] oact: sigaction_t): int;
+
+	(* BSD *)
+		PROCEDURE [ccall] sigaltstack* (VAR [nil] ss: stack_t; VAR [nil] oss: stack_t): int;
+
+	(* ANSI C 89 *)
+		PROCEDURE [ccall] getenv* (s: PtrSTR): PtrSTR;
+
+	(* ANSI C 89 *)
+		PROCEDURE [ccall] fopen* (path, mode: PtrSTR): PtrFILE;
+		PROCEDURE [ccall] fdopen* (fildes: int; mode: PtrSTR): PtrFILE;
+		PROCEDURE [ccall] fclose* (stream: PtrFILE): int;
+		PROCEDURE [ccall] fread* (ptr: PtrVoid; size: size_t; nmemb: size_t; stream: PtrFILE): size_t;
+		PROCEDURE [ccall] fwrite* (ptr: PtrVoid; size: size_t; nmemb: size_t; stream: PtrFILE): size_t;
+		PROCEDURE [ccall] fflush* (s: PtrFILE): int;
+		PROCEDURE [ccall] printf0* ["printf"] (format: PtrSTR): int;
+		PROCEDURE [ccall] printfs* ["printf"] (format, s: PtrSTR): int;
+	(* ANSI C 89, XPG4 *)
+		PROCEDURE [ccall] fseek* (stream: PtrFILE; offset: long; whence: int): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] fileno* (stream: PtrFILE): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] rename* (from, to: PtrSTR): int;
+		PROCEDURE [ccall] mkdir* (path: PtrSTR; mode: mode_t): int;
+		PROCEDURE [ccall] opendir* (filename: PtrSTR): PtrDIR;
+		PROCEDURE [ccall] readdir* (dirp: PtrDIR): PtrDirent;
+		PROCEDURE [ccall] closedir* (dirp: PtrDIR): int;
+	(* ANSI C 89, XPG4.2 *)
+		PROCEDURE [ccall] remove* (path: PtrSTR): int;
+		PROCEDURE [ccall] canonicalize_file_name* (path: PtrSTR): PtrSTR;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] getcwd* (buf: PtrSTR; size: size_t): PtrSTR;
+
+	(* ANSI C 99 *)
+		PROCEDURE [ccall] exit* (status: int);
+
+	(* ANSI C 89 *)
+		PROCEDURE [ccall] strftime* (buf: PtrSTR; maxsize: size_t; format: PtrSTR; timeptr: tm): size_t;
+
+	(* XXX: use fread instead *)
+		PROCEDURE [ccall] fgets* (str: PtrSTR; size: int; stream: PtrFILE): PtrSTR;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] open* (path: PtrSTR; flags: intFlags; mode: mode_t): int;
+		PROCEDURE [ccall] write* (d: int; buf: PtrVoid; nbytes: size_t): ssize_t;
+		PROCEDURE [ccall] read* (d: int; buf: PtrVoid; nbytes: size_t): ssize_t;
+		PROCEDURE [ccall] close* (d: int): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] chmod* (path: PtrSTR; mode: mode_t): int;
+		PROCEDURE [ccall] fchmod* (fd: int; mode: mode_t): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] fork* (): pid_t;
+		PROCEDURE [ccall] waitpid* (wpid: pid_t; VAR [nil] status: int; options: intFlags): pid_t;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] execv* (path: PtrSTR; argv: POINTER [untagged] TO ARRAY [untagged] OF PtrSTR): int;
+		PROCEDURE [ccall] execvp* (file: PtrSTR; argv: POINTER [untagged] TO ARRAY [untagged] OF PtrSTR): int;
+
+	(* POSIX.2 *)
+		PROCEDURE [ccall] system* (string: PtrSTR): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] sysconf* (name: int): long;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] popen* (command, type: PtrSTR): PtrFILE;
+		PROCEDURE [ccall] pclose* (stream: PtrFILE): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] getrlimit* (resource: int; VAR rlim: rlimit): int;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] utimensat* (fd: int; path: PtrSTR; VAR times: TVP; flag: intFlags): int;
+
+	(* Linux only *)
+		PROCEDURE [ccall] sendfile* (out_fd: int; in_fd: int; VAR [nil] offset: off_t; count: size_t): ssize_t;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] readlink* (path: PtrSTR; buf: PtrSTR; bufsiz: size_t): ssize_t;
+
+END ObsdLibc.

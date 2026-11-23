@@ -1,3 +1,0 @@
-			(* OpenBSD 7.8 /usr/include/sys/_time.h *)
-				tv_sec*: time_t; (* seconds *)
-				tv_nsec*: long; (* and nanoseconds *)

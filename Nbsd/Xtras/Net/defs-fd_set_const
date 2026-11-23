@@ -1,3 +1,0 @@
-		(* NetBSD 10.1 /usr/include/sys/fd_set.h *)
-			FD_SETSIZE = 256;
-			__NFDBITS = 32;

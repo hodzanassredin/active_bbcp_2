@@ -1,1 +1,0 @@
-../../../Obsd/Xtras/txt2odc.py

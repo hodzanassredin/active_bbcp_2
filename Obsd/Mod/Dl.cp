@@ -1,0 +1,33 @@
+MODULE ObsdDl ["libc.so.102"];
+
+	(*
+		Alexander Shiryaev, 2012.09, 2013.08, 2025.10
+
+		OpenBSD 7.8
+		i386
+	*)
+
+	CONST
+		NULL* = 0H;
+
+		(* from OpenBSD 7.8 /usr/include/dlfcn.h *)
+			RTLD_LAZY* = 1;
+			(* DL_LAZY* = RTLD_LAZY; *) (* compat *)
+			RTLD_NOW* = 2;
+
+			RTLD_GLOBAL* = 100H;
+			RTLD_LOCAL* = 000H;
+			RTLD_TRACE* = 200H;
+
+	TYPE
+		PtrVoid* = INTEGER;
+		HANDLE* = PtrVoid;
+		PtrSTR* = POINTER TO ARRAY [untagged] OF SHORTCHAR;
+
+	PROCEDURE [ccall16] dlopen* (file: PtrSTR; mode: INTEGER): HANDLE;
+	PROCEDURE [ccall16] dlclose* (handle: HANDLE): INTEGER;
+	PROCEDURE [ccall16] dlsym* (handle: HANDLE; symbol: PtrSTR): HANDLE;
+
+	PROCEDURE [ccall16] dlerror* (): PtrSTR;
+
+END ObsdDl.

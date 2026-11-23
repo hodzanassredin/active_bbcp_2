@@ -1,7 +1,0 @@
-			(* NetBSD 10.1 /usr/include/sys/ucontext.h *)
-				uc_flags: int (* unsigned int *);
-				uc_link: Ptrucontext_t;
-				uc_sigmask: sigset_t;
-				uc_stack: stack_t;
-				uc_mcontext-: mcontext_t;
-				(* ... *)

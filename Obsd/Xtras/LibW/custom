@@ -1,1 +1,0 @@
-	PROCEDURE [ccall] setlocale* (category: int; locale: Libc.PtrSTR): Libc.PtrSTR;

@@ -1,5 +1,0 @@
-#!/bin/sh
-
-useDir="$HOME/blackbox"
-
-mkdir -p "${useDir}" && cd "${useDir}" && bbcb2

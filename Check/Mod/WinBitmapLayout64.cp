@@ -1,0 +1,11 @@
+MODULE CheckWinBitmapLayout64;
+
+	IMPORT SYSTEM, WinApi;
+
+	CONST
+		checkRGBQUAD = 1 DIV (1 DIV (1 + ABS(SIZE(WinApi.RGBQUAD) - 4)));
+		checkBITMAPINFOHEADER = 1 DIV (1 DIV (1 + ABS(SIZE(WinApi.BITMAPINFOHEADER) - 40)));
+		checkBITMAPINFO = 1 DIV (1 DIV (1 + ABS(SIZE(WinApi.BITMAPINFO) - 44)));
+		checkBITMAP = 1 DIV (1 DIV (1 + ABS(SIZE(WinApi.BITMAP) - 32)));
+
+END CheckWinBitmapLayout64.

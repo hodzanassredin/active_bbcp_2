@@ -1,0 +1,413 @@
+MODULE StdLoader;
+(**
+	project	= "BlackBox 2.0, changes from 1.7.2 marked by green"
+	organization	= "www.oberon.ch blackbox.oberon.org"
+	contributors	= "Oberon microsystems, Alexander Shiryaev, Ivan Denisov"
+	version	= "System/Rsrc/About"
+	copyright	= "System/Rsrc/About"
+	license	= "The 2-Clause BSD License"
+	changes	= ""
+	issues	= ""
+
+**)
+
+	IMPORT S := SYSTEM, Kernel, Files;
+
+	CONST
+		done = Kernel.done;
+		fileNotFound = Kernel.fileNotFound;
+		syntaxError = Kernel.syntaxError;
+		objNotFound = Kernel.objNotFound;
+		illegalFPrint = Kernel.illegalFPrint;
+		cyclicImport = Kernel.cyclicImport;
+		noMem = Kernel.noMem;
+		descNotFound = -1;
+
+		OFdir = "Code";
+		SYSdir = "System";
+		OFtag = 6F4F4346H;
+		
+		(* meta interface consts *)
+		mTyp = 2; mVar = 3; mProc = 4; mExported = 4;
+		
+		(* fixup types (OCF v2, amd64): pointer slots are 8 bytes; short is not emitted for amd64 *)
+		absolute = 100; relative = 101; copy = 102; table = 103; tableend = 104; short = 105; ripBased = 106;
+		(* ripBased + immLen (immLen = 0..8): disp32 = target - (ladr + 4 + immLen) *)
+		
+	TYPE
+		Name = Kernel.Name;
+		ModSpec = POINTER TO RECORD
+			next, link, imp: ModSpec;
+			name: Name;
+			file: Files.File;
+			mod: Kernel.Module;
+			hs, ds, ms, cs, vs: INTEGER; (* headSize, descSize, metaSize, codeSize, dataSize *)
+			dad, mad, cad, vad: LONGINT (* descAdr, metaAdr, codeAdr, varAdr *)
+		END;
+		
+		Hook = POINTER TO RECORD (Kernel.LoaderHook) END;
+		
+		IntRef = POINTER TO RECORD [untagged] i: INTEGER END;	(* 4-byte slot access w/o S.GET/S.PUT (LONGINT locals break the backend) *)
+		AdrRef = POINTER TO RECORD [untagged] a: LONGINT END;	(* 8-byte slot *)
+
+	VAR
+		res-: INTEGER;
+		importing-, imported-, object-: Name;
+		inp: Files.Reader;
+
+	PROCEDURE Error (r: INTEGER; impd, impg: ModSpec);
+	BEGIN
+		res := r; imported := impd.name$;
+		IF impg # NIL THEN importing := impg.name$ END;
+	END Error;
+	
+	PROCEDURE Append (VAR s: ARRAY OF CHAR; t: ARRAY OF CHAR);
+		VAR len, i, j: INTEGER; ch: CHAR;
+	BEGIN
+		len := LEN(s);
+		i := 0; WHILE s[i] # 0X DO INC(i) END;
+		j := 0; REPEAT ch := t[j]; s[i] := ch; INC(j); INC(i) UNTIL (ch = 0X) OR (i = len);
+		s[len - 1] := 0X
+	END Append;
+
+	PROCEDURE IsUpper (ch: CHAR): BOOLEAN;
+	BEGIN
+		CASE ch OF
+		| 041X..05AX, 0C0X..0D6X, 0D8X..0DEX, 0178X..0179X, 0181X..0182X, 0186X..0187X, 0189X..018BX, 018EX..0191X, 0193X..0194X, 0196X..0198X, 019CX..019DX, 019FX..01A0X, 01A6X..01A7X, 01A9X, 01AEX..01AFX, 01B1X..01B3X, 01B7X..01B8X, 01BCX, 01C4X..01C5X, 01C7X..01C8X, 01CAX..01CBX, 01F1X..01F2X, 01F6X..01F8X, 023AX..023BX, 023DX..023EX, 0243X..0246X, 0376X, 037FX, 0388X..038AX, 038EX..038FX, 0391X..03A1X, 03A3X..03ABX, 03CFX, 03D2X..03D4X, 03F4X, 03F9X..03FAX, 03FDX..042FX, 04C0X..04C1X, 0531X..0556X, 010A0X..010C5X, 010C7X, 010CDX, 013A0X..013F5X, 01F08X..01F0FX, 01F18X..01F1DX, 01F28X..01F2FX, 01F38X..01F3FX, 01F48X..01F4DX, 01F68X..01F6FX, 01F88X..01F8FX, 01F98X..01F9FX, 01FA8X..01FAFX, 01FB8X..01FBCX, 01FC8X..01FCCX, 01FD8X..01FDBX, 01FE8X..01FECX, 01FF8X..01FFCX, 02102X, 02107X, 0210BX..0210DX, 02110X..02112X, 02115X, 02119X..0211DX, 0212AX..0212DX, 02130X..02133X, 0213EX..0213FX, 02145X, 02160X..0216FX, 02183X, 024B6X..024CFX, 02C00X..02C2EX, 02C62X..02C64X, 02C6DX..02C70X, 02C72X, 02C75X, 02C7EX..02C80X, 02CF2X, 0A77DX..0A77EX, 0A7AAX..0A7AEX, 0A7B0X..0A7B4X, 0A7B6X, 0FF21X..0FF3AX: RETURN TRUE
+		| 0100X..0137X, 014AX..0177X, 0184X..0185X, 01A2X..01A5X, 01ACX..01ADX, 01DEX..01EFX, 01F4X..01F5X, 01FAX..0233X, 0248X..024FX, 0370X..0373X, 0386X..0387X, 038CX..038DX, 03D8X..03EFX, 0460X..0481X, 048AX..04BFX, 04D0X..052FX, 01E00X..01E95X, 01E9EX..01EFFX, 02124X..02129X, 02C60X..02C61X, 02C82X..02CE3X, 0A640X..0A66DX, 0A680X..0A69BX, 0A722X..0A72FX, 0A732X..0A76FX, 0A780X..0A787X, 0A790X..0A793X, 0A796X..0A7A9X: RETURN ~ODD(ORD(ch))
+		| 0139X..0148X, 017BX..017EX, 01B5X..01B6X, 01CDX..01DCX, 0241X..0242X, 03F7X..03F8X, 04C3X..04CEX, 01F59X..01F60X, 02C67X..02C6CX, 02CEBX..02CEEX, 0A779X..0A77CX, 0A78BX..0A78EX: RETURN ODD(ORD(ch))
+		ELSE RETURN FALSE
+		END
+	END IsUpper;
+
+	PROCEDURE SplitName (IN name: ARRAY OF CHAR; VAR head, tail: ARRAY OF CHAR);
+		VAR i, j: INTEGER; ch, lch: CHAR;
+	BEGIN
+		i := 0; ch := name[0];
+		IF ch # 0X THEN
+			REPEAT
+				head[i] := ch; lch := ch; INC(i); ch := name[i]
+			UNTIL (ch = 0X) OR (ch = ".") OR IsUpper(ch) & ~IsUpper(lch);
+			IF ch = "." THEN i := 0; ch := name[0] END;
+			head[i] := 0X; j := 0;
+			WHILE ch # 0X DO tail[j] := ch; INC(i); INC(j); ch := name[i] END;
+			tail[j] := 0X;
+			IF tail = "" THEN tail := head$; head := "" END
+		ELSE head := ""; tail := ""
+		END
+	END SplitName;
+
+	PROCEDURE ThisObjFile (VAR name: ARRAY OF CHAR): Files.File;
+		VAR f: Files.File; loc: Files.Locator; dir, fname: Files.Name;
+	BEGIN
+		SplitName(name, dir, fname);
+		Files.dir.GetFileName(fname, Files.objType, fname);
+		loc := Files.dir.This(dir); loc := loc.This(OFdir);
+		f := Files.dir.Old(loc, fname, TRUE);
+		IF (f = NIL) & (dir = "") THEN
+			loc := Files.dir.This(SYSdir); loc := loc.This(OFdir);
+			f := Files.dir.Old(loc, fname, TRUE)
+		END;
+		RETURN f
+	END ThisObjFile;
+	
+	PROCEDURE RWord (VAR x: INTEGER);
+		VAR b: BYTE; y: INTEGER;
+	BEGIN
+		inp.ReadByte(b); y := b MOD 256;
+		inp.ReadByte(b); y := y + 100H * (b MOD 256);
+		inp.ReadByte(b); y := y + 10000H * (b MOD 256);
+		inp.ReadByte(b); x := y + 1000000H * b
+	END RWord;
+	
+	PROCEDURE RNum (VAR x: INTEGER);
+		VAR b: BYTE; s, y: INTEGER;
+	BEGIN
+		s := 0; y := 0; inp.ReadByte(b);
+		WHILE b < 0 DO INC(y, ASH(b + 128, s)); INC(s, 7); inp.ReadByte(b) END;
+		x := ASH((b + 64) MOD 128 - 64, s) + y
+	END RNum;
+
+	(* inline from module Utf to avoid import *)
+	
+	PROCEDURE Utf8ToString (IN in: ARRAY OF SHORTCHAR; OUT out: ARRAY OF CHAR; 
+											OUT res: INTEGER);
+		VAR i, j, val, max: INTEGER; ch: SHORTCHAR;
+		
+		PROCEDURE FormatError();
+		BEGIN out := in$; res := 2 (*format error*)
+		END FormatError;
+		
+	BEGIN
+		ch := in[0]; i := 1; j := 0; max := LEN(out) - 1;
+		WHILE (ch # 0X) & (j < max) DO
+			IF ch < 80X THEN
+				out[j] := ch; INC(j)
+			ELSIF ch < 0E0X THEN
+				val := ORD(ch) - 192;
+				IF val < 0 THEN FormatError; RETURN END ;
+				ch := in[i]; INC(i); val := val * 64 + ORD(ch) - 128;
+				IF (ch < 80X) OR (ch >= 0E0X) THEN FormatError; RETURN END ;
+				out[j] := CHR(val); INC(j)
+			ELSIF ch < 0F0X THEN 
+				val := ORD(ch) - 224;
+				ch := in[i]; INC(i); val := val * 64 + ORD(ch) - 128;
+				IF (ch < 80X) OR (ch >= 0E0X) THEN FormatError; RETURN END ;
+				ch := in[i]; INC(i); val := val * 64 + ORD(ch) - 128;
+				IF (ch < 80X) OR (ch >= 0E0X) THEN FormatError; RETURN END ;
+				out[j] := CHR(val); INC(j)
+			ELSE
+				FormatError; RETURN
+			END ;
+			ch := in[i]; INC(i)
+		END;
+		out[j] := 0X;
+		IF ch = 0X THEN res := 0 (*ok*) ELSE res := 1 (*truncated*) END
+	END Utf8ToString;
+
+	PROCEDURE RName (VAR name: ARRAY OF CHAR);
+		VAR b: BYTE; i, n, res: INTEGER; s: Kernel.Utf8Name;
+	BEGIN
+		i := 0; n := LEN(name) - 1; inp.ReadByte(b);
+		WHILE (i < n) & (b # 0) DO
+			s[i] := SHORT(CHR(b MOD 256)); INC(i); inp.ReadByte(b)
+		END;
+		WHILE b # 0 DO inp.ReadByte(b) END;
+		s[i] := 0X;
+		Utf8ToString(s, name, res); ASSERT(res = 0)
+	END RName;
+
+	PROCEDURE Fixup (adr: LONGINT; mod: ModSpec);	(* OCF v2 (amd64), cf. bbrun64.c *)
+		VAR link, alink, offset, t, n, x, immLen: INTEGER; linkadr: LONGINT;
+			ir: IntRef; ar, sr: AdrRef;
+	BEGIN
+		RNum(link);
+		WHILE link # 0 DO
+			RNum(offset);
+			WHILE link # 0 DO
+				IF link > 0 THEN linkadr := mod.cad + link
+				ELSE alink := -link;
+					IF alink < mod.ms THEN linkadr := mod.mad + alink
+					ELSE linkadr := mod.dad + alink - mod.ms
+					END
+				END;
+				ir := S.VAL(IntRef, linkadr); x := ir.i;	(* 4 metadata bytes: typ * 1000000H + next24 *)
+				t := x DIV 1000000H;
+				n := (x + 800000H) MOD 1000000H - 800000H;	(* sign-extended next24 *)
+				IF t = absolute THEN	(* 8-byte write overwrites metadata + sentinel *)
+					ar := S.VAL(AdrRef, linkadr); ar.a := adr + offset
+				ELSIF t = relative THEN
+					ir.i := SHORT(adr + offset - linkadr - 4)
+				ELSIF t = copy THEN	(* copy 8 bytes from adr + offset *)
+					sr := S.VAL(AdrRef, adr + offset);
+					ar := S.VAL(AdrRef, linkadr); ar.a := sr.a
+				ELSIF t = table THEN	(* 8-byte case entry; next entry at link + 8 *)
+					ar := S.VAL(AdrRef, linkadr); ar.a := adr + n; n := link + 8
+				ELSIF t = tableend THEN
+					ar := S.VAL(AdrRef, linkadr); ar.a := adr + n; n := 0
+				ELSIF (t >= ripBased) & (t <= ripBased + 8) THEN
+					immLen := t - ripBased;
+					ir.i := SHORT(adr + offset - (linkadr + 4 + immLen))
+				ELSE Error(syntaxError, mod, NIL); n := 0
+				END;
+				link := n
+			END;
+			RNum(link)
+		END
+	END Fixup;
+	
+	PROCEDURE ReadHeader (mod: ModSpec);
+		VAR n, p: INTEGER; name: Name; imp, last: ModSpec;
+	BEGIN
+		mod.file := ThisObjFile(mod.name);
+		IF (mod.file = NIL) & (mod.link # NIL) THEN
+			(* try closing importing obj file *)
+			mod.link.file.Close; mod.link.file := NIL;
+			mod.file := ThisObjFile(mod.name)
+		END;
+		IF mod.file # NIL THEN
+			inp := mod.file.NewReader(inp);
+			IF inp # NIL THEN
+				inp.SetPos(0); RWord(n); RWord(p);
+				IF (n = OFtag) & (p = Kernel.processor) THEN
+					RWord(mod.hs); RWord(mod.ms); RWord(mod.ds);
+					RWord(mod.cs); RWord(mod.vs);
+					RNum(n); RName(name);
+					IF name = mod.name THEN
+						mod.imp := NIL; last := NIL;
+						WHILE n > 0 DO
+							NEW(imp); RName(imp.name);
+							IF last = NIL THEN mod.imp := imp ELSE last.next := imp END;
+							last := imp; imp.next := NIL; DEC(n) 
+						END
+					ELSE Error(fileNotFound, mod, NIL)
+					END
+				ELSE Error(syntaxError, mod, NIL)
+				END
+			ELSE Error(noMem, mod, NIL)
+			END
+		ELSE Error(fileNotFound, mod, NIL)
+		END
+	END ReadHeader;
+	
+	PROCEDURE ReadModule (mod: ModSpec);
+		TYPE BlockPtr = POINTER TO ARRAY [untagged] 1000000H OF BYTE;
+		VAR i, x, fp, ofp, opt, a, di, mi, ci, vi: INTEGER;
+			name: Name; dp, mp, cp: BlockPtr; imp: ModSpec; obj: Kernel.Object;
+	BEGIN
+		IF mod.file = NIL THEN mod.file := ThisObjFile(mod.name) END;
+		inp := mod.file.NewReader(inp);
+		IF inp # NIL THEN
+			inp.SetPos(mod.hs);
+			IF Kernel.AllocModMem(mod.ds, mod.ms, mod.cs, mod.vs, di, mi, ci, vi) THEN
+				mod.dad := di; mod.mad := mi; mod.cad := ci; mod.vad := vi;	(* INTEGER -> LONGINT *)
+				dp := S.VAL(BlockPtr, mod.dad);
+				mp := S.VAL(BlockPtr, mod.mad);
+				cp := S.VAL(BlockPtr, mod.cad);
+				inp.ReadBytes(mp^, 0, mod.ms);
+				inp.ReadBytes(dp^, 0, mod.ds);
+				inp.ReadBytes(cp^, 0, mod.cs);
+				mod.mod := S.VAL(Kernel.Module, mod.dad);
+				Fixup(S.ADR(Kernel.NewRec), mod);
+				Fixup(S.ADR(Kernel.NewArr), mod);
+				Fixup(mod.mad, mod);
+				Fixup(mod.dad, mod);
+				Fixup(mod.cad, mod);
+				Fixup(mod.vad, mod);
+				imp := mod.imp; i := 0;
+				WHILE (res = done) & (imp # NIL) DO
+					RNum(x);
+					WHILE (res <= done) & (x # 0) DO
+						RName(name); RNum(fp); opt := 0;
+						IF imp.mod # NIL THEN
+							IF name = "" THEN obj := Kernel.ThisDesc(imp.mod, fp)
+							ELSE
+								obj := Kernel.ThisObject(imp.mod, name)
+							END;
+							IF (obj # NIL) & (obj.id MOD 16 = x) THEN
+								ofp := obj.fprint;
+								IF x = mTyp THEN
+									RNum(opt);
+									IF ODD(opt) THEN ofp := obj.offs END;
+									IF (opt > 1) & (obj.id DIV 16 MOD 16 # mExported) THEN
+										Error(objNotFound, imp, mod); object := name$
+									END;
+									Fixup(S.VAL(LONGINT, obj.struct), mod)
+								ELSIF x = mVar THEN
+									Fixup(imp.mod.varBase + obj.offs, mod)
+								ELSIF x = mProc THEN
+									Fixup(imp.mod.procBase + obj.offs, mod)
+								END;
+								IF ofp # fp THEN
+									Error(illegalFPrint, imp, mod); object := name$
+								END
+							ELSIF name # "" THEN
+								Error(objNotFound, imp, mod); object := name$
+							ELSE
+								(* proceed to find failing named object *)
+								Error(descNotFound, imp, mod);
+								RNum(opt); Fixup(0, mod)
+							END
+						ELSE	(* imp is dll *)
+							IF x IN {mVar, mProc} THEN
+								a := Kernel.ThisDllObj(x, fp, imp.name, name);
+								IF a # 0 THEN Fixup(a, mod)
+								ELSE Error(objNotFound, imp, mod); object := name$
+								END
+							ELSIF x = mTyp THEN
+								RNum(opt); RNum(x);
+								IF x # 0 THEN
+									Error(objNotFound, imp, mod); object := name$
+								END
+							END
+						END;
+						RNum(x)
+					END;
+					mod.mod.imports[i] := imp.mod; INC(i); imp := imp.next
+				END;
+				IF res = done THEN
+					IF ~Kernel.ProtectModMem(mod.ms, mod.cs, SHORT(mod.mad), SHORT(mod.cad)) THEN
+						res := noMem
+					END
+				END;
+				IF res # done THEN
+					Kernel.DeallocModMem(mod.ds, mod.ms, mod.cs, mod.vs,
+						SHORT(mod.dad), SHORT(mod.mad), SHORT(mod.cad), SHORT(mod.vad));
+					mod.mod := NIL
+				END
+			ELSE Error(noMem, mod, NIL)
+			END
+		ELSE Error(noMem, mod, NIL)
+		END;
+		mod.file.Close; mod.file := NIL
+	END ReadModule;
+	
+	PROCEDURE LoadMod (mod: ModSpec);
+		VAR i: ModSpec; ok: BOOLEAN; j: INTEGER;
+	BEGIN
+		importing := ""; imported := ""; object := ""; i := mod;
+		WHILE (i.link # NIL) & (i.link.name # mod.name) DO i := i.link END;
+		IF i.link = NIL THEN ReadHeader(mod)
+		ELSE Error(cyclicImport, i, i.link)
+		END;
+		i := mod.imp;
+		WHILE (res = done) & (i # NIL) DO	(* get imported module *)
+			IF i.name = "$$" THEN i.name := "Kernel" END;
+			IF i.name[0] = "$" THEN	(* dll *)
+				j := 1;
+				WHILE i.name[j] # 0X DO i.name[j - 1] := i.name[j]; INC(j) END;
+				i.name[j - 1] := 0X;
+				Kernel.LoadDll(i.name, ok);
+				IF ~ok THEN Error(fileNotFound, i, NIL) END
+			ELSE
+				i.mod := Kernel.ThisLoadedMod(i.name);	(* loaded module *)
+				IF i.mod = NIL THEN i.link := mod; LoadMod(i) END	(* new module *)
+			END;
+			i := i.next
+		END;
+		IF res = done THEN
+			mod.mod := Kernel.ThisLoadedMod(mod.name); (* guaranties uniqueness *)
+			IF mod.mod = NIL THEN
+				ReadModule(mod);
+				IF res = done THEN
+					Kernel.RegisterMod(mod.mod);
+					res := done
+				END
+			END
+		END;
+		IF res = descNotFound THEN
+			res := objNotFound; object := "<TypeDesc>"
+		END;
+		IF object # "" THEN
+			Append(imported, "."); Append(imported, object); object := ""
+		END
+	END LoadMod;
+
+	PROCEDURE (h: Hook) ThisMod (IN name: ARRAY OF CHAR): Kernel.Module;
+		VAR m: Kernel.Module; ms: ModSpec;
+	BEGIN
+		res := done;
+		m := Kernel.ThisLoadedMod(name);
+		IF m = NIL THEN
+			NEW(ms); ms.link := NIL; ms.name := name$;
+			LoadMod(ms);
+			m := ms.mod;
+			inp := NIL	(* free last file *)
+		END;
+		h.res := res;
+		h.importing := importing$;
+		h.imported := imported$;
+		h.object := object$;
+		RETURN m
+	END ThisMod;
+
+	PROCEDURE Init;
+		VAR h: Hook;
+	BEGIN
+		NEW(h); Kernel.SetLoaderHook(h)
+	END Init;
+
+BEGIN
+	Init
+END StdLoader.
+

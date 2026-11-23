@@ -1,7 +1,0 @@
-			(* FreeBSD 14.3 /usr/include/sys/_ucontext.h *)
-				uc_sigmask: sigset_t (* __sigset_t *);
-				uc_mcontext-: mcontext_t;
-				uc_link: Ptrucontext_t;
-				uc_stack: stack_t (* __stack_t *);
-				uc_flags: int;
-				__spare__: ARRAY [untagged] 4 OF int

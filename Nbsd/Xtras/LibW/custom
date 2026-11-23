@@ -1,1 +1,0 @@
-	PROCEDURE [ccall] setlocale* ["__setlocale50"] (category: int; locale: Libc.PtrSTR): Libc.PtrSTR;

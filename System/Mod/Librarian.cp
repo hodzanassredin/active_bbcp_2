@@ -1,0 +1,132 @@
+MODULE Librarian;
+(**
+	project	= "BlackBox 2.0, new module"
+	organizations	= "Oberon microsystems, BBWFC, OberonCore, BBCP Team"
+	contributors	= "Contributors, A.A. Dmitriev, B.V. Rumshin, I.A. Denisov"
+	version	= "System/Rsrc/About"
+	copyright	= "System/Rsrc/About"
+	license	= "The 2-Clause BSD License"
+	changes	= ""
+	issues	= ""
+
+**)
+
+	IMPORT Files;
+
+	TYPE
+		Librarian* = POINTER TO ABSTRACT RECORD
+			res*: INTEGER;		(* result of the last GetSpec call *)
+		END;
+
+		StdLibrarian = POINTER TO RECORD (Librarian)
+			root: Files.Locator
+		END;
+
+	VAR
+		lib-, stdLib-: Librarian;
+
+	PROCEDURE (lib: Librarian) SplitName* (IN name: ARRAY OF CHAR; VAR head, tail: ARRAY OF CHAR), NEW, ABSTRACT;
+
+	PROCEDURE (lib: Librarian) GetSpec* (IN mod, cat: ARRAY OF CHAR; OUT loc: Files.Locator; OUT name: Files.Name), NEW, ABSTRACT;
+
+
+	(* Standard Librarian *)
+
+	PROCEDURE IsUpper (ch: CHAR): BOOLEAN;
+	BEGIN
+		CASE ch OF
+		| 041X..05AX, 0C0X..0D6X, 0D8X..0DEX, 0178X..0179X, 0181X..0182X, 0186X..0187X, 0189X..018BX, 018EX..0191X, 0193X..0194X, 0196X..0198X, 019CX..019DX, 019FX..01A0X, 01A6X..01A7X, 01A9X, 01AEX..01AFX, 01B1X..01B3X, 01B7X..01B8X, 01BCX, 01C4X..01C5X, 01C7X..01C8X, 01CAX..01CBX, 01F1X..01F2X, 01F6X..01F8X, 023AX..023BX, 023DX..023EX, 0243X..0246X, 0376X, 037FX, 0388X..038AX, 038EX..038FX, 0391X..03A1X, 03A3X..03ABX, 03CFX, 03D2X..03D4X, 03F4X, 03F9X..03FAX, 03FDX..042FX, 04C0X..04C1X, 0531X..0556X, 010A0X..010C5X, 010C7X, 010CDX, 013A0X..013F5X, 01F08X..01F0FX, 01F18X..01F1DX, 01F28X..01F2FX, 01F38X..01F3FX, 01F48X..01F4DX, 01F68X..01F6FX, 01F88X..01F8FX, 01F98X..01F9FX, 01FA8X..01FAFX, 01FB8X..01FBCX, 01FC8X..01FCCX, 01FD8X..01FDBX, 01FE8X..01FECX, 01FF8X..01FFCX, 02102X, 02107X, 0210BX..0210DX, 02110X..02112X, 02115X, 02119X..0211DX, 0212AX..0212DX, 02130X..02133X, 0213EX..0213FX, 02145X, 02160X..0216FX, 02183X, 024B6X..024CFX, 02C00X..02C2EX, 02C62X..02C64X, 02C6DX..02C70X, 02C72X, 02C75X, 02C7EX..02C80X, 02CF2X, 0A77DX..0A77EX, 0A7AAX..0A7AEX, 0A7B0X..0A7B4X, 0A7B6X, 0FF21X..0FF3AX: RETURN TRUE
+		| 0100X..0137X, 014AX..0177X, 0184X..0185X, 01A2X..01A5X, 01ACX..01ADX, 01DEX..01EFX, 01F4X..01F5X, 01FAX..0233X, 0248X..024FX, 0370X..0373X, 0386X..0387X, 038CX..038DX, 03D8X..03EFX, 0460X..0481X, 048AX..04BFX, 04D0X..052FX, 01E00X..01E95X, 01E9EX..01EFFX, 02124X..02129X, 02C60X..02C61X, 02C82X..02CE3X, 0A640X..0A66DX, 0A680X..0A69BX, 0A722X..0A72FX, 0A732X..0A76FX, 0A780X..0A787X, 0A790X..0A793X, 0A796X..0A7A9X: RETURN ~ODD(ORD(ch))
+		| 0139X..0148X, 017BX..017EX, 01B5X..01B6X, 01CDX..01DCX, 0241X..0242X, 03F7X..03F8X, 04C3X..04CEX, 01F59X..01F60X, 02C67X..02C6CX, 02CEBX..02CEEX, 0A779X..0A77CX, 0A78BX..0A78EX: RETURN ODD(ORD(ch))
+		ELSE RETURN FALSE
+		END
+	END IsUpper;
+
+	PROCEDURE (lib: StdLibrarian) SplitName (IN name: ARRAY OF CHAR; VAR head, tail: ARRAY OF CHAR);
+		VAR i, j: INTEGER; ch, lch: CHAR;
+	BEGIN
+		i := 0; ch := name[0];
+		IF ch # 0X THEN
+			REPEAT
+				head[i] := ch; lch := ch; INC(i); ch := name[i]
+			UNTIL (ch = 0X) OR (ch = ".") OR IsUpper(ch) & ~IsUpper(lch);
+			IF ch = "." THEN i := 0; ch := name[0] END;
+			head[i] := 0X; j := 0;
+			WHILE ch # 0X DO tail[j] := ch; INC(i); INC(j); ch := name[i] END;
+			tail[j] := 0X;
+			IF tail = "" THEN tail := head$; head := "System" END;
+		ELSE
+			head := "System"; tail := ""
+		END
+	END SplitName;
+
+	PROCEDURE FileExists (filesInfoList: Files.FileInfo; IN name: ARRAY OF CHAR): BOOLEAN;
+		VAR fi: Files.FileInfo;
+	BEGIN
+		fi := filesInfoList;
+		WHILE (fi # NIL) & (fi.name # name) DO fi := fi.next END;
+		RETURN fi # NIL
+	END FileExists;
+
+	PROCEDURE StartsWith (IN str, patt: ARRAY OF CHAR): BOOLEAN;
+		VAR i, k: INTEGER; res: BOOLEAN;
+	BEGIN
+		i := LEN(patt$); k := LEN(str$);
+		IF k >= i THEN
+			k := 0; 
+			REPEAT res := patt[k] = str[k]; INC(k) UNTIL ~res OR (k = i);
+		ELSE res := FALSE
+		END;
+		RETURN res
+	END StartsWith;
+
+	PROCEDURE (lib: StdLibrarian) GetSpec (IN mod, cat: ARRAY OF CHAR; OUT loc: Files.Locator; OUT name: Files.Name);
+		VAR head, tail: ARRAY 256 OF CHAR; fi: Files.FileInfo;
+	BEGIN
+		lib.SplitName(mod, head, tail);
+		loc := lib.root.This(head);
+		IF StartsWith(cat, "Code") THEN
+			loc := loc.This("Code");
+			name := tail + ".ocf"
+		ELSIF StartsWith(cat, "Mod") THEN
+			loc := loc.This("Mod");
+			fi := Files.dir.FileList(loc);
+			IF FileExists(fi, tail + ".odc") THEN
+				name := tail + ".odc"
+			ELSIF FileExists(fi, tail + ".cp") THEN
+				name := tail + ".cp"
+			ELSE
+				name := tail + ".odc"
+			END
+		ELSIF StartsWith(cat, "Sym") THEN
+			loc := loc.This("Sym"); name := tail + ".osf"
+		ELSIF StartsWith(cat, "Docu") THEN
+			loc := loc.This("Docu"); name := tail + ".odc"
+		ELSIF StartsWith(cat, "Rsrc") THEN
+			loc := loc.This("Rsrc"); name := tail + ".odc"
+		ELSIF StartsWith(cat, "Root") THEN
+			loc := lib.root; name := "";
+		ELSE
+			loc := loc.This(cat); name := tail + ".odc"
+		END;
+		lib.res := 0
+	END GetSpec;
+
+	PROCEDURE SetLib* (librarian: Librarian);
+	BEGIN
+		ASSERT(librarian # NIL, 20);
+		lib := librarian
+	END SetLib;
+
+	PROCEDURE NewStdLibrarian* (loc: Files.Locator): Librarian;
+		VAR std: StdLibrarian;
+	BEGIN
+		NEW(std); std.root := loc;
+		RETURN std
+	END NewStdLibrarian;
+
+BEGIN
+	stdLib := NewStdLibrarian(Files.dir.This(""));
+	lib := stdLib
+END Librarian.
+

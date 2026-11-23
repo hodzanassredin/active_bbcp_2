@@ -1,0 +1,40 @@
+MODULE LinIoctl ["libc.so.6"];
+
+	(*
+		GNU/Linux
+		i386
+	*)
+
+	CONST
+		TIOCM_CAR* = {6};
+		TIOCM_CTS* = {5};
+		TIOCM_RNG* = {7};
+		TIOCM_RTS* = {2};
+		TIOCM_DSR* = {8};
+		TIOCM_DTR* = {1};
+		TIOCM_CD* = TIOCM_CAR;
+		TIOCM_LE* = {0};
+		TIOCM_RI* = TIOCM_RNG;
+		TIOCM_SR* = {4};
+		TIOCM_ST* = {3};
+
+		FIONBIO* = 5421H;
+		FIONREAD* = 541BH;
+
+		TIOCMGET* = 5415H;
+		TIOCMSET* = 5418H;
+		TIOCEXCL* = 540CH;
+		TIOCNXCL* = 540DH;
+		TIOCOUTQ* = 5411H;
+		TIOCSBRK* = 5427H;
+		TIOCCBRK* = 5428H;
+		TIOCMBIS* = 5416H;
+		TIOCMBIC* = 5417H;
+
+	TYPE
+		int* = INTEGER;
+
+	PROCEDURE [ccall] ioctl0* ["ioctl"] (d: int; request: INTEGER): int;
+	PROCEDURE [ccall] ioctl1* ["ioctl"] (d: int; request: INTEGER; VAR arg: INTEGER): int;
+
+END LinIoctl.

@@ -1,1 +1,0 @@
-../../../Obsd/Xtras/LibW/Makefile

@@ -1,0 +1,108 @@
+MODULE Kernel64;
+	IMPORT S := SYSTEM;
+
+	CONST
+		processor* = 12;
+		N = 16;
+		any = 1000000;
+		heapSize = 16 * 1024 * 1024;
+
+	TYPE
+		Module* = POINTER TO RECORD
+			next: Module;	(* @0 *)
+			opts: SET;	(* @8 *)
+			refcnt: INTEGER;	(* @12 *)
+			compTime, loadTime: ARRAY 6 OF SHORTINT;	(* @16, @28 *)
+			ext: INTEGER;	(* @40 *)
+			term: PROCEDURE;	(* @48 *)
+			nofimps, nofptrs: INTEGER;	(* @56, @60 *)
+			csize, dsize, rsize: INTEGER;	(* @64, @68, @72 *)
+			code, data, refs: LONGINT;	(* @80, @88, @96 *)
+			procBase, varBase: LONGINT;	(* @104, @112 *)
+			names: POINTER TO ARRAY OF SHORTCHAR;	(* @120 *)
+			ptrs: POINTER TO ARRAY OF LONGINT;	(* @128 *)
+			imports: POINTER TO ARRAY OF Module;	(* @136 *)
+			export: LONGINT;	(* @144 *)
+			name: ARRAY 256 OF SHORTCHAR	(* @152 *)
+		END;
+
+		Type* = POINTER TO RECORD
+			size: INTEGER; mod: Module; id: INTEGER;
+			base: ARRAY 16 OF Type; fields: LONGINT;
+			ptroffs: ARRAY any OF INTEGER
+		END;
+
+		Cluster* = POINTER TO RECORD size: INTEGER; next: Cluster END;
+		Block* = POINTER TO RECORD tag: Type; last: LONGINT; actual: LONGINT; first: LONGINT END;
+		FreeBlk* = POINTER TO RECORD tag: Type; size: INTEGER; next: FreeBlk END;
+
+	VAR
+		root: Cluster;
+		free: ARRAY N OF FreeBlk;
+		sentinel: FreeBlk; sRec: RECORD tag: Type; size: INTEGER; next: FreeBlk END;
+		allocated-: LONGINT;
+		heap: ARRAY heapSize OF CHAR;
+		heapPos: LONGINT;
+		modList: Module;	(* ПОСЛЕДНЯЯ: offset 0 = varBase+0, лоадер инжектит сюда modlist *)
+
+	PROCEDURE NewBlock* (size: INTEGER): Block;
+		VAR p, sz: LONGINT;
+	BEGIN
+		sz := (S.VAL(LONGINT, size) + 8 + 15) DIV 16 * 16;	(* +8 под тег *)
+		IF sz < 24 THEN sz := 24 END;
+		p := S.ADR(heap) + heapPos;
+		p := (p + 15) DIV 16 * 16;
+		IF p + sz - S.ADR(heap) > heapSize THEN RETURN NIL END;
+		heapPos := p + sz - S.ADR(heap);
+		RETURN S.VAL(Block, p)
+	END NewBlock;
+
+	PROCEDURE NewArr* (eltyp, nofelem, nofdim: INTEGER): LONGINT;
+		VAR b: Block; sz, headSize, elsize: INTEGER; t: Type;
+	BEGIN
+		IF (nofdim < 0) OR (nofdim > (MAX(INTEGER) - 24) DIV 4) THEN RETURN 0 END;
+		headSize := 4 * nofdim + 24;	(* как у codegen: [tag8][last8][actual8][first8][len0 4]... *)
+		IF (eltyp >= -1) & (eltyp <= 12) THEN	(* базовые типы: код -> размер *)
+			CASE eltyp OF
+			| -1, 0, 8, 10, 11, 12: elsize := 8
+			| 1, 3, 5: elsize := 1
+			| 2, 9: elsize := 2
+			| 4, 6, 7: elsize := 4
+			END
+		ELSE	(* eltyp — дескриптор записи (+1: финализация, здесь не поддерживается) *)
+			t := S.VAL(Type, eltyp - eltyp MOD 2); elsize := t.size
+		END;
+		IF (nofelem < 0) OR (nofelem > (MAX(INTEGER) - headSize) DIV elsize) THEN RETURN 0 END;
+		sz := headSize + nofelem * elsize;
+		b := NewBlock(sz);
+		IF b = NIL THEN RETURN 0 END;
+		b.tag := S.VAL(Type, S.VAL(LONGINT, eltyp));
+		b.last := S.ADR(b.last) + sz - elsize;	(* указатель на последний элемент *)
+		b.first := S.ADR(b.last) + headSize;	(* указатель на первый элемент *)
+		RETURN S.ADR(b.last)
+	END NewArr;
+
+	PROCEDURE NewRec* (typ: LONGINT): LONGINT;
+		VAR tag: Type; b: Block;
+	BEGIN
+		IF ODD(SHORT(typ)) THEN tag := S.VAL(Type, typ - 1) ELSE tag := S.VAL(Type, typ) END;
+		b := NewBlock(tag.size);
+		IF b = NIL THEN RETURN 0 END;
+		b.tag := tag;
+		RETURN S.ADR(b.last)
+	END NewRec;
+
+	PROCEDURE RegisterMod* (m: Module);
+	BEGIN m.next := modList; modList := m END RegisterMod;
+
+	PROCEDURE Init*;
+		VAR i: INTEGER;
+	BEGIN
+		modList := NIL; root := NIL; allocated := 0;
+		sRec.tag := NIL; sRec.size := MAX(INTEGER); sRec.next := S.VAL(FreeBlk, S.ADR(sRec));
+		sentinel := S.VAL(FreeBlk, S.ADR(sRec));
+		FOR i := 0 TO N - 1 DO free[i] := sentinel END
+	END Init;
+
+BEGIN Init
+END Kernel64.

@@ -1,0 +1,369 @@
+MODULE ObsdNet ["libc.so.102"];
+
+	(*
+		OpenBSD 7.8
+		i386
+	*)
+
+	CONST
+		NULL* = 0H;
+
+		SOCKET_ERROR* = -1;
+		INVALID_SOCKET* = -1;
+
+		INADDR_NONE* = -1;
+		INADDR_ANY* = 0;
+
+		(* socket domains *)
+		AF_APPLETALK* = 16;
+		PF_APPLETALK* = AF_APPLETALK;
+		AF_BLUETOOTH* = 32;
+		PF_BLUETOOTH* = AF_BLUETOOTH;
+		PF_BPF* = 31;
+		AF_CCITT* = 10;
+		PF_CCITT* = AF_CCITT;
+		AF_CHAOS* = 5;
+		PF_CHAOS* = AF_CHAOS;
+		AF_CNT* = 21;
+		PF_CNT* = AF_CNT;
+		AF_COIP* = 20;
+		PF_COIP* = AF_COIP;
+		AF_DATAKIT* = 9;
+		PF_DATAKIT* = AF_DATAKIT;
+		AF_DECnet* = 12;
+		PF_DECnet* = AF_DECnet;
+		AF_DLI* = 13;
+		PF_DLI* = AF_DLI;
+		AF_ECMA* = 8;
+		PF_ECMA* = AF_ECMA;
+		AF_ENCAP* = 28;
+		PF_ENCAP* = AF_ENCAP;
+		AF_FRAME* = 36;
+		PF_FRAME* = AF_FRAME;
+		AF_HYLINK* = 15;
+		PF_HYLINK* = AF_HYLINK;
+		AF_IMPLINK* = 3;
+		PF_IMPLINK* = AF_IMPLINK;
+		AF_INET* = 2;
+		PF_INET* = AF_INET;
+		AF_INET6* = 24;
+		PF_INET6* = AF_INET6;
+		AF_IPX* = 23;
+		PF_IPX* = AF_IPX;
+		AF_ISDN* = 26;
+		PF_ISDN* = AF_ISDN;
+		AF_ISO* = 7;
+		PF_ISO* = AF_ISO;
+		AF_KEY* = 30;
+		PF_KEY* = AF_KEY;
+		AF_LAT* = 14;
+		PF_LAT* = AF_LAT;
+		AF_LINK* = 18;
+		PF_LINK* = AF_LINK;
+		AF_UNIX* = 1;
+		AF_LOCAL* = AF_UNIX;
+		PF_LOCAL* = AF_LOCAL;
+		AF_MAX* = 37;
+		PF_MAX* = AF_MAX;
+		AF_MPLS* = 33;
+		PF_MPLS* = AF_MPLS;
+		AF_NATM* = 27;
+		PF_NATM* = AF_NATM;
+		AF_NS* = 6;
+		PF_NS* = AF_NS;
+		PF_OSI* = AF_ISO;
+		PF_PFLOW* = 34;
+		PF_PIP* = 25;
+		PF_PIPEX* = 35;
+		AF_PUP* = 4;
+		PF_PUP* = AF_PUP;
+		AF_ROUTE* = 17;
+		PF_ROUTE* = AF_ROUTE;
+		PF_RTIP* = 22;
+		AF_SIP* = 29;
+		PF_SIP* = AF_SIP;
+		AF_SNA* = 11;
+		PF_SNA* = AF_SNA;
+		PF_UNIX* = AF_UNIX;
+		AF_UNSPEC* = 0;
+		PF_UNSPEC* = AF_UNSPEC;
+		PF_XTP* = 19;
+
+		(* socket types *)
+		SOCK_CLOEXEC* = 8000H;
+		SOCK_CLOFORK* = 0800H;
+		SOCK_DGRAM* = 2;
+		SOCK_DNS* = 1000H;
+		SOCK_NONBLOCK* = 4000H;
+		SOCK_RAW* = 3;
+		SOCK_RDM* = 4;
+		SOCK_SEQPACKET* = 5;
+		SOCK_STREAM* = 1;
+
+		(* socket protocols *)
+		IPPROTO_AH* = 51;
+		IPPROTO_CARP* = 112;
+		IPPROTO_DIVERT* = 258;
+		IPPROTO_DONE* = 257;
+		IPPROTO_DSTOPTS* = 60;
+		IPPROTO_EGP* = 8;
+		IPPROTO_ENCAP* = 98;
+		IPPROTO_EON* = 80;
+		IPPROTO_ESP* = 50;
+		IPPROTO_ETHERIP* = 97;
+		IPPROTO_FRAGMENT* = 44;
+		IPPROTO_GGP* = 3;
+		IPPROTO_GRE* = 47;
+		IPPROTO_IP* = 0;
+		IPPROTO_HOPOPTS* = IPPROTO_IP;
+		IPPROTO_ICMP* = 1;
+		IPPROTO_ICMPV6* = 58;
+		IPPROTO_IDP* = 22;
+		IPPROTO_IGMP* = 2;
+		IPPROTO_IPCOMP* = 108;
+		IPPROTO_IPIP* = 4;
+		IPPROTO_IPV4* = IPPROTO_IPIP;
+		IPPROTO_IPV6* = 41;
+		IPPROTO_MAX* = 256;
+		IPPROTO_MAXID* = 259;
+		IPPROTO_MOBILE* = 55;
+		IPPROTO_MPLS* = 137;
+		IPPROTO_NONE* = 59;
+		IPPROTO_PFSYNC* = 240;
+		IPPROTO_PIM* = 103;
+		IPPROTO_PUP* = 12;
+		IPPROTO_RAW* = 255;
+		IPPROTO_ROUTING* = 43;
+		IPPROTO_RSVP* = 46;
+		IPPROTO_SCTP* = 132;
+		IPPROTO_TCP* = 6;
+		IPPROTO_TP* = 29;
+		IPPROTO_UDP* = 17;
+		IPPROTO_UDPLITE* = 136;
+
+		(* socket options *)
+		SO_ACCEPTCONN* = {1};
+		SO_BINDANY* = {12};
+		SO_BROADCAST* = {5};
+		SO_DEBUG* = {0};
+		SO_DOMAIN* = {2,5,12};
+		SO_DONTROUTE* = {4};
+		SO_ERROR* = {0..2,12};
+		SO_KEEPALIVE* = {3};
+		SO_LINGER* = {7};
+		SO_OOBINLINE* = {8};
+		SO_PEERCRED* = {1,5,12};
+		SO_PROTOCOL* = {0,2,5,12};
+		SO_RCVBUF* = {1,12};
+		SO_RCVLOWAT* = {2,12};
+		SO_RCVTIMEO* = {1,2,12};
+		SO_REUSEADDR* = {2};
+		SO_REUSEPORT* = {9};
+		SO_RTABLE* = {0,5,12};
+		SO_SNDBUF* = {0,12};
+		SO_SNDLOWAT* = {0,1,12};
+		SO_SNDTIMEO* = {0,2,12};
+		SO_SPLICE* = {0,1,5,12};
+		SO_TIMESTAMP* = {11};
+		SO_TYPE* = {3,12};
+		SO_USELOOPBACK* = {6};
+		SO_ZEROIZE* = {13};
+
+		SHUT_RD* = 0;
+		SHUT_RDWR* = 2;
+		SHUT_WR* = 1;
+
+		SOL_SOCKET* = 0FFFFH;
+
+		MSG_BCAST* = {8};
+		MSG_CMSG_CLOEXEC* = {11};
+		MSG_CMSG_CLOFORK* = {13};
+		MSG_CTRUNC* = {5};
+		MSG_DONTROUTE* = {2};
+		MSG_DONTWAIT* = {7};
+		MSG_EOR* = {3};
+		MSG_MCAST* = {9};
+		MSG_NOSIGNAL* = {10};
+		MSG_OOB* = {0};
+		MSG_PEEK* = {1};
+		MSG_TRUNC* = {4};
+		MSG_WAITALL* = {6};
+		MSG_WAITFORONE* = {12};
+
+		SOMAXCONN* = 128;
+
+		(* addrinfo.ai_flags *)
+		AI_ADDRCONFIG* = {6};
+		AI_CANONNAME* = {1};
+		AI_EXT* = {3};
+		AI_FQDN* = {5};
+		AI_MASK* = {0..2,4..6};
+		AI_NUMERICHOST* = {2};
+		AI_NUMERICSERV* = {4};
+		AI_PASSIVE* = {0};
+
+		(* getaddrinfo/getnameinfo/gai_strerror error codes *)
+		EAI_ADDRFAMILY* = -9;
+		EAI_AGAIN* = -3;
+		EAI_BADFLAGS* = -1;
+		EAI_BADHINTS* = -12;
+		EAI_FAIL* = -4;
+		EAI_FAMILY* = -6;
+		EAI_MEMORY* = -10;
+		EAI_NODATA* = -5;
+		EAI_NONAME* = -2;
+		EAI_OVERFLOW* = -14;
+		EAI_PROTOCOL* = -13;
+		EAI_SERVICE* = -8;
+		EAI_SOCKTYPE* = -7;
+		EAI_SYSTEM* = -11;
+
+		(* OpenBSD 7.8 /usr/include/sys/select.h *)
+			FD_SETSIZE = 1024;
+			__NBBY = 8;
+
+
+	TYPE
+		uint8_t = SHORTCHAR;
+		int8_t = SHORTCHAR;
+		uint16_t = SHORTINT;
+		(* PtrVoid, int, intFlags, short, socklen_t, size_t, ssize_t, in_addr_t, in_port_t, time_t, suseconds_t, nfds_t, sa_family_t *)
+		PtrVoid* = INTEGER;
+		short* = SHORTINT;
+		int* = INTEGER;
+		intFlags* = SET;
+		size_t* = INTEGER;
+		ssize_t* = INTEGER;
+		time_t* = LONGINT;
+		suseconds_t* = INTEGER;
+		socklen_t* = INTEGER;
+		in_addr_t* = INTEGER;
+		in_port_t* = SHORTINT;
+		nfds_t* = INTEGER;
+		sa_family_t* = SHORTCHAR;
+
+		PtrSTR* = POINTER [untagged] TO ARRAY [untagged] OF SHORTCHAR;
+
+		SOCKET* = int;
+
+(*
+		in_addr* = RECORD [untagged]
+			s_addr*: in_addr_t;
+		END;
+*)
+		in_addr* = RECORD [untagged]
+			S_un*: RECORD [union]
+				S_un_b*: RECORD [untagged]
+					s_b1*: SHORTCHAR;
+					s_b2*: SHORTCHAR;
+					s_b3*: SHORTCHAR;
+					s_b4*: SHORTCHAR;
+				END;
+				S_un_w*: RECORD [untagged]
+					s_w1*: SHORTINT;
+					s_w2*: SHORTINT;
+				END;
+				S_addr*: in_addr_t;
+			END;
+		END;
+
+		Ptrsockaddr* = POINTER [untagged] TO sockaddr;
+		sockaddr* = RECORD [untagged]
+			(* OpenBSD 7.8 /usr/include/sys/socket.h *)
+				sa_len*: SHORTCHAR; (* total length *)
+				sa_family*: sa_family_t; (* address family *)
+				sa_data*: ARRAY [untagged] 14 OF SHORTCHAR; (* actually longer; address value *)
+		END;
+
+		Ptrsockaddr_storage = POINTER [untagged] TO sockaddr_storage;
+		sockaddr_storage* = RECORD [untagged]
+			(* OpenBSD 7.8 /usr/include/sys/socket.h *)
+				ss_len*: SHORTCHAR; (* total length *)
+				ss_family*: sa_family_t; (* address family *)
+				__ss_pad1: ARRAY [untagged] 6 OF SHORTCHAR; (* align to quad *)
+				__ss_pad2: LONGINT; (* force alignment for stupid compilers *)
+				__ss_pad3: ARRAY [untagged] 240 OF SHORTCHAR; (* pad to a total of 256 bytes *)
+		END;
+
+		Ptrsockaddr_in* = POINTER [untagged] TO sockaddr_in;
+		sockaddr_in* = RECORD [untagged]
+			(* OpenBSD 7.8 /usr/include/netinet/in.h *)
+				sin_len*: uint8_t;
+				sin_family*: sa_family_t;
+				sin_port*: in_port_t;
+				sin_addr*: in_addr;
+				sin_zero*: ARRAY [untagged] 8 OF int8_t;
+		END;
+
+		Ptraddrinfo* = POINTER [untagged] TO addrinfo;
+		addrinfo* = RECORD [untagged]
+			(* OpenBSD 7.8 /usr/include/netdb.h *)
+				ai_flags*: intFlags; (* input flags *)
+				ai_family*: int; (* protocol family for socket *)
+				ai_socktype*: int; (* socket type *)
+				ai_protocol*: int; (* protocol for socket *)
+				ai_addrlen*: socklen_t; (* length of socket-address *)
+				ai_addr*: Ptrsockaddr; (* socket-address for socket *)
+				ai_canonname*: PtrSTR; (* canonical name for service location (iff req) *)
+				ai_next*: Ptraddrinfo; (* pointer to next in list *)
+		END;
+
+		timeval* = RECORD [untagged]
+			(* Linux, FreeBSD, OpenBSD *)
+				tv_sec*: time_t; (* seconds *)
+				tv_usec*: suseconds_t; (* and microseconds *)
+		END;
+
+		pollfd* = RECORD [untagged]
+			(* Linux, FreeBSD, OpenBSD *)
+				fd*: int;
+				events*: short;
+				revents*: short;
+		END;
+
+		(* OpenBSD 7.8 /usr/include/sys/select.h *)
+			__fd_mask = SET;
+			fd_set* = ARRAY [untagged] (FD_SETSIZE + (SIZE(__fd_mask) * __NBBY - 1)) DIV (SIZE(__fd_mask) * __NBBY) OF __fd_mask;
+
+	(* POSIX.1 *)
+		PROCEDURE [ccall] socket* (domain: int; type: int; protocol: int): SOCKET;
+		PROCEDURE [ccall] accept* (s: SOCKET; VAR addr: sockaddr; VAR addrlen: socklen_t): SOCKET;
+		PROCEDURE [ccall] bind* (s: SOCKET; VAR name: sockaddr; namelen: socklen_t): int;
+		PROCEDURE [ccall] connect* (s: SOCKET; VAR name: sockaddr; namelen: socklen_t): int;
+		PROCEDURE [ccall] getsockname* (s: SOCKET; VAR name: sockaddr; VAR namelen: socklen_t): int;
+		PROCEDURE [ccall] listen* (s: SOCKET; backlog: int): int;
+		PROCEDURE [ccall] recv* (s: SOCKET; buf: PtrVoid; len: size_t; flags: intFlags): ssize_t;
+		PROCEDURE [ccall] recvfrom* (s: SOCKET; buf: PtrVoid; len: size_t; flags: intFlags; VAR from: sockaddr; VAR fromlen: socklen_t): ssize_t;
+		PROCEDURE [ccall] send* (s: SOCKET; msg: PtrVoid; len: size_t; flags: intFlags): ssize_t;
+		PROCEDURE [ccall] sendto* (s: SOCKET; msg: PtrVoid; len: size_t; flags: intFlags; VAR to: sockaddr; tolen: socklen_t): ssize_t;
+		PROCEDURE [ccall] shutdown* (s: SOCKET; how: int): int;
+		PROCEDURE [ccall] getsockopt* (s: SOCKET; level: int; optname: intFlags; optval: PtrVoid; VAR [nil] optlen: socklen_t): int;
+		PROCEDURE [ccall] setsockopt* (s: SOCKET; level: int; optname: intFlags; optval: PtrVoid; optlen: socklen_t): int;
+
+		PROCEDURE [ccall] inet_addr* (cp: PtrSTR): in_addr_t;
+		PROCEDURE [ccall] htons* (host16: uint16_t): uint16_t;
+
+		PROCEDURE [ccall] select* (nfds: INTEGER; VAR [nil] readfds: fd_set; VAR [nil] writefds: fd_set; VAR [nil] exceptfds: fd_set; VAR timeout: timeval): int;
+
+		PROCEDURE [ccall] poll* (VAR fds: ARRAY [untagged] OF pollfd; nfds: nfds_t; timeout: int): int;
+
+(*
+	PROCEDURE FD_ZERO (VAR set: Net.fd_set);
+		VAR i: INTEGER;
+	BEGIN
+		i := LEN(set); REPEAT DEC(i); set[i] := {} UNTIL i = 0
+	END FD_ZERO;
+
+	PROCEDURE FD_SET (fd: Net.SOCKET; VAR set: Net.fd_set);
+	BEGIN
+		INCL(set[fd DIV 32], fd MOD 32)
+	END FD_SET;
+*)
+
+	(* POSIX.1g *)
+		PROCEDURE [ccall] getaddrinfo* (hostname: PtrSTR; servname: PtrSTR; VAR [nil] hints: addrinfo; VAR res: Ptraddrinfo): int;
+		PROCEDURE [ccall] freeaddrinfo* (ai: Ptraddrinfo);
+
+		PROCEDURE [ccall] gai_strerror* (ecode: int): PtrSTR;
+
+END ObsdNet.

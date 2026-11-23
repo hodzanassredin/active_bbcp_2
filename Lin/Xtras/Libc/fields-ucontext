@@ -1,8 +1,0 @@
-			(* /usr/include/sys/ucontext.h *)
-				uc_flags*: INTEGER (* unsigned long int *);
-				uc_link: Ptrucontext_t;
-				uc_stack: stack_t;
-				uc_mcontext-: mcontext_t;
-				uc_sigmask: sigset_t;
-				__fpregs_mem: _libc_fpstate;
-				_ssp: ARRAY [untagged] 4 OF INTEGER (* unsigned long int *)

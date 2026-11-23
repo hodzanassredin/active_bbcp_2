@@ -1,0 +1,40 @@
+MODULE NbsdIoctl ["libc.so.12"];
+
+	(*
+		NetBSD 10.1
+		i386
+	*)
+
+	CONST
+		TIOCM_CAR* = {6};
+		TIOCM_CTS* = {5};
+		TIOCM_RNG* = {7};
+		TIOCM_RTS* = {2};
+		TIOCM_DSR* = {8};
+		TIOCM_DTR* = {1};
+		TIOCM_CD* = TIOCM_CAR;
+		TIOCM_LE* = {0};
+		TIOCM_RI* = TIOCM_RNG;
+		TIOCM_SR* = {4};
+		TIOCM_ST* = {3};
+
+		FIONBIO* = -2147195266;
+		FIONREAD* = 1074030207;
+
+		TIOCMGET* = 1074033770;
+		TIOCMSET* = -2147191699;
+		TIOCEXCL* = 536900621;
+		TIOCNXCL* = 536900622;
+		TIOCOUTQ* = 1074033779;
+		TIOCSBRK* = 536900731;
+		TIOCCBRK* = 536900730;
+		TIOCMBIS* = -2147191700;
+		TIOCMBIC* = -2147191701;
+
+	TYPE
+		int* = INTEGER;
+
+	PROCEDURE [ccall] ioctl0* ["ioctl"] (d: int; request: INTEGER): int;
+	PROCEDURE [ccall] ioctl1* ["ioctl"] (d: int; request: INTEGER; VAR arg: INTEGER): int;
+
+END NbsdIoctl.
