@@ -388,6 +388,31 @@ MODULE WinKernel;
 	PROCEDURE (VAR p: Platform) DeallocateClusterMem (base: S.ADDRESS; size: INTEGER);
 		VAR ok: INTEGER;
 	BEGIN ok := WkFree(base, 0, 1); ASSERT(ok # 0, 111) END DeallocateClusterMem;
+	PROCEDURE (VAR p: Platform) AllocateStackMem (size: INTEGER; OUT lo, hi: S.ADDRESS);
+	(* Стек задачи: VirtualAlloc (reserve+commit) и одна сторожевая
+	   страница PAGE_NOACCESS снизу. Страницы физически выделяются по
+	   касанию, поэтому тысячи задач стоят адресного пространства. *)
+		VAR guard, total, base: S.ADDRESS; old, ok: INTEGER;
+	BEGIN
+		guard := p.PageSize();
+		total := ((size + guard - 1) DIV guard) * guard + guard;
+		base := A.VirtualAlloc(0, total, memReserve + memCommit, 4);	(* PAGE_READWRITE *)
+		IF base = 0 THEN lo := 0; hi := 0; RETURN END;
+		ok := A.VirtualProtect(base, guard, 1, old);	(* PAGE_NOACCESS *)
+		IF ok = 0 THEN
+			ok := A.VirtualFree(base, 0, memRelease);
+			lo := 0; hi := 0; RETURN
+		END;
+		lo := base + guard; hi := base + total
+	END AllocateStackMem;
+	PROCEDURE (VAR p: Platform) DeallocateStackMem (lo, hi: S.ADDRESS);
+		VAR ok: INTEGER;
+	BEGIN
+		IF lo # 0 THEN
+			ok := A.VirtualFree(lo - p.PageSize(), 0, memRelease);
+			ASSERT(ok # 0, 112)
+		END
+	END DeallocateStackMem;
 	PROCEDURE (VAR p: Platform) Commit (base, committed, capacity, request: S.ADDRESS; OUT granted: S.ADDRESS);
 	BEGIN granted := committed END Commit; (* multi-cluster; gradualCommit is FALSE *)
 	PROCEDURE (VAR p: Platform) Time (): LONGINT;
@@ -404,6 +429,11 @@ MODULE WinKernel;
 	BEGIN RETURN WkReadable(from, to) # 0 END IsReadable;
 	PROCEDURE (VAR p: Platform) InActivationStack (sp: S.ADDRESS): BOOLEAN;
 	BEGIN RETURN (sp >= trapTop) & (sp < baseStack) END InActivationStack;
+	PROCEDURE (VAR p: Platform) GetTryContext (): S.ADDRESS;
+	(* Голова цепочки Try текущего стека — для SwitchSave/Restore задач. *)
+	BEGIN RETURN current END GetTryContext;
+	PROCEDURE (VAR p: Platform) SetTryContext (ctx: S.ADDRESS);
+	BEGIN current := ctx END SetTryContext;
 	PROCEDURE (VAR p: Platform) GetTrapInfo (VAR pc, sp, fp: S.ADDRESS; VAR err: INTEGER; VAR val: S.ADDRESS; OUT recursive: BOOLEAN);
 		VAR t: Trap;
 	BEGIN
