@@ -11,3 +11,5 @@ Test64ActionTrap.Do|pass|180
 # Test64TrapStack - трап главного стека ловится своим Try, а не чужим.
 Test64GcStack.Do|pass|120
 Test64TrapStack.Do|pass|120
+# Шаг 2а: InHeap с индексом кластеров — границы, вне кучи, после освобождения.
+Test64InHeap.Do|pass|120

@@ -21,6 +21,8 @@ MODULE Loop;
 	
 	VAR
 		gc: INTEGER;	(* how many events must be executed before next GC *)
+		lastAlloc: LONGINT;	(* снимок Kernel.AllocCount на прошлой сборке *)
+		gcChecks, gcSkips: LONGINT;	(* диагностика решения о сборке *)
 		Validate, Iterate: PROCEDURE;
 		Guard: ExitGuard;
 		quantum*: LONGINT; (** minimal indivisible interval between Services.Action invocations *)
@@ -46,7 +48,15 @@ MODULE Loop;
 			IF Validate # NIL THEN Validate END;
 			exit := Guard();
 			IF (gc <= 0) OR Kernel.WouldFinalize() & ~exit THEN
-				Kernel.Collect; gc := gcCycle;
+				(* Периодическая сборка имеет смысл только если с прошлой
+				   сборки были выделения: иначе собирать нечего, а полный
+				   Collect при большой живой куче стоит секунды. *)
+				INC(gcChecks);
+				IF Kernel.WouldFinalize() OR (Kernel.AllocCount() # lastAlloc) THEN
+					Kernel.Collect; lastAlloc := Kernel.AllocCount()
+				ELSE INC(gcSkips)
+				END;
+				gc := gcCycle
 			END;
 			now := Kernel.Time();
 			IF now >= itstime THEN 
@@ -59,6 +69,11 @@ MODULE Loop;
 		UNTIL exit
 	END Loop;
 
+	PROCEDURE Stats* (OUT checks, skips: LONGINT);
+	BEGIN
+		checks := gcChecks; skips := gcSkips
+	END Stats;
+
 	PROCEDURE Start* (eventIterator, viewsValidator: PROCEDURE; exitGuard: ExitGuard);
 	BEGIN
 		ASSERT(eventIterator # NIL, 20); ASSERT(exitGuard # NIL, 21);
@@ -66,11 +81,14 @@ MODULE Loop;
 		Guard := exitGuard;
 		Kernel.InstallCleaner(Collect);
 		Validate := viewsValidator;
+		lastAlloc := Kernel.AllocCount();	(* InstallCleaner выше уже выделил узел *)
+		gcChecks := 0; gcSkips := 0;
 		Kernel.Start(Loop);
 		Kernel.RemoveCleaner(Collect)
 	END Start;
 
 BEGIN
 	gc := gcCycle;
+	lastAlloc := -1;	(* первая периодическая сборка — всегда *)
 	quantum := 10
 END Loop.

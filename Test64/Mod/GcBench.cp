@@ -125,14 +125,17 @@ MODULE Test64GcBench;
 	END Watch;
 
 	PROCEDURE LoopBench (IN tag: ARRAY OF CHAR);
-		VAR q, t0, t1, ns: LONGINT;
+		VAR q, t0, t1, ns, a0, a1, gcChecks, gcSkips: LONGINT;
 	BEGIN
 		collects := 0; fasts := 0; iters := 0;
 		q := Loop.quantum; Loop.quantum := 0;
 		Kernel.debug := TRUE; Kernel.watcher := Watch;
+		a0 := Kernel.AllocCount();
 		t0 := Now();
 		Loop.Start(Noop, NIL, Guard);
 		t1 := Now();
+		a1 := Kernel.AllocCount();
+		Loop.Stats(gcChecks, gcSkips);
 		Kernel.watcher := NIL; Kernel.debug := FALSE; Loop.quantum := q;
 		ns := t1 - t0;
 		W("BENCH "); W(tag);
@@ -140,6 +143,8 @@ MODULE Test64GcBench;
 		W(" iters="); N(iters);
 		W(" collects="); N(collects);
 		W(" fast="); N(fasts);
+		W(" allocs="); N(a1 - a0);
+		W(" checks="); N(gcChecks); W(" skips="); N(gcSkips);
 		W(" ns="); N(ns);
 		W(" perIterUs=");
 		IF iters > 0 THEN N(ns DIV 1000 DIV iters) ELSE N(0) END;

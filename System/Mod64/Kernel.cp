@@ -68,6 +68,14 @@ MODULE Kernel;
 
 		N = 128 DIV 16;	(* free lists *)
 
+		(* Шаг 2а: индекс кластеров для InHeap. Кластеры кучи лежат в
+		   отсортированном по адресу массиве; InHeap ищет двоичным поиском
+		   вместо линейного обхода root на каждый помечаемый объект.
+		   При переполнении индекса (больше кластеров, чем здесь) InHeap
+		   возвращается к линейному обходу — корректность важнее скорости.
+		   16384 записей по 8 байт = 128 КБ статических данных. *)
+		clusterIndexMax = 16384;
+
 		(* kernel flags in module desc *)
 		init = 16; dyn = 17; dll = 24; iptrs = 30; 
 		monoCluster = 25; (* memory model with only one huge heap cluster; used for .exe, not used for .dll *)
@@ -356,6 +364,11 @@ MODULE Kernel;
 		candidates: ARRAY 1024 OF LONGINT;
 		nofcand: INTEGER;
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
+		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock: нужен Loop,
+					   чтобы не собирать мусор без выделений с прошлой сборки *)
+		clusterIndex: ARRAY clusterIndexMax OF Cluster;	(* отсортирован по адресу *)
+		nofClusterIndex: INTEGER;
+		clusterIndexFull: BOOLEAN;	(* индекс переполнен: InHeap идёт по root *)
 		ttotal: LONGINT;	(* current total size of BlackBox heap *)	(* committed heap size *)
 		(* total is used only in monocluster mode; it stands for the committed heap size; in monocluster mode, all of heap is in root. The committed size of root is root.size. So, total is not needed? *)
 		used: LONGINT;	(* bytes allocated on system heap *)
@@ -808,6 +821,49 @@ MODULE Kernel;
 	(* -------------------- system memory management --------------------- *)
 
 	(* A. V. Shiryaev, 2012.10: NOTE: it seems that GC works correctly with positive addesses only *)
+
+	(* --- индекс кластеров (шаг 2а) ------------------------------------- *)
+
+	PROCEDURE IndexFind (p: LONGINT): INTEGER;
+	(* позиция первого кластера с адресом > p; -1 при пустом индексе *)
+		VAR lo, hi, mid: INTEGER;
+	BEGIN
+		lo := 0; hi := nofClusterIndex;
+		WHILE lo < hi DO
+			mid := (lo + hi) DIV 2;
+			IF S.VAL(LONGINT, clusterIndex[mid]) <= p THEN lo := mid + 1 ELSE hi := mid END
+		END;
+		RETURN lo
+	END IndexFind;
+
+	PROCEDURE IndexInsert (c: Cluster);
+	(* вставить кластер в отсортированный индекс; при переполнении
+	   индекс больше не поддерживается, InHeap идёт по цепочке root *)
+		VAR i, pos: INTEGER;
+	BEGIN
+		IF clusterIndexFull OR (c = NIL) THEN RETURN END;
+		IF nofClusterIndex >= clusterIndexMax THEN clusterIndexFull := TRUE; RETURN END;
+		pos := IndexFind(S.VAL(LONGINT, c));
+		i := nofClusterIndex;
+		WHILE i > pos DO clusterIndex[i] := clusterIndex[i-1]; DEC(i) END;
+		clusterIndex[pos] := c; INC(nofClusterIndex)
+	END IndexInsert;
+
+	PROCEDURE IndexRemove (c: Cluster);
+		VAR i, pos: INTEGER; found: BOOLEAN;
+	BEGIN
+		IF clusterIndexFull OR (c = NIL) THEN RETURN END;
+		pos := IndexFind(S.VAL(LONGINT, c));
+		(* IndexFind даёт первую запись с адресом > адреса c, а адреса
+		   кластеров уникальны: совпадение может быть только слева *)
+		found := (pos > 0) & (clusterIndex[pos-1] = c);
+		IF found THEN DEC(pos) END;
+		IF found THEN
+			i := pos;
+			WHILE i < nofClusterIndex - 1 DO clusterIndex[i] := clusterIndex[i+1]; INC(i) END;
+			DEC(nofClusterIndex); clusterIndex[nofClusterIndex] := NIL
+		END
+	END IndexRemove;
 
 	PROCEDURE AllocateCluster (size: INTEGER; VAR c: Cluster);
 	(** Allocate cluster c of at least size bytes in either mono- or multi-cluster heap layout *)
@@ -1984,15 +2040,60 @@ MODULE Kernel;
 	END Mark;
 
 	PROCEDURE InHeap (p: LONGINT): BOOLEAN;	(* p внутри какого-либо кластера кучи? *)
-		VAR c: Cluster;
+		VAR c: Cluster; pos: INTEGER;
 	BEGIN
-		c := root;
-		WHILE c # NIL DO
-			IF (p >= S.VAL(LONGINT, c) + 24) & (p < S.VAL(LONGINT, c) + c.size) THEN RETURN TRUE END;
-			c := c.next
+		IF ~clusterIndexFull THEN
+			(* кластеры не пересекаются: достаточно проверить ближайший
+			   слева (первый с адресом > p, минус один) *)
+			pos := IndexFind(p);
+			IF pos = 0 THEN RETURN FALSE END;
+			c := clusterIndex[pos-1];
+			RETURN (p >= S.VAL(LONGINT, c) + 24) & (p < S.VAL(LONGINT, c) + c.size)
+		ELSE
+			c := root;
+			WHILE c # NIL DO
+				IF (p >= S.VAL(LONGINT, c) + 24) & (p < S.VAL(LONGINT, c) + c.size) THEN RETURN TRUE END;
+				c := c.next
+			END;
+			RETURN FALSE
+		END
+	END InHeap;
+
+	(* Диагностика/тесты шага 2а: InHeap и состояние индекса кластеров. *)
+	PROCEDURE InHeapAddr* (p: LONGINT): BOOLEAN;
+	BEGIN
+		RETURN InHeap(p)
+	END InHeapAddr;
+
+	PROCEDURE ClusterBounds* (i: INTEGER; OUT base, size: LONGINT): BOOLEAN;
+	(** Границы i-го кластера в индексе (по возрастанию адреса). *)
+	BEGIN
+		IF (i >= 0) & (i < nofClusterIndex) THEN
+			base := S.VAL(LONGINT, clusterIndex[i]); size := clusterIndex[i].size;
+			RETURN TRUE
 		END;
 		RETURN FALSE
-	END InHeap;
+	END ClusterBounds;
+
+	PROCEDURE ClusterIndexSize* (): INTEGER;
+	BEGIN
+		RETURN nofClusterIndex
+	END ClusterIndexSize;
+
+	PROCEDURE ClusterIndexCheck* (): BOOLEAN;
+	(** Инвариант индекса: строго возрастает и совпадает по составу с root. *)
+		VAR i, n: INTEGER; c: Cluster; ok: BOOLEAN;
+	BEGIN
+		IF clusterIndexFull THEN RETURN FALSE END;
+		ok := TRUE; i := 0;
+		WHILE (i < nofClusterIndex) & ok DO
+			IF (i > 0) & (S.VAL(LONGINT, clusterIndex[i-1]) >= S.VAL(LONGINT, clusterIndex[i])) THEN ok := FALSE END;
+			INC(i)
+		END;
+		n := 0; c := root;
+		WHILE c # NIL DO INC(n); c := c.next END;
+		RETURN ok & (n = nofClusterIndex)
+	END ClusterIndexCheck;
 
 	PROCEDURE MarkGlobals;
 		VAR m: Module; i: INTEGER; p: LONGINT; ap: AnyRef;
@@ -2275,6 +2376,7 @@ MODULE Kernel;
 				(* deallocate cluster *)
 				c := cluster; cluster := cluster.next;
 				IF last = NIL THEN root := cluster ELSE last.next := cluster END;
+				IndexRemove(c);
 				DeallocateCluster(c)	(*FreeHeapMem(c)*)
 			ELSE
 				IF fblk # NIL THEN Insert(fblk, SHORT(end - S.VAL(LONGINT, fblk))) END;
@@ -2465,6 +2567,7 @@ MODULE Kernel;
 				WHILE (c.next # NIL) & (S.VAL(LONGINT, new) > S.VAL(LONGINT, c.next)) DO c := c.next END;
 				new.next := c.next; c.next := new
 			END;
+			IndexInsert(new);
 			b := S.VAL(FreeBlock, S.VAL(LONGINT, new) + 24);
 			b.size := (new.size - 24) DIV 16 * 16 - 8
 		ELSE
@@ -2500,7 +2603,8 @@ MODULE Kernel;
 			IF a >= 32 THEN Insert(S.VAL(FreeBlock, S.VAL(LONGINT, b) + tsize), a) END;
 			ASSERT(FinChainHit(S.VAL(LONGINT, b), S.VAL(LONGINT, b) + tsize) = NIL, 21);	(* NewBlock накрыл живой FList-узел *)
 			IF size > 0 THEN Erase(S.ADR(b.size), (size + 3) DIV 4) END;
-			INC(allocated, tsize)
+			INC(allocated, tsize);
+			INC(allocCount)
 		END;
 		RETURN S.VAL(Block, b)
 	END NewBlock;
@@ -2511,6 +2615,13 @@ MODULE Kernel;
 	BEGIN
 		RETURN allocated
 	END Allocated;
+
+	PROCEDURE AllocCount* (): LONGINT;
+	(** Монотонный счётчик успешных NewBlock. System/Loop сравнивает его
+		снимок с прошлой сборки: нет выделений — нет и новой работы для GC. *)
+	BEGIN
+		RETURN allocCount
+	END AllocCount;
 
 	PROCEDURE Used* (): LONGINT;
 	BEGIN
@@ -2780,15 +2891,17 @@ MODULE Kernel;
 		
 		(* monoClusterMem := FALSE; *)
 		allocated := 0; (*total := 0;*) used := 0;
+		allocCount := 0; nofClusterIndex := 0; clusterIndexFull := FALSE;
 		sentinelBlock.size := MAX(INTEGER);
-		sentinel := S.ADR(sentinelBlock); 
+		sentinel := S.ADR(sentinelBlock);
 		i := N;
-		
+
 		REPEAT DEC(i); free[i] := sentinel UNTIL i = 0;
 		(* debug := TRUE; *)
 		IF monoClusterMem THEN
 			AllocateCluster(1, root);
 			ASSERT(root # NIL, 60);
+			IndexInsert(root);
 			i := MIN(N - 1, (root.size - 24) DIV 16 - 1);
 			free[i] := S.VAL(FreeBlock, S.VAL(LONGINT, root) + 24);
 			free[i].next := sentinel;

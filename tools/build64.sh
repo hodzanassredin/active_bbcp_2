@@ -44,7 +44,7 @@ if ! "$BB/dev0Linux" < "$LOG.cmd" > "$LOG" 2>&1; then
 	echo "build64: dev0Linux завершился с ошибкой, лог: $LOG" >&2
 	tail -20 "$LOG" >&2; cp "$LOG" /tmp/build64-fail.log; exit 1
 fi
-COMPILE_ERR='~TRAP|[0-9]+ error[s]? detected|syntax error|compilation failed|not found|undeclared|undefined'
+COMPILE_ERR='~TRAP|[0-9]+ error[s]? detected|error:|syntax error|compilation failed|not found|undeclared|undefined'
 if grep -qE "$COMPILE_ERR" "$LOG"; then
 	echo "build64: в журнале компиляции есть ошибки:" >&2
 	grep -nE "$COMPILE_ERR" "$LOG" | head -20 >&2
