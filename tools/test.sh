@@ -86,6 +86,30 @@ if [ "$runrobust" -eq 1 ]; then
 	fi
 fi
 
+runmpi=1
+if [ -n "$only" ]; then
+	case " $only " in *" Test64Mpi "*) ;; *) runmpi=0;; esac
+fi
+if [ "$runmpi" -eq 1 ]; then
+	total=$((total + 1))
+	echo "test: Test64Mpi (marks='proc', mpiexec на 5 рангах)"
+	rout=$("$BB/tools/test-mpi.sh" 2>&1); rrc=$?
+	printf '%s\n' "$rout"
+	case "$rout" in
+		SKIP*)
+			skipped=$((skipped + 1)); echo "SKIP Test64Mpi"; summary="$summary
+  SKIP Test64Mpi" ;;
+		*)
+			if [ $rrc -eq 0 ]; then
+				ok=$((ok + 1)); echo "PASS Test64Mpi"; summary="$summary
+  OK   Test64Mpi"
+			else
+				bad=$((bad + 1)); echo "FAIL Test64Mpi"; summary="$summary
+  BAD  Test64Mpi"
+			fi ;;
+	esac
+fi
+
 echo "== test: всего $total, прошло $ok, провалов $bad, пропущено $skipped"
 [ -n "$summary" ] && printf '%s\n' "$summary"
 [ $bad -eq 0 ]

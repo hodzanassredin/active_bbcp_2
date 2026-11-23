@@ -6,8 +6,9 @@ MODULE AsyncComputon;
 	обратно; код Do с кучей поэтому исполняется не в рабочей нити этапа 8.
 
 	Транспорт — локальные процессы: fork+exec blackbox-console, три pipe
-	на исполнителя (команда на stdin, запросы, ответы). MPI в системе
-	нет; интерфейс Push/Pull/Try от транспорта не зависит.
+	на исполнителя (команда на stdin, запросы, ответы); есть TCP по
+	localhost и внешний MPI (AsyncMpi, MPICH из .work/venv). Интерфейс
+	Push/Pull/Try от транспорта не зависит.
 
 	Ожидание Pull из задачи — точка уступки: ответ забирает главный цикл
 	через Poller, задача спит на Tasks.Park. При гибели исполнителя
@@ -24,12 +25,15 @@ MODULE AsyncComputon;
 		kindWork = 0; kindStop = 1; kindUnload = 2;
 		unloadBusy = 20;
 		pullTimeout = 10000;
-		trPipe = 0; trTcp = 1;
+		trPipe = 0; trTcp = 1; trMpi = 2;
 		tcpTimeout = 5000;
 
 	TYPE
 		Computon* = POINTER TO ABSTRACT RECORD (Stores.Store) END;
 		Hook* = POINTER TO ABSTRACT RECORD END;
+		(** Внешний транспорт (MPI): AsyncComputon не импортирует его
+			модуль, чтобы обычные тесты не требовали MPI-библиотеки. *)
+		Transport* = POINTER TO ABSTRACT RECORD END;
 
 		Req = POINTER TO RReq;
 		RReq = RECORD
@@ -59,6 +63,8 @@ MODULE AsyncComputon;
 
 		DoAction = RECORD (Services.SafeAction) c: Computon END;
 
+		MpiPoll = POINTER TO RECORD (Services.Action) END;
+
 		Argv = POINTER [untagged] TO ARRAY [untagged] OF LinLibc.PtrSTR;
 		ShBuf = POINTER TO ARRAY OF SHORTCHAR;
 
@@ -71,6 +77,8 @@ MODULE AsyncComputon;
 		lastErr: INTEGER;
 		hook: Hook;
 		nextWorker: INTEGER;
+		extTransport: Transport;	(* MPI: объект, поставленный AsyncMpi *)
+		mpiPoll: MpiPoll;
 
 		hdr: ARRAY 12 OF SHORTCHAR;
 		outLen: INTEGER;
@@ -89,6 +97,13 @@ MODULE AsyncComputon;
 	PROCEDURE (c: Computon) Do*, NEW, ABSTRACT;
 
 	PROCEDURE (h: Hook) Failed* (rank, tag, err: INTEGER), NEW, ABSTRACT;
+
+	PROCEDURE (t: Transport) Start* (n: INTEGER; OUT size: INTEGER), NEW, ABSTRACT;
+	PROCEDURE (t: Transport) SendFrame* (rank, tag, kind: INTEGER;
+		buf: POINTER TO ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN, NEW, ABSTRACT;
+	PROCEDURE (t: Transport) Poll*, NEW, ABSTRACT;
+	PROCEDURE (t: Transport) Stop*, NEW, ABSTRACT;
+	PROCEDURE (t: Transport) Alive* (rank: INTEGER): BOOLEAN, NEW, ABSTRACT;
 
 	(* --- числа в кадре ---------------------------------------------------- *)
 
@@ -219,15 +234,32 @@ MODULE AsyncComputon;
 	END MakeArgStr;
 
 	PROCEDURE SetTransport* (IN name: ARRAY OF CHAR): BOOLEAN;
-	(** Выбрать транспорт до Start: "pipe" (локальные pipe, по умолчанию)
-		или "tcp" (соединение по localhost). Программа Push/Pull не
+	(** Выбрать транспорт до Start: "pipe" (локальные pipe, по умолчанию),
+		"tcp" (соединение по localhost) или "mpi" (внешний транспорт,
+		поставленный AsyncMpi.SetTransportObject). Программа Push/Pull не
 		меняется. *)
 	BEGIN
 		IF name = "tcp" THEN transport := trTcp; RETURN TRUE
+		ELSIF name = "mpi" THEN transport := trMpi; RETURN TRUE
 		ELSIF (name = "pipe") OR (name = "") THEN transport := trPipe; RETURN TRUE
 		ELSE RETURN FALSE
 		END
 	END SetTransport;
+
+	PROCEDURE SetTransportObject* (t: Transport);
+	(** Поставить внешний транспорт (MPI) до выбора "mpi" и Start. *)
+	BEGIN
+		extTransport := t
+	END SetTransportObject;
+
+	PROCEDURE (a: MpiPoll) Do;
+	(** Главный цикл забирает готовые ответы внешнего транспорта. *)
+	BEGIN
+		IF started & (transport = trMpi) & (extTransport # NIL) THEN
+			extTransport.Poll;
+			Services.DoLater(a, Services.Ticks() + 5)
+		END
+	END Do;
 
 	PROCEDURE CloseWorker (idx: INTEGER);
 	(* Закрыть сокет или оба pipe; для TCP один дескриптор — общий. *)
@@ -342,6 +374,9 @@ MODULE AsyncComputon;
 
 	PROCEDURE WorkerAlive (rank: INTEGER): BOOLEAN;
 	BEGIN
+		IF transport = trMpi THEN
+			RETURN (extTransport # NIL) & extTransport.Alive(rank)
+		END;
 		RETURN (rank >= 0) & (rank < nworkers) & ~workers[rank].dead
 	END WorkerAlive;
 
@@ -427,6 +462,10 @@ MODULE AsyncComputon;
 	PROCEDURE SendFrame (rank, tag, kind: INTEGER; buf: POINTER TO ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
 		VAR ok: BOOLEAN;
 	BEGIN
+		IF transport = trMpi THEN
+			IF extTransport = NIL THEN RETURN FALSE END;
+			RETURN extTransport.SendFrame(rank, tag, kind, buf, len)
+		END;
 		IF ~WorkerAlive(rank) THEN RETURN FALSE END;
 		PutInt(hdr, 0, len); PutInt(hdr, 4, tag); PutInt(hdr, 8, kind);
 		ok := WriteAll(workers[rank].inFd, hdr, 12);
@@ -536,7 +575,7 @@ MODULE AsyncComputon;
 		отказал (модуль занят: импортирован или его кадр есть на стеке)
 		или не ответил; код отказа — в LastError.
 		Звать можно вне задачи: ответы собираются через Poller. *)
-		VAR i, tag, len: INTEGER; deadline: LONGINT; req: Req; all, ready: BOOLEAN;
+		VAR i, tag, len, res: INTEGER; deadline: LONGINT; req: Req; all, ready: BOOLEAN;
 			buf: ShBuf;
 	BEGIN
 		lastErr := 0;
@@ -565,7 +604,11 @@ MODULE AsyncComputon;
 				IF reqs[i].used & reqs[i].unload & ~reqs[i].done THEN ready := FALSE END
 			END;
 			IF ready OR (Kernel.Time() >= deadline) THEN EXIT END;
-			IF Poller.Wait(1) THEN END
+			IF transport = trMpi THEN
+				IF extTransport # NIL THEN extTransport.Poll END;
+				res := LinNative.usleep(1000)
+			ELSIF Poller.Wait(1) THEN
+			END
 		END;
 		FOR i := 0 TO maxReq - 1 DO
 			IF reqs[i].used & reqs[i].unload THEN
@@ -600,9 +643,15 @@ MODULE AsyncComputon;
 	PROCEDURE Stop*;
 	(** Погасить исполнителей. SIGCHLD в BlackBox игнорируется, поэтому
 		waitpid не нужен (и в консольном x64 он небезопасен): закрываем
-		pipes и убиваем процессы. *)
+		pipes и убиваем процессы. Для внешнего транспорта (MPI) Stop
+		шлёт остановку рангам и завершает MPI. *)
 		VAR i, res: INTEGER; ok: BOOLEAN;
 	BEGIN
+		IF started & (transport = trMpi) & (extTransport # NIL) THEN
+			extTransport.Stop;
+			started := FALSE; nworkers := 0;
+			RETURN
+		END;
 		IF started THEN
 			FOR i := 0 TO nworkers - 1 DO
 				IF workers[i].waiter # NIL THEN Poller.Remove(workers[i].waiter) END;
@@ -622,6 +671,16 @@ MODULE AsyncComputon;
 	BEGIN
 		ASSERT((1 <= n) & (n <= maxPool), 20);
 		Stop;
+		IF transport = trMpi THEN
+			ASSERT(extTransport # NIL, 21);
+			extTransport.Start(n, nworkers);
+			started := nworkers > 0;
+			IF started THEN
+				IF mpiPoll = NIL THEN NEW(mpiPoll) END;
+				Services.DoLater(mpiPoll, Services.Ticks() + 5)
+			END;
+			RETURN
+		END;
 		nworkers := 0;
 		FOR i := 0 TO n - 1 DO
 			IF Spawn(i) THEN INC(nworkers) END
@@ -677,6 +736,28 @@ MODULE AsyncComputon;
 		workers[idx].inLen := rem
 	END ParseWorker;
 
+	PROCEDURE DeliverFrame* (rank, tag, status: INTEGER; VAR b: ARRAY OF SHORTCHAR; len: INTEGER);
+	(** Ответ внешнего транспорта (MPI): тот же разбор, что у Ready
+		pipe/TCP. Вызывается из главного цикла под действием Poll. *)
+		VAR req: Req; i: INTEGER;
+	BEGIN
+		req := FindReq(tag);
+		IF (req # NIL) & ~req.done THEN
+			IF req.unload THEN req.status := status
+			ELSIF status = 0 THEN
+				IF (len >= 0) & (len <= maxFrame) THEN
+					FOR i := 0 TO len - 1 DO payload[i] := b[i] END;
+					req.c := Deserialize(payload, len);
+					IF req.c = NIL THEN req.status := -5 ELSE req.status := 0 END
+				ELSE req.status := -5
+				END
+			ELSE req.status := status
+			END;
+			req.done := TRUE;
+			WakeReq(req)
+		END
+	END DeliverFrame;
+
 	PROCEDURE (w: WWait) Ready (events: SET);
 		VAR idx, n: INTEGER; eof: BOOLEAN;
 	BEGIN
@@ -710,7 +791,7 @@ MODULE AsyncComputon;
 	BEGIN
 	END NoopViewer;
 
-	PROCEDURE RunDo (c: Computon; OUT err: INTEGER);
+	PROCEDURE RunDo* (c: Computon; OUT err: INTEGER);
 		VAR a: DoAction;
 	BEGIN
 		a.c := c;
