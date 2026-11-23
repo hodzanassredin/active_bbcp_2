@@ -318,6 +318,7 @@ MODULE Kernel;
 			next: Stack;
 			lo*, hi*: S.ADDRESS;	(* стек занимает [lo, hi); hi — верх (начальный SP) *)
 			sp: S.ADDRESS;			(* сохранённый SP, пока стек не текущий; hi — пустой *)
+			fp: S.ADDRESS;			(* FP вызывающего SwitchSave — корень обхода кадров спящего стека *)
 			tryContext: S.ADDRESS;	(* платформенный контекст последнего Kernel.Try *)
 			trapStack: TrapCleaner;	(* цепочка уборщиков на этом стеке *)
 			lockChain: LockRec;		(* цепочка взятых мониторов (этап 4) *)
@@ -1727,7 +1728,7 @@ MODULE Kernel;
 		VAR s: Stack;
 	BEGIN
 		NEW(s);
-		s.lo := lo; s.hi := hi; s.sp := hi;	(* пустой стек *)
+		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
 		s.tryContext := 0; s.trapStack := NIL; s.lockChain := NIL; s.lockDepth := 0; s.tryCount := 0;
 		s.signal := signal; s.main := FALSE;
 		s.next := stacks; stacks := s;
@@ -1793,12 +1794,21 @@ MODULE Kernel;
 	(** Вызывается переключателем ДО ухода с текущего стека: сохранить
 		состояние исполнения в запись стека и очистить глобальное, чтобы
 		следующий стек начал со своего. *)
-		VAR sp: S.ADDRESS; s: Stack;
+		VAR sp, fpp: S.ADDRESS; s: Stack; ar: AdrRef;
 	BEGIN
 		S.GETREG(SP, sp);
 		s := StackOf(sp);
 		IF s # NIL THEN
 			s.sp := sp;
+			(* FP нужен, чтобы обойти кадры спящего стека. Берём кадр
+			   ВЫЗЫВАЮЩЕГО SwitchSave, а не свой: свой кадр умирает по
+			   возврате из SwitchSave, ещё до сырого переключения, и
+			   сохраняемая переключателем область регистров затирает его
+			   слова. Кадр вызывающего (SwitchTo/обёртки) живёт всё время
+			   переключения. *)
+			S.GETREG(FP, fpp);
+			ar := S.VAL(AdrRef, fpp);
+			s.fp := ar.a;
 			IF platform # NIL THEN s.tryContext := platform.GetTryContext() END;
 			s.trapStack := trapStack;
 			s.lockChain := lockChain;
@@ -1841,21 +1851,33 @@ MODULE Kernel;
 
 	PROCEDURE FrameInModule (s: Stack; modLo, modHi: S.ADDRESS): BOOLEAN;
 	(* Есть ли в цепочке кадров стека s адрес возврата из кода [modLo, modHi)?
-	   Текущий стек идёт от FP, спящий — от сохранённого SP. Чтения
-	   ограничены диапазоном стека и проверяются IsReadable. *)
-		VAR fp, newfp, p: S.ADDRESS; ar: AdrRef; guard: INTEGER; sp: S.ADDRESS;
+	   Текущий стек идёт от FP, спящий — от FP, сохранённого SwitchSave.
+	   Кадры CP выровнены на 4, а не на 8 (компилятор пакует 4-байтные
+	   поля; FP бывает ≡4 mod 8) — прежняя проверка mod 8 сразу
+	   возвращала FALSE, и выгрузка «успешно» ломала возврат. *)
+		VAR fpp, newfp, p: S.ADDRESS; ar: AdrRef; guard: INTEGER; sp0: S.ADDRESS;
+			cur, interrupted: Stack;
 	BEGIN
-		S.GETREG(SP, sp);
-		IF StackOf(sp) = s THEN S.GETREG(FP, fp) ELSE fp := s.sp END;
-		IF fp = 0 THEN RETURN FALSE END;
+		S.GETREG(SP, sp0);
+		cur := StackOf(sp0);
+		IF cur = s THEN
+			S.GETREG(FP, fpp)
+		ELSIF (cur # NIL) & cur.signal THEN
+			(* трап: обходим прерванный стек от FP из ucontext (Kernel.fp) *)
+			interrupted := StackOf(sp);
+			IF (interrupted = s) & (fp # 0) THEN fpp := fp ELSE fpp := s.fp END
+		ELSE
+			fpp := s.fp
+		END;
+		IF fpp = 0 THEN RETURN FALSE END;
 		guard := 0;
-		WHILE (s.lo <= fp) & (fp < s.hi) & (guard < 4096) DO
-			IF (fp MOD 8 # 0) OR ~IsReadable(fp, fp + 2 * SIZE(S.ADDRESS)) THEN RETURN FALSE END;
-			ar := S.VAL(AdrRef, fp + SIZE(S.ADDRESS)); p := ar.a;
+		WHILE (s.lo <= fpp) & (fpp < s.hi) & (guard < 4096) DO
+			IF (fpp MOD 4 # 0) OR ~IsReadable(fpp, fpp + 2 * SIZE(S.ADDRESS)) THEN RETURN FALSE END;
+			ar := S.VAL(AdrRef, fpp + SIZE(S.ADDRESS)); p := ar.a;
+			ar := S.VAL(AdrRef, fpp); newfp := ar.a;
 			IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
-			ar := S.VAL(AdrRef, fp); newfp := ar.a;
-			IF newfp <= fp THEN RETURN FALSE END;
-			fp := newfp; INC(guard)
+			IF newfp <= fpp THEN RETURN FALSE END;
+			fpp := newfp; INC(guard)
 		END;
 		RETURN FALSE
 	END FrameInModule;
@@ -2167,8 +2189,9 @@ MODULE Kernel;
 		BEGIN
 			(* 64-бит: защита от битого FP — читаем только валидную память и
 			   требуем строгого роста FP (стек растёт вниз, caller выше);
-			   иначе битый фрейм уводил walker в мусор/цикл (cycle guard) *)
-			IF (fr.fp MOD 8 # 0) OR ~IsReadable(fr.fp, fr.fp + 2 * SIZE(S.ADDRESS)) THEN
+			   иначе битый фрейм уводил walker в мусор/цикл (cycle guard).
+			   Выравнивание — 4: кадры CP пакуются по 4 и бывают ≡4 mod 8. *)
+			IF (fr.fp MOD 4 # 0) OR ~IsReadable(fr.fp, fr.fp + 2 * SIZE(S.ADDRESS)) THEN
 				fr.eos := TRUE; RETURN
 			END;
 			ar := S.VAL(AdrRef, fr.fp + SIZE(S.ADDRESS)); fr.pc := ar.a; DEC(fr.pc);
@@ -3777,7 +3800,7 @@ MODULE Kernel;
 		   Точный верх уточнит Kernel.Start. *)
 		mainStack := S.VAL(Stack, S.ADR(mainStackRec));
 		mainStack.lo := baseStack - maxStackScan; mainStack.hi := baseStack;
-		mainStack.sp := baseStack; mainStack.tryContext := 0;
+		mainStack.sp := baseStack; mainStack.fp := 0; mainStack.tryContext := 0;
 		mainStack.trapStack := NIL; mainStack.lockChain := NIL; mainStack.lockDepth := 0; mainStack.tryCount := 0;
 		mainStack.signal := FALSE; mainStack.main := TRUE;
 		mainStack.next := NIL; stacks := mainStack;
