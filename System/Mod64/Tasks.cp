@@ -33,6 +33,7 @@ MODULE Tasks;
 		nameLen = 64;
 		defaultStack = 256 * 1024;
 		defaultSlice = 5;	(* мс на шаг планировщика *)
+		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
 
 		(** состояния задачи **)
 		New* = 0; Ready* = 1; Running* = 2; Sleeping* = 3;
@@ -78,6 +79,7 @@ MODULE Tasks;
 		scheduled, inStep: BOOLEAN;
 		alive: INTEGER;		(* незавершённых задач *)
 		slice: LONGINT;
+		lastPoll: LONGINT;	(* когда Kernel.RequestPoll поднимался последний раз *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
 
@@ -520,6 +522,9 @@ MODULE Tasks;
 		inStep := TRUE;
 		t0 := Kernel.Time();
 		LOOP
+			IF Kernel.Time() - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
+				Kernel.RequestPoll; lastPoll := Kernel.Time()
+			END;
 			WakeSleepers(Kernel.Time());
 			t := Dequeue();
 			IF t = NIL THEN CheckDeadlock; EXIT END;
@@ -660,6 +665,13 @@ MODULE Tasks;
 		END
 	END NameHook;
 
+	PROCEDURE YieldHook;
+	(** Уступка из Kernel.Poll: только в задаче и вне каркаса. Отмена
+		проверяется в Yield (CheckWait): Poll — тоже точка отмены. *)
+	BEGIN
+		IF (current # NIL) & ~InFramework() THEN Yield END
+	END YieldHook;
+
 	PROCEDURE StackHook (a: S.ADDRESS): Kernel.Stack;
 	(** Запись стека задачи: ядро добавляет взятие монитора в её цепочку
 		при передаче владения спящей задаче. *)
@@ -676,5 +688,6 @@ BEGIN
 	NEW(sched);
 	slice := defaultSlice;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
-	Kernel.SetScheduler(CurHook, Park, UnparkHook, ReadyHook, DeadlineHook, NameHook, StackHook)
+	lastPoll := Kernel.Time();
+	Kernel.SetScheduler(CurHook, Park, UnparkHook, ReadyHook, DeadlineHook, NameHook, StackHook, YieldHook)
 END Tasks.

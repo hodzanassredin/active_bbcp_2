@@ -280,8 +280,10 @@ MODULE DevCPVamd64;
 	PROCEDURE GetComKernel;
 	BEGIN
 		IF addRef = NIL THEN
-			DevCPT.OpenScope(SHORT(SHORT(-DevCPT.nofGmod)), NIL);
-			DevCPT.topScope.name := DevCPT.NewName("$$");
+			(* Область "$$" (Poll/Lock/Unlock/Await) создаётся по
+			   требованию; добавляем в неё COM-точки входа. *)
+			DevCPT.EnsureKernel;
+			DevCPT.OpenKernel;
 			DevCPT.Insert("AddRef", addRef);
 			addRef.mode := XProc;
 			addRef.fprint := addRefFP;
@@ -298,9 +300,7 @@ MODULE DevCPVamd64;
 			DevCPCamd64.intHandler.mode := XProc;
 			DevCPCamd64.intHandler.fprint := intHandlerFP;
 			DevCPCamd64.intHandler.fpdone := TRUE;
-			DevCPT.GlbMod[DevCPT.nofGmod] := DevCPT.topScope;
-			INC(DevCPT.nofGmod);
-			DevCPT.CloseScope;
+			DevCPT.CloseKernel
 		END
 	END GetComKernel;
 

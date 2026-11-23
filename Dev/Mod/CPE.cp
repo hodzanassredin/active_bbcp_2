@@ -287,6 +287,14 @@ MODULE DevCPE;
 			| TProc: IF obj.adr = -1 THEN obj := obj.nlink ELSE offs := offs + obj.adr; obj := Code END
 			| Var: offs := offs + dsize; obj := Data
 			| Con, IProc, XProc, LProc:
+			END;
+			(* Вложенная процедура как значение (условие ACTIVE.AWAIT,
+			   этап 6): её код уже сгенерирован (procs обходит n.left до
+			   объемлющей процедуры), поэтому адрес — константа в блоке
+			   кода. Ссылка идёт в Code.links — группа исправляется от
+			   базы кода модуля так же, как обычные LProc верхнего уровня. *)
+			IF (obj.mode = LProc) & (obj.mnolev > 0) & (obj.adr > 0) THEN
+				offs := obj.adr; obj := Code
 			END
 		ELSIF obj.mode = Typ THEN
 			IF obj.typ.untagged THEN	(* add desc for imported untagged types *)

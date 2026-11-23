@@ -1068,6 +1068,22 @@ MODULE DevCPP;
 		END
 	END Expression;
 
+	(* [exclusive] разрешён у методов и у процедур модуля верхнего уровня;
+	   у вложенной процедуры — ошибка. Монитор модуля создаётся здесь,
+	   до Allocate: генератор возьмёт адрес скрытой переменной. *)
+	PROCEDURE CheckExclusive (proc: DevCPT.Object; sys: SHORTINT; lev: BYTE);
+		VAR mon: DevCPT.Object;
+	BEGIN
+		IF sys = DevCPM.exclusive THEN
+			IF lev > 1 THEN
+				DevCPM.err(225)	(* [exclusive] только на верхнем уровне *)
+			ELSE
+				DevCPT.EnsureKernel;
+				IF proc.mode # TProc THEN mon := DevCPT.ModuleMonitor() END
+			END
+		END
+	END CheckExclusive;
+
 	PROCEDURE ProcedureDeclaration(VAR x: DevCPT.Node);
 		VAR proc, fwd: DevCPT.Object;
 			name: DevCPT.Name;
@@ -1136,6 +1152,7 @@ MODULE DevCPP;
 			c := DevCPM.errpos;
 			INCL(proc.conval.setval, hasBody);
 			CheckSym(semicolon); Block(procdec, statseq);
+			DevCPB.AttachSynth(procdec);	(* скрытые процедуры условий AWAIT *)
 			DevCPB.Enter(procdec, statseq, proc); x := procdec;
 			x.conval := DevCPT.NewConst(); x.conval.intval := c; x.conval.intval2 := DevCPM.startpos;
 			CheckSym(end);
@@ -1190,6 +1207,7 @@ MODULE DevCPP;
 				ASSERT(DevCPT.topScope # NIL);
 				GetParams;	(* may change proc := fwd !!! *)
 				ASSERT(DevCPT.topScope # NIL);
+				CheckExclusive(proc, sys, level);
 				GetAttributes(proc, baseProc, recTyp);
 				IF (fwd # NIL) & (fwdAttr / proc.conval.setval * {absAttr, empAttr, extAttr} # {}) THEN err(184) END;
 				CheckOverwrite(proc, baseProc, recTyp);
@@ -1246,6 +1264,7 @@ MODULE DevCPP;
 			IF (mode # LProc) & (level > 0) THEN err(73) END ;
 			INC(level); DevCPT.OpenScope(level, proc);
 			proc.link := NIL; GetParams;	(* may change proc := fwd !!! *)
+			CheckExclusive(proc, sys, level);
 			IF mode = CProc THEN GetCode
 			ELSIF DevCPM.noCode IN DevCPM.options THEN INCL(proc.conval.setval, hasBody)
 			ELSIF ~forward THEN Body; proc.adr := 0
@@ -1399,9 +1418,11 @@ MODULE DevCPP;
 				DevCPS.Get(sym); pos := DevCPM.startpos; CasePart(x); CheckSym(end)
 			ELSIF sym = while THEN
 				DevCPS.Get(sym); pos := DevCPM.startpos; Expression(x); CheckBool(x); CheckSym(do); StatSeq(y);
+				IF DevCPM.yieldPts IN DevCPM.options THEN DevCPB.YieldPoint(y) END;
 				DevCPB.Construct(Nwhile, x, y); CheckSym(end)
 			ELSIF sym = repeat THEN
 				DevCPS.Get(sym); StatSeq(x);
+				IF DevCPM.yieldPts IN DevCPM.options THEN DevCPB.YieldPoint(x) END;
 				IF sym = until THEN DevCPS.Get(sym); pos := DevCPM.startpos; Expression(y); CheckBool(y)
 				ELSE err(43)
 				END ;
@@ -1435,11 +1456,13 @@ MODULE DevCPP;
 						WHILE z.link # NIL DO z := z.link END ;
 						z.link := y
 					END ;
+					IF DevCPM.yieldPts IN DevCPM.options THEN DevCPB.YieldPoint(s) END;
 					CheckSym(end); DevCPB.Construct(Nwhile, x, s); pos := p
 				ELSE err(ident)
 				END
 			ELSIF sym = loop THEN
 				DevCPS.Get(sym); INC(LoopLevel); StatSeq(x); DEC(LoopLevel);
+				IF DevCPM.yieldPts IN DevCPM.options THEN DevCPB.YieldPoint(x) END;
 				DevCPB.Construct(Nloop, x, NIL); CheckSym(end)
 			ELSIF sym = with THEN
 				DevCPS.Get(sym); idtyp := NIL; x := NIL;
@@ -1612,6 +1635,25 @@ MODULE DevCPP;
 		END
 	END Block;
 
+	PROCEDURE FrameworkModule (IN name: ARRAY OF SHORTCHAR): BOOLEAN;
+	(** Модуль каркаса: System (односложные имена), Std, Text, Form, Host,
+		Dev и платформенные Lin/Win. Ключ точек уступки им запрещён:
+		внутри каркаса уступка — только в явных точках ожидания. *)
+		VAR sub: ARRAY 16 OF SHORTCHAR; i, j: INTEGER;
+	BEGIN
+		i := 0; j := 0;
+		WHILE name[i] # 0X DO
+			IF (i > 0) & (name[i] >= "A") & (name[i] <= "Z") THEN
+				sub[j] := 0X;
+				RETURN (sub = "System") OR (sub = "Std") OR (sub = "Text") OR (sub = "Form")
+					OR (sub = "Host") OR (sub = "Dev") OR (sub = "Lin") OR (sub = "Win")
+			END;
+			IF j < LEN(sub) - 1 THEN sub[j] := name[i]; INC(j) END;
+			INC(i)
+		END;
+		RETURN TRUE	(* односложное имя — модуль подсистемы System *)
+	END FrameworkModule;
+
 	PROCEDURE Module*(VAR prog: DevCPT.Node);
 		VAR impName, aliasName: DevCPT.Name;
 				procdec, statseq: DevCPT.Node;
@@ -1621,6 +1663,9 @@ MODULE DevCPP;
 		IF sym = module THEN DevCPS.Get(sym) ELSE err(16) END ;
 		IF sym = ident THEN
 			DevCPT.Open(DevCPS.name); DevCPS.Get(sym);
+			IF (DevCPM.yieldPts IN DevCPM.options) & FrameworkModule(DevCPT.SelfName) THEN
+				DevCPM.err(225)	(* ключ точек уступки запрещён модулям каркаса *)
+			END;
 			DevCPT.libName := "";
 			IF sym = lbrak THEN
 				INCL(DevCPM.options, DevCPM.interface); DevCPS.Get(sym);
@@ -1650,8 +1695,12 @@ MODULE DevCPP;
 				END ;
 				CheckSym(semicolon)
 			END ;
+			(* "$$" создаётся после импортов: псевдозапись «Kernel» для
+			   отпечатка CondProc иначе перехватила бы импорт Kernel. *)
+			IF (DevCPM.yieldPts IN DevCPM.options) & DevCPM.noerr THEN DevCPT.EnsureKernel END;
 			IF DevCPM.noerr THEN TDinit := NIL; lastTDinit := NIL; c := DevCPM.errpos;
-				Block(procdec, statseq); DevCPB.Enter(procdec, statseq, NIL); prog := procdec;
+				Block(procdec, statseq); DevCPB.AttachSynth(procdec);
+				DevCPB.Enter(procdec, statseq, NIL); prog := procdec;
 				prog.conval := DevCPT.NewConst(); prog.conval.intval := c; prog.conval.intval2 := DevCPM.startpos;
 				IF sym = close THEN DevCPS.Get(sym); StatSeq(prog.link) END;
 				prog.conval.realval := DevCPM.startpos;

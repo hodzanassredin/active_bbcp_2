@@ -138,12 +138,15 @@ MODULE DevCPT;
 		
 		(* COM function number *)
 		validfn = 40; iidfn = 41; queryfn = 42;
+
+		(* ACTIVE function number *)
+		awaitfn* = 47;
 		
 		(* attribute flags (attr.adr, struct.attribute, proc.conval.setval) *)
 		newAttr* = 16; absAttr* = 17; limAttr* = 18; empAttr* = 19; extAttr* = 20;
 		
 		(* procedure flags (conval.setval) *)
-		isHidden = 29;
+		isHidden* = 29;	(* скрытая процедура расширения (условие ACTIVE.AWAIT) *)
 
 		(* module visibility of objects *)
 		internal = 0; external = 1; externalR = 2; inPar = 3; outPar = 4;
@@ -180,7 +183,16 @@ MODULE DevCPT;
 		END ;
 
 	VAR
-		universe, syslink, comlink, infinity*: Object;
+		universe, syslink, comlink, activelink, infinity*: Object;
+		(* Псевдомодуль "$$" — точки входа ядра для кода расширения.
+		   Создаётся заново на каждую компиляцию, чтобы не тащить
+		   ссылки и used-флаги прошлого модуля. *)
+		kernelScope, kernelSave: Object;
+		kPoll*, kLock*, kUnlock*, kAwait*: Object;
+		(* kernelScope создаётся по первому требованию (EnsureKernel):
+		   иначе каждый модуль импортировал бы "$$" — Kernel. *)
+		moduleMon: Object;	(* скрытая глобальная монитора модуля *)
+		hiddenN: INTEGER;	(* счётчик скрытых имён за компиляцию *)
 		impCtxt: ImpCtxt;
 		expCtxt: ExpCtxt;
 		nofhdfld: INTEGER;
@@ -270,6 +282,7 @@ MODULE DevCPT;
 	BEGIN
 		topScope := universe; OpenScope(0, NIL); SYSimported := FALSE;
 		GlbMod[0] := topScope; nofGmod := 1;
+		moduleMon := NIL; hiddenN := 0; kernelScope := NIL;
 		sfpresent := TRUE;	(* !!! *)
 		symChanges := 0;
 		infinity.conval.intval := DevCPM.ConstNotAlloc;
@@ -1179,6 +1192,15 @@ MODULE DevCPT;
 				h := NewObj(); h.mode := Head; h.right := comlink; obj.scope := h;
 			ELSE err(151)
 			END;
+		ELSIF name = "ACTIVE" THEN
+			IF processor # 12 THEN
+				err(151)	(* расширение реализовано только для amd64 *)
+			ELSE
+				INCL(DevCPM.options, DevCPM.active);
+				Insert(aliasName, obj); obj.mode := Mod; obj.mnolev := 0;
+				obj.scope := activelink; obj.typ := notyp;
+				h := NewObj(); h.mode := Head; h.right := activelink; obj.scope := h
+			END
 		ELSIF name = "JAVA" THEN
 			INCL(DevCPM.options, DevCPM.java)
 		ELSE
@@ -1615,6 +1637,113 @@ MODULE DevCPT;
 		obj.mode := Attr; obj.adr := num
 	END EnterAttr;
 
+	(* --- псевдомодуль "$$" и скрытые объекты расширения (этап 6) ------ *)
+
+	PROCEDURE NewHidden* (IN prefix: ARRAY OF SHORTCHAR; OUT name: Name);
+	(** Уникальное скрытое имя: prefix + номер (ARRAY как результат
+		функции CP не разрешает, поэтому имя — выходной параметр). *)
+		VAR d: ARRAY 8 OF SHORTCHAR; i, j, k, x: INTEGER;
+	BEGIN
+		INC(hiddenN); x := hiddenN; k := 0;
+		REPEAT d[k] := SHORT(CHR(ORD("0") + x MOD 10)); INC(k); x := x DIV 10 UNTIL x = 0;
+		i := 0; j := 0;
+		WHILE (prefix[j] # 0X) & (i < LEN(name) - 10) DO name[i] := prefix[j]; INC(i); INC(j) END;
+		WHILE k > 0 DO DEC(k); name[i] := d[k]; INC(i) END;
+		name[i] := 0X
+	END NewHidden;
+
+	PROCEDURE MakeKernelPar (IN name: ARRAY OF SHORTCHAR; typ: Struct): Object;
+		VAR p: Object;
+	BEGIN
+		p := NewObj(); p.name := NewName(name); p.mode := Var; p.typ := typ;
+		p.vis := 0; p.sysflag := 0; p.link := NIL;
+		RETURN p
+	END MakeKernelPar;
+
+	PROCEDURE KProc (IN name: Name; result: Struct; par: Object; VAR obj: Object);
+	BEGIN
+		Insert(name, obj);
+		obj.mode := XProc; obj.typ := result; obj.link := par;
+		obj.vis := external; obj.library := NIL; obj.entry := NIL;
+		obj.conval := NewConst()	(* генератор читает conval.setval *)
+	END KProc;
+
+	PROCEDURE CreateKernel;
+	(** Область "$$" — как в GetComKernel (DevCPVamd64), но создаётся
+		на каждую компиляцию и содержит все точки входа ядра, которые
+		нужны раскрытию ACTIVE.AWAIT, [exclusive] и точкам уступки.
+		FPrintObj вычислит отпечатки по сигнатурам; они совпадут с
+		экспортом Kernel, если сигнатуры совпадают. *)
+		VAR par, par2, par3, fp, typeObj, nameMod: Object; ct: Struct; kn: BYTE;
+	BEGIN
+		(* Отпечаток CondProc включает имена «Kernel» и «CondProc»:
+		   заводим для них псевдозапись GlbMod (library # NIL — в импорт
+		   она не попадает, объекты в неё не кладутся). *)
+		kn := nofGmod;
+		nameMod := NewObj(); nameMod.name := NewName("Kernel");
+		nameMod.library := NewName("");
+		GlbMod[kn] := nameMod; INC(nofGmod);
+		OpenScope(SHORT(SHORT(-nofGmod)), NIL);
+		topScope.name := NewName("$$");
+		KProc("Poll", notyp, NIL, kPoll);
+		par := MakeKernelPar("obj", anyptrtyp); KProc("Lock", notyp, par, kLock);
+		par := MakeKernelPar("obj", anyptrtyp); KProc("Unlock", notyp, par, kUnlock);
+		ct := NewStr(ProcTyp, Basic);
+		fp := MakeKernelPar("frame", adrtyp);
+		ct.BaseTyp := booltyp; ct.link := fp;
+		typeObj := NewObj(); typeObj.mode := Typ; typeObj.typ := ct;
+		typeObj.name := NewName("CondProc");
+		ct.strobj := typeObj; ct.mno := kn;
+		par := MakeKernelPar("cond", ct);
+		par2 := MakeKernelPar("frame", adrtyp); par.link := par2;
+		par3 := MakeKernelPar("obj", anyptrtyp); par2.link := par3;
+		KProc("Await", notyp, par, kAwait);
+		kernelScope := topScope;
+		GlbMod[nofGmod] := topScope; INC(nofGmod);
+		CloseScope
+	END CreateKernel;
+
+	PROCEDURE EnsureKernel*;
+	(** Создать область "$$" при первом использовании расширения:
+		AWAIT, [exclusive] или точки уступки. Так модуль, не
+		использующий расширение, не получает лишнего импорта Kernel. *)
+	BEGIN
+		IF kernelScope = NIL THEN CreateKernel END
+	END EnsureKernel;
+
+	PROCEDURE OpenKernel*;
+	(** Временно сделать текущей область "$$" (для COM-объектов
+		в DevCPVamd64.GetComKernel). *)
+	BEGIN
+		kernelSave := topScope; topScope := kernelScope
+	END OpenKernel;
+
+	PROCEDURE CloseKernel*;
+	BEGIN
+		topScope := kernelSave
+	END CloseKernel;
+
+	PROCEDURE ModuleMonitor* (): Object;
+	(** Скрытая глобальная переменная модуля — объект монитора для
+		[exclusive]-процедур верхнего уровня и их ACTIVE.AWAIT. *)
+		VAR o: Object;
+	BEGIN
+		IF moduleMon = NIL THEN
+			kernelSave := topScope; topScope := GlbMod[0];	(* область модуля *)
+			Insert("@monitor", moduleMon);
+			moduleMon.mode := Var; moduleMon.typ := int32typ;
+			moduleMon.vis := internal; moduleMon.leaf := TRUE;
+			o := topScope.scope;
+			IF o = NIL THEN topScope.scope := moduleMon
+			ELSE
+				WHILE o.link # NIL DO o := o.link END;
+				o.link := moduleMon
+			END;
+			topScope := kernelSave
+		END;
+		RETURN moduleMon
+	END ModuleMonitor;
+
 	PROCEDURE EnterTProc(ptr, rec: Struct; IN name: Name; num, typ: SHORTINT);
 		VAR obj, par: Object;
 	BEGIN
@@ -1716,6 +1845,10 @@ MODULE DevCPT;
 		EnterTProc(punktyp, iunktyp, "AddRef", 1, 2);
 		EnterTProc(punktyp, iunktyp, "Release", 2, 2);
 		comlink := topScope.right; topScope.right := NIL;
+
+		(* инициализация псевдомодуля ACTIVE *)
+		EnterProc("AWAIT", awaitfn);
+		activelink := topScope.right; topScope.right := NIL;
 		
 		universe := topScope;
 		EnterProc("LCHR", lchrfn);

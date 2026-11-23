@@ -85,6 +85,7 @@ MODULE DevCPCamd64;
 		(* sysflag *)
 		untagged = 1; callback = 2; noAlign = 3; union = 7;
 		interface = 10; ccall = -10; guarded = 10; noframe = 16;
+		exclusive = 32;	(* [exclusive]: Kernel.Lock/Unlock в прологе/эпилоге *)
 		nilBit = 1; enumBits = 8; new = 1; iid = 2;
 		stackArray = 120;
 		
@@ -2499,6 +2500,60 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		DevCPE.PutWord(call, DevCPE.pc - call - 4)
 	END Ms64Entry;
 
+	(* --- [exclusive]: монитор в прологе и на общем выходе (этап 6.3) ----- *)
+
+	PROCEDURE MonitorArg (proc: DevCPT.Object; VAR x, r: DevCPLamd64.Item);
+	(** Операнд объекта-монитора: [RBP + получатель] у метода, адрес
+		скрытой глобальной модуля у процедуры верхнего уровня. *)
+	BEGIN
+		IF proc.mode = TProc THEN
+			x.mode := Ind; x.reg := BP; x.offset := proc.link.adr; x.scale := 0; x.form := Pointer
+		ELSE
+			x.mode := Abs; x.obj := DevCPT.ModuleMonitor(); x.offset := x.obj.adr;
+			x.scale := 0; x.form := Pointer;
+			DevCPLamd64.MakeReg(r, AX, Pointer);
+			DevCPLamd64.GenLoadAdr(x, r);
+			x := r
+		END
+	END MonitorArg;
+
+	PROCEDURE LockEntry (proc: DevCPT.Object);
+	(** Kernel.Lock(монитор) после кадра процедуры. BX (статическая связь
+		вызывающего) сохраняется: Lock — обычная CP-процедура. *)
+		VAR x, r: DevCPLamd64.Item;
+	BEGIN
+		DevCPT.EnsureKernel; DevCPT.kLock.used := TRUE;
+		DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPush(r);
+		MonitorArg(proc, x, r);
+		DevCPLamd64.GenPush(x);
+		x.mode := XProc; x.obj := DevCPT.kLock; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPLamd64.GenCall(x);
+		DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPop(r)
+	END LockEntry;
+
+	PROCEDURE UnlockExit (proc: DevCPT.Object);
+	(** Kernel.Unlock(монитор) на общем выходе. Результат уже в RAX
+		(или ST0 для вещественного) — сохраняем его через вызов. *)
+		VAR x, r: DevCPLamd64.Item; f: SHORTINT;
+	BEGIN
+		DevCPT.EnsureKernel; DevCPT.kUnlock.used := TRUE;
+		f := proc.typ.form;
+		IF f IN {Real32, Real64} THEN
+			GenB(48H); GenB(83H); GenB(0ECH); GenB(8);	(* sub rsp, 8 *)
+			GenB(0DDH); GenB(1CH); GenB(24H)	(* fstp qword [rsp] *)
+		ELSIF f # NoTyp THEN GenB(50H)	(* push rax *)
+		END;
+		MonitorArg(proc, x, r);
+		DevCPLamd64.GenPush(x);
+		x.mode := XProc; x.obj := DevCPT.kUnlock; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPLamd64.GenCall(x);
+		IF f IN {Real32, Real64} THEN
+			GenB(0DDH); GenB(04H); GenB(24H);	(* fld qword [rsp] *)
+			GenB(48H); GenB(83H); GenB(0C4H); GenB(8)	(* add rsp, 8 *)
+		ELSIF f # NoTyp THEN GenB(58H)	(* pop rax *)
+		END
+	END UnlockExit;
+
 	PROCEDURE Enter* (proc: DevCPT.Object; empty, useFpu: BOOLEAN);
 		VAR sp, fp, r, r1: DevCPLamd64.Item; par: DevCPT.Object; adr, size, np: INTEGER;
 	BEGIN
@@ -2575,7 +2630,8 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				IF imVar IN proc.conval.setval THEN
 					DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenMove(fp, r)
 				END
-			END
+			END;
+			IF ~empty & (proc.sysflag = exclusive) THEN LockEntry(proc) END
 		ELSIF ~empty THEN (* enter module *)
 			DevCPLamd64.GenPush(fp);
 			DevCPLamd64.GenMove(sp, fp);
@@ -2592,6 +2648,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	BEGIN
 		DevCPLamd64.MakeReg(sp, SP, Pointer); DevCPLamd64.MakeReg(fp, BP, Pointer);
 		IF proc # NIL THEN (* exit proc *)
+			IF ~empty & (proc.sysflag = exclusive) THEN UnlockExit(proc) END;
 			IF proc.sysflag # noframe THEN
 				IF ~empty OR NeedOutPtrInit(proc) THEN
 					IF isGuarded IN proc.conval.setval THEN	(* remove exception frame; TODO amd64 TLS redesign *)

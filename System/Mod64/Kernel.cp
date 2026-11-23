@@ -308,6 +308,7 @@ MODULE Kernel;
 		SchedDeadline* = PROCEDURE (): LONGINT;
 		SchedName* = PROCEDURE (task: S.ADDRESS; OUT name: ARRAY OF CHAR);
 		SchedStack* = PROCEDURE (task: S.ADDRESS): Stack;
+		SchedYield* = PROCEDURE;	(* уступка по ключу точек уступки (6.2) *)
 
 		(* Реестр стеков (этап 2). Одна запись на любой стек: главный,
 		   сопрограмма/задача (этап 3), сигнальный. Общий для будущих нитей:
@@ -472,7 +473,9 @@ MODULE Kernel;
 		schedDeadline: SchedDeadline;
 		schedName: SchedName;
 		schedStack: SchedStack;
+		schedYield: SchedYield;
 		schedInstalled: BOOLEAN;
+		pollWanted: BOOLEAN;	(* главный цикл просит уступить в Kernel.Poll *)
 
 		(* Вычисление чужого условия внутри Unlock/Await: трап ловится
 		   и переадресуется ждущей задаче, уборка стека не запускается. *)
@@ -1895,6 +1898,12 @@ MODULE Kernel;
 	PROCEDURE [code] CALL (a: LONGINT) 0FFH, 0D0H;	(* call AX *)
 	PROCEDURE [code] RETI (): LONGINT;
 	PROCEDURE [code] RETR (): REAL;
+
+	(* Вызвать условие ждущего с кадром в BX (статическая связь CP):
+	   cond — в AX, frame — в стеке. pop rcx; push rbx; mov rbx,rcx;
+	   push rcx; call rax; pop rbx. *)
+	PROCEDURE [code] CallCond (cond: CondProc; frame: S.ADDRESS): BOOLEAN
+		059H, 053H, 048H, 089H, 0CBH, 051H, 0FFH, 0D0H, 05BH;
 	
 	(*
 		64-бит: каждый слот par = 8 байт (один push).
@@ -2470,7 +2479,7 @@ MODULE Kernel;
 	PROCEDURE CondBody (a, b, c: S.ADDRESS);
 	BEGIN
 		condCompleted := FALSE;
-		condResult := condP(condF);
+		condResult := CallCond(condP, condF);	(* кадр ждущего — в BX *)
 		condCompleted := TRUE
 	END CondBody;
 
@@ -2648,14 +2657,32 @@ MODULE Kernel;
 	END MarkMonitors;
 
 	PROCEDURE SetScheduler* (current: SchedCurrent; park: SchedPark; unpark: SchedUnpark;
-			ready: SchedReady; deadline: SchedDeadline; name: SchedName; stackOf: SchedStack);
-	(** Ставится модулем Tasks: ядро зовёт эти процедуры в Lock/Wait/Await. *)
+			ready: SchedReady; deadline: SchedDeadline; name: SchedName; stackOf: SchedStack;
+			yield: SchedYield);
+	(** Ставится модулем Tasks: ядро зовёт эти процедуры в Lock/Wait/Await
+		и в точках уступки (Poll). *)
 	BEGIN
 		schedCurrent := current; schedPark := park; schedUnpark := unpark;
 		schedReady := ready; schedDeadline := deadline; schedName := name;
-		schedStack := stackOf;
+		schedStack := stackOf; schedYield := yield;
 		schedInstalled := (current # NIL) & (park # NIL) & (unpark # NIL)
 	END SetScheduler;
+
+	PROCEDURE RequestPoll*;
+	(** Главный цикл поднимает флаг: следующий Poll в задаче уступит. *)
+	BEGIN
+		pollWanted := TRUE
+	END RequestPoll;
+
+	PROCEDURE Poll*;
+	(** Точка уступки ключа компиляции. Не уступает вне задачи, в мониторе
+		(там переключение только явным AWAIT) и без планировщика. *)
+	BEGIN
+		IF pollWanted & (lockDepth = 0) & schedInstalled & (schedYield # NIL) & IsTask() THEN
+			pollWanted := FALSE;
+			schedYield
+		END
+	END Poll;
 
 	PROCEDURE Lock* (obj: ANYPTR);
 	(** Взять монитор объекта. Повторный вход разрешён (счётчик).
@@ -2740,7 +2767,7 @@ MODULE Kernel;
 		IF (m = NIL) OR (m.owner # me) THEN
 			MonFail("Await: monitor is not held by the caller")
 		END;
-		IF cond(frame) THEN RETURN END;	(* компилятор тоже проверяет до вызова *)
+		IF CallCond(cond, frame) THEN RETURN END;	(* компилятор тоже проверяет до вызова *)
 		NEW(w); w.task := me; w.cond := cond; w.frame := frame; w.trap := 0;
 		AppendWait(m, w);
 		saved := m.count;

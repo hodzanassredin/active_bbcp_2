@@ -23,6 +23,7 @@ MODULE DevCompiler;
 		(* compiler options: *)
 		checks = 0; allchecks = 1; assert = 2; obj = 3; ref = 4;
 		allref = 5; srcpos = 6; reallib = 7; signatures = 8;
+		yieldPts = 13;	(* ключ точек уступки (только amd64), символ "^" *)
 		hint = 29; oberon = 30; errorTrap = 31;
 		defopt = {checks, assert, obj, ref, allref, srcpos, signatures};
 
@@ -52,6 +53,11 @@ MODULE DevCompiler;
 		(* IF found THEN *) INCL(DevCPM.options, DevCPM.comAware); (* END; *)
 		IF errorTrap IN opt THEN INCL(DevCPM.options, DevCPM.trap) END;
 		IF oberon IN opt THEN INCL(DevCPM.options, DevCPM.oberon) END;
+		IF yieldPts IN opt THEN
+			IF DevCPV.processor = 12 THEN INCL(DevCPM.options, DevCPM.yieldPts)
+			ELSE DevCPM.err(225)	(* точки уступки есть только в amd64-ядре *)
+			END
+		END;
 		DevCPT.Init(opt);
 		DevCPB.typSize := DevCPV.TypeSize;
 		DevCPT.processor := DevCPV.processor;
@@ -187,6 +193,7 @@ MODULE DevCompiler;
 			ELSIF opt[i] = "?" THEN INCL(opts, hint)
 			ELSIF opt[i] = "@" THEN INCL(opts, errorTrap)
 			ELSIF opt[i] = "$" THEN INCL(opts, oberon)
+			ELSIF opt[i] = "^" THEN INCL(opts, yieldPts)
 			END;
 			INC(i)
 		END;
@@ -354,6 +361,7 @@ MODULE DevCompiler;
 					ELSIF s.char = "?" THEN INCL(opts, hint)
 					ELSIF s.char = "@" THEN INCL(opts, errorTrap)
 					ELSIF s.char = "$" THEN INCL(opts, oberon)
+					ELSIF s.char = "^" THEN INCL(opts, yieldPts)
 					ELSIF s.char = "(" THEN
 						s.Scan;
 						WHILE (s.start < end) & (s.type = TextMappers.string) DO
