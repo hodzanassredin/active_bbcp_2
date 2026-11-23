@@ -1,0 +1,13 @@
+# Тесты стенда. Формат: <команда>|<ожидание>|<таймаут, с>
+#
+# Зелёные: то, что сегодня работает и не должно ломаться.
+Test64Basic.Do|pass|60
+Test64Heap.Do|pass|180
+Test64Trap.Do|pass|60
+# Действие, трапнувшее без DoLater, возвращается в очередь (этап 1, Services.Cleanup).
+Test64ActionTrap.Do|pass|180
+# Этап 2: реестр стеков и контекст Kernel.Try на стек.
+# Test64GcStack   - сборка на зарегистрированном втором стеке сохраняет объекты.
+# Test64TrapStack - трап главного стека ловится своим Try, а не чужим.
+Test64GcStack.Do|pass|120
+Test64TrapStack.Do|pass|120
