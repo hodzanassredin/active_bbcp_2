@@ -25,3 +25,4 @@ System_devUnloadGuard|proc|300|System_devUnloadGuardCode
 Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool
 # Проверка переполнения стека задачи ключом компилятора % (только amd64).
 System_devStackChk|proc|300||%
+System_devSchedTrap|proc|300||
