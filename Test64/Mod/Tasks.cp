@@ -32,6 +32,9 @@ MODULE Test64Tasks;
 		Probe = POINTER TO RECORD (Tasks.Task) END;
 		GroupChild = POINTER TO RECORD (Tasks.Task) END;
 		GroupTrapChild = POINTER TO RECORD (Tasks.Task) END;
+		ProbeBox = POINTER TO RECORD n: INTEGER END;
+		LockHolder = POINTER TO RECORD (Tasks.Task) mon: ProbeBox END;
+		LockProbe = POINTER TO RECORD (Tasks.Task) mon: ProbeBox; got: BOOLEAN END;
 		Prod = POINTER TO RECORD (Tasks.Task) END;
 		Cons = POINTER TO RECORD (Tasks.Task) END;
 		Phil = POINTER TO RECORD (Tasks.Task) id: INTEGER END;
@@ -411,5 +414,43 @@ MODULE Test64Tasks;
 		Tasks.List;	(* задача ещё в очереди: строка со state=ready *)
 		UnitAssert.True(Pump(2000), "listed task finished")
 	END TestProcList;
+
+	(* --- флаг wake не должен протекать в ожидание монитора ------------- *)
+
+	PROCEDURE (h: LockHolder) Run;
+	BEGIN
+		Kernel.Lock(h.mon);
+		Tasks.Sleep(50);
+		Kernel.Unlock(h.mon)
+	END Run;
+
+	PROCEDURE (p: LockProbe) Run;
+	BEGIN
+		Tasks.Park;		(* сюда придёт Unpark *)
+		Kernel.Lock(p.mon);	(* монитор занят держателем *)
+		p.got := TRUE;
+		Kernel.Unlock(p.mon)
+	END Run;
+
+	PROCEDURE TestProcParkWakeFlag*;
+	(** Unpark будит Park; флаг wake должен быть съеден этим пробуждением.
+		Если он остаётся, следующий Park (внутри Kernel.Lock) вернётся
+		сразу, и Lock трапнет «woken without the monitor». *)
+		VAR mon: ProbeBox; h: LockHolder; p: LockProbe; ok: BOOLEAN;
+	BEGIN
+		NEW(mon); NEW(h); h.mon := mon;
+		Tasks.Start(h);
+		WHILE ~Kernel.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
+		UnitAssert.True(Kernel.IsLocked(mon), "holder took the monitor");
+		NEW(p); p.mon := mon; Tasks.Start(p);
+		Tasks.Step;	(* probe ушёл в Park *)
+		UnitAssert.True(Tasks.State(p) = Tasks.Parked, "probe parked");
+		Tasks.Unpark(p);
+		ok := Pump(5000);
+		UnitAssert.True(ok, "tasks finished");
+		UnitAssert.True(~Tasks.Failed(p), "probe survived the monitor wait");
+		UnitAssert.True(p.got, "probe acquired the monitor");
+		UnitAssert.True(~Kernel.IsLocked(mon), "monitor released")
+	END TestProcParkWakeFlag;
 
 END Test64Tasks.
