@@ -9,6 +9,10 @@
 # из отчёта UnitRunner («failed 0») и кода завершения. В конце
 # проверяется, что прогон не добавил в /tmp имён odc + 9 цифр (файлы
 # других процессов стенда не считаются).
+#
+# libtest32.so собирается флагами tools/i386-toolchain.sh (без sudo).
+# Нет 32-битного C-тулчейна — Test64CoTests пропускается с причиной;
+# остальные модули от C-помощника не зависят.
 set -u
 . "$(dirname "$0")/env.sh"
 
@@ -22,6 +26,7 @@ Test64Tasks|proc slow|900
 Test64Monitors|proc|300
 Test64Active|proc|300
 Test64Yield|proc|300
+Test64CoTests|proc|300
 Test64UnloadGuard|proc|300'
 
 LIST=0; only=""
@@ -41,6 +46,22 @@ if [ -z "$only" ]; then
 	fi
 fi
 [ -x "$INTERP32" ] || { echo "test32: нет $INTERP32 — tools/build32.sh" >&2; exit 2; }
+
+# libtest32.so — C-помощник сопрограмм (ucontext, tools/test64.c).
+# Пустой stdout tools/i386-toolchain.sh — тулчейна нет: Test64CoTests
+# пропускается, остальные модули от C-помощника не зависят.
+have_lib=0
+if I386FLAGS=$("$BB/tools/i386-toolchain.sh"); then
+	if [ -n "$I386FLAGS" ]; then
+		# shellcheck disable=SC2086
+		if gcc $I386FLAGS -shared -fPIC -O2 -o "$INSTALL/libtest32.so" "$BB/tools/test64.c"; then
+			have_lib=1
+		else
+			echo "test32: сборка libtest32.so не удалась" >&2
+		fi
+	fi
+fi
+if [ "$have_lib" -eq 0 ] && [ -f "$INSTALL/libtest32.so" ]; then have_lib=1; fi
 
 run_one() {
 	mod="$1"; marks="$2"; tmo="$3"
@@ -65,11 +86,15 @@ run_one() {
 # давних исполнителей RobustParallel). Проверяем только прирост.
 tmp_before=$(find /tmp -maxdepth 1 -type f -name 'odc[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' 2>/dev/null | wc -l)
 
-ok=0; bad=0; total=0
+ok=0; bad=0; skipped=0; total=0
 while IFS='|' read -r mod marks tmo; do
 	[ -n "$mod" ] || continue
 	if [ -n "$only" ]; then
 		case " $only " in *" $mod "*) ;; *) continue;; esac
+	fi
+	if [ "$have_lib" -eq 0 ] && [ "$mod" = Test64CoTests ]; then
+		echo "SKIP Test64CoTests: нет libtest32.so (32-битный C-тулчейн недоступен)"
+		skipped=$((skipped + 1)); continue
 	fi
 	total=$((total + 1))
 	echo "test32: $mod (marks='${marks:-}', ${tmo}s)"
@@ -89,5 +114,5 @@ if [ "$left" -gt "$tmp_before" ]; then
 	bad=$((bad + 1))
 fi
 
-echo "test32: этапов $total, ok $ok, bad $bad"
+echo "test32: этапов $total, ok $ok, skip $skipped, bad $bad"
 [ "$bad" -eq 0 ]
