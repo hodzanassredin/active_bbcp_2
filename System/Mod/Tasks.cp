@@ -111,6 +111,7 @@ MODULE Tasks;
 		sched: SchedAction;	(* действие планировщика Services *)
 		schedHook: Sched;	(* крючок Kernel.Scheduler *)
 		scheduled, inStep: BOOLEAN;
+		schedAt: LONGINT;	(* срок назначенного шага; смысл имеет при scheduled *)
 		alive: INTEGER;		(* незавершённых задач *)
 		slice: LONGINT;
 		lastPoll: LONGINT;	(* когда Kernel.RequestPoll поднимался последний раз *)
@@ -677,17 +678,17 @@ MODULE Tasks;
 	END NextDeadline;
 
 	PROCEDURE EnsureScheduled;
-	(** Разбудить главный цикл: действие планировщика выполнится в ближайшем
-		шаге Services. Если только спят — на ближайший срок. *)
+	(* Назначить шаг планировщика в главном цикле Services: немедленно,
+	   если есть готовые задачи, иначе на ближайший срок спящих.
+	   Инвариант: scheduled => шаг назначен на schedAt. Уже назначенный шаг
+	   переносится, если нужен более ранний срок: Unpark или Cancel с
+	   главного стека делает задачу готовой, когда шаг ждёт срока спящей.
+	   Пост: есть готовые => шаг назначен не позже Services.now. *)
 		VAR d: LONGINT;
 	BEGIN
-		IF ~scheduled THEN
-			IF HasReady() THEN
-				scheduled := TRUE; Services.DoLater(sched, Services.now)
-			ELSE
-				d := NextDeadline();
-				IF d >= 0 THEN scheduled := TRUE; Services.DoLater(sched, d) END
-			END
+		IF HasReady() THEN d := Services.now ELSE d := NextDeadline() END;
+		IF (d >= 0) & (~scheduled OR (d < schedAt)) THEN
+			scheduled := TRUE; schedAt := d; Services.DoLater(sched, d)
 		END
 	END EnsureScheduled;
 

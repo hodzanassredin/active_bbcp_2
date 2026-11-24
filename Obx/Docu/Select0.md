@@ -61,7 +61,11 @@ The log shows:
 
 ```
 ObxSelect0: fast=reply slow=timeout
+Tasks: cancelled
 ```
+
+The second line is printed by the cancellation of the slow server: when the command ends it is still
+asleep, and at program exit `Tasks` cancels the remaining tasks (trap 127 in `Sleep`).
 
 ## What happened
 

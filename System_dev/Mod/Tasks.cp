@@ -50,6 +50,7 @@ MODULE System_devTasks;
 		FlagSleeper = POINTER TO RECORD (Tasks.Task) flag: BOOLEAN END;
 		TrapParent = POINTER TO RECORD (Tasks.Task) child: LongSleeper END;
 		TwoGroups = POINTER TO RECORD (Tasks.Task) long: LongSleeper; same: BOOLEAN END;
+		Parker = POINTER TO RECORD (Tasks.Task) done: BOOLEAN END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -586,6 +587,32 @@ MODULE System_devTasks;
 		t.sawReady := Tasks.State(t.target) = Tasks.Ready;
 		Tasks.Unpark(t.target)
 	END Run;
+
+	PROCEDURE (t: Parker) Run;
+	BEGIN
+		Tasks.Park; t.done := TRUE
+	END Run;
+
+	PROCEDURE TestProcUnparkOutsideTaskReschedules*;
+	(** Планировщик назначил свой шаг на срок спящей задачи. Unpark с
+		главного стека делает другую задачу готовой: она исполняется в
+		ближайшем шаге главного цикла, а не в срок спящей. *)
+		VAR s: LongSleeper; p: Parker; t0: LONGINT;
+	BEGIN
+		NEW(s); s.ms := 3000; Tasks.Start(s);
+		NEW(p); p.done := FALSE; Tasks.Start(p);
+		t0 := Kernel.Time();
+		WHILE ((Tasks.State(p) # Tasks.Parked) OR (Tasks.State(s) # Tasks.Sleeping))
+			& (Kernel.Time() - t0 <= 1000) DO Services.actionHook.Step END;
+		UnitAssert.True(Tasks.State(p) = Tasks.Parked, "parker parked");
+		Services.actionHook.Step;	(* шаг планировщика назначен на срок спящей *)
+		Tasks.Unpark(p);
+		t0 := Kernel.Time();
+		WHILE ~p.done & (Kernel.Time() - t0 <= 1000) DO Services.actionHook.Step END;
+		UnitAssert.True(p.done, "woken task ran before the sleeper's deadline");
+		Tasks.Cancel(s);
+		UnitAssert.True(Pump(2000), "tasks finished")
+	END TestProcUnparkOutsideTaskReschedules;
 
 	PROCEDURE TestProcUnparkReadyThenLock*;
 	(** Unpark готовой задачи не делает ожидание монитора холостым, а сам
