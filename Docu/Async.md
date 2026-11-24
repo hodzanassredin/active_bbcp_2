@@ -55,8 +55,8 @@ The default size is 256 KB; pages are committed on touch.
 
 ## Monitors
 
-A monitor is a side-table entry in the kernel keyed by the **address of
-an object**. Any object can be a monitor; no field is reserved in the
+A monitor is a side-table entry in the ordinary module `Monitors`
+(moved out of the kernel in s18) keyed by the **address of an object**. Any object can be a monitor; no field is reserved in the
 object header. The table entry exists while the object is held or
 awaited and disappears afterwards.
 
@@ -81,16 +81,23 @@ Rules, as implemented:
 - `Unlock` of the last nesting level hands the monitor to the first
   waiter with a true condition, otherwise to a manual `Wait` waiter,
   otherwise to the first arriving task, otherwise frees the entry.
-- **Traps release monitors.** Every `Lock` is recorded in a chain on
-  the current task; `Kernel.Try` remembers the chain depth on entry and
-  releases everything taken inside it when the body exits or traps.
-  This works for nested `Try`, and an outer acquisition survives a trap
-  caught by an inner `Try`.
-- The garbage collector treats objects in the monitor table and the
-  records of the lock chains as roots.
-- `Kernel.IsLocked(obj)`, `Kernel.MonitorCount()`,
-  `Kernel.WaitersCount()` and `Kernel.DumpMonitors` are available for
-  tests and diagnostics.
+- **Traps release monitors.** Every `Lock` is recorded in a chain
+  keyed by the task token; `Kernel.Try` asks the `Monitors` hook for the
+  chain depth on entry and releases everything taken inside it when the
+  body exits or traps. This works for nested `Try`, and an outer
+  acquisition survives a trap caught by an inner `Try`.
+- The monitor table, the lock chains and their free lists are ordinary
+  globals of `Monitors`; `MarkGlobals` scans them, so the kernel no
+  longer marks monitors itself. The monitored object is stored in an
+  `ANYPTR` field, which keeps it alive even without other references.
+- `Monitors.IsLocked(obj)`, `Monitors.MonitorCount()`,
+  `Monitors.WaitersCount()` and `Monitors.DumpMonitors` are available
+  for tests and diagnostics.
+- The kernel keeps only the four entry points called by generated code
+  (`Kernel.Lock`, `Unlock`, `Wait`, `Await`) as stubs over one
+  `Kernel.MonitorHook` object. Without the installed hook they trap with
+  "monitors module is not loaded"; the standard `Lin`/`Win` init modules
+  import `Monitors`, so it is present in a normal world.
 
 Without `Tasks` loaded the kernel still takes and releases free
 monitors, but waiting is a trap: **there is nobody to wake the task**.
@@ -623,7 +630,9 @@ scenario is checked headlessly under `gtk4-broadwayd`
 - The kernel entry points for generated code (`Kernel.Lock`, `Unlock`,
   `Await`, `Poll`) live in a hidden import module `"$$"`; the loader
   binds it to `Kernel`, so no object-file format or loader change was
-  needed.
+  needed. Since s18 `Kernel.Lock/Unlock/Wait/Await` are stubs forwarding
+  to `Monitors`; `Kernel.Poll` asks the scheduler hook object
+  (`Kernel.SetScheduler(s)`), which replaced eight procedure variables.
 - `[exclusive]` is an ordinary positive procedure flag (32), accepted
   only with `IMPORT ACTIVE` and only as the sole flag. Misuse is a
   compile error (compiler error 225, "illegal sys flag"); a non-BOOLEAN

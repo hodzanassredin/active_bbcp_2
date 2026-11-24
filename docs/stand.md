@@ -15,14 +15,14 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Сборка x64 из `.cp` | `tools/build64.sh` | работает; первый `--clean` с нуля, в т.ч. после залежей `/tmp/odcNNNNN` |
 | Консольный запуск | `echo 'Команда' \| tools/run64.sh` | работает |
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
-| Тесты без окон | `tools/test.sh` (Unit) | 19 этапов, 87 проверок, все зелёные |
+| Тесты без окон | `tools/test.sh` (Unit) | 21 этап, все зелёные |
 | Временные файлы `LinFiles` | `Test64Files` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
 | i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: UnitTests 4/4, Files 3/3, Tasks 14/14, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
 | i386: C-тулчейн | `tools/i386-toolchain.sh` | без sudo; libtest32.so, ucontext |
 | Бутстрап i386 | `tools/bootstrap.sh` | три прохода, 98 файлов, B и C — 0 различий |
 | Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
 | Этап 1/3: GUI | `tools/test-gui.sh` (gtk4-broadwayd) | `ok=1`, 20 тиков, maxgap 108 мс |
-| Этап 4: мониторы | `Test64Monitors` | 9 тестов, зелёные |
+| Этап 4: мониторы | `Test64Monitors` | 9 тестов, зелёные; реализация — `System/Mod/Monitors.cp` (s18) |
 | Этап 6: `[exclusive]`/`AWAIT` | `Test64Active` | 6 тестов, зелёные |
 | Этап 6: ключ уступок | `Test64Yield` | 3 теста, зелёные |
 | Этап 7: каналы и выбор | `Test64Channels` | 9 тестов, зелёные |
@@ -32,7 +32,7 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Этап 9: компутоны | `Test64Computons` | 9 тестов, зелёные (1/4/16 процессов) |
 | Этап 9: `RobustParallel` | `tools/test-robust.sh` | сумма 500500 на 1/4/16 процессах |
 | Этап 9: MPI | `tools/test-mpi.sh` (mpiexec -n 5) | 12 квадратов, 252 мс |
-| Этап 2: стеки | `Test64Tests.TestProcGcStack`, `TestProcTrapStack` | зелёные |
+| Этап 2: стеки | `Test64Tests.TestProcGcStack`, `TestProcTrapStack` | зелёные; сборка на незнакомом стеке отменяется, а не HALT(126) |
 | Шаг 2а: индекс кластеров | `Test64Tests.TestProcInHeap` | зелёный |
 | Замер 1/10/50 млн | `tools/bench-gc.sh Test64GcBench.DoSmall` / `.Do` | выполнен |
 | Windows x64 | `tools/test-win64.sh` (wine) | UnitTests 4/4, Test64WinTasks 5/5, Test64WinWorkers 4/4 |
@@ -44,6 +44,7 @@ active_bb/                     репозиторий (ветка active2)
   <Подсистема>/Mod/*.cp        исходники (Mod64 — приоритетный вариант amd64)
   Unit/Mod/*.cp                UnitAssert, UnitRunner, UnitTests
   Test64/Mod/*.cp              сценарии Test64, Test64Tests, Test64Tasks
+  System/Mod/Monitors.cp       мониторы, цепочки взятий, диагностика (s18)
   System/Mod64/Tasks.cp        задачи со своим стеком (этап 3, amd64)
   System/Mod/Tasks.cp          то же для i386 (переключатель на x86)
   Test64/Mod64/Co.cp           сопрограммы amd64 (libtest64.so)
