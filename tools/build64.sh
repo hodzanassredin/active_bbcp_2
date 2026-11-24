@@ -68,14 +68,15 @@ echo "build64: компиляция подсистем:$subs"
 	if [ -d "$BB/Robust/Mod" ] || [ -d "$BB/Robust/Mod64" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Robust"
 	fi
-	# Actor — акторы и супервизор над Tasks и Async (только amd64).
-	if [ -d "$BB/Actor/Mod" ]; then
-		echo "DevCompiler64.CompileSubs @Lin Actor"
-	fi
 	# Kv — хранилище «ключ -> значение»; KvLin нужен LinLibc, поэтому
 	# подсистема идёт после основного списка (на Windows её нет).
 	if [ -d "$BB/Kv/Mod" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Kv"
+	fi
+	# Actor — акторы и супервизор над Tasks и Async (только amd64);
+	# журнал ActorKvJournal импортирует Kv, поэтому Actor — после Kv.
+	if [ -d "$BB/Actor/Mod" ]; then
+		echo "DevCompiler64.CompileSubs @Lin Actor"
 	fi
 	# Примеры Obx на задачах и каналах лежат в Obx/Mod64: обход CompileSubs
 	# их не берёт (им нужны Tasks и Async, которые собираются выше), поэтому
