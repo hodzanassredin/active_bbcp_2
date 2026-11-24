@@ -36,6 +36,7 @@ MODULE Async_devBench;
 	VAR
 		sum, got: INTEGER;
 		allocs0: LONGINT;	(* Kernel.AllocCount в начале замера *)
+		switches0: LONGINT;	(* Tasks.Switches в начале замера *)
 
 	(* --- вывод ------------------------------------------------------------ *)
 
@@ -54,7 +55,8 @@ MODULE Async_devBench;
 	BEGIN
 		W("BENCH "); W(name); W(" ops="); N(ops); W(" totalNs="); N(ns);
 		W(" nsPerOp="); N(ns DIV ops);
-		W(" allocsPer1000="); N((Kernel.AllocCount() - allocs0) * 1000 DIV ops); Console.WriteLn
+		W(" allocsPer1000="); N((Kernel.AllocCount() - allocs0) * 1000 DIV ops);
+		W(" switchesPer1000="); N((Tasks.Switches() - switches0) * 1000 DIV ops); Console.WriteLn
 	END Report;
 
 	PROCEDURE Run (IN name: ARRAY OF CHAR; ops: INTEGER; t0: LONGINT);
@@ -66,9 +68,9 @@ MODULE Async_devBench;
 	END Run;
 
 	PROCEDURE Now (): LONGINT;
-	(* Начало замера: время и счётчик выделений. *)
+	(* Начало замера: время, счётчики выделений и переключений стека. *)
 	BEGIN
-		allocs0 := Kernel.AllocCount();
+		allocs0 := Kernel.AllocCount(); switches0 := Tasks.Switches();
 		RETURN System_devClock.now()
 	END Now;
 
