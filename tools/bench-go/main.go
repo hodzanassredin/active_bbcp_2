@@ -190,6 +190,23 @@ func yield(n int) {
 	report("yield", n, time.Since(t0))
 }
 
+// sleepers: n сопрограмм, каждая k раз спит 1..10 мс; op — одно пробуждение.
+func sleepers(n, k int) {
+	var wg sync.WaitGroup
+	wg.Add(n)
+	t0 := time.Now()
+	for i := 1; i <= n; i++ {
+		go func(id int) {
+			for j := 1; j <= k; j++ {
+				time.Sleep(time.Duration(1+(id+j)%10) * time.Millisecond)
+			}
+			wg.Done()
+		}(i)
+	}
+	wg.Wait()
+	report("sleep10k", n*k, time.Since(t0))
+}
+
 func pairs() {
 	const m = 1000000
 	pingpong(m)
@@ -199,6 +216,7 @@ func pairs() {
 	selectk(8, m)
 	spawn(100000)
 	yield(m)
+	sleepers(10000, 20)
 }
 
 func main() {

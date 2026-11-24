@@ -32,6 +32,7 @@ MODULE Async_devBench;
 
 		Short = POINTER TO RECORD (Tasks.Task) END;
 		Yielder = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Sleeper = POINTER TO RECORD (Tasks.Task) id, n: INTEGER END;
 
 	VAR
 		sum, got: INTEGER;
@@ -243,6 +244,15 @@ MODULE Async_devBench;
 		SpawnN(spawnN, "spawn-warm")
 	END Spawn;
 
+	PROCEDURE SpawnNoGc*;
+	(** Первое создание при Kernel.blockCollect: доля сборщика в первом прогоне
+		Spawn. Отдельная команда, запускается в свежем процессе. *)
+	BEGIN
+		Kernel.blockCollect := TRUE;
+		SpawnN(spawnN, "spawn-nogc");
+		Kernel.blockCollect := FALSE
+	END SpawnNoGc;
+
 	(* --- чистое переключение ---------------------------------------------- *)
 
 	PROCEDURE (t: Yielder) Run;
@@ -267,9 +277,35 @@ MODULE Async_devBench;
 		YieldN(million)
 	END Yield;
 
+	(* --- сон: очередь спящих ---------------------------------------------- *)
+
+	PROCEDURE (t: Sleeper) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO t.n DO Tasks.Sleep(1 + (t.id + i) MOD 10) END;
+		INC(sum)
+	END Run;
+
+	PROCEDURE SleepN (n, k: INTEGER; IN name: ARRAY OF CHAR);
+	(* n задач, каждая k раз спит 1..10 мс; op — одно пробуждение. Сумма
+	   снов одной задачи — около k * 5,5 мс: время сверх неё — цена
+	   планировщика. *)
+		VAR i: INTEGER; t: Sleeper; t0: LONGINT;
+	BEGIN
+		sum := 0;
+		t0 := Now();
+		FOR i := 1 TO n DO NEW(t); t.id := i; t.n := k; Go(t) END;
+		Run(name, n * k, t0)
+	END SleepN;
+
+	PROCEDURE Sleepers*;
+	BEGIN
+		SleepN(10000, 20, "sleep10k")
+	END Sleepers;
+
 	PROCEDURE All*;
 	BEGIN
-		PingPong; Buffer64; Monitor; Select2; Select8; Spawn; Yield
+		PingPong; Buffer64; Monitor; Select2; Select8; Spawn; Yield; Sleepers
 	END All;
 
 	(* --- тесты: итог обмена, время только печатается ---------------------- *)
@@ -299,6 +335,11 @@ MODULE Async_devBench;
 	BEGIN
 		Spawn; UnitAssert.EqualInt(spawnN, sum, "every task ran")
 	END TestSlowSpawn;
+
+	PROCEDURE TestSlowSleepers*;
+	BEGIN
+		Sleepers; UnitAssert.EqualInt(10000, sum, "every sleeper finished")
+	END TestSlowSleepers;
 
 	PROCEDURE TestSlowYield*;
 	BEGIN

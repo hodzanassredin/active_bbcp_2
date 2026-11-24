@@ -38,6 +38,8 @@ MODULE System_devTasks;
 		Prod = POINTER TO RECORD (Tasks.Task) END;
 		Cons = POINTER TO RECORD (Tasks.Task) END;
 		Phil = POINTER TO RECORD (Tasks.Task) id: INTEGER END;
+		LongSleeper = POINTER TO RECORD (Tasks.Task) ms: INTEGER END;
+		Resleeper = POINTER TO RECORD (Tasks.Task) wakes: INTEGER END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -454,5 +456,55 @@ MODULE System_devTasks;
 		UnitAssert.True(p.got, "probe acquired the monitor");
 		UnitAssert.True(~Monitors.IsLocked(mon), "monitor released")
 	END TestProcParkWakeFlag;
+
+	(* --- очередь спящих --------------------------------------------------- *)
+
+	PROCEDURE (t: LongSleeper) Run;
+	BEGIN
+		Tasks.Sleep(t.ms)
+	END Run;
+
+	PROCEDURE (t: Resleeper) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO 3 DO Tasks.Sleep(1000); INC(t.wakes) END;	(* будят раньше срока *)
+		Tasks.Sleep(2); INC(t.wakes)
+	END Run;
+
+	PROCEDURE TestProcNextDeadlineCheap*;
+	(** Ближайший срок не требует обхода спящих: 2000 вопросов при 10 тыс.
+		спящих задач укладываются в 20 мс (обход всех — около 200 мс и больше). *)
+		CONST n = 10000; q = 2000;
+		VAR i: INTEGER; t: POINTER TO ARRAY OF LongSleeper; d, t0, t1: LONGINT;
+	BEGIN
+		NEW(t, n);
+		FOR i := 0 TO n - 1 DO
+			NEW(t[i]); t[i].ms := 60000 + i; Tasks.SetStackSize(t[i], benchStack); Tasks.Start(t[i])
+		END;
+		Tasks.Step;	(* все уснули *)
+		d := 0;
+		t0 := Kernel.Time();
+		FOR i := 1 TO q DO d := Tasks.NextDeadline() END;
+		t1 := Kernel.Time();
+		UnitAssert.True(d > 0, "deadline found");
+		UnitAssert.True(t1 - t0 < 20, "NextDeadline does not walk all sleepers");
+		FOR i := 0 TO n - 1 DO Tasks.Cancel(t[i]) END;
+		UnitAssert.True(Pump(5000), "cancelled sleepers finished")
+	END TestProcNextDeadlineCheap;
+
+	PROCEDURE TestProcResleepAfterUnpark*;
+	(** Задачу будят раньше срока и она засыпает снова: устаревший срок не
+		будит её второй раз, последний сон заканчивается по своему сроку. *)
+		VAR t: Resleeper; i: INTEGER;
+	BEGIN
+		NEW(t); Tasks.Start(t);
+		FOR i := 1 TO 3 DO
+			Tasks.Step; UnitAssert.True(Tasks.State(t) = Tasks.Sleeping, "sleeps");
+			Tasks.Unpark(t)
+		END;
+		UnitAssert.True(Pump(2000), "finished");
+		UnitAssert.EqualInt(4, t.wakes, "one wake per sleep");
+		UnitAssert.EqualInt(-1, SHORT(Tasks.NextDeadline()), "no stale deadlines")
+	END TestProcResleepAfterUnpark;
 
 END System_devTasks.

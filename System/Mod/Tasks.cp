@@ -40,6 +40,8 @@ MODULE Tasks;
 		word = 4;			(* SIZE(SYSTEM.ADDRESS) *)
 		defaultSlice = 5;	(* мс на шаг планировщика *)
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
+		heapArity = 4;		(* детей у узла кучи спящих *)
+		heapMin = 64;		(* начальная длина кучи и запас перед уплотнением *)
 
 		(** состояния задачи **)
 		New* = 0; Ready* = 1; Running* = 2; Sleeping* = 3;
@@ -54,7 +56,7 @@ MODULE Tasks;
 			next: Task;		(* список всех задач *)
 			prev: Task;		(* предыдущая в списке всех задач *)
 			rnext: Task;		(* очередь готовых *)
-			snext: Task;		(* список спящих *)
+			sleepSeq: INTEGER;	(* номер текущего сна: отличает свою запись кучи от устаревших *)
 			wnext: Task;		(* очередь ждущих эту задачу *)
 			waiters: Task;
 			sp: S.ADDRESS;		(* сохранённый rsp *)
@@ -76,11 +78,26 @@ MODULE Tasks;
 			owner: Task		(* задача, которая ждёт опустошения *)
 		END;
 
+		(* Запись кучи спящих. Действительна, пока t спит этим сном:
+		   t.state = Sleeping и t.sleepSeq = seq; иначе устарела (задачу
+		   разбудили раньше срока) и выбрасывается при подъёме к вершине. *)
+		SleepEntry = RECORD
+			t: Task;
+			deadline: LONGINT;
+			seq: INTEGER
+		END;
+
 		SchedAction = POINTER TO RECORD (Services.Action) END;
 		Sched = POINTER TO RECORD (Kernel.Scheduler) END;
 
 	VAR
-		all, readyHead, readyTail, sleepers: Task;
+		all, readyHead, readyTail: Task;
+		(* Куча спящих: четверичная, по возрастанию deadline, в heap[0 .. heapN).
+		   Инвариант: heap[(i - 1) DIV heapArity].deadline <= heap[i].deadline;
+		   у каждой спящей задачи ровно одна действительная запись; nSleeping —
+		   число спящих задач, heapN - nSleeping — устаревших записей. *)
+		heap: POINTER TO ARRAY OF SleepEntry;
+		heapN, nSleeping: INTEGER;
 		current: Task;
 		schedSP: S.ADDRESS;
 		sched: SchedAction;	(* действие планировщика Services *)
@@ -199,6 +216,7 @@ MODULE Tasks;
 	PROCEDURE MakeReady (t: Task);
 	BEGIN
 		IF (t.state IN {Sleeping, Waiting, Parked}) THEN
+			IF t.state = Sleeping THEN DEC(nSleeping) END;	(* запись кучи устарела *)
 			t.state := Ready; Enqueue(t); deadlocked := FALSE; EnsureScheduled
 		END
 	END MakeReady;
@@ -208,20 +226,103 @@ MODULE Tasks;
 		RETURN (t.state = Finished) OR (t.state = Cancelled)
 	END IsDone;
 
-	PROCEDURE WakeSleepers (now: LONGINT);
-		VAR t, prev, nx: Task;
+	(* --- куча спящих ------------------------------------------------------ *)
+
+	PROCEDURE Valid (IN e: SleepEntry): BOOLEAN;
 	BEGIN
-		prev := NIL; t := sleepers;
-		WHILE t # NIL DO
-			nx := t.snext;
-			IF t.state # Sleeping THEN	(* разбужен отменой/Unpark *)
-				IF prev = NIL THEN sleepers := nx ELSE prev.snext := nx END
-			ELSIF t.deadline <= now THEN
-				IF prev = NIL THEN sleepers := nx ELSE prev.snext := nx END;
-				t.snext := NIL; t.state := Ready; Enqueue(t)
-			ELSE prev := t
+		RETURN (e.t.state = Sleeping) & (e.t.sleepSeq = e.seq)
+	END Valid;
+
+	PROCEDURE SiftUp (i: INTEGER);
+	(* Пред: инвариант кучи нарушен только в i относительно предков. Пост: инвариант. *)
+		VAR e: SleepEntry; p: INTEGER;
+	BEGIN
+		e := heap[i];
+		WHILE (i > 0) & (e.deadline < heap[(i - 1) DIV heapArity].deadline) DO
+			p := (i - 1) DIV heapArity; heap[i] := heap[p]; i := p
+		END;
+		heap[i] := e
+	END SiftUp;
+
+	PROCEDURE SiftDown (i: INTEGER);
+	(* Пред: инвариант кучи нарушен только в i относительно потомков. Пост: инвариант. *)
+		VAR e: SleepEntry; c, m, j: INTEGER;
+	BEGIN
+		e := heap[i];
+		LOOP
+			c := heapArity * i + 1;
+			IF c >= heapN THEN EXIT END;
+			m := c; j := c + 1;
+			WHILE (j < heapN) & (j < c + heapArity) DO
+				IF heap[j].deadline < heap[m].deadline THEN m := j END;
+				INC(j)
 			END;
-			t := nx
+			IF heap[m].deadline < e.deadline THEN heap[i] := heap[m]; i := m ELSE EXIT END
+		END;
+		heap[i] := e
+	END SiftDown;
+
+	PROCEDURE PopTop;
+	(* Пред: heapN > 0. Пост: вершина снята, инвариант кучи сохранён. *)
+	BEGIN
+		DEC(heapN);
+		heap[0] := heap[heapN]; heap[heapN].t := NIL;
+		IF heapN > 0 THEN SiftDown(0) END
+	END PopTop;
+
+	PROCEDURE Compact;
+	(* Пост: в куче только действительные записи, heapN = nSleeping. *)
+		VAR i, n: INTEGER;
+	BEGIN
+		n := 0;
+		FOR i := 0 TO heapN - 1 DO
+			IF Valid(heap[i]) THEN heap[n] := heap[i]; INC(n) END
+		END;
+		FOR i := n TO heapN - 1 DO heap[i].t := NIL END;
+		heapN := n;
+		ASSERT(heapN = nSleeping, 100);
+		i := (heapN - 2) DIV heapArity;
+		WHILE i >= 0 DO SiftDown(i); DEC(i) END
+	END Compact;
+
+	PROCEDURE ReserveHeap (n: INTEGER);
+	(* Пост: в куче место хотя бы под n записей. Место запасается при запуске
+	   задачи (StartIn): выделение памяти в Sleep, когда спят тысячи задач,
+	   запустило бы сборку со сканом всех их стеков. *)
+		VAR new: POINTER TO ARRAY OF SleepEntry; i, len: INTEGER;
+	BEGIN
+		IF (heap = NIL) OR (LEN(heap^) < n) THEN
+			len := heapMin;
+			WHILE len < n DO len := 2 * len END;
+			NEW(new, len);
+			FOR i := 0 TO heapN - 1 DO new[i] := heap[i] END;
+			heap := new
+		END
+	END ReserveHeap;
+
+	PROCEDURE PushSleeper (t: Task);
+	(* Пред: t.state = Sleeping, t.deadline и t.sleepSeq — этого сна, nSleeping
+	   уже учитывает t. Пост: в куче действительная запись t. *)
+	BEGIN
+		ASSERT(t.state = Sleeping, 20);
+		IF heapN >= 2 * nSleeping + heapMin THEN Compact END;
+		ReserveHeap(heapN + 1);
+		heap[heapN].t := t; heap[heapN].deadline := t.deadline; heap[heapN].seq := t.sleepSeq;
+		INC(heapN); SiftUp(heapN - 1)
+	END PushSleeper;
+
+	PROCEDURE WakeSleepers (now: LONGINT);
+	(* Пост: спящие со сроком <= now — в очереди готовых, устаревшие записи
+	   с вершины сняты. *)
+		VAR t: Task;
+	BEGIN
+		WHILE heapN > 0 DO
+			IF ~Valid(heap[0]) THEN PopTop
+			ELSIF heap[0].deadline <= now THEN
+				t := heap[0].t; PopTop; DEC(nSleeping);
+				t.state := Ready; Enqueue(t)
+			ELSE RETURN
+			END
 		END
 	END WakeSleepers;
 
@@ -408,6 +509,7 @@ MODULE Tasks;
 		CheckTask(t);
 		IF ~InitStack(t) THEN Fail("no stack memory (platform does not support it)") END;
 		IF t.timeSlice <= 0 THEN t.timeSlice := defaultSlice END;
+		ReserveHeap(2 * (alive + 1) + heapMin);	(* PushSleeper не выделяет: heapN < 2 * nSleeping + heapMin *)
 		IF g # NIL THEN t.group := g; INC(g.alive) END;
 		t.state := Ready; Enqueue(t); deadlocked := FALSE;
 		t.prev := NIL; t.next := all;
@@ -457,8 +559,8 @@ MODULE Tasks;
 		CheckWait("Sleep");
 		IF ms <= 0 THEN Yield; RETURN END;
 		current.deadline := Kernel.Time() + ms;
-		current.state := Sleeping;
-		current.snext := sleepers; sleepers := current;
+		current.state := Sleeping; INC(current.sleepSeq); INC(nSleeping);
+		PushSleeper(current);
 		SwitchTo(current.sp, schedSP, current.stackRec);
 		current.wake := FALSE	(* Unpark разбудил сон, а не будущий Park *)
 	END Sleep;
@@ -552,14 +654,9 @@ MODULE Tasks;
 
 	PROCEDURE NextDeadline* (): LONGINT;
 	(** Ближайший срок спящей задачи в мс Kernel.Time; -1 — нет. *)
-		VAR t: Task; min: LONGINT;
 	BEGIN
-		min := -1; t := sleepers;
-		WHILE t # NIL DO
-			IF (t.state = Sleeping) & ((min < 0) OR (t.deadline < min)) THEN min := t.deadline END;
-			t := t.snext
-		END;
-		RETURN min
+		WHILE (heapN > 0) & ~Valid(heap[0]) DO PopTop END;
+		IF heapN = 0 THEN RETURN -1 ELSE RETURN heap[0].deadline END
 	END NextDeadline;
 
 	PROCEDURE EnsureScheduled;
@@ -790,6 +887,6 @@ CLOSE
 		all := all.next
 	END;
 	DrainPool;
-	readyHead := NIL; readyTail := NIL; sleepers := NIL; current := NIL;
+	readyHead := NIL; readyTail := NIL; heap := NIL; heapN := 0; nSleeping := 0; current := NIL;
 	scheduled := FALSE; inStep := FALSE
 END Tasks.
