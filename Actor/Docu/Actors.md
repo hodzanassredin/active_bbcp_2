@@ -23,9 +23,8 @@ the actor, which decides what to do with the failed child: continue, restart it 
 or stop it.
 
 The sender knows the receiver by its *address*, a value of type `ActorCore.Ref`. An address consists
-of a node name and an actor name. The node is always the own one: there is no transport between
-processes. Sending, watching and stopping go through abstract methods of the address, so the address
-of another process takes the same place (section 9).
+of a node name and an actor name. Sending, watching and stopping go through abstract methods of the
+address, so the address of an actor on another node takes the same place (sections 9 and 10).
 
 ## 2. The First Actor
 
@@ -502,7 +501,7 @@ and the new field gets its default. A frame from a future version and a frame of
 frames.
 
 **Cost.** Each change is the encoding of a frame through `Stores` and a write to the journal;
-recovery without a snapshot goes through all events of the stream (measurements in section 10). The
+recovery without a snapshot goes through all events of the stream (measurements in section 11). The
 journal grows without bound: events before a snapshot are not deleted, because the audit needs the
 history. The file journal (`ActorFileJournal`) is a temporary store until an ordered key-value
 store: one process per file, `Flush` without `fsync` (a power failure can take the last records; on
@@ -519,7 +518,7 @@ are three journal implementations:
 | transactions | — | no; a torn tail is dropped on open | yes: `Append` is one write transaction |
 | processes | one | one per file | one per base |
 | opening | — | reads the whole file, index in memory | reads the meta; tree lookup |
-| writing an event (section 10) | 4.7–4.9 µs | 6.4–7.0 µs | 1.6–1.7 ms (two `Sync`) |
+| writing an event (section 11) | 4.7–4.9 µs | 6.4–7.0 µs | 1.6–1.7 ms (two `Sync`) |
 
 The append-only file stays as a simple implementation for examples and tests without a base; where
 an event must survive a power failure, the journal is `ActorKvJournal`.
@@ -549,8 +548,9 @@ An address is an abstract record `Ref` with the fields `node` and `name` and fou
 `Post(m, sender)` delivers a letter, `AddWatcher(w)` and `RemoveWatcher(w)` subscribe and unsubscribe
 a watcher, `Stop` stops the receiver. A local address is the mailbox itself (`Context` extends
 `Ref`). `Tell` calls `Post`, `c.Watch` and `c.Unwatch` call `AddWatcher` and `RemoveWatcher`,
-`StopActor` calls `Stop`; none of them knows where the receiver is. A transport between processes
-would extend `Ref` with its own type, and `ActorCore.InitRef` fills in its node and name.
+`StopActor` calls `Stop`; none of them knows where the receiver is. A transport between nodes
+extends `Ref` with its own type (`ActorNet`, section 10), and `ActorCore.InitRef` fills in its node
+and name.
 
 The reply address of `Ask` is a `Ref` too. While `Ask` waits, the address stands in a registry under
 the name `"$ask/number"`, and the directory finds it by that name like an actor; after `Ask` returns, and after
@@ -565,7 +565,82 @@ The name of an actor is the string from `Spawn`: `"counter"` for a top-level act
 `"parent/worker"` for a child, `"$7"` for an actor without a name. Two actors with one name trap in
 `Spawn` with code 24. A stopped actor leaves the directory, and its name becomes free.
 
-## 10. Measurements
+## 10. Actors on Different Nodes
+
+A shop and a bank run in different BlackBox instances. The shop needs a balance; the bank needs a
+foreign process not to debit an account by guessing its name. A node is an instance with a root
+actor; the node's name is the name of that root, and the node's actors are its descendants
+(`"bank/acct"`). Nodes are joined by a transport `ActorNet.Transport`: "send a frame to a node".
+There are two implementations: `ActorNetMem`, a network in memory with a fault plan for tests and
+examples, and `ActorNetTcp`, TCP on `CommTCP` and `AsyncIO`, the same modules the computon transport
+uses. Several nodes may live in one process: letters between them still go through the transport,
+are encoded and decoded, and so behave as between processes.
+
+```
+net := ActorNetMem.NewAuto();
+shop := ActorNet.New("shop", net, 1234); ActorNetMem.Add(net, shop);
+bank := ActorNet.New("bank", net, 5678); ActorNetMem.Add(net, bank);
+teller := ActorCore.Spawn(NIL, ActorCore.NewProps(NewTeller), "bank");
+ActorNet.Export(bank, teller, cap);	(* "bank|bank|5f0c…" *)
+r := ActorNet.Import(shop, cap);
+res := ActorCore.Ask(r, q, 1000, reply)
+```
+
+**Capability address.** A remote address is a node, a name and a mark: the first 16 bytes of a hash
+of the owner node's secret and the name. Only the owner hands out the mark: in the sender address of
+a frame, in an address inside a letter (`ActorNet.WriteRef`) and explicitly (`Export`). A frame with
+a wrong mark is dropped and counted in `refused`; guessing the name is not enough, because the mark
+of another name does not fit (`TestForgedAddressRefused`). The mark is computed, not stored, so a
+node restarted with the same secret accepts the old addresses. Frames are not encrypted: the mark
+protects against guessing, not against eavesdropping.
+
+**Letter.** The sender writes `Tell(r, m)` or `Ask(r, m, …)` as locally. A letter that goes to another
+node extends `ActorNet.Msg` and implements `Write` and `Read` over `Stores.Writer` and `Reader`; the
+type is found by module and type name, as in `Stores`. A letter of another type sent to a remote
+address traps with `ActorNet.notNetMsg`.
+
+**At-most-once delivery.** A frame carries the sender node's name, its incarnation number and a
+sequence number; the receiver remembers a window of recent numbers and drops a repeat. A network
+duplicate is not executed twice (`TestDuplicatesExecuteOnce`), and a lost frame is not repeated:
+`Ask` then ends with a time-out (`TestAskTimeout`). Repeating a command is the application's job: the
+command carries an operation number, the receiver records the outcome as an event and answers a
+repeat of the same number with the same outcome without executing it again.
+`TestRetryAfterLostReply` loses the reply, repeats the command and checks that the journal holds
+one event.
+
+**Watching and node loss.** `c.Watch(r)` of a remote address sends a request to the owner node; the
+owner watches the actor itself and on stop sends an "ended" frame. If a node is gone (the transport
+reported `ActorNet.Lost`: in memory `ActorNetMem.Crash`, on TCP a broken connection), every watcher
+of an address on that node receives `Terminated` (`TestNodeLost`, `TestTcpLost`). A `Terminated` does
+not tell node loss from an actor stop: it carries no reason.
+
+**Saga.** A money transfer between accounts on nodes A and B is led by a coordinator on node C, a
+persistent actor. The steps: withdraw from A, deposit to B, and if the deposit is refused, refund to
+A. The coordinator first records each step as an event and then sends the command; on a tick it
+repeats the command of the current step, and the accounts answer a repeat with the old outcome. A
+crash of any node at any point does not change the sum: after a restart the coordinator reads its
+journal and continues from the recorded step, and so does an account. `ObxActor7` shows a transfer
+with the coordinator crashing in the middle.
+
+**Testing from a seed.** The network `ActorNetMem.New(seed)` loses, delays, duplicates and reorders
+frames by the plan `Plan`, and draws its lots from the seed. The executor `ActorSim` processes
+mailboxes in one task in arrival order, without real time. Together they make a run a function of
+the seed: `TestSagaSeeds` runs the saga on 200 seeds with node crashes, checks that all transfers
+ended and the sum is conserved, and runs every seed a second time, comparing the step and frame
+counts and the balances. A failure prints the seed; `Actor_devNet.Rerun` repeats the last one. A
+long run on 3000 seeds is the command `Actor_devNet.Long`.
+
+```sh
+echo 'Actor_devNet.Long' | tools/run64.sh
+```
+
+There is no `Ask` and no idle time-out in this run: they live in real time, and a step is repeated
+on the driver's tick.
+
+Examples: `ObxActor6`, two nodes in one process, `Ask`, refusal of a forged address and node loss;
+`ObxActor7`, a saga with a node crash.
+
+## 11. Measurements
 
 `Actor_devBench` prints `BENCH` lines of the same form as `Async_devBench`. On the development machine
 (Linux x86-64, three runs in a row, `tools/test.sh Actor_devBench`) two actors answering each other
@@ -591,23 +666,30 @@ cases cost 1.8–4.0 ms. The spread comes from the disk: its `Sync` time is not 
 100 000 events without a snapshot takes 0.38–0.51 s from memory and 0.38–0.41 s from the file; with
 a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and `recover-*`.
 
-## 11. Limitations
+Nodes (`Actor_devNet`, network in memory, `ActorSim`): a saga run of 8 transfers with 10 % loss,
+10 % duplicates, delays of up to 3 steps, reordering and node crashes takes about 3.5 ms per seed
+(`TestSagaSeeds`: 200 seeds, each twice, 1.4 s). The long run `Actor_devNet.Long` on 3000 seeds takes
+83 s (about 28 ms per seed): the time per seed grows with the number of runs in one process,
+probably because of node and name lists the runs do not free; the cause is not analysed.
+
+## 12. Limitations
 
 - One OS thread: actors run in turn, and computation in one actor delays the others until the next
   switch point of the executor (an executor yields every 64 mailboxes).
 - Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per batch; a batch is
   formed only from tasks writing at the same time (section 8).
-- No transport: a `Ref` of another node can be described, but nobody delivers to it.
+- Nodes: at-most-once delivery, frames are not encrypted, the TCP transport is Linux only;
+  there are no virtual actors and no consensus (Raft) (section 10).
 - One strategy, `OneForOne`; "all for one" is not implemented.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
 - `Ask` to itself from the handler traps with code 23.
 
-## 12. Interface
+## 13. Interface
 
 Trap numbers: 20–26 — violated precondition (the number is given at the procedure), 100 — violated
 module invariant, 127 — the task was cancelled.
 
-### 12.1. ActorCore
+### 13.1. ActorCore
 
 ```
 DEFINITION ActorCore;
@@ -709,6 +791,7 @@ DEFINITION ActorCore;
 	PROCEDURE StopActor (r: Ref);
 	PROCEDURE Ask (to: Ref; m: Msg; ms: LONGINT; OUT reply: Msg): INTEGER;
 	PROCEDURE InitRef (r: Ref; IN node, name: ARRAY OF CHAR);
+	PROCEDURE Terminate (w, who: Ref);
 	PROCEDURE SetDispatcher (d: Dispatcher);
 	PROCEDURE SetDir (d: Directory);
 
@@ -860,6 +943,12 @@ For transport modules.
 Pre: `r # NIL` — trap 20; `node` and `name` shorter than `nameLen` — trap 21.
 Post: `r.node = node`, `r.name = name`.
 
+**PROCEDURE Terminate (w, who: Ref)**
+For transport modules: tell the watcher `w` that the address `who`, which is not a local mailbox (a
+remote address), has ended.
+Pre: `w # NIL` — trap 20; `who # NIL` — 21.
+Post: `w` will receive `Terminated` with the field `who`.
+
 **PROCEDURE SetDispatcher (d: Dispatcher)**
 For executor modules.
 Pre: `d # NIL` — trap 20.
@@ -869,7 +958,7 @@ Post: `dispatcher = d`; the methods of `Dispatcher` other than `Schedule` work o
 Pre: `d # NIL` — trap 20.
 Post: `dir = d`; the first installed directory stays in `stdDir`.
 
-### 12.2. ActorSup
+### 13.2. ActorSup
 
 ```
 DEFINITION ActorSup;
@@ -887,7 +976,7 @@ Pre: `directive` is `Resume`, `Restart`, `Stop` or `Escalate` — trap 20; `max 
 Post: the strategy answers a child's failure with directive `directive`; for `Restart` it answers
 `Stop` if this is failure number `max + 1` within `withinMs` ms from the first failure of the window.
 
-### 12.3. ActorRun
+### 13.3. ActorRun
 
 ```
 DEFINITION ActorRun;
@@ -921,7 +1010,7 @@ parents); the pool tasks ended by themselves, without cancellation; the own task
 together with the actors; `n = 0`. An actor that has not stopped within 5 s remains, and the pool
 tasks are then cancelled.
 
-### 12.4. ActorJournal
+### 13.4. ActorJournal
 
 ```
 DEFINITION ActorJournal;
@@ -1010,7 +1099,7 @@ module is loaded, `dir` is a memory journal.
 **PROCEDURE Now (): LONGINT**
 Post: the current UTC time as `YYYYMMDDhhmmss`.
 
-### 12.5. ActorCodec
+### 13.5. ActorCodec
 
 ```
 DEFINITION ActorCodec;
@@ -1049,7 +1138,7 @@ version is out of range, `s = NIL`.
 **PROCEDURE SetDir (c: Codec)**
 Pre: `c # NIL`, trap 20. Post: `dir = c`; the first codec installed stays in `stdDir`.
 
-### 12.6. ActorPersist
+### 13.6. ActorPersist
 
 ```
 DEFINITION ActorPersist;
@@ -1134,7 +1223,7 @@ Post: the events numbered `>= from` are parsed and given to `v.Visit` in order; 
 is the number of the last one given (`from - 1` if there are no new ones); otherwise `res` is a
 journal error or `corrupt` (a frame cannot be read), and `last` is the number of the last good one.
 
-### 12.7. ActorFileJournal
+### 13.7. ActorFileJournal
 
 ```
 DEFINITION ActorFileJournal;
@@ -1163,7 +1252,7 @@ Limits: `Flush` without `fsync`; one process per file; the stream index in memor
 event); opening reads the whole file; the checksum catches a tear and accidental damage, not a
 deliberate change.
 
-### 12.8. ActorKvJournal
+### 13.8. ActorKvJournal
 
 ```
 DEFINITION ActorKvJournal;
@@ -1184,3 +1273,208 @@ committed to the medium; on `conflict` nothing is written. Base errors: `KvDb.co
 **PROCEDURE New (db: KvDb.Db): ActorJournal.Journal**
 Pre: `db # NIL`, trap 20.
 Post: a journal in the open base `db`; `Close` of the journal closes the base.
+
+### 13.9. ActorNet
+
+```
+DEFINITION ActorNet;
+
+	IMPORT Stores, ActorCore;
+
+	CONST
+		notNetMsg = 30;
+
+	TYPE
+		Msg = POINTER TO ABSTRACT RECORD (ActorCore.Msg)
+			(m: Msg) Write- (VAR wr: Stores.Writer), NEW, EMPTY;
+			(m: Msg) Read- (VAR rd: Stores.Reader), NEW, EMPTY
+		END;
+
+		Node = POINTER TO LIMITED RECORD
+			name-: ActorCore.Name;
+			up-: BOOLEAN;
+			incarnation-: LONGINT;
+			sent-, received-, duplicates-, refused-: LONGINT
+		END;
+
+		Transport = POINTER TO ABSTRACT RECORD
+			(t: Transport) Send (IN from, to: ARRAY OF CHAR; IN frame: ARRAY OF BYTE; len: INTEGER), NEW, ABSTRACT
+		END;
+
+	PROCEDURE New (IN name: ARRAY OF CHAR; t: Transport; secret: LONGINT): Node;
+	PROCEDURE Down (n: Node);
+	PROCEDURE Up (n: Node);
+	PROCEDURE Export (n: Node; r: ActorCore.Ref; OUT cap: ARRAY OF CHAR);
+	PROCEDURE Import (n: Node; IN cap: ARRAY OF CHAR): ActorCore.Ref;
+	PROCEDURE WriteRef (VAR wr: Stores.Writer; r: ActorCore.Ref);
+	PROCEDURE ReadRef (VAR rd: Stores.Reader; OUT r: ActorCore.Ref);
+	PROCEDURE Deliver (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER);
+	PROCEDURE Lost (n: Node; IN node: ARRAY OF CHAR);
+
+END ActorNet.
+```
+
+**TYPE Msg** — a letter that may go to another node. `Write` writes the fields, `Read` reads them in
+the same order; addresses in fields go through `WriteRef` and `ReadRef`. The letter type must be
+found by name (`Kernel.ThisType`) on the receiving node; a letter of an unknown type is refused
+(`refused`).
+
+**TYPE Node** — a node: `name` is the name of the root actor, `up` tells the node is up,
+`incarnation` grows on every `Up`; frame counters: sent, received, dropped as a repeat, refused
+(wrong mark, broken frame, unknown type).
+
+**TYPE Transport** — a frame transport. `Send` hands the frame `frame[0 .. len - 1]` from node `from`
+to node `to`; the frame may be lost. The transport passes a received frame to `Deliver` of the target
+node and reports a lost link to a node with `Lost`.
+
+**PROCEDURE New (IN name: ARRAY OF CHAR; t: Transport; secret: LONGINT): Node**
+Pre: `name # ""`, without `"/"`, shorter than `ActorCore.nameLen` — trap 20; `t # NIL` — 21.
+Post: the node is up, incarnation 1. The marks of the node's addresses depend on `secret`. The user
+creates the node's root actor: `Spawn(NIL, …, name)`.
+
+**PROCEDURE Down (n: Node)**
+Post: the node is down: frames from and to it are lost, its memory of frames and watches is cleared,
+its root actor is stopped. Journals in storage are not touched.
+
+**PROCEDURE Up (n: Node)**
+Pre: the node is down and its root actor stopped — trap 20.
+Post: the node is up with a new incarnation; the user creates the root actor again.
+
+**PROCEDURE Export (n: Node; r: ActorCore.Ref; OUT cap: ARRAY OF CHAR)**
+Pre: `r` is a local address — trap 20.
+Post: `cap` is a capability `"node|name|mark"` to `r`, to hand to another node outside letters.
+
+**PROCEDURE Import (n: Node; IN cap: ARRAY OF CHAR): ActorCore.Ref**
+Post: the address of the capability for letters from node `n`; `NIL` — the capability did not
+parse. The owner node checks the mark on delivery.
+
+**PROCEDURE WriteRef (VAR wr: Stores.Writer; r: ActorCore.Ref)**
+**PROCEDURE ReadRef (VAR rd: Stores.Reader; OUT r: ActorCore.Ref)**
+Pre: called from `Msg.Write` and `Msg.Read` — trap 20 in `WriteRef`.
+Post: the address is written as a capability of the node encoding the frame, and read back: an own
+address with a right mark is the local actor, with a wrong one `NIL`, a foreign one a remote address.
+
+**PROCEDURE Deliver (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER)**
+For a transport. Post: a repeat, a foreign mark and a broken frame are dropped and counted; otherwise
+the letter is in the target's mailbox.
+
+**PROCEDURE Lost (n: Node; IN node: ARRAY OF CHAR)**
+For a transport. Post: every watcher of an address on `node` received `Terminated`; watches requested
+by `node` are removed.
+
+### 13.10. ActorNetMem
+
+```
+DEFINITION ActorNetMem;
+
+	IMPORT ActorNet;
+
+	TYPE
+		Plan = RECORD
+			loss, dup: INTEGER;
+			delay: INTEGER;
+			reorder: BOOLEAN
+		END;
+
+		Net = POINTER TO LIMITED RECORD (ActorNet.Transport)
+			plan: Plan;
+			now-: LONGINT;
+			lost-, duplicated-, delivered-: LONGINT
+		END;
+
+	PROCEDURE New (seed: LONGINT): Net;
+	PROCEDURE NewAuto (): Net;
+	PROCEDURE Add (net: Net; n: ActorNet.Node);
+	PROCEDURE Pump (net: Net): BOOLEAN;
+	PROCEDURE Pending (net: Net): INTEGER;
+	PROCEDURE Rand (net: Net; k: INTEGER): INTEGER;
+	PROCEDURE Drop (net: Net);
+	PROCEDURE Crash (net: Net; IN name: ARRAY OF CHAR);
+
+END ActorNetMem.
+```
+
+A network in memory. **Plan**: `loss` and `dup` are the shares of lost and duplicated frames in
+thousandths, `delay` is the largest delay of a frame in network steps, `reorder` picks a ready frame
+by lot. **Net**: `now` counts network steps; counters of lost, duplicated and delivered frames.
+
+**PROCEDURE New (seed: LONGINT): Net** — a network with an empty plan; `Pump` delivers the frames.
+The same `seed` and the same actions give the same sequence of deliveries.
+**PROCEDURE NewAuto (): Net** — a network without faults; the main loop (a `Services` action)
+delivers the frames in sending order.
+**PROCEDURE Add (net: Net; n: ActorNet.Node)** — Pre: no node with the same name — trap 20. Post:
+frames to `n.name` reach `n`.
+**PROCEDURE Pump (net: Net): BOOLEAN** — a network step: `now` grows by 1, at most one ready frame
+is delivered. Post: `TRUE` — frames are still in flight.
+**PROCEDURE Pending (net: Net): INTEGER** — frames in flight.
+**PROCEDURE Rand (net: Net; k: INTEGER): INTEGER** — Pre: `k > 0` — trap 20. Post: a number in
+`[0, k)` from the network's generator; for a test driver, so that its decisions also come from the
+seed.
+**PROCEDURE Drop (net: Net)** — all frames in flight are lost.
+**PROCEDURE Crash (net: Net; IN name: ARRAY OF CHAR)** — Pre: the node is in the network — trap 20.
+Post: `ActorNet.Down` of the node, frames to it are lost, the other nodes received `Lost(name)`.
+
+### 13.11. ActorSim
+
+```
+DEFINITION ActorSim;
+
+	VAR
+		steps-: LONGINT;
+
+	PROCEDURE Install;
+	PROCEDURE Step (): BOOLEAN;
+	PROCEDURE Drain (max: INTEGER): BOOLEAN;
+	PROCEDURE Idle (): BOOLEAN;
+
+END ActorSim.
+```
+
+An executor for deterministic testing: mailboxes with work stand in one queue in arrival order; it
+has no tasks of its own, a driver task calls `Step`.
+
+**PROCEDURE Install** — Pre: the `ActorRun` pool is stopped (not checked). Post: this executor
+serves the mailboxes, the queue is empty, `steps = 0`.
+**PROCEDURE Step (): BOOLEAN** — Pre: `Install`, called from a task — trap 20. Post: `FALSE` — there
+was no work; `TRUE` — the first mailbox processed all system letters and at most one user letter.
+**PROCEDURE Drain (max: INTEGER): BOOLEAN** — `Step` while there is work, at most `max` times.
+Post: `TRUE` — no work left.
+**PROCEDURE Idle (): BOOLEAN** — Post: no mailbox has work.
+
+### 13.12. ActorNetTcp
+
+```
+DEFINITION ActorNetTcp;
+
+	IMPORT ActorNet;
+
+	TYPE
+		Net = POINTER TO LIMITED RECORD (ActorNet.Transport)
+			node-: ActorNet.Node;
+			sentFrames-, readFrames-: LONGINT
+		END;
+
+	PROCEDURE New (IN listen: ARRAY OF CHAR; OUT net: Net; OUT res: INTEGER);
+	PROCEDURE Attach (net: Net; n: ActorNet.Node);
+	PROCEDURE Address (net: Net; OUT adr: ARRAY OF CHAR);
+	PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR);
+	PROCEDURE Close (net: Net);
+
+END ActorNetTcp.
+```
+
+A TCP transport, Linux only. A frame to a node goes over an outgoing connection into the queue of a
+writer task; `Send` does not wait for the network. On the wire: the length (4 bytes) and the frame;
+the first message of a connection is the sender node's name. A broken connection gives
+`ActorNet.Lost`; frames queued on a broken connection are lost. The main loop must poll descriptors
+(`AsyncIO`).
+
+**PROCEDURE New (IN listen: ARRAY OF CHAR; OUT net: Net; OUT res: INTEGER)** — Post:
+`res = CommStreams.done` — `net` listens on `listen` (`"127.0.0.1:0"` — a free port); otherwise
+`net = NIL`.
+**PROCEDURE Attach (net: Net; n: ActorNet.Node)** — Pre: no node yet — trap 20. Post: received
+frames go to node `n` (created on `net`).
+**PROCEDURE Address (net: Net; OUT adr: ARRAY OF CHAR)** — Post: the address `net` listens on.
+**PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR)** — Post: frames to node `name` go to `adr`.
+**PROCEDURE Close (net: Net)** — Post: the listener and connections are closed, the tasks end; other
+nodes see the break.
