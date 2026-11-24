@@ -24,6 +24,9 @@ ObxComputon  docu/sources		компутон в отдельном процесс
 ObxActor0  docu/sources		первый актор: Spawn, Tell, Ask, Shutdown
 ObxActor1  docu/sources		надзор: трап и перезапуск теряет состояние
 ObxActor2  docu/sources		банк: Resume сохраняет остатки счетов
+ObxActor3  docu/sources		счёт с журналом в файле переживает перезапуск
+ObxActor4  docu/sources		снимки и история изменений (аудит)
+ObxActor5  docu/sources		CQRS: отчёт «обороты по счетам» догоняет журнал
 ObxBank0  docu/sources		учебник: действие и задача делают одну работу
 ObxBank1  docu/sources		учебник: кассиры, Join, Sleep, отмена, группа
 ObxBank2  docu/sources		учебник: ожидание денег без монитора и с AWAIT
