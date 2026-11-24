@@ -17,6 +17,8 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #define GUARD 4096
 
@@ -106,4 +108,15 @@ long test64_minflt (void) {
 	struct rusage ru;
 	if (getrusage (RUSAGE_SELF, &ru) != 0) return 0;
 	return ru.ru_minflt;
+}
+
+/* Окно счётчиков perf stat --control fd:CTL,ACK -D -1: фаза phase замера
+   включает (on # 0) или выключает счётчики, если она названа в PERF_PHASE.
+   Без PERF_CTL_FD ничего не делает. */
+void test64_perf (long phase, long on) {
+	const char *c = getenv ("PERF_CTL_FD"), *a = getenv ("PERF_ACK_FD"), *p = getenv ("PERF_PHASE");
+	char buf[8];
+	if (c == NULL || p == NULL || atol (p) != phase) return;
+	if (write (atoi (c), on ? "enable\n" : "disable\n", on ? 7 : 8) < 0) return;
+	if (a != NULL && read (atoi (a), buf, sizeof buf) < 0) return;
 }

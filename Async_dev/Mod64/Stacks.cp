@@ -140,14 +140,20 @@ MODULE Async_devStacks;
 		Tasks.Sleep(0); INC(counter)
 	END Run;
 
-	PROCEDURE Load1 (n, size: INTEGER; IN tag: ARRAY OF CHAR);
+	PROCEDURE Load1 (n, size, phase: INTEGER; IN tag: ARRAY OF CHAR);
+	(* phase, phase + 1 — номера фаз создания и исполнения для окна счётчиков
+	   perf (System_devCRaw.c_perf, переменная PERF_PHASE). *)
 		VAR i: INTEGER; t: Once; t0, t1, t2, f0, f1, f2: LONGINT;
 	BEGIN
 		counter := 0;
 		f0 := System_devCRaw.c_minflt(); t0 := System_devClock.now();
+		System_devCRaw.c_perf(phase, 1);
 		FOR i := 1 TO n DO NEW(t); Tasks.SetStackSize(t, size); Tasks.Start(t) END;
+		System_devCRaw.c_perf(phase, 0);
 		f1 := System_devCRaw.c_minflt(); t1 := System_devClock.now();
+		System_devCRaw.c_perf(phase + 1, 1);
 		Pump;
+		System_devCRaw.c_perf(phase + 1, 0);
 		f2 := System_devCRaw.c_minflt(); t2 := System_devClock.now();
 		ASSERT(counter = n, 60);
 		W("BENCH "); W(tag); W(" stack="); N(size);
@@ -158,8 +164,8 @@ MODULE Async_devStacks;
 	PROCEDURE Load*;
 	(** Первый прогон — свежие стеки 64 КБ, второй — те же из пула. *)
 	BEGIN
-		Load1(10000, 64 * 1024, "load");
-		Load1(10000, 64 * 1024, "load-warm")
+		Load1(10000, 64 * 1024, 1, "load");
+		Load1(10000, 64 * 1024, 3, "load-warm")
 	END Load;
 
 	PROCEDURE Scale*;
@@ -167,16 +173,16 @@ MODULE Async_devStacks;
 		(второй прогон каждого размера): рост цены с числом задач — промахи
 		кеша и TLB по стекам, а не отказы страниц. *)
 	BEGIN
-		Load1(100, 64 * 1024, "scale100"); Load1(100, 64 * 1024, "scale100-warm");
-		Load1(1000, 64 * 1024, "scale1000"); Load1(1000, 64 * 1024, "scale1000-warm");
-		Load1(10000, 64 * 1024, "scale10k"); Load1(10000, 64 * 1024, "scale10k-warm")
+		Load1(100, 64 * 1024, 10, "scale100"); Load1(100, 64 * 1024, 10, "scale100-warm");
+		Load1(1000, 64 * 1024, 10, "scale1000"); Load1(1000, 64 * 1024, 10, "scale1000-warm");
+		Load1(10000, 64 * 1024, 10, "scale10k"); Load1(10000, 64 * 1024, 10, "scale10k-warm")
 	END Scale;
 
 	PROCEDURE LoadSmall*;
 	(** То же со стеком 8 КБ (свежий процесс: пул отдаёт стек только того же размера). *)
 	BEGIN
-		Load1(10000, 8 * 1024, "load8k");
-		Load1(10000, 8 * 1024, "load8k-warm")
+		Load1(10000, 8 * 1024, 1, "load8k");
+		Load1(10000, 8 * 1024, 3, "load8k-warm")
 	END LoadSmall;
 
 END Async_devStacks.
