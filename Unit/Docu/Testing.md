@@ -1,90 +1,166 @@
 # Unit testing in BlackBox
 
-Subsystem `Unit` provides module tests for Component Pascal: `UnitAssert`
-(checks) and `UnitRunner` (discovery, fixtures, isolation, reports).
-A test is an exported parameterless procedure whose name starts with
-`Test`; no registration is needed.
+A programmer changes the procedure `Strings.IntToString` and wants to know whether negative numbers
+still work. Without tests he opens a work window, types a command, looks at the output, and a week
+later forgets to repeat the check. The `Unit` subsystem turns such a check into a module that runs with
+one command and prints an unambiguous result. The subsystem consists of two modules: `UnitAssert`
+checks values, `UnitRunner` finds the tests, executes them one by one and prints a report.
 
-## Writing a test
+## 1. The first test
+
+A *test* is an exported procedure without parameters whose name starts with `Test`. It need not be
+registered anywhere: the runner finds such procedures itself by walking the module's exports with
+`Meta.Scanner`.
+
+Tests do not live in the subsystem under test but next to it, in a subsystem with the suffix `_dev`.
+Tests of the `Text` subsystem lie in `Text_dev/Mod/<Topic>.cp`, and the module is called
+`Text_dev<Topic>`. For the first test we create the subsystem `My_dev` and the file
+`My_dev/Mod/Strings.cp`:
 
 ```
-MODULE Text_devWriter;
-	IMPORT TextModels, UnitAssert;
+MODULE My_devStrings;
 
-	VAR t: TextModels.Model;
+	IMPORT Strings, UnitAssert;
 
-	PROCEDURE Setup*;	(* optional, before every test *)
-	BEGIN t := TextModels.dir.New()
+	VAR s: ARRAY 32 OF CHAR;
+
+	PROCEDURE Setup*;
+	BEGIN s := ""
 	END Setup;
 
-	PROCEDURE TestWriteAtEnd*;
-		VAR w: TextModels.Writer;
+	PROCEDURE TestIntToStringNegative*;
 	BEGIN
-		w := t.NewWriter(NIL); w.WriteChar("a"); w.WriteChar("b");
-		UnitAssert.EqualInt(2, t.Length(), "length after two chars")
-	END TestWriteAtEnd;
+		Strings.IntToString(-42, s);
+		UnitAssert.EqualStr("-42", s, "знак и цифры")
+	END TestIntToStringNegative;
 
-END Text_devWriter.
+	PROCEDURE TestFindMissing*;
+		VAR pos: INTEGER;
+	BEGIN
+		Strings.Find("abc", "x", 0, pos);
+		UnitAssert.EqualInt(-1, pos, "нет образца")
+	END TestFindMissing;
+
+END My_devStrings.
 ```
 
-Tests live in a separate `<Subsystem>_dev` subsystem next to the one
-under test: the file is `<Subsystem>_dev/Mod/<Theme>.cp` and the module
-is `<Subsystem>_dev<Theme>` (`Text_devWriter` in
-`Text_dev/Mod/Writer.cp`). An entry point without a theme is
-`<Subsystem>_devMain` (`Text_dev/Mod/Main.cp`). AMD64-only tests use
-`Mod64` in the same subsystem (`Async_dev/Mod64/Channels.cp`, module
-`Async_devChannels`). Production builds do not include `*_dev`
-subsystems; tests are built on demand by `tools/unit.sh`.
+Each test calls the procedure under test and compares the result with the expected one. The first
+argument of a comparison is the expected value, the second the actual value, the third an explanation
+that goes into the report on failure. The procedure `Setup` is not a test: the runner calls it before
+every test, so every test starts with an empty string `s`.
 
-## Rules
+We run the module with the external launcher. It compiles `Unit` and the test module, starts a separate
+console BlackBox and executes `UnitRunner.Run` in it:
 
-1. **Discovery.** Exported procedures with no parameters named `Test…`
-   are found through `Meta.Scanner`; the order is the module export
-   order. No registry, like `test_*` in pytest.
-2. **Fixtures.** Optional `Setup*`/`Teardown*` run around every test;
-   `SetupModule*`/`TeardownModule*` once per module. `Teardown` runs even
-   after a trap. If `SetupModule` traps, it is reported as a failure and
-   the tests of the module do not run: they are `SKIP` with the reason
-   `SetupModule trapped`.
-3. **Checks.** The procedures of `UnitAssert` are listed in the
-   section "Interface". A plain
-   `ASSERT` also works: any unexpected trap is a failed test with the
-   kernel's trap report. Failure text is `expected X, got Y: msg`;
-   for strings — `expected <...>, got <...>`. The text is cut at 255
-   characters (`UnitAssert.Message`); long strings do not trap.
-4. **No checks — a failure.** A test that made no `UnitAssert` call and
-   did not trap is reported `EMPTY` and counted as failed.
-5. **Isolation.** Every test and every fixture runs under `Kernel.Try`;
-   a trap fails only that test. `Kernel.Collect` runs after a trapped
-   test. The runner does not replace the trap viewer: `Try` catches the
-   trap whether or not a viewer is installed.
-6. **Marks by name prefix.** `TestSlow…` (long), `TestGui…` (needs a
-   display), `TestProc…` (better in its own process: kernel, collector,
-   signals, `Kernel.Quit`). By default only ordinary tests run; pass the
-   marks explicitly. Mouse drag simulation is forbidden by the stand
-   rules.
-7. **Report.** One line per test: `PASS Module.Test 0 ms`,
-   `FAIL Module.Test 0 ms: message`, `EMPTY …`, `SKIP … (mark)`; then
-   `== Unit: passed N, failed M, empty K, skipped S`. With the `quit` key
-   the runner calls `Kernel.Quit(0|1)`, so the shell sees a status. `tap`
-   prints TAP, `junit=FILE` writes a JUnit XML file in UTF-8 (relative to
-   the working directory of the console); a skipped test carries its
-   reason in `<skipped message="…"/>`.
-8. **Temporary files.** `UnitRunner.TempDir` returns `UnitTmp`. The
-   BlackBox process has no portable `mkdir`; the external launcher
-   (`tools/unit.sh`) creates and removes the directory.
-9. **A defect test fails first.** Make sure the test fails on the old
-   code and passes on the new one.
-10. **One behaviour — one test.** Name says what is checked:
-    `TestDeleteOutOfRangeTraps`, not `Test3`.
-11. **A test requires no changes to the module under test or the
-    kernel.** A test uses only what an ordinary client uses: public
-    procedures, globals, and observable effects (counters, output,
-    state). The kernel checks internal invariants itself (`ASSERT` in a
-    debug spot) instead of exporting a checker; a diagnostic export
-    with no users outside `*_dev` is removed.
+```
+$ tools/unit.sh My_devStrings
+== Unit: run My_devStrings
+PASS My_devStrings.TestFindMissing 0 ms
+PASS My_devStrings.TestIntToStringNegative 0 ms
+== Unit: passed 2, failed 0, empty 0, skipped 0
+```
 
-## Running
+One line is printed per test: outcome, name and time. Tests run in the order of the module's export
+table, that is alphabetically, not in text order. The summary line counts the outcomes. The exit code
+of `tools/unit.sh` is 0 only if the summary says `failed 0` and the process exited with code 0.
+
+## 2. How a run works
+
+A test that traps must not take the other tests with it, and its garbage must not reach the next one.
+Therefore `UnitRunner` executes every test and every fixture under `Kernel.Try`. A trap becomes a
+failure of that test with the message `test trapped`; the kernel prints its trap report, and the
+runner calls `Kernel.Collect` and moves on to the next test. The runner does not replace the trap
+viewer: `Kernel.Try` catches the trap without it.
+
+*Fixtures* are optional procedures with special names. `Setup` and `Teardown` run around each test,
+`SetupModule` and `TeardownModule` once per module, before the first test and after the last.
+`Teardown` runs after a trapped test too: it closes what `Setup` opened. If `SetupModule` traps, the
+module's tests have nothing to run on: the runner prints the failure `SetupModule trapped` and marks the
+module's tests `SKIP` with the same reason.
+
+A test fails if it, `Setup` or `Teardown` trapped, or if one of the `UnitAssert` checks did not pass;
+the message comes from the last failed check. A test that did not trap and made no check gets the mark
+`EMPTY`. Such a test proves nothing: it would pass on broken code too. For example, the test
+
+```
+PROCEDURE TestNothing*;
+BEGIN
+	Strings.IntToString(1, s)
+END TestNothing;
+```
+
+gives the line `EMPTY My_devStrings.TestNothing 0 ms: no checks`. The summary line shows empty tests
+separately and includes them in the number of failed ones: `passed 2, failed 1, empty 1`. A process
+with the `quit` key exits with code 1.
+
+A plain `ASSERT` in a test works too: an unexpected trap is a failure. But a test with only `ASSERT`
+turns out empty when it succeeds. If a test checks that code does not trap, it marks the check
+explicitly by calling `UnitAssert.Checked`. If a test checks that code traps, it calls
+`UnitAssert.Traps(p, …)`: the procedure `p` runs under `Kernel.Try`, and a failure is counted when no
+trap happened.
+
+Failure messages have the form `expected X, got Y: explanation`, for strings `expected <X>, got <Y>:
+explanation`. A message is cut to 255 characters (`UnitAssert.Message`); a long string in a comparison
+does not trap.
+
+## 3. Marks and a separate process
+
+Some tests cannot run on every change. A long test delays the run, a test with windows needs a screen,
+and a test that calls `Kernel.Quit` or checks the collector can bring the process down. Such tests are
+marked by a name prefix: `TestSlow…` is long, `TestGui…` needs a screen, `TestProc…` is better run in a
+separate process. By default the runner skips them and prints `SKIP` with the reason `slow`, `gui` or
+`proc`; the keys of the same names of the command `UnitRunner.Run` enable them.
+
+`tools/unit.sh` provides the separate process: one module, one `blackbox-console` process. If a test
+brings the process down, `tools/unit.sh` reports the exit code and the tail of the output, and the
+other modules of the `tools/test.sh` list run in their own processes.
+
+## 4. Rules
+
+1. One behaviour, one test. The name says what is checked: `TestDeleteOutOfRangeTraps`, not `Test3`.
+   Then the `FAIL` line in the report names the broken behaviour itself.
+2. A test for a defect fails first. It is run on the code with the defect and shows `FAIL`, then on the
+   fixed code and shows `PASS`. A test that never failed may have checked nothing.
+3. A test requires no changes to the module under test or to the kernel. A test uses what an ordinary
+   client uses: exports, global variables and observable effects — counters, output, state.
+4. Temporary files lie in the directory `UnitRunner.TempDir` (`UnitTmp`). BlackBox has no portable
+   `mkdir`, so `tools/unit.sh` creates and cleans the directory.
+
+A violation of the third rule is not visible at once. Suppose a test wants to know that the heap of
+sleeping tasks in `Tasks` is ordered. The easiest way is to add an exported procedure `HeapOk*` to
+`Tasks` and call it from the test. The test passes, but the kernel gets an export that no client uses.
+The new export changes the fingerprint of the symbol file, and all modules importing `Tasks` need
+recompilation; the distribution carries a procedure that cannot be removed or changed without breaking
+the test. The right way is different. The kernel checks an internal invariant itself, with an `ASSERT`
+at the place where the invariant may break (in `Tasks` this is the `ASSERT` with number 100 when the
+heap is compacted), and the test creates thousands of sleeping tasks with different deadlines and checks
+what a client sees: the tasks wake up in deadline order. Trap 100 is then detected too, as a
+`test trapped` failure. A diagnostic export without users outside `*_dev` is removed.
+
+## 5. `_dev` subsystems
+
+Tests are kept apart from the code because the distribution build does not include `*_dev`
+subsystems: the user gets neither the tests nor their dependencies. `tools/unit.sh` builds the tests
+on demand.
+
+A module's name determines its file by the BlackBox rules: `Text_devWriter` lies in
+`Text_dev/Mod/Writer.cp`. The entry point of a subsystem without a topic is `<Subsystem>_devMain`, for
+example `Text_dev/Mod/Main.cp`. Tests for amd64 only lie in `Mod64` of the same subsystem: the module
+`Async_devChannels` is in `Async_dev/Mod64/Channels.cp`.
+
+The runner itself is checked by `Unit_devMain`. The module `Unit_devProbe` contains a passing, a
+trapping, a failing, an empty and a slow test and fixtures; `TestNestedRunner` runs the probe quietly
+through `UnitRunner.RunModuleCounts` and compares the counters.
+
+## 6. Running and reports
+
+Inside BlackBox the command `UnitRunner.Run` runs tests, with arguments separated by spaces. The first
+argument is the target: a module name, a subsystem name or `all`. A subsystem name selects the loaded
+modules of its tests: `System` finds `System_dev*`, `Async` finds `Async_dev*`; `all` selects all loaded
+modules whose name contains `_dev`. The modules must already be loaded into the world. The keys `slow`,
+`gui`, `proc` enable marks; `tap` prints a TAP report; `junit=FILE` writes a JUnit XML report; `quit`
+at the end calls `Kernel.Quit(0)` or `Kernel.Quit(1)` so that an external launcher gets the code;
+`noquit` cancels `quit`.
 
 ```
 echo 'UnitRunner.Run Unit_devMain quit' | tools/run64.sh
@@ -95,20 +171,14 @@ tools/test.sh --list
 tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
-`UnitRunner.Run` arguments: a module name, a subsystem name, or `all`;
-`slow`, `gui`, `proc` enable those marks; `junit=FILE`, `tap`; `quit`
-calls `Kernel.Quit(0|1)` at the end (so the console launcher gets a
-status), `noquit` cancels it.
-A subsystem name selects the loaded test modules of that subsystem:
-`System` finds `System_dev*`, `Async` finds `Async_dev*`. `all`
-selects every loaded module whose name contains `_dev`. The modules
-must already be loaded (linked) into the world.
+`tools/unit.sh` compiles `Unit`, the modules from `--compile` and the test module with `tools/go64.sh`
+(up to three passes, because the order of dependencies is not known in advance) and executes
+`UnitRunner.Run` with the `quit` key and the marks from `--marks`. `tools/test.sh` walks the list
+`tools/tests.txt`, where each module has its marks, timeout, additional modules and compiler options.
 
-`tools/unit.sh` compiles the module with `tools/go64.sh` (up to three
-passes), runs it in a separate `blackbox-console`, and succeeds only when
-the summary says `failed 0` and the process exits with 0. This is the
-external launcher for `TestProc…`: a test that calls `Kernel.Quit` or
-crashes the process cannot take other modules down.
+The JUnit report is read by the continuous integration system: it shows failures by test name. The
+file is written in UTF-8, the path is relative to the console's working directory. Each test becomes a
+`<testcase>` element; a skipped test carries its reason in `<skipped message="…"/>`.
 
 ## Interface
 
@@ -143,50 +213,50 @@ DEFINITION UnitAssert;
 END UnitAssert.
 ```
 
-The procedures of `UnitAssert` check no preconditions and do not trap. Every check increments the
-check counter. A failure increments the failure counter and stores the message.
+The `UnitAssert` procedures check no preconditions and do not trap. Each check increments the check
+counter; a failure increments the failure counter and remembers the message.
 
 **PROCEDURE Reset**
-Post: the counters are 0, the message is empty.
+Post: counters are 0, the message is empty.
 
 **PROCEDURE Save (OUT s: State)**, **Restore (IN s: State)**
-Post: `s` is a copy of the counters and the message; `Restore` takes them back from `s`.
+Post: `s` is a copy of the counters and the message; `Restore` restores them from `s`.
 
 **PROCEDURE Checks (): LONGINT**, **Failures (): INTEGER**, **LastMessage (OUT m: Message)**
-Post: the number of checks, the number of failures, the message of the last failure.
+Post: number of checks, number of failures, message of the last failure.
 
 **PROCEDURE Checked**
 Counts a check without a condition.
 Post: the check counter is incremented by 1.
 
 **PROCEDURE True (cond: BOOLEAN; IN m: ARRAY OF CHAR)**
-Post: `~cond` — a failure with message `m`.
+Post: `~cond` — failure with message `m`.
 
 **PROCEDURE Fail (IN m: ARRAY OF CHAR)**
-Post: a failure with message `m`.
+Post: failure with message `m`.
 
 **PROCEDURE EqualInt (expected, actual: LONGINT; IN m: ARRAY OF CHAR)**
 Post: `expected # actual` — failure `expected X, got Y: m`.
 
 **PROCEDURE EqualReal (expected, actual, eps: REAL; IN m: ARRAY OF CHAR)**
-Post: a failure if `ABS(actual - expected) > eps`. With `eps <= 0` or `expected = 0` the
-comparison is exact.
+Post: failure if `ABS(actual - expected) > eps`. With `eps <= 0` or `expected = 0` the comparison is
+exact.
 
 **PROCEDURE EqualStr (IN expected, actual: ARRAY OF CHAR; IN m: ARRAY OF CHAR)**
-Post: the strings differ — failure `expected <X>, got <Y>: m`.
+Post: strings differ — failure `expected <X>, got <Y>: m`.
 
 **PROCEDURE EqualSet (expected, actual: SET; IN m: ARRAY OF CHAR)**
-Post: the sets differ — failure `expected set X, got Y: m`; sets are printed as numbers.
+Post: sets differ — failure `expected set X, got Y: m`; sets are printed as numbers.
 
 **PROCEDURE NotNil (p: ANYPTR; IN m: ARRAY OF CHAR)**
-Post: `p = NIL` — a failure.
+Post: `p = NIL` — failure.
 
 **PROCEDURE Same (expected, actual: ANYPTR; IN m: ARRAY OF CHAR)**
-Post: `expected # actual` — a failure.
+Post: `expected # actual` — failure.
 
 **PROCEDURE Traps (p: PROCEDURE; IN m: ARRAY OF CHAR)**
 Calls `p` under `Kernel.Try`.
-Post: `p` did not trap or `p = NIL` — a failure.
+Post: `p` did not trap or `p = NIL` — failure.
 
 ```
 DEFINITION UnitRunner;
@@ -206,19 +276,12 @@ END UnitRunner.
 
 **PROCEDURE RunModuleCounts (IN module, marks: ARRAY OF CHAR; quietRun: BOOLEAN; OUT c: Counts)**
 Runs the tests of module `module` with marks `marks`; `quietRun` suppresses output.
-Post: `c` holds the totals; the `UnitAssert` state is restored. A module not found — one failure.
+Post: `c` holds the totals; the `UnitAssert` state is restored. Module not found — one failure.
 
 **PROCEDURE TempDir (OUT path: ARRAY OF CHAR)**
 Post: `path = "UnitTmp"`.
 
 **PROCEDURE Run**
-A command; its arguments are listed in the section "Running".
-Post: the summary is printed. With the `quit` key the process exits with code 1 on failures and
-empty tests, otherwise with code 0.
-
-## Self-check
-
-`Unit_devMain` (in `Unit_dev/Mod/Main.cp`) verifies the runner itself:
-`Unit_devProbe` contains a passing, a trapping, a failing, an empty and
-a slow test plus fixtures; `TestNestedRunner` runs the probe quietly and
-compares `PASS/FAIL/EMPTY/SKIP` counts.
+Command; the arguments are described in section 6.
+Post: the summary is printed. With the `quit` key the process exits with code 1 on failures or empty
+tests, otherwise with code 0.
