@@ -19,7 +19,7 @@ MODULE Test64GcBench;
 
 	Вывод: строки "BENCH ..." (стабильные метки) и маркер TEST64-PASS/FAIL. *)
 
-	IMPORT Console, Strings, Kernel, Loop, Test64Support, Test64Co;
+	IMPORT Console, Strings, Kernel, Loop, Test64Support, Test64Clock;
 
 	CONST
 		m1 = 1000000; m10 = 10000000; m50 = 50000000;
@@ -38,7 +38,7 @@ MODULE Test64GcBench;
 
 	PROCEDURE Now (): LONGINT;
 	BEGIN
-		RETURN Test64Co.co_now()
+		RETURN Test64Clock.now()
 	END Now;
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);

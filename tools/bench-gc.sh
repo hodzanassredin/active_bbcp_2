@@ -17,7 +17,7 @@ command -v /usr/bin/time >/dev/null 2>&1 || { echo "bench-gc: нет /usr/bin/ti
 cc -shared -fPIC -O2 -o "$INSTALL/libtest64.so" "$BB/tools/test64.c" || {
 	echo "bench-gc: сборка libtest64.so не удалась" >&2; exit 2; }
 
-mods="Test64Support Test64CRaw Test64Co Test64GcBench"
+mods="Test64Support Test64CRaw Test64Clock Test64GcBench"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))

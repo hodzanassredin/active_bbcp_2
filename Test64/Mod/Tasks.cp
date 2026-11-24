@@ -8,7 +8,7 @@ MODULE Test64Tasks;
 	tools/unit.sh гонит модуль отдельным процессом. Нагрузка на 10 тыс.
 	задач помечена TestSlow… и включается в манифесте marks=proc,slow. *)
 
-	IMPORT Kernel, Services, Tasks, UnitAssert, Test64Co, Console, Strings;
+	IMPORT Kernel, Services, Tasks, UnitAssert, Test64Clock, Console, Strings;
 
 	CONST
 		benchStack = 64 * 1024;
@@ -52,7 +52,7 @@ MODULE Test64Tasks;
 
 	PROCEDURE Now (): LONGINT;
 	BEGIN
-		RETURN Test64Co.co_now()
+		RETURN Test64Clock.now()
 	END Now;
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);
