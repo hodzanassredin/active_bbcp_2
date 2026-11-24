@@ -2517,6 +2517,99 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		END
 	END MonitorArg;
 
+	(* Быстрый путь: поле владельца объекта. Метод с получателем-указателем,
+	   у записи которого есть "@mon", или процедура модуля (поле — сама
+	   скрытая переменная @monitor). Иначе — прежний Kernel.Lock/Unlock. *)
+	PROCEDURE MonFieldOff (proc: DevCPT.Object; OUT off: INTEGER): BOOLEAN;
+		VAR rt: DevCPT.Struct; f: DevCPT.Object;
+	BEGIN
+		off := 0;
+		IF proc.mode = TProc THEN
+			rt := proc.link.typ;
+			IF rt.form # Pointer THEN RETURN FALSE END;
+			f := DevCPT.MonField(rt.BaseTyp);
+			IF f = NIL THEN RETURN FALSE END;
+			off := f.adr; RETURN TRUE
+		ELSE
+			RETURN TRUE
+		END
+	END MonFieldOff;
+
+	PROCEDURE KVarItem (obj: DevCPT.Object; VAR x: DevCPLamd64.Item);
+	BEGIN
+		obj.used := TRUE;
+		x.mode := Abs; x.obj := obj; x.offset := 0; x.scale := 0; x.form := Pointer
+	END KVarItem;
+
+	PROCEDURE ObjToReg (proc: DevCPT.Object; reg: INTEGER);
+	(* Адрес объекта-монитора в reg. *)
+		VAR x, r: DevCPLamd64.Item;
+	BEGIN
+		DevCPLamd64.MakeReg(r, reg, Pointer);
+		IF proc.mode = TProc THEN
+			x.mode := Ind; x.reg := BP; x.offset := proc.link.adr; x.scale := 0; x.form := Pointer;
+			DevCPLamd64.GenMove(x, r)
+		ELSE
+			x.mode := Abs; x.obj := DevCPT.ModuleMonitor(); x.offset := x.obj.adr;
+			x.scale := 0; x.form := Pointer;
+			DevCPLamd64.GenLoadAdr(x, r)
+		END
+	END ObjToReg;
+
+	PROCEDURE FastLockEntry (proc: DevCPT.Object; off: INTEGER);
+	(** Свободен (поле = 0) и есть место на стеке взятий ядра: поле := monTok,
+		взятие (объект, off) — на вершину [monBase, monTop). Иначе
+		Kernel.LockAt(объект, off). Портит RAX, RCX, RDX; BX сохраняется. *)
+		VAR x, r: DevCPLamd64.Item; slow, done: DevCPLamd64.Label;
+	BEGIN
+		DevCPT.EnsureKernel; slow := 0; done := 0;
+		ObjToReg(proc, AX);
+		GenB(48H); GenB(83H); GenB(0B8H); GenD(off); GenB(0);	(* cmp qword [rax+off], 0 *)
+		DevCPLamd64.GenJump(ccNE, slow, FALSE);
+		KVarItem(DevCPT.kMonTop, x); DevCPLamd64.MakeReg(r, CX, Pointer); DevCPLamd64.GenMove(x, r);
+		KVarItem(DevCPT.kMonEnd, x); DevCPLamd64.MakeReg(r, DX, Pointer); DevCPLamd64.GenMove(x, r);
+		GenB(48H); GenB(39H); GenB(0D1H);	(* cmp rcx, rdx *)
+		DevCPLamd64.GenJump(ccAE, slow, FALSE);
+		KVarItem(DevCPT.kMonTok, x); DevCPLamd64.MakeReg(r, DX, Pointer); DevCPLamd64.GenMove(x, r);
+		GenB(48H); GenB(89H); GenB(90H); GenD(off);	(* mov [rax+off], rdx *)
+		GenB(48H); GenB(89H); GenB(01H);	(* mov [rcx], rax *)
+		GenB(48H); GenB(0C7H); GenB(41H); GenB(8); GenD(off);	(* mov qword [rcx+8], off *)
+		GenB(48H); GenB(83H); GenB(0C1H); GenB(16);	(* add rcx, 16 *)
+		KVarItem(DevCPT.kMonTop, x); DevCPLamd64.MakeReg(r, CX, Pointer); DevCPLamd64.GenMove(r, x);
+		DevCPLamd64.GenJump(ccAlways, done, FALSE);
+		DevCPLamd64.SetLabel(slow);
+		DevCPT.kLockAt.used := TRUE;
+		DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPush(r);
+		GenB(68H); GenD(off);	(* push off *)	(* параметры кладутся справа налево *)
+		DevCPLamd64.MakeReg(r, AX, Pointer); DevCPLamd64.GenPush(r);
+		x.mode := XProc; x.obj := DevCPT.kLockAt; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPLamd64.GenCall(x);
+		DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPop(r);
+		DevCPLamd64.SetLabel(done)
+	END FastLockEntry;
+
+	PROCEDURE^ UnlockExit (proc: DevCPT.Object);
+
+	PROCEDURE FastUnlockExit (proc: DevCPT.Object; off: INTEGER);
+	(** Поле = monTok: взятие быстрым путём на вершине стека ядра — поле := 0,
+		monTop уменьшается. Иначе Kernel.Unlock. RAX и ST0 не трогаются. *)
+		VAR x, r: DevCPLamd64.Item; slow, done: DevCPLamd64.Label;
+	BEGIN
+		DevCPT.EnsureKernel; slow := 0; done := 0;
+		ObjToReg(proc, CX);
+		KVarItem(DevCPT.kMonTok, x); DevCPLamd64.MakeReg(r, DX, Pointer); DevCPLamd64.GenMove(x, r);
+		GenB(48H); GenB(39H); GenB(91H); GenD(off);	(* cmp [rcx+off], rdx *)
+		DevCPLamd64.GenJump(ccNE, slow, FALSE);
+		GenB(48H); GenB(0C7H); GenB(81H); GenD(off); GenD(0);	(* mov qword [rcx+off], 0 *)
+		KVarItem(DevCPT.kMonTop, x); DevCPLamd64.MakeReg(r, DX, Pointer); DevCPLamd64.GenMove(x, r);
+		GenB(48H); GenB(83H); GenB(0EAH); GenB(16);	(* sub rdx, 16 *)
+		KVarItem(DevCPT.kMonTop, x); DevCPLamd64.MakeReg(r, DX, Pointer); DevCPLamd64.GenMove(r, x);
+		DevCPLamd64.GenJump(ccAlways, done, FALSE);
+		DevCPLamd64.SetLabel(slow);
+		UnlockExit(proc);
+		DevCPLamd64.SetLabel(done)
+	END FastUnlockExit;
+
 	PROCEDURE LockEntry (proc: DevCPT.Object);
 	(** Kernel.Lock(монитор) после кадра процедуры. BX (статическая связь
 		вызывающего) сохраняется: Lock — обычная CP-процедура. *)
@@ -2555,7 +2648,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	END UnlockExit;
 
 	PROCEDURE Enter* (proc: DevCPT.Object; empty, useFpu: BOOLEAN);
-		VAR sp, fp, r, r1: DevCPLamd64.Item; par: DevCPT.Object; adr, size, np: INTEGER;
+		VAR sp, fp, r, r1: DevCPLamd64.Item; par: DevCPT.Object; adr, size, np, off: INTEGER;
 	BEGIN
 		procedureUsesFpu := useFpu;
 		uwBegin := DevCPE.pc; uwProlog := 0; uwFrame := 0; uwLength := 0;
@@ -2631,7 +2724,9 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 					DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenMove(fp, r)
 				END
 			END;
-			IF ~empty & (proc.sysflag = exclusive) THEN LockEntry(proc) END
+			IF ~empty & (proc.sysflag = exclusive) THEN
+				IF MonFieldOff(proc, off) THEN FastLockEntry(proc, off) ELSE LockEntry(proc) END
+			END
 		ELSIF ~empty THEN (* enter module *)
 			DevCPLamd64.GenPush(fp);
 			DevCPLamd64.GenMove(sp, fp);
@@ -2644,11 +2739,13 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	END Enter;
 	
 	PROCEDURE Exit* (proc: DevCPT.Object; empty: BOOLEAN);
-		VAR sp, fp, r, x: DevCPLamd64.Item; size: INTEGER;
+		VAR sp, fp, r, x: DevCPLamd64.Item; size, off: INTEGER;
 	BEGIN
 		DevCPLamd64.MakeReg(sp, SP, Pointer); DevCPLamd64.MakeReg(fp, BP, Pointer);
 		IF proc # NIL THEN (* exit proc *)
-			IF ~empty & (proc.sysflag = exclusive) THEN UnlockExit(proc) END;
+			IF ~empty & (proc.sysflag = exclusive) THEN
+				IF MonFieldOff(proc, off) THEN FastUnlockExit(proc, off) ELSE UnlockExit(proc) END
+			END;
 			IF proc.sysflag # noframe THEN
 				IF ~empty OR NeedOutPtrInit(proc) THEN
 					IF isGuarded IN proc.conval.setval THEN	(* remove exception frame; TODO amd64 TLS redesign *)

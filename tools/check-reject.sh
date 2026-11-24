@@ -16,9 +16,9 @@ ok=0; bad=0
 cleanup () {
 	rm -f "$BB/Dev/Mod/RejAwait.cp" "$BB/Dev/Mod/RejCall.cp" \
 		"$BB/Dev/Mod/RejLocal.cp" "$BB/Dev/Mod/RejNoActive.cp" \
-		"$BB/Dev/Mod/RejCode.cp" "$BB/Dev/Mod/KeyProbe.cp" "$BB/Dev/Mod/RejGuarded.cp" \
+		"$BB/Dev/Mod/RejCode.cp" "$BB/Dev/Mod/RejSize.cp" "$BB/Dev/Mod/KeyProbe.cp" "$BB/Dev/Mod/RejGuarded.cp" \
 		"$BB/System/Mod/KeyProbe.cp" "$BB/System/Mod/Usermod.cp"
-	rm -f "$BB"/.work/BB64LIN/Dev/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,KeyProbe}.ocf 2>/dev/null
+	rm -f "$BB"/.work/BB64LIN/Dev/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,RejSize,KeyProbe}.ocf 2>/dev/null
 	rm -f "$BB"/.work/BB64LIN/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
 	rm -f "$BB"/.work/i386/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
 	rm -f "$BB"/.work/i386/Dev/Code/KeyProbe.ocf 2>/dev/null
@@ -71,6 +71,8 @@ run ExclusiveNoActive.cp "$BB/Dev/Mod/RejNoActive.cp" "$CC64" DevRejNoActive \
 	"[exclusive] без IMPORT ACTIVE"
 run ExclusiveWithCode.cp "$BB/Dev/Mod/RejCode.cp" "$CC64" DevRejCode \
 	"[exclusive] вместе с [code]"
+run SizeBeforeExclusive.cp "$BB/Dev/Mod/RejSize.cp" "$CC64" DevRejSize \
+	"исключающий метод после SIZE записи: скрытому полю уже нет места"
 run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC64" 'SystemKeyProbe^' \
 	"ключ точек уступки в модуле каркаса (System)"
 run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC32" 'SystemKeyProbe^' \
