@@ -5,14 +5,14 @@ MODULE Actor_devBench;
 	исполнителя без задержки планировщика. *)
 
 	IMPORT Kernel, Services, Tasks, Console, Strings, Stores, Files, CasStore, ActorCore, ActorRun,
-		ActorJournal, ActorPersist, ActorFileJournal, KvStore, KvDb, KvLin, ActorKvJournal,
+		ActorJournal, ActorCodec, ActorPersist, ActorFileJournal, KvStore, KvDb, KvLin, ActorKvJournal,
 		UnitAssert, System_devClock;
 
 	CONST
 		actors = 10000;
 		exchanges = 100000;
 		events = 100000;
-		kvEvents = 2000;	(* с Sync на каждое событие *)
+		kvEvents = 2048;	(* с Sync на каждое событие *)
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -24,6 +24,7 @@ MODULE Actor_devBench;
 		Added = POINTER TO RECORD (ActorPersist.Event) n: INTEGER END;
 		Burst = POINTER TO RECORD (Msg) n: INTEGER END;
 		Saver = POINTER TO RECORD (ActorPersist.Actor) sum: LONGINT END;
+		KvWriter = POINTER TO RECORD (Tasks.Task) name: ARRAY 8 OF CHAR; n: INTEGER END;
 
 	VAR
 		got, starts, hops, limit: INTEGER;
@@ -35,6 +36,7 @@ MODULE Actor_devBench;
 		jr: ActorJournal.Journal;
 		saved, recovered: BOOLEAN;
 		total: LONGINT;
+		kvDone: INTEGER;
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);
 	BEGIN
@@ -218,6 +220,44 @@ MODULE Actor_devBench;
 		PersistRun("kv", kvEvents);
 		jr.Close; KvLin.Delete("actor_dev_bench.kv")
 	END PersistKv;
+
+	PROCEDURE (w: KvWriter) Run;
+		VAR i, res: INTEGER; m: ActorJournal.Meta; e: Added; d: ActorJournal.Bytes; len: INTEGER;
+	BEGIN
+		NEW(e); e.n := 1; ActorCodec.dir.Encode(e, d, len);
+		FOR i := 1 TO w.n DO
+			m.seq := i; m.author := "bench";
+			jr.Append(w.name, i - 1, m, d, len, res); ASSERT(res = ActorJournal.ok, 100)
+		END;
+		INC(kvDone)
+	END Run;
+
+	PROCEDURE KvWriters (k: INTEGER);
+	(* Пост: k задач дописали всего kvEvents событий в свои потоки; строка BENCH. *)
+		VAR st: KvStore.Store; db: KvDb.Db; res, i: INTEGER; w: KvWriter; t0: LONGINT; s: ARRAY 8 OF CHAR;
+	BEGIN
+		KvLin.Delete("actor_dev_bench.kv");
+		KvLin.Open("actor_dev_bench.kv", st, res); KvDb.Open(st, db, res);
+		jr := ActorKvJournal.New(db); kvDone := 0;
+		t0 := Now();
+		FOR i := 0 TO k - 1 DO
+			NEW(w); w.name := "w"; Strings.IntToString(i, s); w.name := w.name + s; w.n := kvEvents DIV k;
+			Tasks.Start(w)
+		END;
+		WHILE kvDone < k DO Tasks.Yield END;
+		Strings.IntToString(k, s); Report("persist-kv-" + s + "writers", kvEvents, t0);
+		jr.Close; KvLin.Delete("actor_dev_bench.kv")
+	END KvWriters;
+
+	PROCEDURE KvGroup;
+	BEGIN
+		KvWriters(1); KvWriters(8); KvWriters(64)
+	END KvGroup;
+
+	PROCEDURE TestSlowKvGroupCommit*;
+	BEGIN
+		UnitAssert.True(Drive(KvGroup, 300000), "kv writers finished")
+	END TestSlowKvGroupCommit;
 
 	PROCEDURE TestSlowPersist*;
 	BEGIN

@@ -6,7 +6,7 @@ MODULE Actor_devPersist;
 	его после любого трапа, кроме decodeTrap (тогда — остановка). Команды
 	шлются Tell, ответы — через глобальные переменные. *)
 
-	IMPORT Kernel, Services, Files, Stores, CasStore,
+	IMPORT Kernel, Services, Tasks, Files, Stores, CasStore,
 		ActorCore, ActorRun, ActorJournal, ActorCodec, ActorPersist, ActorFileJournal,
 		KvStore, KvDb, KvFault, KvLin, ActorKvJournal, UnitAssert;
 
@@ -44,6 +44,10 @@ MODULE Actor_devPersist;
 
 		Raw = POINTER TO RECORD (ActorJournal.Sink) n: INTEGER END;
 
+		(* хранилище, считающее Sync; страницы — в KvFault *)
+		Counted = POINTER TO RECORD (KvStore.Store) s: KvFault.Store; syncs: INTEGER END;
+		Writer = POINTER TO RECORD (Tasks.Task) name: ARRAY 8 OF CHAR; n: INTEGER; res: INTEGER END;
+
 	VAR
 		jr: ActorJournal.Journal;
 		snaps: CasStore.Store;
@@ -52,6 +56,7 @@ MODULE Actor_devPersist;
 		replays, applied, restores, handled, reason, firstMsg: INTEGER;
 		bal: INTEGER; got: BOOLEAN;
 		writeVer: INTEGER;
+		writersDone, staleFor: INTEGER;
 
 	(* --- обвязка ---------------------------------------------------------- *)
 
@@ -324,7 +329,7 @@ MODULE Actor_devPersist;
 	BEGIN
 		jr := ActorJournal.NewMem(); snaps := CasStore.NewMem(); snapEvery := 0; acct := NIL;
 		replays := 0; applied := 0; restores := 0; handled := 0; reason := 0; firstMsg := 0;
-		writeVer := 0;
+		writeVer := 0; staleFor := 0;
 		ActorRun.Start(2)
 	END Setup;
 
@@ -636,6 +641,118 @@ MODULE Actor_devPersist;
 		Wd(1, 1);
 		UnitAssert.EqualInt(1000 - maxOps - 2, Balance(), "forgotten operation withdraws again")
 	END TestOldOperationsForgotten;
+
+	PROCEDURE (c: Counted) Read (id: INTEGER; VAR buf: ARRAY OF BYTE; beg: INTEGER; OUT res: INTEGER);
+	BEGIN
+		c.s.Read(id, buf, beg, res)
+	END Read;
+
+	PROCEDURE (c: Counted) Write (id: INTEGER; IN buf: ARRAY OF BYTE; beg: INTEGER; OUT res: INTEGER);
+	BEGIN
+		c.s.Write(id, buf, beg, res)
+	END Write;
+
+	PROCEDURE (c: Counted) Sync (OUT res: INTEGER);
+	BEGIN
+		INC(c.syncs); c.s.Sync(res)
+	END Sync;
+
+	PROCEDURE (c: Counted) Pages (): INTEGER;
+	BEGIN
+		RETURN c.s.Pages()
+	END Pages;
+
+	PROCEDURE (c: Counted) Close;
+	BEGIN
+		c.s.Close
+	END Close;
+
+	PROCEDURE AppendStale (IN s: ARRAY OF CHAR; OUT res: INTEGER);
+	(* Пост: дописывание в s с ожидаемым номером 0 (поток уже не пуст). *)
+		VAR m: ActorJournal.Meta; d: ActorJournal.Bytes; len: INTEGER;
+	BEGIN
+		Frame(NewDeposited(9), d, len); m.seq := 1; m.author := "stale";
+		jr.Append(s, 0, m, d, len, res)
+	END AppendStale;
+
+	PROCEDURE (w: Writer) Run;
+		VAR i, res: INTEGER;
+	BEGIN
+		w.res := ActorJournal.ok;
+		FOR i := 1 TO w.n DO
+			IF ORD(w.name[1]) - ORD("0") < staleFor THEN AppendStale(w.name, res)
+			ELSE AppendRaw(jr, w.name, NewDeposited(i), res)
+			END;
+			IF res # ActorJournal.ok THEN w.res := res END
+		END;
+		INC(writersDone)
+	END Run;
+
+	PROCEDURE RunWriters (k, n: INTEGER; OUT ws: ARRAY OF Writer);
+	(* Пост: k задач дописали по n событий каждая в свой поток "w0", "w1" … *)
+		VAR i: INTEGER;
+	BEGIN
+		writersDone := 0;
+		FOR i := 0 TO k - 1 DO
+			NEW(ws[i]); ws[i].name := "w0"; ws[i].name[1] := CHR(ORD("0") + i); ws[i].n := n; Tasks.Start(ws[i])
+		END;
+		IF UntilInt(writersDone, k, 5000) THEN END
+	END RunWriters;
+
+	PROCEDURE TestKvGroupCommit*;
+	(* Восемь писателей одновременно: одна фиксация на пачку, а не на событие. *)
+		VAR c: Counted; db: KvDb.Db; res, i, s0: INTEGER; ws: ARRAY 8 OF Writer;
+	BEGIN
+		NEW(c); c.s := KvFault.New(); KvDb.Open(c, db, res); jr := ActorKvJournal.New(db);
+		s0 := c.syncs;
+		RunWriters(8, 4, ws);
+		UnitAssert.EqualInt(8, writersDone, "writers finished");
+		FOR i := 0 TO 7 DO
+			UnitAssert.EqualInt(ActorJournal.ok, ws[i].res, "append ok");
+			UnitAssert.EqualInt(4, jr.Last(ws[i].name), "all events written")
+		END;
+		UnitAssert.True(c.syncs - s0 <= 2 * 4 + 2, "one commit per batch of eight")
+	END TestKvGroupCommit;
+
+	PROCEDURE TestKvGroupConflictIsolated*;
+	(* В одной пачке: два писателя с устаревшим номером в своих потоках и
+	   шесть обычных; конфликт получают только двое, остальные записаны. *)
+		VAR db: KvDb.Db; res, i: INTEGER; ws: ARRAY 8 OF Writer;
+	BEGIN
+		KvDb.Open(KvFault.New(), db, res); jr := ActorKvJournal.New(db);
+		AppendRaw(jr, "w0", NewDeposited(1), res); AppendRaw(jr, "w1", NewDeposited(1), res);
+		staleFor := 2;	(* w0 и w1 пишут с expected = 0 *)
+		RunWriters(8, 1, ws);
+		staleFor := 0;
+		UnitAssert.EqualInt(ActorJournal.conflict, ws[0].res, "w0 conflict");
+		UnitAssert.EqualInt(ActorJournal.conflict, ws[1].res, "w1 conflict");
+		FOR i := 2 TO 7 DO UnitAssert.EqualInt(ActorJournal.ok, ws[i].res, "others written") END;
+		UnitAssert.EqualInt(1, jr.Last("w0"), "nothing added to w0");
+		UnitAssert.EqualInt(1, jr.Last("w7"), "w7 written")
+	END TestKvGroupConflictIsolated;
+
+	PROCEDURE TestKvGroupTorn*;
+	(* Обрыв в каждой точке фиксации пачки из четырёх потоков: после питания
+	   либо вся пачка есть, либо её нет; ok получил только зафиксированный. *)
+		VAR st: KvFault.Store; db: KvDb.Db; k, res, i, n, before, after: INTEGER; ws: ARRAY 8 OF Writer;
+			done: BOOLEAN;
+	BEGIN
+		k := 0; done := FALSE; before := 0; after := 0;
+		WHILE ~done & (k < 300) DO
+			st := KvFault.New(); KvDb.Open(st, db, res); jr := ActorKvJournal.New(db);
+			st.Arm(k, k MOD 100);
+			RunWriters(4, 1, ws);
+			done := TRUE; FOR i := 0 TO 3 DO done := done & (ws[i].res = ActorJournal.ok) END;
+			jr.Close; st.PowerOff(k + 1); KvDb.Open(st, db, res); jr := ActorKvJournal.New(db);
+			n := 0; FOR i := 0 TO 3 DO n := n + SHORT(jr.Last(ws[i].name)) END;
+			UnitAssert.True((n = 0) OR (n = 4), "the batch is all or nothing");
+			IF n = 0 THEN INC(before) ELSE INC(after) END;
+			IF done THEN UnitAssert.EqualInt(4, n, "ok means committed") END;
+			jr.Close; jr := NIL; INC(k)
+		END;
+		UnitAssert.True(done, "a batch without a fault in the end");
+		UnitAssert.True(before > 0, "faults leave the base as before")
+	END TestKvGroupTorn;
 
 	(* --- журнал в Kv ------------------------------------------------------------ *)
 

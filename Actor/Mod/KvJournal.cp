@@ -17,7 +17,9 @@ MODULE ActorKvJournal;
 	ключах, и его можно рассогласовать с ними; поиск по дереву — те же
 	O(log n) страниц, что и чтение счётчика.
 
-	Append — одна пишущая транзакция (KvDb.Update): найти последний номер,
+	Append вне задачи — своя пишущая транзакция; из задачи — групповая
+	фиксация (Lead): одна транзакция на всех, кто пишет одновременно.
+	Транзакция (KvDb.Update): найти последний номер,
 	сравнить с expected, записать, зафиксировать. Несовпадение — Abort,
 	ничего не записано. Фиксация — страницы, Sync, мета, Sync: событие,
 	о котором Append ответил ok, переживает выключение питания, а
@@ -29,14 +31,28 @@ MODULE ActorKvJournal;
 	другая задача открытой пишущей не застаёт; Sync же держит исполнитель
 	до конца записи на носитель. *)
 
-	IMPORT Utf, KvDb, ActorJournal;
+	IMPORT Kernel, Tasks, Utf, KvDb, ActorJournal;
 
 	TYPE
 		Bytes = ActorJournal.Bytes;
 
 		Journal = POINTER TO RECORD (ActorJournal.Journal)
-			db: KvDb.Db
+			db: KvDb.Db;
+			queue, tail: Request;	(* ждут следующей пачки *)
+			leading: BOOLEAN	(* пачку собирает и фиксирует задача-ведущий *)
 		END;
+
+		Request = POINTER TO RECORD
+			next: Request;
+			stream: ActorJournal.Name; expected: LONGINT;
+			key, val: Bytes;
+			res: INTEGER; done: BOOLEAN;
+			task: Tasks.Task
+		END;
+
+		Batch = POINTER TO RECORD (KvDb.Body) first: Request END;
+
+		Cleaner = POINTER TO RECORD (Kernel.TrapCleaner) j: Journal; batch: Request END;
 
 		(* тела транзакций *)
 		Appender = POINTER TO RECORD (KvDb.Body)
@@ -175,6 +191,61 @@ MODULE ActorKvJournal;
 		s.found := tx.Get(SnapKey(s.stream)^, s.val); s.res := tx.res
 	END Do;
 
+	PROCEDURE (b: Batch) Do- (tx: KvDb.Tx);
+	(* Каждый запрос сверяется со своим потоком в той же транзакции:
+	   конфликт одного не мешает остальным. *)
+		VAR r: Request;
+	BEGIN
+		r := b.first;
+		WHILE r # NIL DO
+			IF LastSeq(tx, r.stream) # r.expected THEN r.res := ActorJournal.conflict
+			ELSE tx.Put(r.key^, r.val^); r.res := ActorJournal.ok
+			END;
+			r := r.next
+		END
+	END Do;
+
+	PROCEDURE Finish (j: Journal; first: Request; res: INTEGER);
+	(* Пост: запросы пачки получили итог фиксации res (кроме конфликтов) и разбужены. *)
+		VAR r: Request;
+	BEGIN
+		r := first;
+		WHILE r # NIL DO
+			IF r.res # ActorJournal.conflict THEN r.res := res END;
+			r.done := TRUE;
+			IF r.task # Tasks.Current() THEN Tasks.Unpark(r.task) END;
+			r := r.next
+		END
+	END Finish;
+
+	PROCEDURE (c: Cleaner) Cleanup;
+	(* Трап ведущего: его пачка и очередь получают failed, ведущего нет. *)
+	BEGIN
+		Finish(c.j, c.batch, ActorJournal.failed);
+		Finish(c.j, c.j.queue, ActorJournal.failed);
+		c.j.queue := NIL; c.j.tail := NIL; c.j.leading := FALSE
+	END Cleanup;
+
+	PROCEDURE Lead (j: Journal);
+	(* Групповая фиксация. Ведущий уступает один раз, чтобы другие задачи
+	   успели встать в очередь, затем фиксирует всю очередь одной
+	   транзакцией; пока он пишет, точек переключения нет, и новые запросы
+	   ждут следующей пачки. *)
+		VAR b: Batch; r, res: INTEGER; cl: Cleaner;
+	BEGIN
+		j.leading := TRUE;
+		NEW(cl); cl.j := j; Kernel.PushTrapCleaner(cl);
+		Tasks.Yield;
+		WHILE j.queue # NIL DO
+			NEW(b); b.first := j.queue; cl.batch := b.first; j.queue := NIL; j.tail := NIL;
+			KvDb.Update(j.db, b, r);
+			res := Res(r);
+			Finish(j, b.first, res); cl.batch := NIL
+		END;
+		j.leading := FALSE;
+		Kernel.PopTrapCleaner(cl)
+	END Lead;
+
 	(* --- журнал ------------------------------------------------------------- *)
 
 	PROCEDURE (j: Journal) Last (IN stream: ARRAY OF CHAR): LONGINT;
@@ -186,7 +257,7 @@ MODULE ActorKvJournal;
 
 	PROCEDURE (j: Journal) Append (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: ActorJournal.Meta;
 		IN body: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER);
-		VAR a: Appender; n, i, r: INTEGER;
+		VAR a: Appender; n, i, r: INTEGER; q: Request;
 	BEGIN
 		ASSERT(stream # "", 20); ASSERT(m.seq = expected + 1, 21); ASSERT((len >= 0) & (len <= LEN(body)), 22);
 		NEW(a); a.stream := stream$; a.expected := expected; a.res := ActorJournal.ok;
@@ -196,8 +267,20 @@ MODULE ActorKvJournal;
 		PutNum(a.val, 0, m.time, 8); PutNum(a.val, 8, m.cause, 8); PutNum(a.val, 16, n, 2);
 		FOR i := 0 TO n - 1 DO PutNum(a.val, 18 + 2 * i, ORD(m.author[i]), 2) END;
 		FOR i := 0 TO len - 1 DO a.val[18 + 2 * n + i] := body[i] END;
-		KvDb.Update(j.db, a, r);
-		IF a.res = ActorJournal.conflict THEN res := ActorJournal.conflict ELSE res := Res(r) END
+		IF ~Tasks.InTask() THEN	(* вне задачи ждать некому: своя транзакция *)
+			KvDb.Update(j.db, a, r);
+			IF a.res = ActorJournal.conflict THEN res := ActorJournal.conflict ELSE res := Res(r) END
+		ELSE
+			NEW(q); q.stream := a.stream; q.expected := expected; q.key := a.key; q.val := a.val;
+			q.task := Tasks.Current(); q.res := ActorJournal.ok;
+			IF j.tail = NIL THEN j.queue := q ELSE j.tail.next := q END;
+			j.tail := q;
+			IF j.leading THEN
+				WHILE ~q.done DO Tasks.Park END
+			ELSE Lead(j)
+			END;
+			res := q.res
+		END
 	END Append;
 
 	PROCEDURE (j: Journal) Read (IN stream: ARRAY OF CHAR; from: LONGINT; k: ActorJournal.Sink; OUT res: INTEGER);

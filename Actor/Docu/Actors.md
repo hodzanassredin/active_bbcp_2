@@ -533,6 +533,16 @@ waits. `Begin(TRUE)` of another task waits in `Tasks.Park` while a write transac
 as journal transactions do not switch, no other task finds one open. An actor that writes often gets
 its own task (`Props.dedicated`).
 
+Two `Sync` per event limit the journal to about 600 events per second. So `Append` from a task does
+not commit by itself but joins the queue of the journal. The first task in an empty queue becomes
+the leader: it yields once, so that other writers can join the queue, and commits the whole queue in
+one transaction. Each request checks its expected number in that transaction: a conflict in one
+stream does not hinder the others. The other tasks wait in `Tasks.Park` and get `ok` only after
+their batch is committed; a failure in the middle of the commit leaves the base without the whole
+batch (`TestKvGroupTorn`). A batch is formed from tasks that write at the same time: eight actors on
+a pool of four executors give batches of at most four, actors with `Props.dedicated` as many as there
+are actors. `Append` outside a task commits by itself.
+
 ## 9. Address and Directory
 
 An address is an abstract record `Ref` with the fields `node` and `name` and four abstract methods:
@@ -572,20 +582,21 @@ and an address keeps two names of 128 characters.
 
 Persistence (`TestSlowPersist`, one executor, 100 000 events with 4 bytes of payload, three runs):
 `Persist` to a memory journal takes 4.7–4.9 µs per event (about 200 000 events per second), to a
-file 6.4–7.0 µs (about 150 000 per second; `Flush` after each write, no `fsync`). The `Kv` journal in a disk file (`TestSlowPersist`, 2000 events) takes 1.6–1.7 ms per event (about
-600 per second), the cost of two `Sync` per commit; recovery of 2000 events without a snapshot takes
-7 ms. There is no group commit: a batch of events in one transaction would cost two `Sync` per batch
-but needs a new journal method. Recovery of
+file 6.4–7.0 µs (about 150 000 per second; `Flush` after each write, no `fsync`). The `Kv` journal
+in a disk file (`TestSlowPersist`, 2000 events) takes 1.6–1.7 ms per event (about 600 per second),
+the cost of two `Sync` per commit; recovery of 2000 events without a snapshot takes 7 ms. Group
+commit (`TestSlowKvGroupCommit`, 2048 events, three runs) changes nothing for one writer, 1.8–4.7 ms
+per event; with 8 writer tasks it gives 0.25–1.4 ms, with 64, 0.44–0.52 ms; without it all three
+cases cost 1.8–4.0 ms. The spread comes from the disk: its `Sync` time is not constant. Recovery of
 100 000 events without a snapshot takes 0.38–0.51 s from memory and 0.38–0.41 s from the file; with
-a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and
-`recover-*`.
+a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and `recover-*`.
 
 ## 11. Limitations
 
 - One OS thread: actors run in turn, and computation in one actor delays the others until the next
   switch point of the executor (an executor yields every 64 mailboxes).
-- Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per event, there is no
-  group commit (section 8).
+- Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per batch; a batch is
+  formed only from tasks writing at the same time (section 8).
 - No transport: a `Ref` of another node can be described, but nobody delivers to it.
 - One strategy, `OneForOne`; "all for one" is not implemented.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
