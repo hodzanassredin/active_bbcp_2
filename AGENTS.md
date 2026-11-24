@@ -317,5 +317,6 @@ code, and the checks to run before a commit.
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
 | `docs/kernel-plan.md` | future kernel work |
+| `docs/stacks-study.md` | task stacks: where time goes, Go-like stack models |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
 | `Demo/Docu/Sys-Map.md` | examples |
