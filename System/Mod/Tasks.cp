@@ -44,6 +44,12 @@ MODULE Tasks;
 		poolMax = 1024;		(* сколько свободных стеков пул держит в покое *)
 		trimStep = 16;		(* сколько лишних стеков шаг планировщика возвращает ядру *)
 		slabN = 64;		(* стеков в плите (Kernel.AllocStacks) *)
+		denseN = 64;		(* стеков в плотной плите (DenseDir) *)
+		denseMax = 32 * 1024 * 1024;	(* наибольшая плотная плита, байт *)
+		denseMinChecked = 2048;	(* наименьший стек выше запаса плотной плиты *)
+		canaryVal = 5AFEC0DEH;	(* слово у дна плотного стека *)
+		denseReserve = 8 * 1024;	(* запас UseDenseStacks: глубина кода без проверки по замеру
+			(docs/stacks-study.md, 6.5) — не больше 7,8 КБ на всех тестах *)
 		word = Taskarch.word;
 		defaultSlice = 5;	(* мс на шаг планировщика *)
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
@@ -72,6 +78,9 @@ MODULE Tasks;
 			state: INTEGER;
 			deadline: LONGINT;	(* до какого Kernel.Time спать *)
 			stackSize: INTEGER;
+			dir: StackDir;		(* поставщик, выдавший стек: ему стек и возвращается *)
+			chkLo: S.ADDRESS;	(* Kernel.stkLo задачи: lo или lo + запас поставщика *)
+			canAdr: S.ADDRESS;	(* адрес канарейки: lo плотного стека или canaryCell *)
 			cancel, wake, failed, bodyOk: BOOLEAN;
 			group: Group;
 			own: Group;
@@ -91,6 +100,40 @@ MODULE Tasks;
 			t: Task;
 			deadline: LONGINT;
 			seq: INTEGER
+		END;
+
+		(** Поставщик стеков задач — каталог в духе Files.Directory. Tasks держит
+			у каждого поставщика пул свободных стеков и берёт стек из пула без
+			вызова поставщика; поставщика зовёт только промах пула, уборка пула
+			(TrimPool) и опустошение. Поле reserve > 0 значит, что под стеком
+			нет сторожевой страницы: Kernel.stkLo = lo + reserve, у дна (lo)
+			лежит канарейка, а код задачи обязан быть собран с проверкой в
+			прологе (ключ %, checked). *)
+		StackDir* = POINTER TO ABSTRACT RECORD
+			pool: S.ADDRESS;	(* свободные стеки: список через верхние слова, см. poolHead ниже *)
+			poolCount: INTEGER;
+			live: INTEGER;		(* стеков у задач *)
+			reserve: INTEGER;	(* 0 — сторож под стеком; иначе запас ниже Kernel.stkLo *)
+			checked: BOOLEAN;	(* код задачи должен быть собран с ключом % *)
+			keep: BOOLEAN;		(* стеки не возвращаются ядру по одному (FreeStack не зовётся) *)
+			listed: BOOLEAN;	(* в списке dirs *)
+			nextDir: StackDir
+		END;
+
+		GuardDir = POINTER TO RECORD (StackDir) END;
+		SlabDir = POINTER TO RECORD (StackDir)
+			(* Плита: стеки [slabNext + g, slabNext + slabStep) ... до slabEnd ещё не выданы;
+			   у каждого снизу сторожевая страница g. Инвариант: slabNext = slabEnd — плиты нет. *)
+			slabNext, slabEnd: S.ADDRESS;
+			slabStep, slabGuard, slabSize: INTEGER
+		END;
+		DenseSlab = POINTER TO RECORD lo, hi: S.ADDRESS; next: DenseSlab END;
+		DenseDir = POINTER TO RECORD (StackDir)
+			(* Плотная плита: стеки вплотную, одна сторожевая страница под плитой.
+			   Невыданные — [next, end) снизу вверх, шаг step. *)
+			next, end: S.ADDRESS;
+			step: INTEGER;
+			slabs: DenseSlab
 		END;
 
 		SchedAction = POINTER TO RECORD (Services.Action) END;
@@ -120,26 +163,40 @@ MODULE Tasks;
 		direct: INTEGER;	(* прямых переключений с последнего возврата в Step *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
-		(* Пул свободных стеков: односвязный список через верхние слова самого
-		   стека. Инвариант: poolHead = 0 равносильно poolCount = 0; иначе poolHead —
-		   верх hi свободного стека, в [hi - word] — верх следующего, в [hi - 2*word] —
-		   его lo, в [hi - 3*word] — размер, с которым стек запрошен у ядра.
-		   Стек в пуле не зарегистрирован в реестре ядра и не сканируется. *)
-		poolHead: S.ADDRESS;
-		poolCount: INTEGER;
+		(* Пул свободных стеков поставщика d: односвязный список через верхние
+		   слова самого стека. Инвариант: d.pool = 0 равносильно d.poolCount = 0;
+		   иначе d.pool — верх hi свободного стека, в [hi - word] — верх следующего,
+		   в [hi - 2*word] — его lo, в [hi - 3*word] — размер, с которым стек
+		   запрошен. Стек в пуле не зарегистрирован в реестре ядра и не сканируется. *)
+		dir: StackDir;		(* поставщик для новых задач *)
+		guardDir: StackDir;	(* поставщик со сторожем: по умолчанию и для кода без ключа % *)
+		dirs: StackDir;		(* поставщики, у которых есть стеки (живые или в пуле) *)
+		canaryCell: S.ADDRESS;	(* канарейка стеков со сторожем: всегда canaryVal *)
 		(* Проход Step: его стек и начало, итог RunLoop. oneTry — один Kernel.Try
 		   на проход (TryTasks); FALSE — платформа его не даёт, Try на задачу. *)
 		stepStack: Kernel.Stack;
 		stepT0: LONGINT;
 		loopDone, oneTry: BOOLEAN;
-		(* Плита: стеки [slabNext + g, slabNext + slabStep) ... до slabEnd ещё не выданы;
-		   у каждого снизу сторожевая страница g. Инвариант: slabNext = slabEnd — плиты нет. *)
-		slabNext, slabEnd: S.ADDRESS;
-		slabStep, slabGuard, slabSize: INTEGER;
 		stackDefault: INTEGER;	(* размер стека по умолчанию, SetDefaultStackSize *)
 		closeT: Task; closeT0: LONGINT;	(* для CLOSE *)
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
+
+	PROCEDURE (d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+	(** Пред: size > 0. Пост: TRUE — [lo, hi) новый стек не меньше size байт; FALSE — памяти нет.
+		Зовётся только при пустом пуле: стеки из пула Tasks выдаёт сам. *)
+
+	PROCEDURE (d: StackDir) FreeStack- (lo, hi: S.ADDRESS), NEW, ABSTRACT;
+	(** Вернуть ядру стек, выданный NewStack. Не зовётся у поставщика с keep. *)
+
+	PROCEDURE (d: StackDir) Drain-, NEW, EMPTY;
+	(** Пул пуст и стеков у задач нет: вернуть ядру всё, что поставщик держит. *)
+
+	PROCEDURE (d: StackDir) Overflow- (t: Task), NEW, EMPTY;
+	(** Точка расширения: канарейка у дна стека t испорчена — код без проверки
+		в прологе ушёл ниже запаса, соседний стек плиты мог быть испорчен.
+		Зовётся до трапа 126 в задаче (в точке ожидания, до переключения) или до пометки
+		её ошибочной (при уборке). Роста стека нет. *)
 
 	PROCEDURE^ EnsureScheduled;
 	PROCEDURE^ CancelGroup (g: Group);
@@ -182,7 +239,7 @@ MODULE Tasks;
 	BEGIN
 		IF Kernel.monTop # Kernel.monBase THEN Kernel.FlushMonitors END;
 		current := t;
-		IF t # NIL THEN Kernel.monTok := S.ADR(t^); Kernel.stkLo := t.lo
+		IF t # NIL THEN Kernel.monTok := S.ADR(t^); Kernel.stkLo := t.chkLo
 		ELSE Kernel.monTok := Kernel.mainToken; Kernel.stkLo := 0
 		END
 	END SetCurrent;
@@ -347,6 +404,19 @@ MODULE Tasks;
 
 	(* --- уход с процессора ------------------------------------------------ *)
 
+	PROCEDURE StackBroken (t: Task; inTask: BOOLEAN);
+	(* Канарейка t испорчена. В задаче — трап 126; при уборке — задача ошибочна. *)
+	BEGIN
+		Msg("task stack corrupted: code without the stack check went below the reserve; the neighbour stack may be damaged");
+		S.PUT(t.canAdr, canaryCell);	(* одно сообщение на порчу *)
+		t.dir.Overflow(t);
+		IF inTask THEN HALT(126)
+		ELSE
+			t.failed := TRUE;
+			IF t.group # NIL THEN t.group.failed := TRUE END
+		END
+	END StackBroken;
+
 	PROCEDURE Leave;
 	(* Пред: current # NIL — задача, которая уже записала своё новое состояние
 	   (Ready и в очереди готовых или одно из ожиданий).
@@ -392,9 +462,14 @@ MODULE Tasks;
 	END InFramework;
 
 	PROCEDURE CheckWait (IN what: ARRAY OF CHAR);
+	(* Каждая точка ожидания зовёт её до смены состояния задачи, поэтому трап
+	   отсюда (127, 126) не оставляет задачу в очередях. 126 — канарейка у дна
+	   стека испорчена (StackBroken). *)
+		VAR c: S.ADDRESS;
 	BEGIN
 		IF current = NIL THEN Msg(what); Msg("wait outside a task") END;
 		ASSERT(current # NIL, 20);
+		S.GET(current.canAdr, c); IF c # canaryCell THEN StackBroken(current, TRUE) END;
 		IF current.cancel THEN Msg("cancelled"); HALT(127) END;
 		IF InFramework() THEN Msg(what); Msg("wait inside an action handler or domain broadcast") END;
 		ASSERT(~InFramework(), 21)
@@ -480,80 +555,241 @@ MODULE Tasks;
 		Finish
 	END TaskBoot;
 
-	PROCEDURE DropSlab;
+	(* --- поставщики стеков ------------------------------------------------- *)
+
+	PROCEDURE (d: GuardDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN Kernel.AllocStack(size, lo, hi)
+	END NewStack;
+
+	PROCEDURE (d: GuardDir) FreeStack- (lo, hi: S.ADDRESS);
+	BEGIN
+		Kernel.FreeStack(lo, hi)
+	END FreeStack;
+
+	PROCEDURE (d: SlabDir) Drain-;
 	(* Пост: невыданные стеки плиты возвращены ядру, плиты нет. *)
 	BEGIN
-		WHILE slabNext # slabEnd DO
-			Kernel.FreeStack(slabEnd - slabStep + slabGuard, slabEnd); slabEnd := slabEnd - slabStep
+		WHILE d.slabNext # d.slabEnd DO
+			Kernel.FreeStack(d.slabEnd - d.slabStep + d.slabGuard, d.slabEnd); d.slabEnd := d.slabEnd - d.slabStep
 		END;
-		slabNext := 0; slabEnd := 0
-	END DropSlab;
+		d.slabNext := 0; d.slabEnd := 0
+	END Drain;
 
-	PROCEDURE TakeStack (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
-	(* Пред: size > 0. Пост: TRUE — [lo, hi) пригоден под стек, запрошенный
-	   с размером size, ниже lo лежит сторожевая страница; FALSE — памяти нет.
-	   Стек берётся из пула, если на его вершине лежит стек того же размера;
-	   иначе из плиты того же размера; иначе у ядра новой плитой (slabN стеков,
-	   сторожевые страницы ставятся при нарезке), а без плит — по одному. *)
+	PROCEDURE (d: SlabDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(* Из плиты того же размера; иначе новой плитой (slabN стеков, сторожевые
+	   страницы ставятся при нарезке); платформа без плит — по одному. *)
+	BEGIN
+		IF (d.slabNext # d.slabEnd) & (d.slabSize # size) THEN d.Drain END;
+		IF d.slabNext = d.slabEnd THEN
+			IF ~Kernel.AllocStacks(size, slabN, d.slabNext, d.slabStep, d.slabGuard) THEN
+				d.slabNext := 0; d.slabEnd := 0;
+				RETURN Kernel.AllocStack(size, lo, hi)
+			END;
+			d.slabEnd := d.slabNext + d.slabStep * slabN; d.slabSize := size
+		END;
+		lo := d.slabEnd - d.slabStep + d.slabGuard;
+		hi := d.slabEnd; d.slabEnd := d.slabEnd - d.slabStep;
+		RETURN TRUE
+	END NewStack;
+
+	PROCEDURE (d: SlabDir) FreeStack- (lo, hi: S.ADDRESS);
+	BEGIN
+		Kernel.FreeStack(lo, hi)
+	END FreeStack;
+
+	PROCEDURE DenseSize (d: DenseDir; size: INTEGER): INTEGER;
+	BEGIN
+		IF size < d.reserve + denseMinChecked THEN size := d.reserve + denseMinChecked END;
+		RETURN (size + 15) DIV 16 * 16
+	END DenseSize;
+
+	PROCEDURE (d: DenseDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(* Плиту нарезают снизу вверх; стеки другого размера — из новой плиты, остаток
+	   прежней не выдаётся (пул держит стеки по размеру). *)
+		VAR n: INTEGER; sl: DenseSlab; a, b: S.ADDRESS;
+	BEGIN
+		size := DenseSize(d, size);
+		IF (d.next = d.end) OR (d.step # size) THEN
+			n := denseN; IF size * n > denseMax THEN n := denseMax DIV size END;
+			IF n < 1 THEN n := 1 END;
+			IF ~Kernel.AllocStack(size * n, a, b) THEN RETURN FALSE END;
+			NEW(sl); sl.lo := a; sl.hi := b; sl.next := d.slabs; d.slabs := sl;
+			d.next := a; d.end := a + size * n; d.step := size
+		END;
+		lo := d.next; hi := lo + size; d.next := hi;
+		RETURN TRUE
+	END NewStack;
+
+	PROCEDURE (d: DenseDir) FreeStack- (lo, hi: S.ADDRESS);
+	BEGIN
+		HALT(100)	(* keep: Tasks не возвращает плотные стеки по одному *)
+	END FreeStack;
+
+	PROCEDURE (d: DenseDir) Drain-;
+	BEGIN
+		WHILE d.slabs # NIL DO Kernel.FreeStack(d.slabs.lo, d.slabs.hi); d.slabs := d.slabs.next END;
+		d.next := 0; d.end := 0; d.step := 0
+	END Drain;
+
+	PROCEDURE NewGuardDir* (): StackDir;
+	(** Поставщик (а): отдельный стек со сторожевой страницей на задачу. *)
+		VAR d: GuardDir;
+	BEGIN
+		NEW(d); RETURN d
+	END NewGuardDir;
+
+	PROCEDURE NewSlabDir* (): StackDir;
+	(** Поставщик (б): плиты по slabN стеков со сторожевой страницей под каждым;
+		платформа без плит — по одному. *)
+		VAR d: SlabDir;
+	BEGIN
+		NEW(d); RETURN d
+	END NewSlabDir;
+
+	PROCEDURE NewDenseDir* (reserve: INTEGER): StackDir;
+	(** Поставщик (в): плиты по denseN стеков вплотную, одна сторожевая страница
+		под плитой. Пред: reserve >= word (трап 20). Kernel.stkLo задачи = lo +
+		reserve: запас под код без проверки в прологе (модули без ключа %, C);
+		у дна — канарейка. Стек меньше reserve + denseMinChecked увеличивается
+		до этого размера. *)
+		VAR d: DenseDir;
+	BEGIN
+		ASSERT(reserve >= word, 20);
+		NEW(d); d.reserve := reserve; d.checked := TRUE; d.keep := TRUE; RETURN d
+	END NewDenseDir;
+
+	PROCEDURE InitStackDir* (d: StackDir; reserve: INTEGER; checked, keep: BOOLEAN);
+	(** Для поставщика вне модуля, до первой выдачи. Пред: d # NIL (20), стеков
+		ещё не выдавал (21), reserve = 0 или reserve >= word (22). *)
+	BEGIN
+		ASSERT(d # NIL, 20); ASSERT(~d.listed & (d.live = 0) & (d.pool = 0), 21);
+		ASSERT((reserve = 0) OR (reserve >= word), 22);
+		d.reserve := reserve; d.checked := checked; d.keep := keep
+	END InitStackDir;
+
+	PROCEDURE SetStackDir* (d: StackDir);
+	(** Пред: d # NIL (трап 20). Пост: новые задачи берут стеки у d. Живые
+		задачи вернут свои стеки тому поставщику, который их выдал. *)
+	BEGIN
+		ASSERT(d # NIL, 20);
+		dir := d
+	END SetStackDir;
+
+	PROCEDURE StackDirOf* (): StackDir;
+	BEGIN
+		RETURN dir
+	END StackDirOf;
+
+	PROCEDURE StackDirOfTask* (t: Task): StackDir;
+	(** Поставщик стека t; NIL — у t нет стека. *)
+	BEGIN
+		ASSERT(t # NIL, 20);
+		IF t.lo = 0 THEN RETURN NIL ELSE RETURN t.dir END
+	END StackDirOfTask;
+
+	PROCEDURE UseGuardStacks*;
+	(** Команда: новые задачи — со стеком со сторожем (поставщик (а)). *)
+	BEGIN
+		SetStackDir(NewGuardDir())
+	END UseGuardStacks;
+
+	PROCEDURE UseSlabStacks*;
+	(** Команда: поставщик (б), плиты со сторожем на стек (по умолчанию). *)
+	BEGIN
+		SetStackDir(NewSlabDir())
+	END UseSlabStacks;
+
+	PROCEDURE UseDenseStacks*;
+	(** Команда: поставщик (в), плотные плиты с запасом denseReserve. *)
+	BEGIN
+		SetStackDir(NewDenseDir(denseReserve))
+	END UseDenseStacks;
+
+	PROCEDURE TakeStack (d: StackDir; size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(* Пред: size > 0. Пост: TRUE — [lo, hi) пригоден под стек, запрошенный у d
+	   с размером size; FALSE — памяти нет. Стек берётся из пула d, если на его
+	   вершине стек того же размера; иначе у d (виртуальный вызов — только здесь). *)
 		VAR sz: S.ADDRESS;
 	BEGIN
-		IF poolHead # 0 THEN
-			S.GET(poolHead - 3 * word, sz);
+		IF d.pool # 0 THEN
+			S.GET(d.pool - 3 * word, sz);
 			IF sz = size THEN
-				hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
-				DEC(poolCount);
+				hi := d.pool; S.GET(hi - 2 * word, lo); S.GET(hi - word, d.pool);
+				DEC(d.poolCount);
 				RETURN TRUE
 			END
 		END;
-		IF (slabNext # slabEnd) & (slabSize # size) THEN DropSlab END;
-		IF slabNext = slabEnd THEN
-			IF ~Kernel.AllocStacks(size, slabN, slabNext, slabStep, slabGuard) THEN
-				slabNext := 0; slabEnd := 0;
-				RETURN Kernel.AllocStack(size, lo, hi)
-			END;
-			slabEnd := slabNext + slabStep * slabN; slabSize := size
-		END;
-		lo := slabEnd - slabStep + slabGuard;
-		hi := slabEnd; slabEnd := slabEnd - slabStep;
-		RETURN TRUE
+		RETURN d.NewStack(size, lo, hi)
 	END TakeStack;
 
-	PROCEDURE GiveStack (size: INTEGER; lo, hi: S.ADDRESS);
-	(* Пред: [lo, hi) получен от TakeStack(size), на нём никто не исполняется,
-	   запись реестра ядра снята. Пост: стек в пуле. *)
+	PROCEDURE GiveStack (d: StackDir; size: INTEGER; lo, hi: S.ADDRESS);
+	(* Пред: [lo, hi) получен от TakeStack(d, size), на нём никто не исполняется,
+	   запись реестра ядра снята. Пост: стек в пуле d. *)
 		VAR sz: S.ADDRESS;
 	BEGIN
 		IF lo = 0 THEN RETURN END;
 		sz := size;
-		S.PUT(hi - word, poolHead); S.PUT(hi - 2 * word, lo); S.PUT(hi - 3 * word, sz);
-		poolHead := hi; INC(poolCount)
+		S.PUT(hi - word, d.pool); S.PUT(hi - 2 * word, lo); S.PUT(hi - 3 * word, sz);
+		d.pool := hi; INC(d.poolCount)
 	END GiveStack;
+
+	PROCEDURE DrainDir (d: StackDir);
+	(* Пред: d.live = 0. Пост: пул d пуст, память d возвращена ядру. *)
+		VAR lo, hi: S.ADDRESS;
+	BEGIN
+		WHILE d.pool # 0 DO
+			hi := d.pool; S.GET(hi - 2 * word, lo); S.GET(hi - word, d.pool);
+			IF ~d.keep THEN d.FreeStack(lo, hi) END
+		END;
+		d.poolCount := 0;
+		d.Drain
+	END DrainDir;
 
 	PROCEDURE TrimPool;
 	(* Пул принимает любой освобождённый стек: возврат памяти ядру стоит
 	   системного вызова, и при массовом завершении задач он дороже самих
 	   задач. Лишнее сверх poolMax возвращается понемногу, не больше trimStep
-	   стеков за шаг планировщика. *)
-		VAR lo, hi: S.ADDRESS; n: INTEGER;
+	   стеков за шаг планировщика. Поставщик, который уже не текущий и чьих
+	   стеков у задач нет, опустошается целиком и выходит из списка. *)
+		VAR lo, hi: S.ADDRESS; n: INTEGER; d, prev: StackDir;
 	BEGIN
-		n := 0;
-		WHILE (poolCount > poolMax) & (n < trimStep) DO
-			hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
-			DEC(poolCount); INC(n);
-			Kernel.FreeStack(lo, hi)
+		prev := NIL; d := dirs;
+		WHILE d # NIL DO
+			IF (d # dir) & (d # guardDir) & (d.live = 0) THEN
+				DrainDir(d); d.listed := FALSE;
+				IF prev = NIL THEN dirs := d.nextDir ELSE prev.nextDir := d.nextDir END
+			ELSE
+				n := 0;
+				WHILE ~d.keep & (d.poolCount > poolMax) & (n < trimStep) DO
+					hi := d.pool; S.GET(hi - 2 * word, lo); S.GET(hi - word, d.pool);
+					DEC(d.poolCount); INC(n);
+					d.FreeStack(lo, hi)
+				END;
+				prev := d
+			END;
+			d := d.nextDir
 		END
 	END TrimPool;
 
 	PROCEDURE DrainPool;
-		VAR lo, hi: S.ADDRESS;
+	(* Опустошить поставщиков без стеков у задач. *)
+		VAR d: StackDir;
 	BEGIN
-		WHILE poolHead # 0 DO
-			hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
-			Kernel.FreeStack(lo, hi)
-		END;
-		poolCount := 0;
-		DropSlab
+		d := dirs;
+		WHILE d # NIL DO
+			IF d.live = 0 THEN DrainDir(d) END;
+			d := d.nextDir
+		END
 	END DrainPool;
+
+	PROCEDURE PoolCount* (): INTEGER;
+	(** Свободных стеков в пулах всех поставщиков (диагностика). *)
+		VAR d: StackDir; n: INTEGER;
+	BEGIN
+		n := 0; d := dirs; WHILE d # NIL DO INC(n, d.poolCount); d := d.nextDir END;
+		RETURN n
+	END PoolCount;
 
 	PROCEDURE StackSizeOf (t: Task): INTEGER;
 	BEGIN
@@ -561,13 +797,21 @@ MODULE Tasks;
 	END StackSizeOf;
 
 	PROCEDURE InitStack (t: Task): BOOLEAN;
-		VAR lo, hi, sp, a, zero: S.ADDRESS; size: INTEGER;
+		VAR lo, hi, sp, a, zero: S.ADDRESS; size: INTEGER; d: StackDir;
 	BEGIN
 		size := StackSizeOf(t);
-		IF ~TakeStack(size, lo, hi) THEN RETURN FALSE END;
-		t.lo := lo; t.hi := hi;
+		d := dir;
+		IF ~TakeStack(d, size, lo, hi) THEN RETURN FALSE END;
 		t.stackRec := Kernel.RegisterStack(lo, hi);
-		IF t.stackRec = NIL THEN GiveStack(size, lo, hi); t.lo := 0; RETURN FALSE END;
+		IF t.stackRec = NIL THEN GiveStack(d, size, lo, hi); RETURN FALSE END;
+		IF ~d.listed THEN d.listed := TRUE; d.nextDir := dirs; dirs := d END;
+		INC(d.live); t.dir := d;
+		t.lo := lo; t.hi := hi;
+		IF d.reserve > 0 THEN
+			t.chkLo := lo + d.reserve; t.canAdr := lo; S.PUT(lo, canaryCell)
+		ELSE
+			t.chkLo := lo; t.canAdr := S.ADR(canaryCell)
+		END;
 		(* 13 нулевых слотов регистров (обнуляются ниже: стек из пула не пуст), адрес входа,
 		   8 байт запаса: sp % 16 = 8, после 13 pop и ret rsp % 16 = 8 *)
 		sp := hi - stackHead;
@@ -611,12 +855,16 @@ MODULE Tasks;
 	(** Освободить стек завершённой задачи (уже на главном стеке) и убрать
 		её из списка всех задач: иначе завершённые задачи и всё, на что они
 		ссылаются, живут до конца процесса. *)
+		VAR c: S.ADDRESS;
 	BEGIN
 		IF t.prev = NIL THEN all := t.next ELSE t.prev.next := t.next END;
 		IF t.next # NIL THEN t.next.prev := t.prev END;
 		t.next := NIL; t.prev := NIL;
 		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL END;
-		GiveStack(StackSizeOf(t), t.lo, t.hi);
+		IF t.lo # 0 THEN
+			S.GET(t.canAdr, c); IF c # canaryCell THEN StackBroken(t, FALSE) END;
+			GiveStack(t.dir, StackSizeOf(t), t.lo, t.hi); DEC(t.dir.live)
+		END;
 		t.lo := 0; t.hi := 0;
 		WakeWaiters(t);
 		DEC(alive);
@@ -1034,6 +1282,8 @@ BEGIN
 	NEW(sched);
 	NEW(schedHook);
 	slice := defaultSlice; stackDefault := defaultStack; oneTry := TRUE;
+	canaryCell := canaryVal;
+	guardDir := NewSlabDir(); dir := guardDir;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
 	lastPoll := Kernel.Time();
 	lastWake := -1;	(* первый Step обязан просмотреть спящих *)
@@ -1055,7 +1305,7 @@ CLOSE
 	Kernel.SetScheduler(NIL);
 	WHILE all # NIL DO
 		IF all.stackRec # NIL THEN Kernel.UnregisterStack(all.stackRec); all.stackRec := NIL END;
-		Kernel.FreeStack(all.lo, all.hi);
+		IF all.lo # 0 THEN GiveStack(all.dir, StackSizeOf(all), all.lo, all.hi); DEC(all.dir.live) END;
 		all.lo := 0; all.hi := 0;
 		all := all.next
 	END;

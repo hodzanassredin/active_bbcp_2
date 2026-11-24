@@ -26,3 +26,4 @@ Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer 
 # Проверка переполнения стека задачи ключом компилятора % (только amd64).
 System_devStackChk|proc|300||%
 System_devSchedTrap|proc|300||
+System_devStackDirs|proc|300||%
