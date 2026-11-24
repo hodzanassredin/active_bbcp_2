@@ -72,17 +72,15 @@ MODULE Tasks;
 			prev: Task;		(* предыдущая в списке всех задач *)
 			rnext: Task;		(* очередь готовых *)
 			sleepSeq: INTEGER;	(* номер текущего сна: отличает свою запись кучи от устаревших *)
+			state: INTEGER;	(* рядом с sleepSeq: два INTEGER в одном слове *)
 			wnext: Task;		(* очередь ждущих эту задачу *)
 			waiters: Task;
 			sp: S.ADDRESS;		(* сохранённый rsp *)
 			lo, hi: S.ADDRESS;	(* границы стека [lo, hi) *)
 			stackRec: Kernel.Stack;
-			state: INTEGER;
+			dir: StackDir;		(* поставщик, выдавший стек: ему стек и возвращается *)
 			deadline: LONGINT;	(* до какого Kernel.Time спать *)
 			stackSize: INTEGER;
-			dir: StackDir;		(* поставщик, выдавший стек: ему стек и возвращается *)
-			chkLo: S.ADDRESS;	(* Kernel.stkLo задачи: lo или lo + запас поставщика *)
-			canAdr: S.ADDRESS;	(* адрес канарейки: lo плотного стека или canaryCell *)
 			cancel, wake, failed, bodyOk: BOOLEAN;
 			group: Group;
 			own: Group;
@@ -176,7 +174,7 @@ MODULE Tasks;
 		dir: StackDir;		(* поставщик для новых задач *)
 		guardDir: StackDir;	(* поставщик со сторожем: по умолчанию и для кода без ключа % *)
 		dirs: StackDir;		(* поставщики, у которых есть стеки (живые или в пуле) *)
-		canaryCell: S.ADDRESS;	(* канарейка стеков со сторожем: всегда canaryVal *)
+		canaryCell: S.ADDRESS;	(* значение канарейки (canaryVal) в слове: сравнение без расширения константы *)
 		runSlot: INTEGER;	(* номер Run в таблице методов; -1 — не найден *)
 		lastType: Kernel.Type; lastChecked: BOOLEAN;	(* итог RunChecked для последнего типа *)
 		(* Проход Step: его стек и начало, итог RunLoop. oneTry — один Kernel.Try
@@ -291,12 +289,12 @@ MODULE Tasks;
 
 	PROCEDURE SetCurrent (t: Task);
 	(* Пост: current = t; Kernel.monTok — адрес t^ (Kernel.mainToken при
-	   t = NIL); Kernel.stkLo — низ стека t (0 при t = NIL); взятия мониторов быстрым путём прежнего токена отданы
+	   t = NIL); Kernel.stkLo — низ стека t плюс запас его поставщика (0 при t = NIL); взятия мониторов быстрым путём прежнего токена отданы
 	   таблице Monitors до смены токена. *)
 	BEGIN
 		IF Kernel.monTop # Kernel.monBase THEN Kernel.FlushMonitors END;
 		current := t;
-		IF t # NIL THEN Kernel.monTok := S.ADR(t^); Kernel.stkLo := t.chkLo
+		IF t # NIL THEN Kernel.monTok := S.ADR(t^); Kernel.stkLo := t.lo + t.dir.reserve
 		ELSE Kernel.monTok := Kernel.mainToken; Kernel.stkLo := 0
 		END
 	END SetCurrent;
@@ -465,7 +463,7 @@ MODULE Tasks;
 	(* Канарейка t испорчена. В задаче — трап 126; при уборке — задача ошибочна. *)
 	BEGIN
 		Msg("task stack corrupted: code without the stack check went below the reserve; the neighbour stack may be damaged");
-		S.PUT(t.canAdr, canaryCell);	(* одно сообщение на порчу *)
+		S.PUT(t.lo, canaryCell);	(* одно сообщение на порчу *)
 		t.dir.Overflow(t);
 		IF inTask THEN HALT(126)
 		ELSE
@@ -526,7 +524,9 @@ MODULE Tasks;
 	BEGIN
 		IF current = NIL THEN Msg(what); Msg("wait outside a task") END;
 		ASSERT(current # NIL, 20);
-		S.GET(current.canAdr, c); IF c # canaryCell THEN StackBroken(current, TRUE) END;
+		IF current.dir.reserve # 0 THEN
+			S.GET(current.lo, c); IF c # canaryCell THEN StackBroken(current, TRUE) END
+		END;
 		IF current.cancel THEN Msg("cancelled"); HALT(127) END;
 		IF InFramework() THEN Msg(what); Msg("wait inside an action handler or domain broadcast") END;
 		ASSERT(~InFramework(), 21)
@@ -865,11 +865,7 @@ MODULE Tasks;
 		IF ~d.listed THEN d.listed := TRUE; d.nextDir := dirs; dirs := d END;
 		INC(d.live); t.dir := d;
 		t.lo := lo; t.hi := hi;
-		IF d.reserve > 0 THEN
-			t.chkLo := lo + d.reserve; t.canAdr := lo; S.PUT(lo, canaryCell)
-		ELSE
-			t.chkLo := lo; t.canAdr := S.ADR(canaryCell)
-		END;
+		IF d.reserve # 0 THEN S.PUT(lo, canaryCell) END;	(* канарейка у дна плотного стека *)
 		(* 13 нулевых слотов регистров (обнуляются ниже: стек из пула не пуст), адрес входа,
 		   8 байт запаса: sp % 16 = 8, после 13 pop и ret rsp % 16 = 8 *)
 		sp := hi - stackHead;
@@ -920,7 +916,9 @@ MODULE Tasks;
 		t.next := NIL; t.prev := NIL;
 		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL END;
 		IF t.lo # 0 THEN
-			S.GET(t.canAdr, c); IF c # canaryCell THEN StackBroken(t, FALSE) END;
+			IF t.dir.reserve # 0 THEN
+				S.GET(t.lo, c); IF c # canaryCell THEN StackBroken(t, FALSE) END
+			END;
 			GiveStack(t.dir, StackSizeOf(t), t.lo, t.hi); DEC(t.dir.live)
 		END;
 		t.lo := 0; t.hi := 0;
