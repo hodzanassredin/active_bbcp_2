@@ -8,18 +8,18 @@ MODULE DemoGroup;
 	Источники:
 	  https://go.dev/blog/pipelines
 	  https://pkg.go.dev/golang.org/x/sync/errgroup
-	В Go это context.WithCancel + errgroup.Group; здесь — Tasks.Group
-	для владения и ожидания и общий флаг stopped в роли ctx.Done().
-	Отмена кооперативная: каждый рабочий проверяет флаг в своей точке
-	ожидания. Трап в задаче в консольном хосте фатален (нет trapViewer),
-	поэтому трап-отмена группы здесь не демонстрируется — её проверяет
-	Test64Tasks.
+	В Go это context.WithCancel + errgroup.Group; здесь — Tasks.Group:
+	StartIn регистрирует участника, трап помечает группу failed и
+	CancelGroup отменяет остальных, родитель (владелец группы) ждёт
+	опустошения в TaskBoot.
 
-	Все четыре рабочих доходят до барьера Arrive; затем третий ставит
-	флаг stopped. Итог детерминирован: ошибка одна, все четверо
-	завершились, Completed = 0, в живых 0. *)
+	Все четыре рабочих доходят до барьера Arrive; затем третий трапает.
+	На время прогона ставится пустой trap viewer (как в UnitRunner):
+	иначе консольный хост считает любой трап фатальным. Итог
+	детерминирован: Entered = 8, Completed = 0, группа failed,
+	один рабочий трапнул, трое отменены, в живых 0. *)
 
-	IMPORT ACTIVE, Tasks, DemoSupport;
+	IMPORT ACTIVE, Kernel, Tasks, DemoSupport;
 
 	CONST
 		n = 4;
@@ -31,15 +31,27 @@ MODULE DemoGroup;
 
 	VAR
 		Workers*: ARRAY n OF Worker;
-		Entered*: INTEGER;	(* входы в тело до отмены *)
-		Cancelled*: INTEGER;	(* вышли по флагу отмены *)
+		Entered*: INTEGER;	(* входы в тело до барьера *)
+		Cancelled*: INTEGER;	(* отменены группой *)
 		Completed*: INTEGER;	(* дошли до конца *)
-		Errors*: INTEGER;	(* рабочих сообщили об ошибке *)
-		Stopped*: BOOLEAN;	(* ctx.Done(): отмена запрошена *)
+		Errors*: INTEGER;	(* рабочих сообщили об ошибке (трап) *)
+		FailedWorker*: INTEGER;	(* трапнувших *)
 		LastGroup*: Tasks.Group;
-		GroupAlive*: INTEGER;
-		Failed*: BOOLEAN;	(* трап в задаче *)
+		GroupIsFailed*: BOOLEAN;	(* Tasks.GroupFailed *)
+		GroupAlive*: INTEGER;	(* Tasks.GroupCount *)
+		Failed*: BOOLEAN;	(* неожиданный сбой прогона *)
 		arrived: INTEGER;	(* барьер под монитором модуля *)
+
+	PROCEDURE NoopViewer;
+	(** Пустой trap viewer на время примера. *)
+	BEGIN
+	END NoopViewer;
+
+	PROCEDURE NilCrash;
+		VAR p: Worker;
+	BEGIN
+		p := NIL; p.id := 1
+	END NilCrash;
 
 	PROCEDURE [exclusive] Arrive*;
 	(** Барьер: все n рабочих должны дойти до этой точки. *)
@@ -54,12 +66,11 @@ MODULE DemoGroup;
 		INC(Entered); Arrive;		(* все четверо во втором круге *)
 		IF w.id = badWorker THEN
 			INC(Errors);
-			Stopped := TRUE		(* отмена для остальных *)
+			NilCrash		(* ошибка: группа failed, остальных отменят *)
 		END;
-		WHILE ~Stopped DO
-			INC(Entered); Tasks.Sleep(1)
-		END;
-		INC(Cancelled)
+		Tasks.Sleep(1);			(* сюда отмена будит остальных *)
+		Tasks.Sleep(1);
+		INC(Completed)
 	END Run;
 
 	PROCEDURE (p: Parent) Run;
@@ -75,25 +86,44 @@ MODULE DemoGroup;
 	END Run;
 
 	PROCEDURE Run*;
-	(** Демонстрация: ошибка одного рабочего отменяет группу. *)
-		VAR p: Parent; i: INTEGER; ok: BOOLEAN;
+	(** Демонстрация: трап одного участника отменяет группу. *)
+		VAR p: Parent; i, st: INTEGER; ok: BOOLEAN; old: Kernel.Handler;
 	BEGIN
 		Entered := 0; Cancelled := 0; Completed := 0; Errors := 0;
-		Stopped := FALSE; arrived := 0;
-		LastGroup := NIL; GroupAlive := -1; Failed := FALSE;
+		FailedWorker := 0; arrived := 0;
+		LastGroup := NIL; GroupIsFailed := FALSE; GroupAlive := -1;
+		Failed := FALSE;
+
+		old := Kernel.GetTrapViewer();
+		Kernel.InstallTrapViewer(NoopViewer);
 		NEW(p); Tasks.Start(p);
 		ok := DemoSupport.Pump(10000);
+		Kernel.InstallTrapViewer(old);
+
+		GroupIsFailed := Tasks.GroupFailed(LastGroup);
 		GroupAlive := Tasks.GroupCount(LastGroup);
-		Failed := ~ok;
 		FOR i := 0 TO n - 1 DO
-			IF Tasks.Failed(Workers[i]) THEN Failed := TRUE END
+			st := Tasks.State(Workers[i]);
+			IF st = Tasks.Cancelled THEN
+				INC(Cancelled)
+			ELSIF Tasks.Failed(Workers[i]) THEN
+				INC(FailedWorker)
+			ELSIF st = Tasks.Finished THEN
+				INC(Completed)
+			END
 		END;
+		Failed := ~ok OR ~GroupIsFailed OR (FailedWorker # 1) OR (GroupAlive # 0);
 		DemoSupport.LogInt("DemoGroup: entered=", Entered);
 		DemoSupport.LogInt(" completed=", Completed);
 		DemoSupport.LogInt(" cancelled=", Cancelled);
-		DemoSupport.LogInt(" errors=", Errors);
+		DemoSupport.LogInt(" failedWorker=", FailedWorker);
+		IF GroupIsFailed THEN
+			DemoSupport.LogInt(" groupFailed=", 1)
+		ELSE
+			DemoSupport.LogInt(" groupFailed=", 0)
+		END;
 		DemoSupport.LogInt(" alive=", GroupAlive);
-		IF Failed THEN DemoSupport.Log(" failed") END;
+		IF Failed THEN DemoSupport.Log(" UNEXPECTED") END;
 		DemoSupport.LogLn
 	END Run;
 

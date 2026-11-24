@@ -79,7 +79,7 @@ not part of the concurrency set.
 | `Test64Demo.TestProcSelectTimeout` | timeout index 1, receive index 0, value 42 |
 | `Test64Demo.TestProcWorkerPool` | 9 results, sum 285 |
 | `Test64Demo.TestProcBoring` | 16 messages, 8 from each generator |
-| `Test64Demo.TestProcGroupCancel` | one error, all members stopped, group empty |
+| `Test64Demo.TestProcGroupCancel` | one trapped, three cancelled, group failed and empty |
 | `Test64Demo.TestProcAnts` | food > 0 in 150 steps, 200 ants, no deadlock |
 
 The headless GUI stage `tools/test-demo-gui.sh` opens the `DemoAnts`

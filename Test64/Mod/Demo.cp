@@ -110,11 +110,12 @@ MODULE Test64Demo;
 	BEGIN
 		DemoGroup.Run;
 		UnitAssert.EqualInt(1, DemoGroup.Errors, "group: one error");
-		UnitAssert.EqualInt(4, DemoGroup.Cancelled, "group: all members stopped");
+		UnitAssert.EqualInt(1, DemoGroup.FailedWorker, "group: one trapped member");
+		UnitAssert.EqualInt(3, DemoGroup.Cancelled, "group: three members cancelled");
 		UnitAssert.EqualInt(0, DemoGroup.Completed, "group: none completed");
 		UnitAssert.EqualInt(0, DemoGroup.GroupAlive, "group: empty");
-		UnitAssert.True(DemoGroup.Stopped, "group: cancellation requested");
-		UnitAssert.True(~DemoGroup.Failed, "group: no traps")
+		UnitAssert.True(DemoGroup.GroupIsFailed, "group: marked failed");
+		UnitAssert.True(~DemoGroup.Failed, "group: run itself did not fail")
 	END TestProcGroupCancel;
 
 	PROCEDURE TestProcAnts*;

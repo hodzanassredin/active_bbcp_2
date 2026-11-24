@@ -16,18 +16,20 @@ members with `errgroup.Wait`.
 
 ## Translation
 
-`Tasks.Group` provides the ownership and the wait: `Tasks.NewGroup`,
-`Tasks.StartIn(t, g)`, and the parent's `Run` returns while `TaskBoot`
-waits for the group to become empty. The `context.Done()` role is
-played by the module flag `Stopped`: every worker checks it in its own
-wait loop and leaves cooperatively.
+`Tasks.Group` provides the ownership, the error propagation and the
+wait: `Tasks.NewGroup`, `Tasks.StartIn(t, g)`; the parent's `Run`
+returns while `TaskBoot` waits for the group to become empty. Worker 3
+traps after all four workers pass the `Arrive` barrier. `TaskBoot`
+marks the group failed and calls the kernel's `CancelGroup`, which
+cancels the other three at their next wait point. The parent finishes
+only when the group is empty.
 
-The error is reported by worker 3 after all four workers pass the
-`Arrive` barrier. All four stop, `Completed` is 0 and the group is
-empty. Cancellation through a **trap** (`Tasks.GroupFailed` and the
-kernel's `CancelGroup`) is not used in the command: a trap in a task is
-fatal in the console host (there is no trap view), so that path is
-covered by `Test64Tasks`.
+A trap in the console host would normally be fatal (there is no trap
+window), so the command installs an empty trap viewer for the duration
+of the run and restores the previous one afterwards — the same
+technique as `UnitRunner`. The trap reports in the journal are
+expected: they are the error and the three cancellations. The summary
+line follows them.
 
 ## Run
 
@@ -38,10 +40,11 @@ echo 'DemoGroup.Run' | tools/run64.sh
 Output:
 
 ```
-DemoGroup: entered=10 completed=0 cancelled=4 errors=1 alive=0
+DemoGroup: entered=8 completed=0 cancelled=3 failedWorker=1 groupFailed=1 alive=0
 ```
 
 ## Test
 
-`Test64Demo.TestProcGroupCancel` checks one error, four stopped
-members, zero completed, an empty group and no traps.
+`Test64Demo.TestProcGroupCancel` checks one error, one trapped member,
+three cancelled members, zero completed, an empty failed group and no
+unexpected failure of the run.
