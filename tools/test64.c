@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <sys/resource.h>
 
 #define GUARD 4096
 
@@ -98,4 +99,11 @@ long test64_ns (void) {
 	struct timespec ts;
 	if (clock_gettime (CLOCK_MONOTONIC, &ts) != 0) return 0;
 	return (long) ts.tv_sec * 1000000000L + (long) ts.tv_nsec;
+}
+
+/* Обращения процесса к отсутствующим страницам (minor faults) для строк BENCH. */
+long test64_minflt (void) {
+	struct rusage ru;
+	if (getrusage (RUSAGE_SELF, &ru) != 0) return 0;
+	return ru.ru_minflt;
 }
