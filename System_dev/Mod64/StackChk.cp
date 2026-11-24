@@ -13,10 +13,13 @@ MODULE System_devStackChk;
 	TYPE
 		Deep = POINTER TO RECORD (Tasks.Task) END;
 		Calm = POINTER TO RECORD (Tasks.Task) n: INTEGER; lo, hi: S.ADDRESS END;
+		Trapper = POINTER TO RECORD (Tasks.Task) kind: INTEGER END;
 
 	VAR
 		depth: INTEGER;
 		lo: S.ADDRESS;	(* низ стека глубокой задачи *)
+		fillLo, fillHi: S.ADDRESS;	(* залитая шаблоном часть стека трапующей задачи *)
+		zeroDiv: INTEGER;
 
 	PROCEDURE Rec (n: INTEGER): INTEGER;
 		VAR a: ARRAY 64 OF INTEGER;
@@ -38,6 +41,21 @@ MODULE System_devStackChk;
 	BEGIN
 		st := Kernel.StackOf(S.ADR(i)); t.lo := st.lo; t.hi := st.hi;
 		FOR i := 1 TO 10 DO INC(t.n); Tasks.Yield END
+	END Run;
+
+	PROCEDURE (t: Trapper) Run;
+	(* Заливает шаблоном стек ниже своего кадра (с запасом 1 КБ под вызовы до
+	   трапа) и трапует: kind 0 — HALT (SIGILL), 1 — деление на ноль (SIGFPE),
+	   2 — ASSERT (SIGILL). Обработка трапа не должна трогать залитое. *)
+		CONST pat = 5A5A5A5AH;
+		VAR x, a: S.ADDRESS; v: INTEGER;
+	BEGIN
+		fillHi := S.ADR(x) - 1024; fillLo := Kernel.stkLo + 4096;
+		a := fillLo; WHILE a < fillHi DO S.PUT(a, pat); INC(a, 4) END;
+		IF t.kind = 0 THEN HALT(42)
+		ELSIF t.kind = 1 THEN v := 7 DIV zeroDiv; x := v
+		ELSE ASSERT(zeroDiv # 0, 43)
+		END
 	END Run;
 
 	PROCEDURE Pump;
@@ -97,5 +115,23 @@ MODULE System_devStackChk;
 		UnitAssert.EqualInt(10, c.n, "task finished");
 		UnitAssert.EqualInt(32 * 1024, c.hi - c.lo, "default size applied")
 	END TestDefaultStackSize;
+
+	PROCEDURE TestProcTrapOffTaskStack*;
+	(* Трап задачи (SIGILL, SIGFPE) обрабатывается на альтернативном стеке:
+	   стек задачи ниже точки трапа не тронут. *)
+		CONST pat = 5A5A5A5AH;
+		VAR t: Trapper; k: INTEGER; a: S.ADDRESS; x: INTEGER; bad: INTEGER;
+	BEGIN
+		zeroDiv := 0;
+		FOR k := 0 TO 2 DO
+			NEW(t); t.kind := k; Tasks.SetStackSize(t, 64 * 1024); Tasks.Start(t);
+			Pump;
+			UnitAssert.True(Tasks.Failed(t), "task trapped");
+			UnitAssert.True(fillHi - fillLo > 32 * 1024, "pattern area filled");
+			bad := 0; a := fillLo;
+			WHILE a < fillHi DO S.GET(a, x); IF x # pat THEN INC(bad) END; INC(a, 4) END;
+			UnitAssert.EqualInt(0, bad, "trap handling left task stack below trap point intact")
+		END
+	END TestProcTrapOffTaskStack;
 
 END System_devStackChk.

@@ -571,14 +571,17 @@ MODULE LinKernel;
 		(* Do not intercept service signals used by native libraries.
 		   Preserve BlackBox interrupt, termination and broken-pipe handling. *)
 		IF Libc.sigaction(Libc.SIGINT, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGINT failed"); log.Ln END;
-		IF Libc.sigaction(Libc.SIGILL, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGILL failed"); log.Ln END;
-		IF Libc.sigaction(Libc.SIGFPE, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGFPE failed"); log.Ln END;
-		IF Libc.sigaction(Libc.SIGBUS, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGBUS failed"); log.Ln END;
 		IF Libc.sigaction(Libc.SIGPIPE, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGPIPE failed"); log.Ln END;
 		IF Libc.sigaction(Libc.SIGTERM, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGTERM failed"); log.Ln END;
 
-		(* SIGSEGV to be executed on an alternative stack *)
+		(* Сигналы трапа (SIGILL — HALT, ASSERT, отмена; SIGFPE, SIGBUS, SIGSEGV)
+		   обрабатываются на альтернативном стеке: Kernel.HandleTrap с отчётом
+		   берёт около 5 КБ, и на стеке задачи эта глубина добавлялась бы к её
+		   собственной (docs/stacks-study.md, замер глубины). *)
 		sa.sa_flags := sa.sa_flags + Libc.SA_ONSTACK;
+		IF Libc.sigaction(Libc.SIGILL, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGILL failed"); log.Ln END;
+		IF Libc.sigaction(Libc.SIGFPE, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGFPE failed"); log.Ln END;
+		IF Libc.sigaction(Libc.SIGBUS, sa, NIL) # 0 THEN log.String("LinKernel: sigaction SIGBUS failed"); log.Ln END;
 		IF Libc.sigaction(Libc.SIGSEGV, sa, NIL) # 0 THEN
 			log.String("LinKernel: failed to install SIGSEGV handler"); log.Ln
 		END;
