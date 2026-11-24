@@ -36,5 +36,5 @@ DemoPipeline: count=10 sum=385
 
 ## Test
 
-`Demo_testsExamples.TestProcPipeline` checks 10 results and
+`Demo_devExamples.TestProcPipeline` checks 10 results and
 1²+…+10² = 385.

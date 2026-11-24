@@ -40,5 +40,5 @@ DemoBuffer: produced=120 consumed=120 sum=2460
 
 ## Test
 
-`Demo_testsExamples.TestProcBoundedBuffer` checks 120 produced, 120 consumed,
+`Demo_devExamples.TestProcBoundedBuffer` checks 120 produced, 120 consumed,
 sum 2460 and no task traps.

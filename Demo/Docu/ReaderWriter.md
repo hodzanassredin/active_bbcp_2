@@ -39,5 +39,5 @@ DemoReaderWriter: reads=15 writes=6 bad=0
 
 ## Test
 
-`Demo_testsExamples.TestProcReadersWriters` checks 15 reads, 6 writes, no
+`Demo_devExamples.TestProcReadersWriters` checks 15 reads, 6 writes, no
 overlap and no traps.

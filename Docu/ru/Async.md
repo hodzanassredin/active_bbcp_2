@@ -252,8 +252,8 @@ END CtlPump.
 `FOR`. Ключ — символ `^` после имени модуля:
 
 ```sh
-echo 'DevCompiler64.CompileThis Dev_testsYield ^' | ./dev0Linux   # amd64
-echo 'DevCompiler.CompileThis Dev_testsYield ^' | ./dev0Linux     # i386
+echo 'DevCompiler64.CompileThis Dev_devYield ^' | ./dev0Linux   # amd64
+echo 'DevCompiler.CompileThis Dev_devYield ^' | ./dev0Linux     # i386
 ```
 
 Ключ — опция модуля; в символьный файл он не попадает, поэтому
@@ -435,7 +435,7 @@ dummy-интерфейсом и своим resolv.conf, где сервер им
 для несуществующего имени ждёт 10 010 мс, а главный цикл делает
 9 449 шагов. Без `unshare`/`ip`/`mount` сценарий печатает `SKIP` с
 причиной; `tools/test.sh` включает его отдельным этапом.
-`Async_testsWinWorkers` повторяет проверки медленного вызова, файла и
+`Async_devWinWorkers` повторяет проверки медленного вызова, файла и
 `getaddrinfo` под wine (4/4).
 
 ## Компутоны (этап 9)

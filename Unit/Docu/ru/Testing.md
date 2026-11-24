@@ -7,7 +7,7 @@
 ## Как написать тест
 
 ```
-MODULE Text_testsWriter;
+MODULE Text_devWriter;
 	IMPORT TextModels, UnitAssert;
 
 	VAR t: TextModels.Model;
@@ -23,16 +23,16 @@ MODULE Text_testsWriter;
 		UnitAssert.EqualInt(2, t.Length(), "длина после двух символов")
 	END TestWriteAtEnd;
 
-END Text_testsWriter.
+END Text_devWriter.
 ```
 
-Тесты живут в отдельной подсистеме `<Подсистема>_tests` рядом с
-проверяемой: файл `<Подсистема>_tests/Mod/<Тема>.cp`, модуль
-`<Подсистема>_tests<Тема>` (пример — `Text_testsWriter` в
-`Text_tests/Mod/Writer.cp`). Точка входа без темы — `<Подсистема>_testsMain`
-(`Text_tests/Mod/Main.cp`). Только для amd64 — `Mod64` в той же
-подсистеме (`Async_tests/Mod64/Channels.cp`, модуль
-`Async_testsChannels`). Поставочная сборка подсистемы `*_tests` не
+Тесты живут в отдельной подсистеме `<Подсистема>_dev` рядом с
+проверяемой: файл `<Подсистема>_dev/Mod/<Тема>.cp`, модуль
+`<Подсистема>_dev<Тема>` (пример — `Text_devWriter` в
+`Text_dev/Mod/Writer.cp`). Точка входа без темы — `<Подсистема>_devMain`
+(`Text_dev/Mod/Main.cp`). Только для amd64 — `Mod64` в той же
+подсистеме (`Async_dev/Mod64/Channels.cp`, модуль
+`Async_devChannels`). Поставочная сборка подсистемы `*_dev` не
 включает: тесты собирает `tools/unit.sh` по требованию.
 
 ## Правила
@@ -78,19 +78,19 @@ END Text_testsWriter.
 ## Запуск
 
 ```
-echo 'UnitRunner.Run Unit_testsMain' | tools/run64.sh
-echo 'UnitRunner.Run Text_testsWriter slow proc' | tools/run64.sh
+echo 'UnitRunner.Run Unit_devMain' | tools/run64.sh
+echo 'UnitRunner.Run Text_devWriter slow proc' | tools/run64.sh
 
 tools/test.sh                 # модули из tools/tests.txt
 tools/test.sh --list
-tools/unit.sh Check_testsMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
+tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
 Аргументы `UnitRunner.Run`: имя модуля, имя подсистемы или `all`;
 `slow`, `gui`, `proc` включают пометки; `junit=ФАЙЛ`, `tap`, `noquit`.
 Имя подсистемы выбирает загруженные модули её тестов: `System` находит
-`System_tests*`, `Async` — `Async_tests*`. `all` — все загруженные
-модули, в имени которых есть `_tests`. Модули должны быть уже загружены
+`System_dev*`, `Async` — `Async_dev*`. `all` — все загруженные
+модули, в имени которых есть `_dev`. Модули должны быть уже загружены
 (слинкованы) в мир.
 
 `tools/unit.sh` компилирует модуль через `tools/go64.sh` (до трёх
@@ -101,7 +101,7 @@ tools/unit.sh Check_testsMain --marks proc --compile "CheckMath64 CheckRealForma
 
 ## Самопроверка
 
-`Unit_testsMain` (`Unit_tests/Mod/Main.cp`) проверяет сам исполнитель:
-`Unit_testsProbe` содержит проходящий, трапующий, падающий, пустой и
+`Unit_devMain` (`Unit_dev/Mod/Main.cp`) проверяет сам исполнитель:
+`Unit_devProbe` содержит проходящий, трапующий, падающий, пустой и
 медленный тесты плюс фикстуры; `TestNestedRunner` гоняет пробу тихо и
 сверяет счётчики `PASS/FAIL/EMPTY/SKIP`.

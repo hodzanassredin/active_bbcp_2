@@ -120,7 +120,7 @@ Measured with 1000 ants (default speed 10):
 
 ## Test
 
-`Demo_testsExamples` (marks `proc`) checks the ants:
+`Demo_devExamples` (marks `proc`) checks the ants:
 
 - `TestProcAnts` — `Simulate(1000, 300)`: food delivered, 1000 ants,
   all finished, no traps, no deadlock;

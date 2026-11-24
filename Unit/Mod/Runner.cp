@@ -296,20 +296,20 @@ MODULE UnitRunner;
 	END RunModule;
 
 	PROCEDURE IsTestModule (IN nm, prefix: ARRAY OF CHAR): BOOLEAN;
-	(* Модуль тестов подсистемы <prefix>_tests: <prefix>_tests<Тема>.
-	   Для prefix = "" (all) — любой модуль, содержащий "_tests". *)
+	(* Модуль тестов подсистемы <prefix>_dev: <prefix>_dev<Тема>.
+	   Для prefix = "" (all) — любой модуль, содержащий "_dev". *)
 		VAR i: INTEGER;
 	BEGIN
-		IF prefix = "" THEN RETURN Contains(nm, "_tests") END;
+		IF prefix = "" THEN RETURN Contains(nm, "_dev") END;
 		IF ~StartsWith(nm, prefix) THEN RETURN FALSE END;
 		i := StrLen(prefix);
-		RETURN (nm[i] = "_") & (nm[i + 1] = "t") & (nm[i + 2] = "e")
-			& (nm[i + 3] = "s") & (nm[i + 4] = "t") & (nm[i + 5] = "s")
+		RETURN (nm[i] = "_") & (nm[i + 1] = "d") & (nm[i + 2] = "e")
+			& (nm[i + 3] = "v")
 	END IsTestModule;
 
 	PROCEDURE RunMatching (IN prefix, marks: ARRAY OF CHAR; VAR total: Counts);
-	(* Модули уже загруженного мира: Run('all') — все *_tests*;
-	   Run('System') — System_tests*; prefix = "" — все *_tests*. *)
+	(* Модули уже загруженного мира: Run('all') — все *_dev*;
+	   Run('System') — System_dev*; prefix = "" — все *_dev*. *)
 		VAR s: Meta.Scanner; nm: Meta.Name; c: Counts; any: BOOLEAN;
 	BEGIN
 		any := FALSE;
@@ -324,7 +324,7 @@ MODULE UnitRunner;
 			s.Scan
 		END;
 		IF ~any THEN
-			W("UnitRunner: no *_tests module for '"); W(prefix); W("'"); Ln
+			W("UnitRunner: no *_dev module for '"); W(prefix); W("'"); Ln
 		END
 	END RunMatching;
 

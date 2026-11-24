@@ -2,7 +2,7 @@
 # Прогон модульных тестов без окон: подсистема Unit + blackbox-console.
 #
 #   tools/test.sh                 # все модули из tools/tests.txt
-#   tools/test.sh System_testsMain # только указанные модули
+#   tools/test.sh System_devMain # только указанные модули
 #   tools/test.sh --list
 #
 # Формат tools/tests.txt: <модуль>|<marks>|<таймаут>|<доп. модули>.
@@ -48,88 +48,88 @@ done < "$manifest"
 # Нет прав/утилит — обвязка печатает SKIP с причиной; это не провал.
 runresolver=1
 if [ -n "$only" ]; then
-	case " $only " in *" Comm_testsResolver "*) ;; *) runresolver=0;; esac
+	case " $only " in *" Comm_devResolver "*) ;; *) runresolver=0;; esac
 fi
 if [ "$runresolver" -eq 1 ]; then
 	total=$((total + 1))
-	echo "test: Comm_testsResolver (marks='proc', сеть и mount без root)"
+	echo "test: Comm_devResolver (marks='proc', сеть и mount без root)"
 	rout=$("$BB/tools/test-resolver.sh" 2>&1); rrc=$?
 	printf '%s\n' "$rout"
 	case "$rout" in
 		SKIP*)
-			skipped=$((skipped + 1)); echo "SKIP Comm_testsResolver"; summary="$summary
-  SKIP Comm_testsResolver" ;;
+			skipped=$((skipped + 1)); echo "SKIP Comm_devResolver"; summary="$summary
+  SKIP Comm_devResolver" ;;
 		*)
 			if [ $rrc -eq 0 ]; then
-				ok=$((ok + 1)); echo "PASS Comm_testsResolver"; summary="$summary
-  OK   Comm_testsResolver"
+				ok=$((ok + 1)); echo "PASS Comm_devResolver"; summary="$summary
+  OK   Comm_devResolver"
 			else
-				bad=$((bad + 1)); echo "FAIL Comm_testsResolver"; summary="$summary
-  BAD  Comm_testsResolver"
+				bad=$((bad + 1)); echo "FAIL Comm_devResolver"; summary="$summary
+  BAD  Comm_devResolver"
 			fi ;;
 	esac
 fi
 
 runrobust=1
 if [ -n "$only" ]; then
-	case " $only " in *" Robust_testsParallel "*) ;; *) runrobust=0;; esac
+	case " $only " in *" Robust_devParallel "*) ;; *) runrobust=0;; esac
 fi
 if [ "$runrobust" -eq 1 ]; then
 	total=$((total + 1))
-	echo "test: Robust_testsParallel (marks='proc', RobustParallel 1/4/16)"
+	echo "test: Robust_devParallel (marks='proc', RobustParallel 1/4/16)"
 	if "$BB/tools/test-robust.sh"; then
-		ok=$((ok + 1)); echo "PASS Robust_testsParallel"; summary="$summary
-  OK   Robust_testsParallel"
+		ok=$((ok + 1)); echo "PASS Robust_devParallel"; summary="$summary
+  OK   Robust_devParallel"
 	else
-		bad=$((bad + 1)); echo "FAIL Robust_testsParallel"; summary="$summary
-  BAD  Robust_testsParallel"
+		bad=$((bad + 1)); echo "FAIL Robust_devParallel"; summary="$summary
+  BAD  Robust_devParallel"
 	fi
 fi
 
 runmpi=1
 if [ -n "$only" ]; then
-	case " $only " in *" Async_testsMpi "*) ;; *) runmpi=0;; esac
+	case " $only " in *" Async_devMpi "*) ;; *) runmpi=0;; esac
 fi
 if [ "$runmpi" -eq 1 ]; then
 	total=$((total + 1))
-	echo "test: Async_testsMpi (marks='proc', mpiexec на 5 рангах)"
+	echo "test: Async_devMpi (marks='proc', mpiexec на 5 рангах)"
 	rout=$("$BB/tools/test-mpi.sh" 2>&1); rrc=$?
 	printf '%s\n' "$rout"
 	case "$rout" in
 		SKIP*)
-			skipped=$((skipped + 1)); echo "SKIP Async_testsMpi"; summary="$summary
-  SKIP Async_testsMpi" ;;
+			skipped=$((skipped + 1)); echo "SKIP Async_devMpi"; summary="$summary
+  SKIP Async_devMpi" ;;
 		*)
 			if [ $rrc -eq 0 ]; then
-				ok=$((ok + 1)); echo "PASS Async_testsMpi"; summary="$summary
-  OK   Async_testsMpi"
+				ok=$((ok + 1)); echo "PASS Async_devMpi"; summary="$summary
+  OK   Async_devMpi"
 			else
-				bad=$((bad + 1)); echo "FAIL Async_testsMpi"; summary="$summary
-  BAD  Async_testsMpi"
+				bad=$((bad + 1)); echo "FAIL Async_devMpi"; summary="$summary
+  BAD  Async_devMpi"
 			fi ;;
 	esac
 fi
 
 rungui=1
 if [ -n "$only" ]; then
-	case " $only " in *" Demo_testsGui "*) ;; *) rungui=0;; esac
+	case " $only " in *" Demo_devGui "*) ;; *) rungui=0;; esac
 fi
 if [ "$rungui" -eq 1 ]; then
 	total=$((total + 1))
-	echo "test: Demo_testsGui (GUI под gtk4-broadwayd, без экрана)"
+	echo "test: Demo_devGui (GUI под gtk4-broadwayd, без экрана)"
 	rout=$("$BB/tools/test-gui.sh" 2>&1); rrc=$?
 	printf '%s\n' "$rout"
 	case "$rout" in
 		SKIP*)
-			skipped=$((skipped + 1)); echo "SKIP Demo_testsGui"; summary="$summary
-  SKIP Demo_testsGui" ;;
+			skipped=$((skipped + 1)); echo "SKIP Demo_devGui"; summary="$summary
+  SKIP Demo_devGui" ;;
 		*)
 			if [ $rrc -eq 0 ]; then
-				ok=$((ok + 1)); echo "PASS Demo_testsGui"; summary="$summary
-  OK   Demo_testsGui"
+				ok=$((ok + 1)); echo "PASS Demo_devGui"; summary="$summary
+  OK   Demo_devGui"
 			else
-				bad=$((bad + 1)); echo "FAIL Demo_testsGui"; summary="$summary
-  BAD  Demo_testsGui"
+				bad=$((bad + 1)); echo "FAIL Demo_devGui"; summary="$summary
+  BAD  Demo_devGui"
 			fi ;;
 	esac
 fi

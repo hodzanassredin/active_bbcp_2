@@ -42,5 +42,5 @@ DemoBarber: served=3 turnedAway=3
 
 ## Test
 
-`Demo_testsExamples.TestProcBarber` checks 3 served, 3 turned away, no traps
+`Demo_devExamples.TestProcBarber` checks 3 served, 3 turned away, no traps
 and no deadlock.

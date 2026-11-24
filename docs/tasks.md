@@ -9,7 +9,7 @@
 обычный модуль `System/Mod/Monitors.cp`; цепочки взятий привязаны к
 токену задачи, а не к записи стека ядра. Философы в тестах по-прежнему
 берут вилки ручными `Park`/`Unpark` — как пример без мониторов;
-буфер и `Await` проверяются в `System_testsMonitors`.
+буфер и `Await` проверяются в `System_devMonitors`.
 
 ## Мониторы вне ядра (s18)
 
@@ -95,7 +95,7 @@ NEW(w); Tasks.SetName(w, "worker"); Tasks.Start(w)
 
 Вокруг сырого переключения — `Kernel.SwitchSave`/`SwitchRestore`:
 контекст `Kernel.Try`, `trapStack` и `tryCount` хранится в записи стека
-ядра. Внешней `.so` нет; `ucontext` из System_testsCo не используется.
+ядра. Внешней `.so` нет; `ucontext` из System_devCo не используется.
 
 ## Планировщик
 
@@ -138,7 +138,7 @@ Services.now)`. `Step` исполняет готовые задачи не до�
 
 ## Тесты и цифры
 
-`System_tests/Mod/Tasks.cp` (модуль `System_testsTasks`, marks=`proc slow`):
+`System_dev/Mod/Tasks.cp` (модуль `System_devTasks`, marks=`proc slow`):
 Yield, производитель-потребитель, философы (ручные Park/Unpark),
 отмена, изоляция трапа, ожидание вне задачи и в обработчике,
 потерянное пробуждение, группа, действие планировщика, список задач,
@@ -153,7 +153,7 @@ Yield, производитель-потребитель, философы (ру
 задач. Спящих `Step` просматривает не чаще раза на изменившееся время
 (`lastWake`) — при 10 тыс. спящих это главный расход шага.
 
-Замер (Linux x64, `UnitRunner.Run System_testsTasks proc slow`):
+Замер (Linux x64, `UnitRunner.Run System_devTasks proc slow`):
 
 | Задачи | Стек | Setup | Шаги | Переключений | На переключение | RSS процесса |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -177,5 +177,5 @@ Yield, производитель-потребитель, философы (ру
 - `Platform.AllocateStackMem` по умолчанию возвращает 0; на Windows
   x64 нужен свой `VirtualAlloc` + `PAGE_NOACCESS` (задача тогда
   отказывается стартовать с понятным сообщением).
-- Консольный init не ставит `trapViewer`; без Unit/System_testsSupport трап
+- Консольный init не ставит `trapViewer`; без Unit/System_devSupport трап
   в задаче фатален, как и любой трап в консоли (общий дефект стенда).
