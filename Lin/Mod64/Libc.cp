@@ -750,6 +750,8 @@ MODULE LinLibc ["libc.so.6"];
 		PROCEDURE [ccall] write* (d: int; buf: PtrVoid; nbytes: size_t): ssize_t;
 		PROCEDURE [ccall] read* (d: int; buf: PtrVoid; nbytes: size_t): ssize_t;
 		PROCEDURE [ccall] close* (d: int): int;
+		PROCEDURE [ccall] fsync* (d: int): int;
+		PROCEDURE [ccall] fdatasync* (d: int): int;
 
 	(* POSIX.1 *)
 		PROCEDURE [ccall] chmod* (path: PtrSTR; mode: mode_t): int;
