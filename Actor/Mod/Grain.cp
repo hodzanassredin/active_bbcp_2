@@ -51,7 +51,14 @@ MODULE ActorGrain;
 		Passivate = POINTER TO RECORD (ActorCore.Msg) END;
 		WatchHost = POINTER TO RECORD (ActorCore.Msg) i: INTEGER END;
 
-		Act = POINTER TO RECORD ref: ActorCore.Ref; age: INTEGER; asked: BOOLEAN; next: Act END;
+		Held = POINTER TO RECORD e: Envelope; sender: ActorCore.Ref; next: Held END;
+
+		Act = POINTER TO RECORD
+			ref: ActorCore.Ref; age: INTEGER;
+			asked: BOOLEAN;	(* попросили пассивироваться: письма — в held до Terminated *)
+			held, last: Held;
+			next: Act
+		END;
 
 		Host = POINTER TO RECORD (ActorCore.Actor) cl: Cluster; acts: Act END;
 
@@ -132,8 +139,8 @@ MODULE ActorGrain;
 		RETURN x
 	END Find;
 
-	PROCEDURE (h: Host) Deliver (c: ActorCore.Context; e: Envelope), NEW;
-		VAR k: Kind; x: Act; name, full: Name; r: ActorCore.Ref;
+	PROCEDURE (h: Host) Deliver (c: ActorCore.Context; e: Envelope; sender: ActorCore.Ref), NEW;
+		VAR k: Kind; x: Act; name, full: Name; r: ActorCore.Ref; hd: Held;
 	BEGIN
 		k := h.cl.kinds; WHILE (k # NIL) & (k.name # e.kind) DO k := k.next END;
 		IF (k = NIL) OR (e.m = NIL) THEN RETURN END;	(* неизвестный вид: письмо пропадает *)
@@ -147,17 +154,24 @@ MODULE ActorGrain;
 			c.Watch(r); INC(h.cl.activations);
 			NEW(x); x.ref := r; x.next := h.acts; h.acts := x
 		END;
-		x.age := 0; x.asked := FALSE;
-		x.ref.Post(e.m, c.Sender())
+		IF x.asked THEN	(* воплощение уходит: письмо ждёт следующего *)
+			NEW(hd); hd.e := e; hd.sender := sender;
+			IF x.last = NIL THEN x.held := hd ELSE x.last.next := hd END;
+			x.last := hd
+		ELSE
+			x.age := 0; x.ref.Post(e.m, sender)
+		END
 	END Deliver;
 
 	PROCEDURE (h: Host) Ended (c: ActorCore.Context; t: ActorCore.Terminated), NEW;
-		VAR x, p: Act; i: INTEGER;
+		VAR x, p: Act; i: INTEGER; hd: Held;
 	BEGIN
 		p := NIL; x := h.acts;
 		WHILE (x # NIL) & (x.ref # t.who) DO p := x; x := x.next END;
 		IF x # NIL THEN
-			IF p = NIL THEN h.acts := x.next ELSE p.next := x.next END
+			IF p = NIL THEN h.acts := x.next ELSE p.next := x.next END;
+			hd := x.held;	(* письма, ждавшие конца пассивации, — новому воплощению по порядку *)
+			WHILE hd # NIL DO h.Deliver(c, hd.e, hd.sender); hd := hd.next END
 		ELSIF t.reason = ActorCore.byNodeLoss THEN
 			FOR i := 0 TO h.cl.n - 1 DO
 				IF h.cl.m[i].host = t.who THEN h.cl.m[i].alive := FALSE END
@@ -168,7 +182,7 @@ MODULE ActorGrain;
 	PROCEDURE (h: Host) Receive (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR x: Act; i: INTEGER;
 	BEGIN
-		WITH m: Envelope DO h.Deliver(c, m)
+		WITH m: Envelope DO h.Deliver(c, m, c.Sender())
 		| m: ActorCore.Terminated DO h.Ended(c, m)
 		| m: WatchHost DO c.Watch(h.cl.m[m.i].host)
 		| m: TickMsg DO

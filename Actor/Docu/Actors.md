@@ -686,7 +686,11 @@ another node. A repeated command is guarded, as in the saga, by an operation num
 
 **Passivation.** The host counts idle ticks of each activation: `ActorGrain.Tick(cl)`; after `idle`
 ticks without letters the activation saves a snapshot and stops. The next letter brings it up from
-the snapshot (`TestPassivateAndReactivate`). A tick is a letter, not a timer: in a deterministic run
+the snapshot (`TestPassivateAndReactivate`). A letter that reaches the host after the passivation
+request but before the activation ends is not handed to the leaving activation: the host holds it
+and after `Terminated` passes it to the new one in order (`TestLetterDuringPassivation`). Letters that
+reach an activation between a journal-conflict trap and its stop are not foreseen by the host: they
+become dead letters, and the client repeats them with the same operation number. A tick is a letter, not a timer: in a deterministic run
 the driver gives it, on a live node a `Services` action.
 
 **Node loss.** The host watches the hosts of the other members. `Terminated` with reason

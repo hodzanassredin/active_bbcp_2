@@ -376,6 +376,29 @@ MODULE Actor_devGrain;
 		UnitAssert.EqualInt(110, lastBalance, "B sees A's event")
 	END TestSplitBrainOneWriter;
 
+	PROCEDURE TestLetterDuringPassivation*;
+	(* Пул исполнителей: хозяин обрабатывает тик (просит пассивацию) и сразу
+		следом конверт тому же ключу, пока воплощение ещё не остановилось.
+		Письмо не теряется: хозяин держит его и отдаёт новому воплощению. *)
+		VAR s: Sum; r: ActorCore.Ref; c: ActorGrain.Cluster; n: ActorNet.Node; t: LONGINT;
+	BEGIN
+		ActorRun.Start(1); net := ActorNetMem.NewAuto(); j := ActorJournal.NewMem();
+		n := ActorNet.New("P", net, 7); ActorNetMem.Add(net, n);
+		c := ActorGrain.New(n, j); ActorGrain.Register(c, "acct", NewAccount); c.idle := 1;
+		key := "5"; r := ActorGrain.Ref(c, "acct", key);
+		ActorCore.Tell(r, NewDeposit(1, 100));
+		t := Services.Ticks(); WHILE (c.activations < 1) & (Services.Ticks() - t < 2000) DO Services.actionHook.Step END;
+		Journal(key, s); t := Services.Ticks();
+		WHILE (s.n < 1) & (Services.Ticks() - t < 2000) DO Services.actionHook.Step; Journal(key, s) END;
+		ActorGrain.Tick(c); ActorCore.Tell(r, NewDeposit(2, 10));	(* оба письма — хозяину подряд *)
+		t := Services.Ticks();
+		WHILE (s.n < 2) & (Services.Ticks() - t < 2000) DO Services.actionHook.Step; Journal(key, s) END;
+		UnitAssert.EqualInt(2, s.n, "second deposit executed");
+		UnitAssert.EqualInt(1, c.passivations, "passivated once");
+		UnitAssert.EqualInt(2, c.activations, "activated again after passivation");
+		ActorNet.Down(n)
+	END TestLetterDuringPassivation;
+
 	(* --- прогоны от зерна --------------------------------------------------------- *)
 
 	PROCEDURE Fail (IN what: ARRAY OF CHAR);
