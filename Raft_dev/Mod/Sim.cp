@@ -17,7 +17,7 @@ MODULE Raft_devSim;
 	  под индексом i — одна и та же запись, и она не меняется;
 	- в конце, после лечения сети, кластер снова фиксирует команды. *)
 
-	IMPORT Strings, Dialog, Log, Core := RaftCore, RaftSm, UnitAssert;
+	IMPORT Strings, Dialog, Log, KvPages, KvDb, KvFault, Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, UnitAssert;
 
 	CONST
 		maxN = 5;
@@ -29,11 +29,6 @@ MODULE Raft_devSim;
 		idle = 0; inc = 1; read = 2;
 
 	TYPE
-		Disk = RECORD	(* стойкое состояние узла *)
-			term, vote, last: INTEGER;
-			log: Core.Entries
-		END;
-
 		Counter = POINTER TO RECORD (RaftSm.StateMachine) v: INTEGER END;
 
 		Client = RECORD
@@ -49,7 +44,9 @@ MODULE Raft_devSim;
 		ops: POINTER TO ARRAY OF Op; nops*: INTEGER;
 		now, nextCtx: INTEGER;
 		nodes: ARRAY maxN OF Core.Node;
-		disk: ARRAY maxN OF Disk;
+		disk: ARRAY maxN OF RaftStorage.Storage;
+		kvs: ARRAY maxN OF KvFault.Store;	(* носители узлов в режиме Kv *)
+		onKv: BOOLEAN;
 		restarts: ARRAY maxN OF INTEGER;
 		rate: ARRAY maxN OF INTEGER;	(* темп часов: тиков за ход *)
 		checked: ARRAY maxN OF INTEGER;	(* до какого индекса сверена фиксация узла *)
@@ -82,8 +79,14 @@ MODULE Raft_devSim;
 	END Violation;
 
 	PROCEDURE Same (IN a, b: Core.Entry): BOOLEAN;
+	(* одна и та же запись: срок и байты команды (после Kv указатели другие) *)
+		VAR k: INTEGER;
 	BEGIN
-		RETURN (a.term = b.term) & (a.data = b.data)
+		IF a.term # b.term THEN RETURN FALSE END;
+		IF (a.data = NIL) OR (b.data = NIL) THEN RETURN a.data = b.data END;
+		IF LEN(a.data^) # LEN(b.data^) THEN RETURN FALSE END;
+		k := 0; WHILE (k < LEN(a.data^)) & (a.data[k] = b.data[k]) DO INC(k) END;
+		RETURN k = LEN(a.data^)
 	END Same;
 
 	(* --- решённое: зафиксированное и применённое ------------------------- *)
@@ -169,18 +172,14 @@ MODULE Raft_devSim;
 
 	(* --- узлы ------------------------------------------------------------ *)
 
-	PROCEDURE Persist (i: INTEGER; IN r: Core.Ready);
-		VAR a: Core.Entries; k: INTEGER; e: Core.Entry;
+	PROCEDURE Persist (i: INTEGER; IN r: Core.Ready): BOOLEAN;
+	(* FALSE — питание пропало посреди фиксации Kv *)
+		VAR res: INTEGER;
 	BEGIN
-		IF r.hard THEN disk[i].term := r.term; disk[i].vote := r.vote END;
-		IF r.from <= r.last + 1 THEN
-			IF r.last >= LEN(disk[i].log^) THEN
-				NEW(a, 2 * r.last + 16); FOR k := 0 TO disk[i].last DO a[k] := disk[i].log[k] END;
-				disk[i].log := a
-			END;
-			FOR k := r.from TO r.last DO Core.EntryAt(nodes[i], k, e); disk[i].log[k] := e END;
-			disk[i].last := r.last
-		END
+		IF onKv & lossy & (Rand(1000) < 5 * harsh) THEN kvs[i].Arm(Rand(40), Rand(KvPages.size)) END;
+		disk[i].Save(nodes[i], r, res);
+		IF onKv THEN kvs[i].Arm(-1, 0) END;
+		RETURN res = RaftStorage.ok
 	END Persist;
 
 	PROCEDURE Post (m: Core.Msg);
@@ -197,15 +196,17 @@ MODULE Raft_devSim;
 		VAR c: INTEGER;
 	BEGIN
 		nodes[i] := NIL; wasLeader[i] := FALSE; checked[i] := 0;
+		IF onKv THEN kvs[i].PowerOff(Rand(1000)) END;	(* несинхронизированное пропало или дошло наполовину *)
 		FOR c := 0 TO nClients - 1 DO IF (cl[c].state # idle) & (cl[c].node = i) THEN cl[c].deadline := now END END
 	END Crash;
 
 	PROCEDURE Restart (i: INTEGER);
-		VAR cnt: Counter;
+		VAR cnt: Counter; db: KvDb.Db; res, t, v, last: INTEGER; log: Core.Entries;
 	BEGIN
 		INC(restarts[i]);
-		nodes[i] := Core.New(i, n, seed * 7919 + restarts[i] * 31, electionTicks,
-			disk[i].term, disk[i].vote, disk[i].log, disk[i].last);
+		IF onKv THEN KvDb.Open(kvs[i], db, res); ASSERT(res = KvDb.ok, 60); disk[i] := RaftKvStorage.New(db) END;
+		disk[i].Load(t, v, log, last, res); ASSERT(res = RaftStorage.ok, 61);
+		nodes[i] := Core.New(i, n, seed * 7919 + restarts[i] * 31, electionTicks, t, v, log, last);
 		NEW(cnt); sms[i] := RaftSm.New(cnt);
 		Core.SetBatch(nodes[i], batch)
 	END Restart;
@@ -217,9 +218,14 @@ MODULE Raft_devSim;
 		nd := nodes[i];
 		WHILE (nd # NIL) & Core.HasReady(nd) DO
 			Core.GetReady(nd, r);
-			IF r.syncFirst THEN Persist(i, r) ELSE Post(r.msgs) END;
+			IF r.syncFirst THEN
+				IF ~Persist(i, r) THEN Crash(i); RETURN END
+			ELSE Post(r.msgs)
+			END;
 			IF lossy & (Rand(10000) < 5 + 10 * (harsh - 1)) OR (crashNext = i) THEN crashNext := -1; Crash(i); RETURN END;
-			IF r.syncFirst THEN Post(r.msgs) ELSE Persist(i, r) END;
+			IF r.syncFirst THEN Post(r.msgs)
+			ELSIF ~Persist(i, r) THEN Crash(i); RETURN
+			END;
 			FOR k := r.applyLo TO r.applyHi DO
 				Core.EntryAt(nd, k, e); Decide(k, e);
 				sms[i].Apply(k, e.data, res, dup); Applied(i, k, e.data, res)
@@ -441,7 +447,7 @@ MODULE Raft_devSim;
 		harsh := 1 + Rand(3); batch := 1 + Rand(4); IF batch = 4 THEN batch := 64 END;
 		Heal;
 		FOR i := 0 TO n - 1 DO
-			disk[i].term := 0; disk[i].vote := Core.none; disk[i].last := 0; NEW(disk[i].log, 16);
+			IF onKv THEN kvs[i] := KvFault.New() ELSE disk[i] := RaftStorage.NewMem() END;
 			restarts[i] := 0; checked[i] := 0; wasLeader[i] := FALSE;
 			rate[i] := 1 + Rand(3);
 			Restart(i)
@@ -482,7 +488,7 @@ MODULE Raft_devSim;
 
 	PROCEDURE Teardown*;
 	BEGIN
-		Core.mutations := {}
+		Core.mutations := {}; onKv := FALSE
 	END Teardown;
 
 	(* --- тесты ----------------------------------------------------------- *)
@@ -500,6 +506,17 @@ MODULE Raft_devSim;
 		Seeds(5, 1000, 500, 2000, {}, f, msg);
 		UnitAssert.True(f < 0, msg)
 	END TestFiveNodes;
+
+	PROCEDURE TestOnKv*;
+	(** Стойкое состояние — в Kv на KvFault: падение узла выключает питание,
+		фиксация может оборваться посередине. *)
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		onKv := TRUE; Seeds(3, 1, 40, 1500, {}, f, msg);
+		IF f < 0 THEN Seeds(5, 500, 20, 1500, {}, f, msg) END;
+		onKv := FALSE;
+		UnitAssert.True(f < 0, msg)
+	END TestOnKv;
 
 	PROCEDURE TestReplayIsExact*;
 		VAR r: BOOLEAN; msg: ARRAY 256 OF CHAR; c1, c2, p1: INTEGER;
@@ -675,6 +692,14 @@ MODULE Raft_devSim;
 		UnitAssert.True(v, "голос, отправленный до сохранения, не пойман");
 		Log.String("голос: " + msg); Log.Ln
 	END TestMutLostVote;
+
+	PROCEDURE TestMutLostVoteOnKv*;
+	(* голос до сохранения ловится и на Kv: несохранённое пропадает с питанием *)
+		VAR v: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		onKv := TRUE; LostVote({Core.mutSendBeforeSync}, v, msg); onKv := FALSE;
+		UnitAssert.True(v, "голос до сохранения на Kv не пойман")
+	END TestMutLostVoteOnKv;
 
 	PROCEDURE TestFigure8Safe*;
 		VAR v: BOOLEAN; msg: ARRAY 256 OF CHAR;
