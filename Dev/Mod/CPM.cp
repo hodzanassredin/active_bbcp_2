@@ -480,6 +480,13 @@ MODULE DevCPM;
 		StdLog.Int(i)
 	END LogWNum;
 
+	PROCEDURE GetPar* (IN key: ARRAY OF CHAR; OUT val: ARRAY OF CHAR; OUT res: INTEGER);
+	(** Чтение внешнего параметра компилятора. Компилятор не импортирует
+		Dialog напрямую: связь с хостом идёт через DevCPM. *)
+	BEGIN
+		Dialog.GetPar(key, val, res)
+	END GetPar;
+
 	PROCEDURE LogWLn*;
 	BEGIN
 		StdLog.Ln

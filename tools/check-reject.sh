@@ -17,9 +17,10 @@ cleanup () {
 	rm -f "$BB/Test64/Mod/RejAwait.cp" "$BB/Test64/Mod/RejCall.cp" \
 		"$BB/Test64/Mod/RejLocal.cp" "$BB/Test64/Mod/RejNoActive.cp" \
 		"$BB/Test64/Mod/RejCode.cp" "$BB/Test64/Mod/KeyProbe.cp" "$BB/Test64/Mod/RejGuarded.cp" \
-		"$BB/System/Mod/KeyProbe.cp"
+		"$BB/System/Mod/KeyProbe.cp" "$BB/System/Mod/Usermod.cp"
 	rm -f "$BB"/.work/BB64LIN/Test64/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,KeyProbe}.ocf 2>/dev/null
-	rm -f "$BB"/.work/bb64LIN/System/Code/KeyProbe.ocf 2>/dev/null
+	rm -f "$BB"/.work/BB64LIN/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
+	rm -f "$BB"/.work/i386/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
 	rm -f "$BB"/.work/i386/Test64/Code/KeyProbe.ocf 2>/dev/null
 }
 trap cleanup EXIT INT TERM
@@ -43,6 +44,23 @@ run () {
 	rm -f "$dest"
 }
 
+# Положительный контроль: однословное имя пользовательского модуля больше
+# не делает его каркасом — ключ точек уступки разрешён. Старый код считал
+# каркасом любой модуль с однословным именем и отвергал ключ.
+run_ok () {
+	fix="$1"; dest="$2"; cc="$3"; mod="$4"; why="$5"
+	cp "$BB/Test64/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
+	if out=$("$cc" "$mod" 2>&1); then
+		echo "PASS $why"
+		ok=$((ok + 1))
+	else
+		echo "BAD  $why: компиляция отвергнута" >&2
+		printf '%s\n' "$out" | tail -5 >&2
+		bad=$((bad + 1))
+	fi
+	rm -f "$dest"
+}
+
 run AwaitOutsideExclusive.cp "$BB/Test64/Mod/RejAwait.cp" "$CC64" Test64RejAwait \
 	"AWAIT вне [exclusive]"
 run AwaitWithCall.cp "$BB/Test64/Mod/RejCall.cp" "$CC64" Test64RejCall \
@@ -59,6 +77,8 @@ run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC32" 'SystemKeyProbe^' \
 	"ключ точек уступки на i386 в модуле каркаса"
 run GuardedAmd64.cp "$BB/Test64/Mod/RejGuarded.cp" "$CC64" Test64RejGuarded \
 	"[guarded] на amd64 (SEH/GetComKernel)"
+run_ok UserKey.cp "$BB/System/Mod/Usermod.cp" "$CC64" 'Usermod^' \
+	"ключ точек уступки в однословном пользовательском модуле"
 
 echo "== reject: прошло $ok, провалов $bad"
 [ $bad -eq 0 ]

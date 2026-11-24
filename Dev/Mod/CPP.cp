@@ -1635,9 +1635,29 @@ MODULE DevCPP;
 		END
 	END Block;
 
+	PROCEDURE IsSystemModule (IN name: ARRAY OF SHORTCHAR): BOOLEAN;
+	(** Явный список модулей подсистемы System. Односложное имя само по
+		себе каркасом не считается: пользовательский модуль вроде CtlPump
+		не должен автоматически терять ключ точек уступки. *)
+	BEGIN
+		RETURN (name = "Console") OR (name = "Containers") OR (name = "Controllers")
+			OR (name = "Controls") OR (name = "Converters") OR (name = "Dates")
+			OR (name = "Dialog") OR (name = "Documents") OR (name = "Files")
+			OR (name = "Files64") OR (name = "Fonts") OR (name = "In")
+			OR (name = "Integers") OR (name = "Kernel") OR (name = "Kernel64")
+			OR (name = "Librarian") OR (name = "Log") OR (name = "Loop")
+			OR (name = "Math") OR (name = "Mechanisms") OR (name = "Meta")
+			OR (name = "Models") OR (name = "Poller") OR (name = "Ports")
+			OR (name = "Printers") OR (name = "Printing") OR (name = "Properties")
+			OR (name = "Sequencers") OR (name = "Services") OR (name = "SMath")
+			OR (name = "Stores") OR (name = "Stores64") OR (name = "Strings")
+			OR (name = "Tasks") OR (name = "Utf") OR (name = "Views")
+			OR (name = "Windows")
+	END IsSystemModule;
+
 	PROCEDURE FrameworkModule (IN name: ARRAY OF SHORTCHAR): BOOLEAN;
-	(** Модуль каркаса: System (односложные имена), Std, Text, Form, Host,
-		Dev и платформенные Lin/Win. Ключ точек уступки им запрещён:
+	(** Модуль каркаса: явный список модулей System и подсистемы Std,
+		Text, Form, Host, Dev, Lin, Win. Ключ точек уступки им запрещён:
 		внутри каркаса уступка — только в явных точках ожидания. *)
 		VAR sub: ARRAY 16 OF SHORTCHAR; i, j: INTEGER;
 	BEGIN
@@ -1651,7 +1671,7 @@ MODULE DevCPP;
 			IF j < LEN(sub) - 1 THEN sub[j] := name[i]; INC(j) END;
 			INC(i)
 		END;
-		RETURN TRUE	(* односложное имя — модуль подсистемы System *)
+		RETURN IsSystemModule(name)
 	END FrameworkModule;
 
 	PROCEDURE Module*(VAR prog: DevCPT.Node);

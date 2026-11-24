@@ -12,7 +12,7 @@ MODULE DevCPE;
 
 **)
 
-	IMPORT SYSTEM, Dates, DevCPM, DevCPT, DevCPUnwind, Dialog;
+	IMPORT SYSTEM, Dates, DevCPM, DevCPT, DevCPUnwind;
 
 
 	CONST
@@ -799,7 +799,7 @@ MODULE DevCPE;
 		время. *)
 		VAR val: ARRAY 32 OF CHAR; res, i: INTEGER; ok: BOOLEAN;
 	BEGIN
-		Dialog.GetPar("BB_COMPILE_TIME", val, res);
+		DevCPM.GetPar("BB_COMPILE_TIME", val, res);
 		IF res = 0 THEN
 			i := 0; WHILE (i < LEN(val)) & (val[i] # 0X) DO INC(i) END;
 			ok := i >= 19;
