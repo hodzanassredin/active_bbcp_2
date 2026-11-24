@@ -832,6 +832,13 @@ MODULE Monitors;
 		VAR m: Monitor;
 	BEGIN
 		IF obj = NIL THEN RETURN FALSE END;
+		(* Ничего не взято: в таблице нет записей, кроме свободной hot, и
+		   стек взятий быстрым путём пуст. Так каналы, которые спрашивают
+		   на каждой операции, не ищут в таблице. *)
+		IF (Kernel.monTop = Kernel.monBase)
+				& ((nofMonitors = 0) OR (nofMonitors = 1) & (hot # NIL) & (hot.owner = 0)) THEN
+			RETURN FALSE
+		END;
 		Flush;
 		m := FindMon(S.VAL(S.ADDRESS, obj));
 		RETURN (m # NIL) & (m.owner # 0)
