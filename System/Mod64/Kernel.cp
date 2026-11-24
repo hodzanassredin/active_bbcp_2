@@ -446,6 +446,10 @@ MODULE Kernel;
 		   SP - stkLo < запас + кадр как беззнаковое: на чужой нити и
 		   сигнальном стеке SP вне [stkLo, stkLo + запас), и проверка молчит. *)
 		stkLo*: S.ADDRESS;
+		(* Проба переноса стека (Stackmove): обработчик трапа 137 проверки в прологе
+		   зовёт stackGrow с адресом регистров прерванного кода (gregs ucontext);
+		   TRUE — стек перенесён, регистры поправлены, исполнение продолжается. *)
+		stackGrow*: PROCEDURE (regs: S.ADDRESS): BOOLEAN;
 		monStk: ARRAY monStkLen OF MonEntry;
 		sched-: Scheduler;	(* read-only: Monitors читает токен/park/unpark/name *)
 		pollWanted: BOOLEAN;	(* главный цикл просит уступить в Kernel.Poll *)

@@ -1245,6 +1245,35 @@ MODULE Tasks;
 		RETURN stackDefault
 	END DefaultStackSize;
 
+	PROCEDURE ReplaceStack* (newSize: INTEGER; OUT oldLo, oldHi, newLo, newHi: S.ADDRESS;
+		OUT oldSize: INTEGER): BOOLEAN;
+	(** Проба переноса стека (Stackmove). Пред: есть текущая задача. Пост: TRUE — текущей задаче
+		выдан новый стек [newLo, newHi) размера newSize, границы задачи, записи реестра ядра и
+		Kernel.stkLo — новые; старый стек [oldLo, oldHi) размера oldSize ещё не отдан
+		(ReleaseStack), содержимое не перенесено. FALSE — задачи или памяти нет. *)
+		VAR t: Task; sz: S.ADDRESS;
+	BEGIN
+		t := current; oldLo := 0; oldHi := 0; newLo := 0; newHi := 0; oldSize := 0;
+		IF (t = NIL) OR (t.stackRec = NIL) THEN RETURN FALSE END;
+		(* не из плиты: плита одного размера, и смена размера на каждом переносе роняла бы её *)
+		sz := 0; IF poolHead # 0 THEN S.GET(poolHead - 3 * word, sz) END;
+		IF sz = newSize THEN
+			newHi := poolHead; S.GET(newHi - 2 * word, newLo); S.GET(newHi - word, poolHead); DEC(poolCount)
+		ELSIF ~Kernel.AllocStack(newSize, newLo, newHi) THEN RETURN FALSE
+		END;
+		oldLo := t.lo; oldHi := t.hi; oldSize := StackSizeOf(t);
+		t.lo := newLo; t.hi := newHi; t.stackSize := newSize;
+		t.stackRec.lo := newLo; t.stackRec.hi := newHi;
+		Kernel.stkLo := newLo;
+		RETURN TRUE
+	END ReplaceStack;
+
+	PROCEDURE ReleaseStack* (size: INTEGER; lo, hi: S.ADDRESS);
+	(** Пред: [lo, hi) отдан ReplaceStack и больше не используется. Пост: стек в пуле. *)
+	BEGIN
+		GiveStack(size, lo, hi)
+	END ReleaseStack;
+
 	PROCEDURE Count* (): INTEGER;
 	BEGIN
 		RETURN alive

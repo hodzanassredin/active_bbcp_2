@@ -821,6 +821,9 @@ MODULE DevCPE;
 		VAR i: INTEGER; t: Dates.Time; d: Dates.Date;
 	BEGIN
 		IF processor = 12 THEN	(* amd64: native 64-bit module descriptor, matches Kernel64.Module *)
+			(* Проба переноса стека: бит 11 — модуль собран с ключом "%" (бит 12) и не импортирует
+			   SYSTEM; без SYSTEM в нём нет внешних процедур и SYSTEM.ADR (Stackmove). *)
+			IF (12 IN options) & ~DevCPT.SYSimported THEN INCL(options, 11) END;
 			Out4(0); Out4(0);	(* next @0 *)
 			Out4(ORD(options));	(* opts @8 *)
 			Out4(0);	(* refcnt @12 *)

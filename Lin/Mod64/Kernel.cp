@@ -504,6 +504,13 @@ MODULE LinKernel;
 		passing := FALSE
 	END GetTrapInfo;
 	
+	PROCEDURE IsGrowTrap (pc: S.ADDRESS): BOOLEAN;
+		VAR a, b, c: BYTE;
+	BEGIN
+		S.GET(pc, a); S.GET(pc + 1, b); S.GET(pc + 2, c);
+		RETURN (a = -73H) & (b = -10H) & (c = -77H)	(* 8DH F0H 89H *)
+	END IsGrowTrap;
+
 	PROCEDURE [ccall] HandleTrap (sig: INTEGER; siginfo: Libc.Ptrsiginfo_t; context: Libc.Ptrucontext_t);
 		VAR inSignalStack: BOOLEAN; oldpc, oldfp: S.ADDRESS;
 	BEGIN
@@ -519,6 +526,16 @@ MODULE LinKernel;
 			fp := context.uc_mcontext.gregs[Libc.REG_EBP];
 			pc := context.uc_mcontext.gregs[Libc.REG_EIP];
 			val := siginfo._sifields._sigfault.si_addr;
+
+		(* Проба переноса стека: трап 137 проверки в прологе (lea esi,eax с номером 89H) *)
+		IF (sig = Libc.SIGILL) & (Kernel.stackGrow # NIL) & IsGrowTrap(pc) THEN
+			(* gregs — с байта 40 ucontext_t x86-64: uc_flags, uc_link, uc_stack (24) *)
+			IF Kernel.stackGrow(S.VAL(S.ADDRESS, context) + 40) THEN
+				S.PUT(S.VAL(S.ADDRESS, context) + 40 + 8 * Libc.REG_EIP, pc + 3);
+				pc := oldpc;
+				RETURN
+			END
+		END;
 
 		INC(trap.depth);
 		inSignalStack := ((sigStack = fp) OR Below(sigStack, fp)) & Below(fp, sigStack + sigStackSize);

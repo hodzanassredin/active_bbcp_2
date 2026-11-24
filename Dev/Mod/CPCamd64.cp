@@ -119,6 +119,8 @@ MODULE DevCPCamd64;
 		uwBegin, uwProlog, uwFrame: INTEGER; uwEnabled: BOOLEAN;
 		uwCodes: ARRAY 8 OF BYTE; uwLength: INTEGER;
 		curCCall: BOOLEAN;	(* SysV: текущий вызов - внешний [ccall] (для Param) *)
+		(* Проба переноса стека: карты кадров (ключ "%"), копятся по процедурам и пишутся в конец кода *)
+		frameMap: POINTER TO ARRAY OF BYTE; frameMapLen: INTEGER;
 
 	
 	PROCEDURE Init* (opt: SET);
@@ -2648,6 +2650,56 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		END
 	END UnlockExit;
 
+	(* Карта кадра для пробы переноса стека (ключ "%", Stackmove). На процедуру — запись
+		вход(4) число(2) слот(2)*число; слот — смещение от FP, кратное 8, в младших трёх битах вид:
+		0 — VAR/IN/OUT-параметр (адрес), 1 — адрес открытого массива (параметр-значение после
+		копии указывает в свой кадр), 2 — статическая связь [FP-8] (imVar), 3 — получатель-запись.
+		Временные значения выражений в карту не входят: их положение зависит от точки вызова. *)
+	PROCEDURE MapB (b: INTEGER);
+		VAR n: POINTER TO ARRAY OF BYTE; i, v: INTEGER;
+	BEGIN
+		v := b MOD 256; IF v > 127 THEN DEC(v, 256) END;
+		IF frameMap = NIL THEN NEW(frameMap, 1024) END;
+		IF frameMapLen = LEN(frameMap^) THEN
+			NEW(n, 2 * LEN(frameMap^)); FOR i := 0 TO frameMapLen - 1 DO n[i] := frameMap[i] END; frameMap := n
+		END;
+		frameMap[frameMapLen] := SHORT(SHORT(v)); INC(frameMapLen)
+	END MapB;
+
+	PROCEDURE MapEntry (proc: DevCPT.Object; entry: INTEGER);
+		VAR par: DevCPT.Object; slots: ARRAY 64 OF INTEGER; n, i: INTEGER;
+	BEGIN
+		n := 0;
+		IF proc # NIL THEN
+			par := proc.link;
+			WHILE (par # NIL) & (n < LEN(slots) - 1) DO
+				IF (par.mode = VarPar) & (par.typ.comp = DynArr) OR (par.mode = Var) & (par.typ.comp = DynArr) THEN
+					slots[n] := par.adr + 1; INC(n)
+				ELSIF (par.mode = VarPar) & (proc.mode = TProc) & (par = proc.link) THEN
+					slots[n] := par.adr + 3; INC(n)
+				ELSIF par.mode = VarPar THEN
+					slots[n] := par.adr; INC(n)
+				END;
+				par := par.link
+			END;
+			IF imVar IN proc.conval.setval THEN slots[n] := -8 + 2; INC(n) END
+		END;
+		MapB(entry); MapB(entry DIV 100H); MapB(entry DIV 10000H); MapB(entry DIV 1000000H);
+		MapB(n); MapB(n DIV 100H);
+		FOR i := 0 TO n - 1 DO MapB(slots[i]); MapB(slots[i] DIV 100H) END
+	END MapEntry;
+
+	PROCEDURE EmitFrameMaps*;
+	(** Пост: карты кадров модуля записаны в конец кода: записи, длина(4), метка "SMAP"(4). *)
+		VAR i: INTEGER;
+	BEGIN
+		IF (DevCPM.stackChk IN DevCPM.options) & (frameMapLen > 0) THEN
+			FOR i := 0 TO frameMapLen - 1 DO GenB(frameMap[i]) END;
+			GenD(frameMapLen); GenD(50414D53H)
+		END;
+		frameMapLen := 0
+	END EmitFrameMaps;
+
 	PROCEDURE StackCheck (size: INTEGER);
 	(** Ключ "%": трап 137, если SP - Kernel.stkLo < stackReserve + size
 		(беззнаково). Портит RAX и R11. *)
@@ -2671,6 +2723,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		DevCPLamd64.MakeReg(fp, BP, Pointer); DevCPLamd64.MakeReg(sp, SP, Pointer);
 		IF proc # NIL THEN (* enter proc *)
 			DevCPLamd64.SetLabel(proc.adr);
+			IF DevCPM.stackChk IN DevCPM.options THEN MapEntry(proc, DevCPE.pc) END;
 			IF proc.sysflag = -14 THEN Ms64Entry(proc) END;
 			uwBegin := DevCPE.pc;
 			IF (~empty OR NeedOutPtrInit(proc)) & (proc.sysflag # noframe) THEN
@@ -2743,6 +2796,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				IF MonFieldOff(proc, off) THEN FastLockEntry(proc, off) ELSE LockEntry(proc) END
 			END
 		ELSIF ~empty THEN (* enter module *)
+			IF DevCPM.stackChk IN DevCPM.options THEN MapEntry(NIL, DevCPE.pc) END;
 			DevCPLamd64.GenPush(fp);
 			DevCPLamd64.GenMove(sp, fp);
 			uwProlog := DevCPE.pc - uwBegin; uwFrame := 5; uwLength := 4;

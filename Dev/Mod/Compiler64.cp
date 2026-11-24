@@ -46,6 +46,7 @@ MODULE DevCompiler64;
 		found: BOOLEAN;	(* DevComDebug was found -> DTC *)
 		select: ARRAY 16 OF CHAR; (* filter for filenames in subsystems *)
 		logMarks: BOOLEAN;
+		forceChk: BOOLEAN;	(* ForceStackChk: ключ "%" всем модулям, кроме исключённых *)
 
 	PROCEDURE Module (source: TextModels.Reader; opt: SET; log: TextModels.Model; VAR error: BOOLEAN);
 		VAR ext, new: BOOLEAN; p: DevCPT.Node;
@@ -132,6 +133,14 @@ MODULE DevCompiler64;
 		END
 	END Scan;
 
+	PROCEDURE ChkExempt (IN name: ARRAY OF CHAR): BOOLEAN;
+	(* Модули, которые ForceStackChk не трогает: ядро (EnsureKernel в нём самом невозможен),
+	   переключатель и сам перенос — они исполняются в обработчике трапа и при переключении. *)
+	BEGIN
+		RETURN (name = "Kernel") OR (name = "LinKernel") OR (name = "Taskarch") OR (name = "Tasks")
+			OR (name = "Stackmove") OR (name = "WinKernel")
+	END ChkExempt;
+
 	PROCEDURE Do (source, log: TextModels.Model; beg: INTEGER; opt: SET; VAR error: BOOLEAN);
 		VAR s: TextMappers.Scanner;
 	BEGIN
@@ -146,6 +155,7 @@ MODULE DevCompiler64;
 				StdLog.Char('"'); StdLog.String(s.string); StdLog.Char('"')
 			END
 		END;
+		IF forceChk & (s.type = TextMappers.string) & ~ChkExempt(s.string) THEN INCL(opt, stackChk) END;
 		sourceR := source.NewReader(NIL); sourceR.SetPos(beg);
 		Module(sourceR, opt, log, error)
 	END Do;
@@ -683,6 +693,12 @@ MODULE DevCompiler64;
 			file := file.next
 		END
 	END CompileSubs;
+
+	PROCEDURE ForceStackChk*;
+	(** Проба переноса стека: следующие компиляции этого процесса — с ключом "%". *)
+	BEGIN
+		forceChk := TRUE
+	END ForceStackChk;
 
 	PROCEDURE InitLogMarks*;
 	BEGIN

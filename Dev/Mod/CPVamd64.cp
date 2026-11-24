@@ -1839,6 +1839,7 @@ MODULE DevCPVamd64;
 			END;
 			procs(prog.left);
 			DevCPCamd64.InstallStackAlloc;
+			DevCPCamd64.EmitFrameMaps;
 			addRef := NIL; release := NIL; release2 := NIL;
 			DevCPCamd64.intHandler := NIL;
 			IF DevCPM.noerr THEN DevCPE.OutCode END;

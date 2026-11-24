@@ -44,6 +44,8 @@ done
 echo "build64: компиляция подсистем:$subs"
 {
 	echo 'DevCompiler64.InitLogMarks'
+	# Проба переноса стека: STACKCHK_ALL=1 — ключ % всем модулям, кроме ядра (Stackmove).
+	[ "${STACKCHK_ALL:-0}" = 1 ] && echo 'DevCompiler64.ForceStackChk'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
 	[ -n "$core" ] && echo "DevCompiler64.CompileSubs @Lin $core"
 	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
@@ -51,6 +53,7 @@ echo "build64: компиляция подсистем:$subs"
 	# поэтому идут до неё.
 	echo "DevCompiler64.CompileThis Taskarch"
 	echo "DevCompiler64.CompileThis Tasks"
+	echo "DevCompiler64.CompileThis Stackmove"
 	echo "DevCompiler64.CompileThis LinThreads"
 	echo "DevCompiler64.CompileThis LinNative"
 	# Async — отдельным вызовом: ей нужны Tasks, LinNative и LinThreads,

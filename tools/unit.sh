@@ -25,6 +25,9 @@ done
 [ -n "$MOD" ] || { echo "unit: укажите модуль тестов" >&2; exit 2; }
 [ -x "$INTERP" ] || { echo "unit: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
+# Проба переноса стека: трап проверки в прологе — на сигнальном стеке (LinKernel).
+case "$MOD" in System_devStackMove) export BB_STACKMOVE=1;; esac
+
 # libtest64.so нужен System_devCo (GcStack/TrapStack) и замеру.
 if command -v cc >/dev/null 2>&1; then
 	cc -shared -fPIC -O2 -o "$INSTALL/libtest64.so" "$BB/tools/test64.c" 2>/dev/null || true
@@ -48,11 +51,19 @@ while [ $pass -lt 3 ]; do
 done
 
 out="${TMPDIR:-/tmp}/unit-$$.out"
-printf 'UnitRunner.Run %s %s quit\n' "$MOD" "$MARKS" | timeout -k 5 "$TMO" "$BB/tools/run64.sh" >"$out" 2>&1
+# Проба переноса стека на всём наборе: STACKMOVE_PROBE=Loose|Exact, STACKMOVE_STACK — стартовый стек.
+pre=""
+if [ -n "${STACKMOVE_PROBE:-}" ]; then
+	export BB_STACKMOVE=1
+	pre="Stackmove.Probe$STACKMOVE_PROBE
+Tasks.SetDefaultStackSize(${STACKMOVE_STACK:-4096})
+"
+fi
+printf '%sUnitRunner.Run %s %s quit\n' "$pre" "$MOD" "$MARKS" | timeout -k 5 "$TMO" "$BB/tools/run64.sh" >"$out" 2>&1
 rc=$?
 
 # Строки отчёта — в stdout пользователя; служебные (TRAP REPORT) не прячем.
-grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit)' "$out" || true
+grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|STACKMOVE)' "$out" || true
 
 if [ $rc -eq 124 ]; then
 	echo "unit: $MOD — таймаут ${TMO}s" >&2
