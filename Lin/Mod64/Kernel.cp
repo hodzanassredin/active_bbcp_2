@@ -320,7 +320,7 @@ MODULE LinKernel;
 		hi := baseStack;	(* 64-бит: без SHORT *)
 		inMainStack := ((trap.top = pc) OR Below(trap.top, pc)) & Below(pc, hi);
 		inSignalStack := ((sigStack = pc) OR Below(sigStack, pc)) & Below(pc, sigStack + sigStackSize);
-		RETURN inMainStack OR inSignalStack OR Kernel.InRegisteredStack(pc)
+		RETURN inMainStack OR inSignalStack OR (Kernel.StackOf(pc) # NIL)
 	END InActivationStack;
 
 	PROCEDURE (VAR p: Platform) GetTryContext (): S.ADDRESS;

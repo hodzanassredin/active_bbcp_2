@@ -195,7 +195,7 @@ tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
 tools/build32.sh                  # i386-мир + консоль в build/BB32LIN
 tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
 tools/i386-toolchain.sh           # 32-битный C-тулчейн без sudo (флаги gcc)
-tools/test.sh                     # 21 этап, 107 тестов
+tools/test.sh                     # 21 этап, 108 тестов
 tools/test-resolver.sh            # этап 8: резолвер в unshare -rmn
 tools/test-robust.sh              # RobustParallel на 1/4/16 процессах
 tools/test-mpi.sh                 # MPI-транспорт, mpiexec -n 5
@@ -214,7 +214,9 @@ tools/bench-gc.sh System_devGcBench.DoSmall   # 1 и 10 млн, без 50 млн
   опции модуля для `CompileThis` (например, `^` — ключ точек уступки;
   `tools/unit.sh --opts '^'`). `tools/test.sh` зовёт `tools/unit.sh`
   на каждый модуль: отдельный процесс, итог `failed 0`.
-  Тесты лежат в отдельных подсистемах рядом с проверяемой: `<Sub>_dev`,
+  Тесты лежат в отдельных подсистемах рядом с проверяемой: `<Sub>_dev`
+  (`_dev` — как принято в сообществе: `Comm_dev` рядом с `Comm`; там же
+  замеры, пробные модули, фикстуры отказов и техническая документация),
   файл `<Sub>_dev/Mod[64]/<Тема>.cp`, модуль `<Sub>_dev<Тема>`
   (`System_dev/Mod/Tasks.cp` — `System_devTasks`;
   `Dev_dev/Mod/Yield.cp` — `Dev_devYield`; точка входа без темы —
@@ -236,16 +238,18 @@ tools/bench-gc.sh System_devGcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `.work/i386dev` (`apt-get download libc6-dev-i386` и
   `lib32gcc-N-dev`, `dpkg-deb -x`, правка `libc.so`) и печатает флаги
   gcc; нет сети/пакета — SKIP, `System_devCoTests` пропускается.
-  Итог — 21 этап, 107 тестов, 0 провалов.
+  Итог — 21 этап, 108 тестов, 0 провалов.
 - Поставочные сборки (`build64.sh`, `build32.sh`, `test-win64.sh`) не
   включают подсистемы `*_dev`: их нет в списке `CompileSubs`. Тесты
   собирает `tools/unit.sh`/`tools/go64.sh` по требованию; i386 —
   `tools/test32.sh`. Ключ `^` разрешён модулям `Dev_dev*`:
   `FrameworkModule` сравнивает имя подсистемы точно, и `Dev_dev`
   каркасом не считается.
-- `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
-  консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
-  прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
+- Трап внутри `Kernel.Try` не фатален и в консоли без `trapViewer`:
+  `Kernel.HandleTrap` зовёт `platform.FatalError` только при
+  `tryCount = 0`. Каркас зритель трапов не подменяет; консольный
+  запускатель передаёт `UnitRunner.Run` ключ `quit`, чтобы получить код
+  выхода. Экспорт `Kernel.GetTrapViewer` удалён.
 - Этап 1: `Services.Post/Wake/NextDeadline`, `Console.WaitInput`,
   `ConsInterp.Run` крутит `Services.actionHook.Step`.
 - Этап 2: реестр `Kernel.Stack` (`RegisterStack`,

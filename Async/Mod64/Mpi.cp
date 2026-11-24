@@ -15,7 +15,7 @@ MODULE AsyncMpi;
 	Ограничения: гибель ранга не повторяется (mpiexec обычно гасит мир),
 	Unload по MPI возвращает отказ -1, WorkerPid неизвестен. *)
 
-	IMPORT S := SYSTEM, Kernel, Services, Dialog, Strings, Dl := LinDl,
+	IMPORT S := SYSTEM, Services, Dialog, Strings, Dl := LinDl,
 		AsyncComputon;
 
 	CONST
@@ -195,18 +195,14 @@ MODULE AsyncMpi;
 
 	(* --- процесс-исполнитель ---------------------------------------------- *)
 
-	PROCEDURE NoopViewer;
-	BEGIN
-	END NoopViewer;
-
 	PROCEDURE WorkerLoop*;
 	(** Точка входа процесса-исполнителя ранга > 0; запускается mpiexec
-		с командой AsyncMpi.WorkerLoop на stdin. *)
+		с командой AsyncMpi.WorkerLoop на stdin. Задания идут через
+		AsyncComputon.RunDo → Kernel.Try, поэтому зритель трапов не нужен. *)
 		VAR rank, len, tag, kind, err, outLen, i: INTEGER;
 			c: AsyncComputon.Computon; ok: BOOLEAN;
 			tmp: POINTER TO ARRAY OF SHORTCHAR;
 	BEGIN
-		Kernel.InstallTrapViewer(NoopViewer);
 		IF ~Bind() THEN RETURN END;
 		IF initP() # 0 THEN RETURN END;
 		rank := rankP();

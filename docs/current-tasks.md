@@ -58,6 +58,20 @@
   `all` — имена с `_tests`. Прогоны: test.sh 21/21 (107), test32 8/8 (44), wine 13/13,
   check-reject, bootstrap B=C, `build64.sh --clean` с нуля. Счётчики до и после совпали.
 
+- s22 — готово, два коммита. А: суффикс тестовой подсистемы `_dev` вместо `_tests` (принятая в сообществе
+  практика: `Comm_dev` рядом с `Comm`); `git mv` всех девяти подсистем, модули `<Sub>_dev<Тема>`, импорты,
+  `tools/tests.txt`, сценарии `tools/*`, поиск `UnitRunner` (`Run System` → `System_dev*`, `all` → `_dev`),
+  документация и `AGENTS.md`. Б: тесты больше не требуют правок ядра. Из `Kernel` (обе разрядности) убраны
+  `ClusterIndexCheck` (инвариант — `ASSERT` при `debug` в `IndexInsert/IndexRemove`, тест `System_devInHeap`
+  переписан чёрным ящиком через `Allocated`), `UnregisterStackAt` (обёртки сопрограмм хранят запись
+  `RegisterStack`), `CurrentStack`, `InRegisteredStack` (`LinKernel` зовёт `StackOf`), `GetTrapViewer`.
+  Дефект 1.6 исправлен: `HandleTrap` фатален только при `tryCount = 0`; красный тест
+  `System_devTrap.TryInConsole` / `TestProcTryInConsole` был красным (код 1) на прежнем ядре. Обходы
+  зрителя трапов убраны из `UnitRunner` (вместо признака консоли — ключ `quit`), `DemoGroup`,
+  `System_devSupport`, `AsyncComputon`, `AsyncMpi`. Экспортов `Kernel`: 80→75 (amd64), 77→73 (i386).
+  Удалён `Monitors.MonitorCount` (не звал никто), снят `*` с `Tasks.InFramework`. Прогоны: `tools/test.sh`
+  21 этап, 108 тестов; `test32` 8/8 (44); wine 13/13; `check-reject` 9/9; `bootstrap` B=C; `build64.sh --clean`.
+
 ## Не делать
 
 - Не пушить; ветки `active` и `ivan-dia261123` не трогать; без sudo/apt install; GUI только вне экрана; мышь не

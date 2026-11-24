@@ -14,7 +14,7 @@ MODULE System_devGcStack;
 
 	Было (этап 0, kernel-report §2.4а, §8.1): MarkLocals при FP вне
 	[baseStack-64МБ, baseStack] молча пропускал скан, и объект терялся.
-	Теперь реестр стеков (Kernel.RegisterStack/UnregisterStackAt) и скан
+	Теперь реестр стеков (Kernel.RegisterStack/UnregisterStack) и скан
 	всех зарегистрированных стеков. *)
 
 	IMPORT SYSTEM, Kernel, System_devSupport, System_devCo;
@@ -51,7 +51,7 @@ MODULE System_devGcStack;
 		finalized := FALSE; fin4242 := FALSE; coError := 0;
 		NEW(o); o.tag := 424242;
 		adr := SYSTEM.ADR(o);	(* заставляет компилятор держать указатель в слоте стека *)
-		System_devSupport.Check(Kernel.InRegisteredStack(adr),
+		System_devSupport.Check(Kernel.StackOf(adr) # NIL,
 			"second stack is not in the kernel registry");
 		Kernel.Collect; Kernel.Collect;
 		IF fin4242 OR (o.tag # 424242) THEN coError := 1 END;
@@ -66,7 +66,7 @@ MODULE System_devGcStack;
 		VAR o: Obj;
 	BEGIN
 		NEW(o); o.tag := 777;
-		System_devSupport.Check(~Kernel.InRegisteredStack(SYSTEM.ADR(o)),
+		System_devSupport.Check(Kernel.StackOf(SYSTEM.ADR(o)) = NIL,
 			"raw stack must not be in the kernel registry");
 		Kernel.Collect; Kernel.Collect;
 		IF o.tag = 777 THEN rawErr := 0 ELSE rawErr := 1 END;

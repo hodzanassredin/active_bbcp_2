@@ -912,6 +912,23 @@ MODULE Kernel;
 		RETURN lo
 	END IndexFind;
 
+	PROCEDURE IndexValid (): BOOLEAN;
+	(* Внутренний инвариант индекса: адреса строго возрастают и состав
+	   совпадает с цепочкой root. Полный обход O(n), поэтому зовётся только
+	   при debug — на каждой вставке/удалении кластера. *)
+		VAR i, n: INTEGER; c: Cluster; ok: BOOLEAN;
+	BEGIN
+		IF clusterIndexFull THEN RETURN TRUE END;	(* индекс не ведётся *)
+		ok := TRUE; i := 0;
+		WHILE (i < nofClusterIndex) & ok DO
+			IF (i > 0) & (S.VAL(LONGINT, clusterIndex[i-1]) >= S.VAL(LONGINT, clusterIndex[i])) THEN ok := FALSE END;
+			INC(i)
+		END;
+		n := 0; c := root;
+		WHILE c # NIL DO INC(n); c := c.next END;
+		RETURN ok & (n = nofClusterIndex)
+	END IndexValid;
+
 	PROCEDURE IndexInsert (c: Cluster);
 	(* вставить кластер в отсортированный индекс; при переполнении
 	   индекс больше не поддерживается, InHeap идёт по цепочке root *)
@@ -922,7 +939,8 @@ MODULE Kernel;
 		pos := IndexFind(S.VAL(LONGINT, c));
 		i := nofClusterIndex;
 		WHILE i > pos DO clusterIndex[i] := clusterIndex[i-1]; DEC(i) END;
-		clusterIndex[pos] := c; INC(nofClusterIndex)
+		clusterIndex[pos] := c; INC(nofClusterIndex);
+		IF debug THEN ASSERT(IndexValid(), 60) END
 	END IndexInsert;
 
 	PROCEDURE IndexRemove (c: Cluster);
@@ -938,7 +956,8 @@ MODULE Kernel;
 			i := pos;
 			WHILE i < nofClusterIndex - 1 DO clusterIndex[i] := clusterIndex[i+1]; INC(i) END;
 			DEC(nofClusterIndex); clusterIndex[nofClusterIndex] := NIL
-		END
+		END;
+		IF debug THEN ASSERT(IndexValid(), 61) END
 	END IndexRemove;
 
 	PROCEDURE AllocateCluster (size: INTEGER; VAR c: Cluster);
@@ -1308,13 +1327,6 @@ MODULE Kernel;
 		trapViewer := h
 	END InstallTrapViewer;
 
-	PROCEDURE GetTrapViewer* (): Handler;
-	(** Текущий обработчик трапов; по нему UnitRunner отличает консоль
-		(viewer = NIL) от GUI и восстанавливает прежний viewer. *)
-	BEGIN
-		RETURN trapViewer
-	END GetTrapViewer;
-
 	PROCEDURE InstallTrapChecker* (h: Handler);
 	BEGIN
 		trapChecker := h
@@ -1650,18 +1662,6 @@ MODULE Kernel;
 		END
 	END StackOf;
 
-	PROCEDURE InRegisteredStack* (adr: S.ADDRESS): BOOLEAN;
-	BEGIN
-		RETURN StackOf(adr) # NIL
-	END InRegisteredStack;
-
-	PROCEDURE CurrentStack* (): Stack;
-		VAR sp: S.ADDRESS;
-	BEGIN
-		S.GETREG(SP, sp);
-		RETURN StackOf(sp)
-	END CurrentStack;
-
 	PROCEDURE NewStack (lo, hi: S.ADDRESS; signal: BOOLEAN): Stack;
 		VAR s: Stack;
 	BEGIN
@@ -1718,15 +1718,6 @@ MODULE Kernel;
 			StackIndexRemove(s)
 		END
 	END UnregisterStack;
-
-	PROCEDURE UnregisterStackAt* (lo: S.ADDRESS);
-	(** Снять регистрацию по нижней границе (для владельца, знающего только адрес). *)
-		VAR s: Stack;
-	BEGIN
-		s := stacks;
-		WHILE (s # NIL) & ((s.lo # lo) OR s.main) DO s := s.next END;
-		IF s # NIL THEN UnregisterStack(s) END
-	END UnregisterStackAt;
 
 	PROCEDURE SwitchSave*;
 	(** Вызывается переключателем ДО ухода с текущего стека: сохранить
@@ -2344,22 +2335,6 @@ MODULE Kernel;
 		IF monitorHook # NIL THEN monitorHook.await(cond, frame, S.VAL(S.ADDRESS, obj))
 		ELSE MonitorFail("Await") END
 	END Await;
-
-	PROCEDURE ClusterIndexCheck* (): BOOLEAN;
-	(** Единственная наружу проверка шага 2а: индекс строго возрастает и
-		совпадает по составу с цепочкой root. *)
-		VAR i, n: INTEGER; c: Cluster; ok: BOOLEAN;
-	BEGIN
-		IF clusterIndexFull THEN RETURN FALSE END;
-		ok := TRUE; i := 0;
-		WHILE (i < nofClusterIndex) & ok DO
-			IF (i > 0) & (S.VAL(LONGINT, clusterIndex[i-1]) >= S.VAL(LONGINT, clusterIndex[i])) THEN ok := FALSE END;
-			INC(i)
-		END;
-		n := 0; c := root;
-		WHILE c # NIL DO INC(n); c := c.next END;
-		RETURN ok & (n = nofClusterIndex)
-	END ClusterIndexCheck;
 
 	PROCEDURE MarkGlobals;
 		VAR m: Module; i: INTEGER; p: LONGINT; ap: AnyRef;
@@ -3170,7 +3145,10 @@ MODULE Kernel;
 					(* репорт в stdout и при GUI trapViewer'е тоже (иначе виден только в окне) *)
 					IF (trapViewer # NIL) & (blog.buf # NIL) THEN platform.String(blog.buf^) END;
 
-					IF (err # silentTrap) & (trapViewer = NIL) THEN
+					(* Фатален только трап, который не ловит ни один Kernel.Try.
+					   Внутри Try отчёт уже напечатан, а управление вернёт
+					   платформенный longjmp: процесс продолжает жить. *)
+					IF (err # silentTrap) & (trapViewer = NIL) & (tryCount = 0) THEN
 						platform.FatalError(trapMessage, blog.buf)
 					END
 				END;

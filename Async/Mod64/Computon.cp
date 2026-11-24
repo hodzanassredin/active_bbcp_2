@@ -787,10 +787,6 @@ MODULE AsyncComputon;
 		a.c.Do
 	END Do;
 
-	PROCEDURE NoopViewer;
-	BEGIN
-	END NoopViewer;
-
 	PROCEDURE RunDo* (c: Computon; OUT err: INTEGER);
 		VAR a: DoAction;
 	BEGIN
@@ -822,8 +818,8 @@ MODULE AsyncComputon;
 			val: ARRAY 64 OF CHAR; c: Computon; ok: BOOLEAN;
 			tmp: POINTER TO ARRAY OF SHORTCHAR; tcps: CommStreams.Stream;
 	BEGIN
-		(* консольный x64 иначе считает фатальным любой трап, даже в Try *)
-		Kernel.InstallTrapViewer(NoopViewer);
+		(* Задания идут через RunDo → Services.Try → Kernel.Try:
+		   зритель трапов не нужен, трап внутри Try не фатален. *)
 		Dialog.GetPar("ASYNC_TCP", val, res);
 		IF res = 0 THEN
 			(* TCP: один сокет на оба направления, адрес дал управляющий.

@@ -80,7 +80,7 @@ timeout 180 wineboot -u >"$OUT/wineboot.log" 2>&1 || {
 run() {
 	mod="$1"; marks="$2"; expect="$3"
 	out="$OUT/run-$mod.out"
-	(cd "$OUT" && printf 'UnitRunner.Run %s %s\n' "$mod" "$marks" \
+	(cd "$OUT" && printf 'UnitRunner.Run %s %s quit\n' "$mod" "$marks" \
 		| timeout 180 wine ./blackbox-console.exe) >"$out" 2>&1
 	rc=$?
 	grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|System_devWinTasks:)' "$out" || true

@@ -78,10 +78,10 @@ MODULE System_devCo;
 	END co_stack_size;
 
 	PROCEDURE co_release* (): INTEGER;
-		VAR res: INTEGER; lo: SYSTEM.ADDRESS;
+		VAR res: INTEGER;
 	BEGIN
-		lo := System_devCRaw.c_stack_low();
-		Kernel.UnregisterStackAt(lo);
+		(* Запись реестра хранит сам владелец: ядру не нужен поиск по адресу. *)
+		IF reg # NIL THEN Kernel.UnregisterStack(reg); reg := NIL END;
 		res := System_devCRaw.c_release();
 		RETURN res
 	END co_release;

@@ -51,7 +51,7 @@ done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/bbmpi.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT INT TERM
-printf 'UnitRunner.Run %s %s\n' "$MOD" "$MARKS" >"$work/rank0.cmd"
+printf 'UnitRunner.Run %s %s quit\n' "$MOD" "$MARKS" >"$work/rank0.cmd"
 printf 'AsyncMpi.WorkerLoop\n' >"$work/worker.cmd"
 cat >"$work/launch.sh" <<EOF
 #!/bin/sh

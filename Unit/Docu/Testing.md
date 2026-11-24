@@ -52,9 +52,8 @@ subsystems; tests are built on demand by `tools/unit.sh`.
    did not trap is reported `EMPTY` and counted as failed.
 5. **Isolation.** Every test and every fixture runs under `Kernel.Try`;
    a trap fails only that test. `Kernel.Collect` runs after a trapped
-   test. `UnitRunner` installs a no-op trap viewer for the run, so a
-   trap inside `Kernel.Try` is not fatal in the console, and restores
-   the previous viewer afterwards.
+   test. The runner does not replace the trap viewer: `Try` catches the
+   trap whether or not a viewer is installed.
 6. **Marks by name prefix.** `TestSlow…` (long), `TestGui…` (needs a
    display), `TestProc…` (better in its own process: kernel, collector,
    signals, `Kernel.Quit`). By default only ordinary tests run; pass the
@@ -73,12 +72,18 @@ subsystems; tests are built on demand by `tools/unit.sh`.
    description.
 10. **One behaviour — one test.** Name says what is checked:
     `TestDeleteOutOfRangeTraps`, not `Test3`.
+11. **A test requires no changes to the module under test or the
+    kernel.** A test uses only what an ordinary client uses: public
+    procedures, globals, and observable effects (counters, output,
+    state). The kernel checks internal invariants itself (`ASSERT` in a
+    debug spot) instead of exporting a checker; a diagnostic export
+    with no users outside `*_dev` is removed.
 
 ## Running
 
 ```
-echo 'UnitRunner.Run Unit_devMain' | tools/run64.sh
-echo 'UnitRunner.Run Text_devWriter slow proc' | tools/run64.sh
+echo 'UnitRunner.Run Unit_devMain quit' | tools/run64.sh
+echo 'UnitRunner.Run Text_devWriter slow proc quit' | tools/run64.sh
 
 tools/test.sh                 # modules from tools/tests.txt
 tools/test.sh --list
@@ -86,7 +91,9 @@ tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat6
 ```
 
 `UnitRunner.Run` arguments: a module name, a subsystem name, or `all`;
-`slow`, `gui`, `proc` enable those marks; `junit=FILE`, `tap`, `noquit`.
+`slow`, `gui`, `proc` enable those marks; `junit=FILE`, `tap`; `quit`
+calls `Kernel.Quit(0|1)` at the end (so the console launcher gets a
+status), `noquit` cancels it.
 A subsystem name selects the loaded test modules of that subsystem:
 `System` finds `System_dev*`, `Async` finds `Async_dev*`. `all`
 selects every loaded module whose name contains `_dev`. The modules

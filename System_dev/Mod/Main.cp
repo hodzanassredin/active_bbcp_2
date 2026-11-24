@@ -44,4 +44,10 @@ MODULE System_devMain;
 		System_devInHeap.Do
 	END TestProcInHeap;
 
+	PROCEDURE TestProcTryInConsole*;
+	(** Трап внутри Kernel.Try в консоли без trap viewer'а: процесс жив. *)
+	BEGIN
+		System_devTrap.TryInConsole
+	END TestProcTryInConsole;
+
 END System_devMain.

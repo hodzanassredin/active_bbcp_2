@@ -17,7 +17,7 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
 | Тесты без окон | `tools/test.sh` (Unit) | 21 этап, все зелёные |
 | Временные файлы `LinFiles` | `Lin_devFiles` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
-| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: Unit_devMain 4/4, Files 3/3, Tasks 14/14, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
+| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: Unit_devMain 4/4, Files 3/3, Tasks 15/15, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
 | i386: C-тулчейн | `tools/i386-toolchain.sh` | без sudo; libtest32.so, ucontext |
 | Бутстрап i386 | `tools/bootstrap.sh` | три прохода, 98 файлов, B и C — 0 различий |
 | Этап 1: очередь и цикл | `System_devMain.TestProcActionTrap` | зелёный |
@@ -195,16 +195,17 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 `*_dev`: их нет в списке `CompileSubs`. Тесты собирает `tools/unit.sh`
 (x64) и `tools/test32.sh` (i386) по требованию.
 
-Результат: **21 этап, 107 тестов, 0 провалов** (манифест — 16
+Результат: **21 этап, 108 тестов, 0 провалов** (манифест — 16
 модулей; остальные — отдельные сценарии) —
 - `Lin_devFiles` (marks=proc slow): заняты все имена `odc00000`…`odc99999`;
   временный файл создаётся (красный на старом коде), после
   создания/закрытия и после финализатора имён «odc» + 9 цифр не
   остаётся (см. §3);
 - `System_devMain` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
-  TrapStack, InHeap (сценарии `System_dev*`, точки входа в
-  `System_dev/Mod/Main.cp`);
-- `System_devTasks` (marks=proc slow): 14 тестов задач — Yield,
+  TrapStack, InHeap, TryInConsole (сценарии `System_dev*`, точки входа
+  в `System_dev/Mod/Main.cp`); `TryInConsole` — трап внутри `Kernel.Try`
+  в консоли без зрителя трапов, процесс жив (п. 1.6 `docs/kernel-plan.md`);
+- `System_devTasks` (marks=proc slow): 15 тестов задач — Yield,
   производитель-потребитель, философы, отмена, изоляция трапа,
   проверки ожидания, группа, действие планировщика, нагрузка
   1 тыс. и 10 тыс. задач, уборка списка `all` в Reap после 10 тыс.
@@ -304,12 +305,18 @@ tools/test32.sh System_devTasks   # только указанные модули
 `System_devPump` и `System_devGcBench` в манифест не входят; замер —
 `tools/bench-gc.sh`.
 
-### Ловушка консоли
+### Трапы в консоли (исправлено)
 
-Консольный init не ставит `Kernel.trapViewer`, поэтому при
-`trapViewer = NIL` любой трап фатален даже внутри `Kernel.Try`.
-`System_devSupport.Begin` ставит пустой viewer — это дефект каркаса, не ядра
-теста. В норме viewer должен ставить консольный init.
+Консольный init не ставит `Kernel.trapViewer`, но трап внутри `Kernel.Try`
+теперь ловится и без него: `Kernel.HandleTrap` делает `platform.FatalError`
+только при `tryCount = 0`. Фатален лишь трап, не охваченный ни одним
+`Try`, — как и должно быть. Проверка — `System_devTrap.TryInConsole`
+(`TestProcTryInConsole`), красная на прежнем ядре.
+
+Каркас зритель трапов больше не подменяет: `UnitRunner` не ставит пустой
+viewer (признак консоли для `Kernel.Quit` заменён ключом `quit` у команды),
+`DemoGroup`, `System_devSupport`, исполнители `AsyncComputon`/`AsyncMpi`
+тоже. Ядро больше не экспортирует `GetTrapViewer`.
 
 ## 6. Этапы 1–6 на `.cp`
 
@@ -322,8 +329,8 @@ tools/test32.sh System_devTasks   # только указанные модули
 - `Cons/Mod/Interp.cp`: между командами и во время ожидания ввода
   вызывает `Services.actionHook.Step`.
 - `System/Mod64/Kernel.cp`: реестр `Stack`, `RegisterStack`,
-  `RegisterSignalStack`, `UnregisterStack(At)`, `StackOf`,
-  `InRegisteredStack`, `CurrentStack`, `SwitchSave/SwitchRestore`;
+  `RegisterSignalStack`, `UnregisterStack`, `StackOf`,
+  `SwitchSave/SwitchRestore`;
   `MarkLocals` сканирует текущий стек от FP и спящие от SP;
   `UnloadMod` не выгружает модуль, если его код есть в кадрах.
   Обход кадров в `FrameInModule`: текущий стек — от `FP`, спящий — от
@@ -337,8 +344,8 @@ tools/test32.sh System_devTasks   # только указанные модули
   `currentTryContext`, `InActivationStack` учитывает зарегистрированные
   стеки, сигнальный стек регистрируется после `Kernel.SetPlatform`.
 - Шаг 2а: `System/Mod64/Kernel.cp` — индекс кластеров для `InHeap`
-  (`IndexInsert/IndexRemove`); наружу из диагностики оставлена одна
-  `ClusterIndexCheck`, счётчик `AllocCount`; `System/Mod/Loop.cp` —
+  (`IndexInsert/IndexRemove`); наружу оставлен счётчик `AllocCount`,
+  инвариант индекса — внутренний `ASSERT` при `debug`; `System/Mod/Loop.cp` —
   пропуск периодической сборки без выделений, диагностика `Loop.Stats`.
 - Этап 3: `System/Mod64/Tasks.cp` — задачи и [code]-переключатель;
   `Kernel.AllocStack/FreeStack` и `Platform.AllocateStackMem`
@@ -529,8 +536,7 @@ LinKernel, Loop, Services, Console, Init/IntInit», потому что `Cons/In
 `Comm_dev/Mod64/Resolver.cp`, `Robust_dev/Mod64/*.cp`,
 `Demo_dev/Mod/*.cp`), `System/Mod/Tasks.cp`,
 `System/Mod64/Tasks.cp`, а с s18 ещё и `System/Mod/Monitors.cp`.
-`Unit` в снимке отсутствует и зовёт `Kernel.GetTrapViewer` — в базовый
-мир не входит.
+`Unit` в снимке отсутствует — в базовый мир не входит.
 
 Результат: новый компилятор собрал базовый мир `@Lin`
 (`Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket`),

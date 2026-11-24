@@ -691,12 +691,6 @@ MODULE Monitors;
 		RETURN (m # NIL) & (m.owner # 0)
 	END IsLocked;
 
-	PROCEDURE MonitorCount* (): INTEGER;
-	(** Число записей в таблице мониторов. *)
-	BEGIN
-		RETURN nofMonitors
-	END MonitorCount;
-
 	PROCEDURE LockDepth* (): INTEGER;
 	(** Глубина цепочки текущего токена: Kernel.Poll не уступает в мониторе. *)
 	BEGIN

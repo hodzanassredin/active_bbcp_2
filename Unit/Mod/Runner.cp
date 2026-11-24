@@ -14,9 +14,11 @@ MODULE UnitRunner;
 
 	Команда:
 		UnitRunner.Run [модуль|подсистема|all] [slow] [gui] [proc]
-			[junit=ФАЙЛ] [tap] [noquit]
-	По умолчанию TestSlow/TestGui/TestProc пропускаются. В консоли
-	(viewer трапов = NIL) в конце зовётся Kernel.Quit(0|1). *)
+			[junit=ФАЙЛ] [tap] [quit] [noquit]
+	По умолчанию TestSlow/TestGui/TestProc пропускаются. С ключом quit
+	в конце зовётся Kernel.Quit(0|1) — так консольный запускатель получает
+	код. Зритель трапов исполнитель не подменяет: Kernel.Try ловит трап
+	сам, без правок ядра ради тестов. *)
 
 	IMPORT SYSTEM, Kernel, Strings, Console, Meta, Files, DevCommanders,
 		TextModels, UnitAssert;
@@ -57,10 +59,6 @@ MODULE UnitRunner;
 
 	PROCEDURE Ln;
 	BEGIN Console.WriteLn END Ln;
-
-	PROCEDURE NoopViewer;
-	BEGIN
-	END NoopViewer;
 
 	PROCEDURE StartsWith (IN s, p: ARRAY OF CHAR): BOOLEAN;
 		VAR i: INTEGER;
@@ -216,12 +214,11 @@ MODULE UnitRunner;
 		quietRun: BOOLEAN; OUT c: Counts);
 		VAR mi, setupMod, teardownMod: Meta.Item; s: Meta.Scanner; nm: Meta.Name;
 			setupOk, teardownOk, ok, trapped: BOOLEAN; mark: INTEGER;
-			oldViewer: Kernel.Handler; saved: UnitAssert.State; savedQuiet: BOOLEAN;
+			saved: UnitAssert.State; savedQuiet: BOOLEAN;
 			msg: UnitAssert.Message;
 	BEGIN
 		c.passed := 0; c.failed := 0; c.empty := 0; c.skipped := 0;
 		UnitAssert.Save(saved); savedQuiet := quiet; quiet := quietRun OR savedQuiet;
-		oldViewer := Kernel.GetTrapViewer(); Kernel.InstallTrapViewer(NoopViewer);
 
 		Meta.Lookup(module, mi);
 		IF ~mi.Valid() THEN
@@ -277,7 +274,6 @@ MODULE UnitRunner;
 			END
 		END;
 
-		Kernel.InstallTrapViewer(oldViewer);
 		quiet := savedQuiet; UnitAssert.Restore(saved)
 	END RunModuleCounts;
 
@@ -475,18 +471,19 @@ MODULE UnitRunner;
 
 	PROCEDURE Run*;
 		VAR par, target, tok, marks, jfile: ARRAY 256 OF CHAR;
-			total: Counts; i, n: INTEGER; noquit, tapOn, isConsole: BOOLEAN;
-			oldViewer: Kernel.Handler; mi: Meta.Item; ok: BOOLEAN;
+			total: Counts; i, n: INTEGER; quitAtEnd, tapOn: BOOLEAN;
+			mi: Meta.Item; ok: BOOLEAN;
 	BEGIN
 		GetPar(par);
-		target := ""; marks := ""; jfile := ""; noquit := FALSE; tapOn := FALSE;
+		target := ""; marks := ""; jfile := ""; quitAtEnd := FALSE; tapOn := FALSE;
 		i := 0;
 		LOOP
 			Token(par, i, tok);
 			IF tok = "" THEN EXIT END;
 			IF StartsWith(tok, "junit=") THEN StrCopy(tok, 6, StrLen(tok) - 6, jfile)
 			ELSIF tok = "tap" THEN tapOn := TRUE
-			ELSIF tok = "noquit" THEN noquit := TRUE
+			ELSIF tok = "quit" THEN quitAtEnd := TRUE
+			ELSIF tok = "noquit" THEN quitAtEnd := FALSE
 			ELSIF tok = "slow" THEN marks := marks + "slow"
 			ELSIF tok = "gui" THEN marks := marks + "gui"
 			ELSIF tok = "proc" THEN marks := marks + "proc"
@@ -497,7 +494,6 @@ MODULE UnitRunner;
 
 		nofResults := 0; quiet := FALSE;
 		total.passed := 0; total.failed := 0; total.empty := 0; total.skipped := 0;
-		oldViewer := Kernel.GetTrapViewer(); isConsole := oldViewer = NIL;
 
 		W("== Unit: run "); W(target); IF marks # "" THEN W(" (marks="); W(marks); W(")") END; Ln;
 		IF (target = "") OR (target = "all") THEN
@@ -518,7 +514,7 @@ MODULE UnitRunner;
 			ELSE W("== Unit: cannot write JUnit "); W(jfile); Ln
 			END
 		END;
-		IF isConsole & ~noquit THEN
+		IF quitAtEnd THEN
 			IF total.failed + total.empty > 0 THEN Kernel.Quit(1) ELSE Kernel.Quit(0) END
 		END
 	END Run;

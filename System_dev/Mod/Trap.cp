@@ -5,7 +5,7 @@ MODULE System_devTrap;
 
 	IMPORT SYSTEM, Kernel, System_devSupport;
 
-	VAR count0: INTEGER; bodyRan: BOOLEAN;
+	VAR count0: INTEGER; bodyRan, consoleBodyRan, consoleReturned: BOOLEAN;
 
 	PROCEDURE Probe (a, b, c: SYSTEM.ADDRESS);
 	BEGIN
@@ -18,6 +18,28 @@ MODULE System_devTrap;
 	BEGIN
 		p := NIL; p.x := 1	(* SIGSEGV *)
 	END Crash;
+
+	PROCEDURE ConsoleCrash (a, b, c: SYSTEM.ADDRESS);
+	BEGIN
+		consoleBodyRan := TRUE;
+		HALT(42)
+	END ConsoleCrash;
+
+	PROCEDURE TryInConsole*;
+	(** Красный тест (п.1.6): в консоли зритель трапов не установлен, но
+		трап внутри Kernel.Try не должен завершать процесс; фатален только
+		трап вне какого-либо Try. *)
+		VAR n0: INTEGER;
+	BEGIN
+		System_devSupport.Begin("TryInConsole");
+		consoleBodyRan := FALSE; consoleReturned := FALSE; n0 := Kernel.trapCount;
+		Kernel.Try(SYSTEM.VAL(Kernel.TryHandler, SYSTEM.ADR(ConsoleCrash)), 0, 0, 0);
+		consoleReturned := TRUE;
+		System_devSupport.Check(consoleBodyRan, "Try did not run its body");
+		System_devSupport.Check(consoleReturned, "control did not return from Try");
+		System_devSupport.Check(Kernel.trapCount > n0, "Try did not catch the trap");
+		System_devSupport.End
+	END TryInConsole;
 
 	PROCEDURE Do*;
 	BEGIN

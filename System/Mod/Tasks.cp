@@ -226,9 +226,9 @@ MODULE Tasks;
 
 	(* --- проверки точек ожидания ------------------------------------------ *)
 
-	PROCEDURE InFramework* (): BOOLEAN;
+	PROCEDURE InFramework (): BOOLEAN;
 	(** Идёт обработчик действия (кроме нашего планировщика) или
-		рассылка по домену. Экспортируется для проверок и отладки. *)
+		рассылка по домену. Внутренняя проверка планировщика. *)
 	BEGIN
 		RETURN Services.executingAction & (Services.executing # sched)
 			OR Models.InDomainCast()

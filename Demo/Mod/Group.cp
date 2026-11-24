@@ -14,12 +14,11 @@ MODULE DemoGroup;
 	опустошения в TaskBoot.
 
 	Все четыре рабочих доходят до барьера Arrive; затем третий трапает.
-	На время прогона ставится пустой trap viewer (как в UnitRunner):
-	иначе консольный хост считает любой трап фатальным. Итог
-	детерминирован: Entered = 8, Completed = 0, группа failed,
+	Трап ловит Kernel.Try в TaskBoot, поэтому зритель трапов не нужен.
+	Итог детерминирован: Entered = 8, Completed = 0, группа failed,
 	один рабочий трапнул, трое отменены, в живых 0. *)
 
-	IMPORT ACTIVE, Kernel, Tasks, DemoSupport;
+	IMPORT ACTIVE, Tasks, DemoSupport;
 
 	CONST
 		n = 4;
@@ -41,11 +40,6 @@ MODULE DemoGroup;
 		GroupAlive*: INTEGER;	(* Tasks.GroupCount *)
 		Failed*: BOOLEAN;	(* неожиданный сбой прогона *)
 		arrived: INTEGER;	(* барьер под монитором модуля *)
-
-	PROCEDURE NoopViewer;
-	(** Пустой trap viewer на время примера. *)
-	BEGIN
-	END NoopViewer;
 
 	PROCEDURE NilCrash;
 		VAR p: Worker;
@@ -87,18 +81,15 @@ MODULE DemoGroup;
 
 	PROCEDURE Run*;
 	(** Демонстрация: трап одного участника отменяет группу. *)
-		VAR p: Parent; i, st: INTEGER; ok: BOOLEAN; old: Kernel.Handler;
+		VAR p: Parent; i, st: INTEGER; ok: BOOLEAN;
 	BEGIN
 		Entered := 0; Cancelled := 0; Completed := 0; Errors := 0;
 		FailedWorker := 0; arrived := 0;
 		LastGroup := NIL; GroupIsFailed := FALSE; GroupAlive := -1;
 		Failed := FALSE;
 
-		old := Kernel.GetTrapViewer();
-		Kernel.InstallTrapViewer(NoopViewer);
 		NEW(p); Tasks.Start(p);
 		ok := DemoSupport.Pump(10000);
-		Kernel.InstallTrapViewer(old);
 
 		GroupIsFailed := Tasks.GroupFailed(LastGroup);
 		GroupAlive := Tasks.GroupCount(LastGroup);

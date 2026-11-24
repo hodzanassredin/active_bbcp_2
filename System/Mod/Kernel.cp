@@ -1150,11 +1150,6 @@ MODULE Kernel;
 		trapViewer := h
 	END InstallTrapViewer;
 
-	PROCEDURE GetTrapViewer* (): Handler;
-	BEGIN
-		RETURN trapViewer
-	END GetTrapViewer;
-
 	PROCEDURE InstallTrapChecker* (h: Handler);
 	BEGIN
 		trapChecker := h
@@ -1903,18 +1898,6 @@ MODULE Kernel;
 		RETURN best
 	END StackOf;
 
-	PROCEDURE InRegisteredStack* (adr: S.ADDRESS): BOOLEAN;
-	BEGIN
-		RETURN StackOf(adr) # NIL
-	END InRegisteredStack;
-
-	PROCEDURE CurrentStack* (): Stack;
-		VAR sp: S.ADDRESS;
-	BEGIN
-		S.GETREG(SP, sp);
-		RETURN StackOf(sp)
-	END CurrentStack;
-
 	PROCEDURE NewStack (lo, hi: S.ADDRESS; signal: BOOLEAN): Stack;
 		VAR s: Stack;
 	BEGIN
@@ -1967,15 +1950,6 @@ MODULE Kernel;
 			s.next := NIL
 		END
 	END UnregisterStack;
-
-	PROCEDURE UnregisterStackAt* (lo: S.ADDRESS);
-	(** Снять регистрацию по нижней границе. *)
-		VAR s: Stack;
-	BEGIN
-		s := stacks;
-		WHILE (s # NIL) & ((s.lo # lo) OR s.main) DO s := s.next END;
-		IF s # NIL THEN UnregisterStack(s) END
-	END UnregisterStackAt;
 
 	PROCEDURE SwitchSave*;
 	(** Сохранить состояние исполнения текущего стека перед переключением. *)
@@ -2805,7 +2779,8 @@ MODULE Kernel;
 					IF ~(defLogger IN dirty) THEN LogThisStack(pc, fp) END;
 					SigRepFooter();
 
-					IF (err # silentTrap) & (trapViewer = NIL) THEN
+					(* Фатален только трап, который не ловит ни один Kernel.Try. *)
+					IF (err # silentTrap) & (trapViewer = NIL) & (tryCount = 0) THEN
 						platform.FatalError(trapMessage, blog.buf)
 					END
 				END;

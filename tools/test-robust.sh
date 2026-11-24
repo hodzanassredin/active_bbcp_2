@@ -35,7 +35,7 @@ for n in 1 4 16; do
 	out="${TMPDIR:-/tmp}/robust-$$-$n.out"
 	(
 		cd "$INSTALL" &&
-		printf 'UnitRunner.Run %s %s\n' "$MOD" "$MARKS" \
+		printf 'UnitRunner.Run %s %s quit\n' "$MOD" "$MARKS" \
 			| LD_LIBRARY_PATH="$INSTALL" timeout -k 5 "$TMO" "$INTERP" --ROBUST_SIZE="$n"
 	) >"$out" 2>&1
 	rc=$?

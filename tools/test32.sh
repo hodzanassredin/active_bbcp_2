@@ -98,7 +98,7 @@ if [ "$have_lib" -eq 0 ] && [ -f "$INSTALL/libtest32.so" ]; then have_lib=1; fi
 run_one() {
 	mod="$1"; marks="$2"; tmo="$3"
 	out="${TMPDIR:-/tmp}/unit32-$$.out"
-	printf 'UnitRunner.Run %s %s\n' "$mod" "$marks" \
+	printf 'UnitRunner.Run %s %s quit\n' "$mod" "$marks" \
 		| (cd "$INSTALL" && LD_LIBRARY_PATH="$INSTALL${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 			timeout -k 5 "$tmo" ./blackbox-console) >"$out" 2>&1
 	rc=$?

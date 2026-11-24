@@ -3,23 +3,15 @@ MODULE System_devSupport;
 	Каждый тест печатает  SYSTEMTESTS-PASS <имя>  или  SYSTEMTESTS-FAIL <имя> ...
 	Вывод идёт через Console (сразу в stdout, не через StdLog). *)
 
-	IMPORT Console, Strings, Kernel, UnitAssert;
+	IMPORT Console, Strings, UnitAssert;
 
 	VAR failures: INTEGER;
 		name: ARRAY 64 OF CHAR;
 
-	(* Консольный x64 BlackBox не устанавливает trapViewer ни в LinIntInit,
-	   ни в LinGui: при trapViewer = NIL System.Kernel.HandleTrap считает
-	   ЛЮБОЙ трап фатальным, даже внутри Kernel.Try (FatalError + Terminate(1)).
-	   Пустой viewer возвращает обычную семантику Try; отчёт о трапе ядро
-	   уже печатает само (DefaultTrapViewer + LogThisStack). *)
-	PROCEDURE NoopViewer;
-	BEGIN
-	END NoopViewer;
-
+	(* Зритель трапов не трогаем: Kernel.Try ловит трап и без него,
+	   отчёт о трапе ядро печатает само (SigRepHeader + LogThisStack). *)
 	PROCEDURE Begin* (IN n: ARRAY OF CHAR);
 	BEGIN
-		Kernel.InstallTrapViewer(NoopViewer);
 		name := n$; failures := 0;
 		Console.WriteStr("SYSTEMTESTS begin "); Console.WriteStr(name); Console.WriteLn
 	END Begin;

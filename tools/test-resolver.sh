@@ -58,7 +58,7 @@ printf 'passwd: files\ngroup: files\nhosts: files dns\nnetworks: files\n' >"$wor
 
 # 4. Прогон в пространстве. Каталог установки и интерпретатор — снаружи,
 #    поэтому пути абсолютные и в кавычках.
-printf 'UnitRunner.Run %s %s\n' "$MOD" "$MARKS" >"$work/cmd"
+printf 'UnitRunner.Run %s %s quit\n' "$MOD" "$MARKS" >"$work/cmd"
 unshare -rmn sh -c "
 	set -e
 	ip link set lo up
