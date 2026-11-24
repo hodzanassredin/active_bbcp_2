@@ -4,20 +4,20 @@
 # marks: slow, gui, proc — какие пометки TestSlow/TestGui/TestProc включать.
 # Каждый модуль запускается отдельным процессом (tools/unit.sh);
 # TestProc-сценарии трогают ядро/сборщик/стеки и потому помечены proc.
-SystemTests|proc|900|SystemTestsSupport SystemTestsCRaw SystemTestsCo SystemTestsBasic SystemTestsHeap SystemTestsTrap SystemTestsActionTrap SystemTestsGcStack SystemTestsTrapStack SystemTestsInHeap
-LinTestsFiles|proc slow|600|
-SystemTestsTasks|proc slow|900|SystemTestsCRaw SystemTestsClock
-SystemTestsMonitors|proc|300|
-UnitTests||180|UnitTestsProbe
-CheckTests|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
-DevTestsActive|proc|300|
-DevTestsYield|proc|300||^
-AsyncTestsChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
-AsyncTestsIO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
-AsyncTestsWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
-AsyncTestsComputons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
-AsyncTestsProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
-SystemTestsUnload|proc|600|SystemTestsUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
-SystemTestsUnloadGuard|proc|300|SystemTestsUnloadGuardCode
+System_testsMain|proc|900|System_testsSupport System_testsCRaw System_testsCo System_testsBasic System_testsHeap System_testsTrap System_testsActionTrap System_testsGcStack System_testsTrapStack System_testsInHeap
+Lin_testsFiles|proc slow|600|
+System_testsTasks|proc slow|900|System_testsCRaw System_testsClock
+System_testsMonitors|proc|300|
+Unit_testsMain||180|Unit_testsProbe
+Check_testsMain|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
+Dev_testsActive|proc|300|
+Dev_testsYield|proc|300||^
+Async_testsChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
+Async_testsIO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
+Async_testsWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
+Async_testsComputons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
+Async_testsProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
+System_testsUnload|proc|600|System_testsUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
+System_testsUnloadGuard|proc|300|System_testsUnloadGuardCode
 # Примеры Demo: задачи, мониторы, каналы, муравьи (amd64).
-DemoTests|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool
+Demo_testsExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool

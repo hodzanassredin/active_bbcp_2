@@ -15,7 +15,7 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=CommTestsResolver
+MOD=Comm_testsResolver
 MARKS=proc
 TMO=180
 DEPS="LinThreads LinNative AsyncWork AsyncWorkLin AsyncIO AsyncSelect AsyncChan AsyncOnce"
@@ -37,7 +37,7 @@ probe=$(unshare -rmn sh -c 'ip link set lo up && ip link add dummy0 type dummy &
 # 2. Компиляция (сеть не нужна, идёт снаружи пространства).
 work=$(mktemp -d "${TMPDIR:-/tmp}/nsres.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT INT TERM
-mods="UnitAssert UnitRunner UnitTestsProbe UnitTests $DEPS"
+mods="UnitAssert UnitRunner Unit_testsProbe Unit_testsMain $DEPS"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))
@@ -72,7 +72,7 @@ unshare -rmn sh -c "
 " >"$work/out" 2>&1
 rc=$?
 
-grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|CommTestsResolver:)' "$work/out" || true
+grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|Comm_testsResolver:)' "$work/out" || true
 if [ $rc -eq 124 ]; then
 	echo "test-resolver: $MOD — таймаут ${TMO}s" >&2
 	tail -20 "$work/out" >&2; exit 1

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Замер сборщика мусора.
 #
-#   tools/bench-gc.sh            # SystemTestsGcBench.Do
+#   tools/bench-gc.sh            # System_testsGcBench.Do
 #   tools/bench-gc.sh <команда>
 #
 # Строки "BENCH ..." печатает сам модуль; RSS — /usr/bin/time -v.
@@ -9,7 +9,7 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-cmd="${1:-SystemTestsGcBench.Do}"
+cmd="${1:-System_testsGcBench.Do}"
 tmo="${BENCH_TIMEOUT:-1800}"
 [ -x "$INTERP" ] || { echo "bench-gc: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 command -v cc >/dev/null 2>&1 || { echo "bench-gc: нет cc" >&2; exit 2; }
@@ -17,7 +17,7 @@ command -v /usr/bin/time >/dev/null 2>&1 || { echo "bench-gc: нет /usr/bin/ti
 cc -shared -fPIC -O2 -o "$INSTALL/libtest64.so" "$BB/tools/test64.c" || {
 	echo "bench-gc: сборка libtest64.so не удалась" >&2; exit 2; }
 
-mods="SystemTestsSupport SystemTestsCRaw SystemTestsClock SystemTestsGcBench"
+mods="System_testsSupport System_testsCRaw System_testsClock System_testsGcBench"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))

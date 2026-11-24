@@ -3,21 +3,21 @@
 #
 #   tools/test-robust.sh
 #
-# Клиент RobustTestsClient написан только против опубликованного
+# Клиент Robust_testsClient написан только против опубликованного
 # определения RobustParallel в стиле MPI: rank 0 раздаёт работу, ранги
 # 1..size-1 считают. Размер мира — внешняя переменная ROBUST_SIZE.
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=RobustTestsParallel
+MOD=Robust_testsParallel
 MARKS=proc
 TMO=180
-DEPS="RobustParallel RobustTestsClient AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads"
+DEPS="RobustParallel Robust_testsClient AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads"
 
 [ -x "$INTERP" ] || { echo "test-robust: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
 # Компиляция: Unit, фасад, клиент, зависимости.
-mods="UnitAssert UnitRunner UnitTestsProbe UnitTests $DEPS"
+mods="UnitAssert UnitRunner Unit_testsProbe Unit_testsMain $DEPS"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))
@@ -39,7 +39,7 @@ for n in 1 4 16; do
 			| LD_LIBRARY_PATH="$INSTALL" timeout -k 5 "$TMO" "$INTERP" --ROBUST_SIZE="$n"
 	) >"$out" 2>&1
 	rc=$?
-	grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|RobustTestsParallel:)' "$out" || true
+	grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|Robust_testsParallel:)' "$out" || true
 	if [ $rc -eq 124 ]; then
 		echo "test-robust: $MOD size=$n — таймаут ${TMO}s" >&2
 		rm -f "$out"; exit 1

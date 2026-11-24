@@ -46,10 +46,6 @@ echo "build64: компиляция подсистем:$subs"
 	echo 'DevCompiler64.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
 	[ -n "$core" ] && echo "DevCompiler64.CompileSubs @Lin $core"
-	# Тестовые модули (Tests*.cp) CompileSubs пропускает. В установке Unit
-	# нужен для ручного UnitRunner.Run: самопроверку собираем явно.
-	echo "DevCompiler64.CompileThis UnitTestsProbe"
-	echo "DevCompiler64.CompileThis UnitTests"
 	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
 	# LinThreads нужны самой подсистеме Async (AsyncSelect, AsyncComputon),
 	# поэтому идут до неё.

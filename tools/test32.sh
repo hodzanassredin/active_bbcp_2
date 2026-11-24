@@ -1,8 +1,8 @@
 #!/bin/sh
-# Прогон i386-мира: UnitTests и расширение этапов 2–6 на 32-битной цели.
+# Прогон i386-мира: Unit_testsMain и расширение этапов 2–6 на 32-битной цели.
 #
 #   tools/test32.sh              # build32.sh, затем все модули
-#   tools/test32.sh SystemTestsTasks  # только указанные модули (мир не собирается)
+#   tools/test32.sh System_testsTasks  # только указанные модули (мир не собирается)
 #   tools/test32.sh --list
 #
 # Каждый модуль — отдельный процесс blackbox-console (i386). Итог берётся
@@ -11,7 +11,7 @@
 # других процессов стенда не считаются).
 #
 # libtest32.so собирается флагами tools/i386-toolchain.sh (без sudo).
-# Нет 32-битного C-тулчейна — SystemTestsCoTests пропускается с причиной;
+# Нет 32-битного C-тулчейна — System_testsCoTests пропускается с причиной;
 # остальные модули от C-помощника не зависят.
 set -u
 . "$(dirname "$0")/env.sh"
@@ -20,14 +20,14 @@ INSTALL="${BB32INSTALL:-$BB/build/BB32LIN}"
 INTERP32="$INSTALL/blackbox-console"
 
 # <модуль>|<marks>|<таймаут>
-MANIFEST='UnitTests||180
-LinTestsFiles|proc slow|600
-SystemTestsTasks|proc slow|900
-SystemTestsMonitors|proc|300
-DevTestsActive|proc|300
-DevTestsYield|proc|300
-SystemTestsCoTests|proc|300
-SystemTestsUnloadGuard|proc|300'
+MANIFEST='Unit_testsMain||180
+Lin_testsFiles|proc slow|600
+System_testsTasks|proc slow|900
+System_testsMonitors|proc|300
+Dev_testsActive|proc|300
+Dev_testsYield|proc|300
+System_testsCoTests|proc|300
+System_testsUnloadGuard|proc|300'
 
 LIST=0; only=""
 for a in "$@"; do
@@ -47,8 +47,40 @@ if [ -z "$only" ]; then
 fi
 [ -x "$INTERP32" ] || { echo "test32: нет $INTERP32 — tools/build32.sh" >&2; exit 2; }
 
+# Поставочный build32.sh подсистемы *_tests не собирает: тестовые модули
+# i386 компилируются здесь по требованию (Unit и мир уже собраны).
+compile_tests32() {
+	log="${TMPDIR:-/tmp}/compile32-$$.log"
+	{
+		echo 'DevCompiler.InitLogMarks'
+		echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod')"
+		for m in Unit_testsProbe Unit_testsMain System_testsClock \
+			System_testsSupport System_testsCRaw System_testsCo \
+			System_testsBasic System_testsGcStack System_testsTrapStack \
+			System_testsCoTests System_testsTasks System_testsMonitors \
+			Dev_testsActive Lin_testsFiles 'Dev_testsYield^' \
+			System_testsUnloadGuardCode System_testsUnloadGuard; do
+			opt=""
+			case "$m" in *\^) opt="^"; m="${m%^}";; esac
+			echo "DevCompiler.CompileThis $m $opt"
+		done
+		echo 'DevLibrarian.DisableDevLib'
+	} > "$log.cmd"
+	if ! (cd "$BB" && "$DEV0" < "$log.cmd" > "$log" 2>&1); then
+		echo "test32: компиляция тестов не удалась:" >&2
+		tail -20 "$log" >&2; rm -f "$log" "$log.cmd"; return 1
+	fi
+	if grep -qE 'error:|not found|~TRAP|[0-9]+ error[s]? detected' "$log"; then
+		echo "test32: ошибки компиляции тестов:" >&2
+		grep -nE 'error:|not found|~TRAP|[0-9]+ error' "$log" | head -10 >&2
+		rm -f "$log" "$log.cmd"; return 1
+	fi
+	rm -f "$log" "$log.cmd"
+}
+compile_tests32 || exit 1
+
 # libtest32.so — C-помощник сопрограмм (ucontext, tools/test64.c).
-# Пустой stdout tools/i386-toolchain.sh — тулчейна нет: SystemTestsCoTests
+# Пустой stdout tools/i386-toolchain.sh — тулчейна нет: System_testsCoTests
 # пропускается, остальные модули от C-помощника не зависят.
 have_lib=0
 if I386FLAGS=$("$BB/tools/i386-toolchain.sh"); then
@@ -92,8 +124,8 @@ while IFS='|' read -r mod marks tmo; do
 	if [ -n "$only" ]; then
 		case " $only " in *" $mod "*) ;; *) continue;; esac
 	fi
-	if [ "$have_lib" -eq 0 ] && [ "$mod" = SystemTestsCoTests ]; then
-		echo "SKIP SystemTestsCoTests: нет libtest32.so (32-битный C-тулчейн недоступен)"
+	if [ "$have_lib" -eq 0 ] && [ "$mod" = System_testsCoTests ]; then
+		echo "SKIP System_testsCoTests: нет libtest32.so (32-битный C-тулчейн недоступен)"
 		skipped=$((skipped + 1)); continue
 	fi
 	total=$((total + 1))

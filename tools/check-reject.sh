@@ -4,7 +4,7 @@
 #
 #   tools/check-reject.sh
 #
-# Фикстуры лежат в Dev/Reject; сценарий временно кладёт каждую на путь,
+# Фикстуры лежат в Dev_tests/Reject; сценарий временно кладёт каждую на путь,
 # который выберет DevLibrarian по имени модуля, компилирует и ждёт ошибку.
 set -u
 . "$(dirname "$0")/env.sh"
@@ -28,7 +28,7 @@ trap cleanup EXIT INT TERM
 # run <фикстура> <куда положить> <компилятор> <модуль[опции]> <что должно быть>
 run () {
 	fix="$1"; dest="$2"; cc="$3"; mod="$4"; why="$5"
-	cp "$BB/Dev/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
+	cp "$BB/Dev_tests/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
 	if out=$("$cc" "$mod" 2>&1); then
 		echo "BAD  $why: компиляция прошла" >&2
 		printf '%s\n' "$out" | tail -5 >&2
@@ -49,7 +49,7 @@ run () {
 # каркасом любой модуль с однословным именем и отвергал ключ.
 run_ok () {
 	fix="$1"; dest="$2"; cc="$3"; mod="$4"; why="$5"
-	cp "$BB/Dev/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
+	cp "$BB/Dev_tests/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
 	if out=$("$cc" "$mod" 2>&1); then
 		echo "PASS $why"
 		ok=$((ok + 1))

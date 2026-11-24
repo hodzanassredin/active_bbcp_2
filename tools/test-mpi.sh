@@ -11,7 +11,7 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=AsyncTestsMpi
+MOD=Async_testsMpi
 MARKS=proc
 TMO=180
 DEPS="AsyncMpi AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads"
@@ -35,7 +35,7 @@ if ! "$MPICC" -shared -fPIC -O2 -o "$MPIDIR/libbbmpi.so" "$BB/tools/bbmpi.c" >"$
 	tail -20 "$MPIDIR/build.log" >&2; exit 1
 fi
 
-mods="UnitAssert UnitRunner UnitTestsProbe UnitTests $DEPS"
+mods="UnitAssert UnitRunner Unit_testsProbe Unit_testsMain $DEPS"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))
@@ -68,7 +68,7 @@ LD_LIBRARY_PATH="$INSTALL:$MPIDIR:$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 	timeout -k 5 "$TMO" "$MPIRUN" -n 5 sh "$work/launch.sh" >"$work/out" 2>&1
 rc=$?
 
-grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|AsyncTestsMpi:)' "$work/out" || true
+grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|Async_testsMpi:)' "$work/out" || true
 if [ $rc -eq 124 ]; then
 	echo "test-mpi: $MOD — таймаут ${TMO}s" >&2
 	tail -20 "$work/out" >&2; exit 1

@@ -7,8 +7,9 @@
 # Источники берутся из <Подсистема>/Mod, результаты — в build/BB32LIN
 # (переопределяется BB32INSTALL). Компилятор — DevCompiler (i386) в
 # упакованном dev0Linux; линковка — DevLinker1.LinkElfExe (ELF32).
-# Tasks и тесты подсистем дополнительно компилируются CompileThis:
-# тесту уступок нужен ключ ^, а в общем списке CompileSubs опции не задать.
+# Tasks компилируется отдельным CompileThis: в общем списке CompileSubs
+# его нет (это модуль Mod64). Тесты подсистем собирает tools/test32.sh
+# по требованию — поставочная сборка подсистемы *_tests не включает.
 #
 # 32-битный C-помощник libtest32.so (ucontext, тот же tools/test64.c)
 # собирается флагами tools/i386-toolchain.sh; без тулчейна — пропуск
@@ -60,24 +61,7 @@ echo "build32: компиляция подсистем"
 	echo 'DevCompiler.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod')"
 	echo "DevCompiler.CompileSubs @Lin $SUBS"
-	echo "DevCompiler.CompileThis UnitTestsProbe"
-	echo "DevCompiler.CompileThis UnitTests"
-	echo "DevCompiler.CompileThis SystemTestsClock"
 	echo "DevCompiler.CompileThis Tasks"
-	echo "DevCompiler.CompileThis SystemTestsSupport"
-	echo "DevCompiler.CompileThis SystemTestsCRaw"
-	echo "DevCompiler.CompileThis SystemTestsCo"
-	echo "DevCompiler.CompileThis SystemTestsBasic"
-	echo "DevCompiler.CompileThis SystemTestsGcStack"
-	echo "DevCompiler.CompileThis SystemTestsTrapStack"
-	echo "DevCompiler.CompileThis SystemTestsCoTests"
-	echo "DevCompiler.CompileThis SystemTestsTasks"
-	echo "DevCompiler.CompileThis SystemTestsMonitors"
-	echo "DevCompiler.CompileThis DevTestsActive"
-	echo "DevCompiler.CompileThis LinTestsFiles"
-	echo "DevCompiler.CompileThis DevTestsYield ^"
-	echo "DevCompiler.CompileThis SystemTestsUnloadGuardCode"
-	echo "DevCompiler.CompileThis SystemTestsUnloadGuard"
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$DEV0" < "$LOG.cmd" > "$LOG" 2>&1; then

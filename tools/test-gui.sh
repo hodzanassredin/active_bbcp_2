@@ -4,10 +4,10 @@
 #   tools/test-gui.sh
 #
 # Поднимает gtk4-broadwayd в своём XDG_RUNTIME_DIR (Broadway-дисплей),
-# запускает blackbox с --BB_RUN=DemoTestsGui.Run: команда заводит задачи
+# запускает blackbox с --BB_RUN=Demo_testsGui.Run: команда заводит задачи
 # производителя-потребителя на [exclusive]+ACTIVE.AWAIT и действие-тикер,
 # дальше работает штатный главный цикл окон. Тикер печатает промежутки;
-# итог «DemoTestsGui: ok=1» означает, что задачи посчитали 100 элементов,
+# итог «Demo_testsGui: ok=1» означает, что задачи посчитали 100 элементов,
 # а главный цикл не замирал (maxgap меньше 500 мс).
 #
 # Системный broadwayd — от GTK3 и с клиентом GTK4 падает; нужен
@@ -16,7 +16,7 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=DemoTestsGui
+MOD=Demo_testsGui
 TMO=60
 
 skip() {
@@ -80,12 +80,12 @@ fi
 (
 	cd "$INSTALL" &&
 	env -u DISPLAY XDG_RUNTIME_DIR="$rt" GDK_BACKEND=broadway BROADWAY_DISPLAY=":$d" \
-		LD_LIBRARY_PATH="$INSTALL" timeout -s KILL "$TMO" ./blackbox --BB_RUN="DemoTestsGui.Run"
+		LD_LIBRARY_PATH="$INSTALL" timeout -s KILL "$TMO" ./blackbox --BB_RUN="Demo_testsGui.Run"
 ) >"$work/out" 2>&1
 rc=$?
 
-grep -E '^(DemoTestsGui:|LinGui:)' "$work/out" || true
-if [ $rc -ne 0 ] || ! grep -q 'DemoTestsGui: ok=1' "$work/out"; then
+grep -E '^(Demo_testsGui:|LinGui:)' "$work/out" || true
+if [ $rc -ne 0 ] || ! grep -q 'Demo_testsGui: ok=1' "$work/out"; then
 	echo "test-gui: $MOD — провал (код $rc)" >&2
 	tail -30 "$work/out" >&2; exit 1
 fi
