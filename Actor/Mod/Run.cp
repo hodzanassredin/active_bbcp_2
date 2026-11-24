@@ -7,30 +7,26 @@ MODULE ActorRun;
 	(монитор, канал), Unpark сбил бы с ожидания. Поэтому у исполнителя
 	флаг idle, поднятый ровно на время ожидания.
 
-	Первый исполнитель вместо Park спит tick мс. Unpark, сделанный вне
-	задачи (команда, действие Services), не переносит срок планировщика,
-	уже назначенный на будущее; без спящей задачи с близким сроком
-	разбуженный исполнитель ждал бы этого срока. Спящий первый исполнитель
-	ограничивает задержку tick мс и избавляет планировщик от сообщения о
-	взаимной блокировке, когда все исполнители свободны.
-
 	Ящик с флагом dedicated обслуживает своя задача Own; она живёт, пока
-	актор не остановлен.
+	актор не остановлен. Отменённую Own заменяет новая при следующей
+	работе ящика: отмена задачи актора — не отказ и не остановка.
+
+	Shutdown останавливает все акторы и завершает задачи пула без отмены.
 
 	Инвариант: каждый ящик в run стоит у исполнителя (Pending) и лежит в
-	run не более одного раза; idle => исполнитель в Tasks.Sleep цикла. *)
+	run не более одного раза; idle => исполнитель в Tasks.Park цикла. *)
 
-	IMPORT Tasks, ActorCore;
+	IMPORT Services, Tasks, ActorCore;
 
 	CONST
 		throughput = 100;	(* писем одного ящика за вызов Process *)
-		tick = 10;	(* мс сна первого исполнителя *)
 		yieldEvery = 64;	(* ящиков между уступками *)
 		maxExec = 64;
+		shutdownMs = 5000;	(* предел ожидания остановки акторов *)
 
 	TYPE
 		Pool = POINTER TO RECORD (ActorCore.Dispatcher) END;
-		Exec = POINTER TO RECORD (Tasks.Task) idle: BOOLEAN END;
+		Exec = POINTER TO RECORD (Tasks.Task) idle, quit: BOOLEAN END;
 		Own = POINTER TO RECORD (Tasks.Task) c: ActorCore.Context; idle: BOOLEAN END;
 
 	VAR
@@ -67,13 +63,12 @@ MODULE ActorRun;
 		LOOP
 			IF count > 0 THEN
 				c := PopRun();
-				IF ActorCore.Process(c, throughput) THEN PushRun(c) END;
+				IF pool.Process(c, throughput) THEN PushRun(c) END;
 				INC(k);
 				IF k MOD yieldEvery = 0 THEN Tasks.Yield END
+			ELSIF e.quit THEN EXIT
 			ELSE
-				e.idle := TRUE;
-				IF e = execs[0] THEN Tasks.Sleep(tick) ELSE Tasks.Park END;
-				e.idle := FALSE
+				e.idle := TRUE; Tasks.Park; e.idle := FALSE
 			END
 		END
 	END Run;
@@ -83,9 +78,9 @@ MODULE ActorRun;
 	BEGIN
 		c := t.c;
 		LOOP
-			IF c.Pending() THEN
-				IF ActorCore.Process(c, throughput) THEN Tasks.Yield END
-			ELSIF c.IsStopped() THEN EXIT
+			IF pool.Pending(c) THEN
+				IF pool.Process(c, throughput) THEN Tasks.Yield END
+			ELSIF pool.Stopped(c) THEN EXIT
 			ELSE
 				t.idle := TRUE; Tasks.Park; t.idle := FALSE
 			END
@@ -93,13 +88,16 @@ MODULE ActorRun;
 	END Run;
 
 	PROCEDURE (p: Pool) Schedule (c: ActorCore.Context);
-		VAR i: INTEGER; o: Own;
+	(* Ящик dedicated: нет задачи, она завершена или это она сама
+	   (отменённая задача снимает ящик перед трапом 127) — новая Own. *)
+		VAR i: INTEGER; o: Own; h: ANYPTR;
 	BEGIN
 		IF c.dedicated THEN
-			IF (c.host = NIL) OR (Tasks.State(c.host(Own)) IN {Tasks.Finished, Tasks.Cancelled}) THEN
-				NEW(o); o.c := c; c.host := o; Tasks.Start(o)
+			h := p.Host(c);
+			IF (h = NIL) OR (h = Tasks.Current()) OR (Tasks.State(h(Own)) IN {Tasks.Finished, Tasks.Cancelled}) THEN
+				NEW(o); o.c := c; p.SetHost(c, o); Tasks.Start(o)
 			ELSE
-				o := c.host(Own);
+				o := h(Own);
 				IF o.idle THEN o.idle := FALSE; Tasks.Unpark(o) END
 			END
 		ELSE
@@ -117,7 +115,9 @@ MODULE ActorRun;
 		VAR i: INTEGER;
 	BEGIN
 		ASSERT((k > 0) & (k <= maxExec), 20); ASSERT(n = 0, 21);
-		FOR i := 0 TO k - 1 DO NEW(execs[i]); execs[i].idle := FALSE; Tasks.Start(execs[i]) END;
+		FOR i := 0 TO k - 1 DO
+			NEW(execs[i]); execs[i].idle := FALSE; execs[i].quit := FALSE; Tasks.Start(execs[i])
+		END;
 		n := k;
 		ActorCore.SetDispatcher(pool)
 	END Start;
@@ -131,6 +131,43 @@ MODULE ActorRun;
 		FOR i := 0 TO n - 1 DO execs[i].idle := FALSE; Tasks.Cancel(execs[i]); execs[i] := NIL END;
 		n := 0
 	END Stop;
+
+	PROCEDURE Wait;
+	BEGIN
+		IF Tasks.InTask() THEN Tasks.Sleep(1) ELSE Services.actionHook.Step END
+	END Wait;
+
+	PROCEDURE Shutdown*;
+	(** Общая остановка. Пред: вызов не из задачи исполнителя (трап 20).
+		Пост: каждый актор без родителя получил Stop, дети остановлены
+		раньше родителей; задачи пула завершились сами, без отмены;
+		собственные задачи остановленных акторов завершаются сами; n = 0.
+		Актор, который не остановился за 5 с (обработчик ждёт без конца),
+		остаётся, задачи пула тогда отменяются (трап 127). Ждёт в задаче
+		(Tasks.Sleep) или крутит главный цикл (Services.actionHook.Step). *)
+		VAR i: INTEGER; t0: LONGINT; busy: BOOLEAN; cur: Tasks.Task;
+	BEGIN
+		cur := Tasks.Current();
+		ASSERT((cur = NIL) OR ~(cur IS Exec) & ~(cur IS Own), 20);
+		IF ActorCore.dispatcher = pool THEN
+			pool.StopRoots;
+			t0 := Services.Ticks();
+			WHILE (pool.Live() > 0) & (Services.Ticks() - t0 < shutdownMs) DO Wait END
+		END;
+		FOR i := 0 TO n - 1 DO
+			execs[i].quit := TRUE;
+			IF execs[i].idle THEN execs[i].idle := FALSE; Tasks.Unpark(execs[i]) END
+		END;
+		t0 := Services.Ticks();
+		REPEAT
+			busy := FALSE;
+			FOR i := 0 TO n - 1 DO
+				IF ~(Tasks.State(execs[i]) IN {Tasks.Finished, Tasks.Cancelled}) THEN busy := TRUE END
+			END;
+			IF busy THEN Wait END
+		UNTIL ~busy OR (Services.Ticks() - t0 >= shutdownMs);
+		Stop
+	END Shutdown;
 
 BEGIN
 	NEW(run, 64); NEW(pool)
