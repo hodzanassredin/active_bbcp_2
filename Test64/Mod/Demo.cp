@@ -6,7 +6,7 @@ MODULE Test64Demo;
 	на задачах, поэтому все тесты помечены TestProc… (отдельный процесс
 	через tools/unit.sh). Ants проверяется без окна через Simulate. *)
 
-	IMPORT UnitAssert,
+	IMPORT UnitAssert, Tasks,
 		DemoBuffer, DemoPhilo, DemoReaderWriter, DemoBarber, DemoModuleMonitor,
 		DemoPingPong, DemoPipeline, DemoSieve, DemoSelectTimeout,
 		DemoWorkerPool, DemoBoring, DemoGroup, DemoAnts;
@@ -121,12 +121,78 @@ MODULE Test64Demo;
 	PROCEDURE TestProcAnts*;
 		VAR food: LONGINT;
 	BEGIN
-		food := DemoAnts.Simulate(200, 150);
+		food := DemoAnts.Simulate(1000, 300);
 		UnitAssert.True(food > 0, "ants: food brought home");
-		UnitAssert.EqualInt(200, DemoAnts.AntCount(), "ants: count preserved");
+		UnitAssert.EqualInt(1000, DemoAnts.AntCount(), "ants: count preserved");
 		UnitAssert.EqualInt(0, DemoAnts.Left, "ants: all finished");
 		UnitAssert.True(~DemoAnts.Failed, "ants: no traps");
 		UnitAssert.True(~DemoAnts.Deadlocked, "ants: no deadlock")
 	END TestProcAnts;
+
+	PROCEDURE TestProcAntsWalls*;
+	(** Стена непроходима: за прогон ни один муравей не оказался в стене,
+		хотя стены реально мешали движению. *)
+		VAR food: LONGINT;
+	BEGIN
+		food := DemoAnts.Simulate(200, 400);
+		UnitAssert.True(DemoAnts.WallCount() >= 3, "ants: at least three walls");
+		UnitAssert.EqualInt(0, DemoAnts.AntsInWalls(), "ants: no ant inside a wall");
+		UnitAssert.EqualInt(0, DemoAnts.WallViolations(), "ants: wall never entered");
+		UnitAssert.True(DemoAnts.WallHits() > 0, "ants: walls blocked moves")
+	END TestProcAntsWalls;
+
+	PROCEDURE TestProcAntsReachable*;
+	(** Каждая куча еды достижима из гнезда по свободным клеткам. *)
+	BEGIN
+		DemoAnts.Reset;
+		UnitAssert.True(DemoAnts.FoodReachable(), "ants: every food patch reachable")
+	END TestProcAntsReachable;
+
+	PROCEDURE TestProcAntsPauseStep*;
+	(** Pause + Step: ровно один шаг каждому муравью. *)
+		VAR food, m0, m1: LONGINT;
+	BEGIN
+		food := DemoAnts.Simulate(10, 3);
+		DemoAnts.Start;
+		DemoAnts.Pause;
+		m0 := DemoAnts.Moves();
+		DemoAnts.Step;
+		m1 := DemoAnts.Moves();
+		UnitAssert.EqualInt(SHORT(m0) + 10, SHORT(m1), "ants: Step is one round");
+		DemoAnts.Stop
+	END TestProcAntsPauseStep;
+
+	PROCEDURE TestProcAntsSpeed*;
+		VAR i: INTEGER;
+	BEGIN
+		DemoAnts.SetSpeed(10);
+		FOR i := 1 TO 20 DO DemoAnts.Faster END;
+		UnitAssert.EqualInt(200, DemoAnts.Speed(), "ants: speed upper bound");
+		FOR i := 1 TO 20 DO DemoAnts.Slower END;
+		UnitAssert.EqualInt(1, DemoAnts.Speed(), "ants: speed lower bound");
+		DemoAnts.SetSpeed(10);
+		UnitAssert.EqualInt(10, DemoAnts.Speed(), "ants: speed restored")
+	END TestProcAntsSpeed;
+
+	PROCEDURE TestProcAntsFoodWalls*;
+	(** Еда доставляется и при стенах: тропа огибает стену. *)
+		VAR food: LONGINT;
+	BEGIN
+		food := DemoAnts.Simulate(200, 1200);
+		UnitAssert.True(food > 0, "ants: food delivered around walls");
+		UnitAssert.EqualInt(0, DemoAnts.AntsInWalls(), "ants: no ant inside a wall")
+	END TestProcAntsFoodWalls;
+
+	PROCEDURE TestProcAntsMany*;
+	(** 1000 муравьёв завершаются и снимаются: задач в системе не остаётся. *)
+		VAR food: LONGINT;
+	BEGIN
+		food := DemoAnts.Simulate(1000, 40);
+		UnitAssert.EqualInt(1000, DemoAnts.AntCount(), "ants many: count preserved");
+		UnitAssert.EqualInt(0, DemoAnts.Left, "ants many: all finished");
+		UnitAssert.EqualInt(0, Tasks.Count(), "ants many: no leftover tasks");
+		UnitAssert.True(~DemoAnts.Failed, "ants many: no traps");
+		UnitAssert.True(~DemoAnts.Deadlocked, "ants many: no deadlock")
+	END TestProcAntsMany;
 
 END Test64Demo.
