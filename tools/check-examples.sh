@@ -24,10 +24,11 @@ if [ "$1" = --run ]; then run=1; shift; fi
 BB="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$BB"
 if [ $# -eq 0 ]; then
-	# Руководства и страницы примеров. Сообщение о языке, README и
+	# Руководства, учебник и страницы примеров. Сообщение о языке, README и
 	# документы устройства показывают модули-образцы, а не примеры с
 	# командой, и в проверку не входят.
 	set -- Docu/Tasks.md Docu/ru/Tasks.md Docu/Async.md Docu/ru/Async.md \
+		Docu/Tut-Active-*.md Docu/ru/Tut-Active-*.md \
 		Unit/Docu/Testing.md Unit/Docu/ru/Testing.md \
 		Cas/Docu/Cas.md Cas/Docu/ru/Cas.md \
 		Actor/Docu/Actors.md Actor/Docu/ru/Actors.md \
