@@ -578,7 +578,7 @@ MODULE AsyncSelect;
 	(** Дождаться ровно одной альтернативы; вернуть её индекс.
 		Результат приёма — ops[i].got. Только из задачи. *)
 		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer;
-			i, n, tIdx, winner: INTEGER; tMs: LONGINT; timer: Timer; done, signals: BOOLEAN;
+			i, n, tIdx, winner: INTEGER; tMs: LONGINT; timer: Timer; done, signals, locked: BOOLEAN;
 	BEGIN
 		ASSERT(Tasks.InTask(), 20);
 		n := LEN(ops); ASSERT(n <= maxAlt, 21);
@@ -596,7 +596,7 @@ MODULE AsyncSelect;
 				END
 			ELSE
 				offers[i] := TakeOffer(ctx, i, ops[i].kind, ops[i].msg);
-				Kernel.Lock(ops[i].core);
+				locked := Enter(ops[i].core);
 				(* решение могло быть принято, пока мы ждали монитор
 				   другого канала: второй альтернативы не исполняем *)
 				IF ~ctx.decided THEN
@@ -605,7 +605,7 @@ MODULE AsyncSelect;
 						ctx.decided := TRUE; ctx.winner := i
 					END
 				END;
-				Kernel.Unlock(ops[i].core)
+				Leave(ops[i].core, locked)
 			END;
 			INC(i)
 		END;
@@ -624,9 +624,9 @@ MODULE AsyncSelect;
 		(* снять проигравшие (и победителя — Withdraw идемпотентен) *)
 		FOR i := 0 TO n - 1 DO
 			IF offers[i] # NIL THEN
-				Kernel.Lock(ops[i].core);
+				locked := Enter(ops[i].core);
 				Withdraw(ops[i].core, offers[i]);
-				Kernel.Unlock(ops[i].core)
+				Leave(ops[i].core, locked)
 			ELSIF (ops[i].kind = SignalKind) & (ops[i].sig # NIL) THEN
 				ops[i].sig.Disarm
 			END
