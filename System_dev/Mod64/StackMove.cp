@@ -263,14 +263,15 @@ MODULE System_devStackMove;
 	PROCEDURE TestProcTrustedList*;
 	(* Список доверенных: ядро (Tasks, Kernel) под каждой задачей; без списка задача закреплена
 	   кадрами Tasks. Модуль вне списка с SYSTEM закрепляет и со списком (TestProcSystemModulePinned). *)
-		VAR v: C.VarT; s: ARRAY 256 OF CHAR;
+		VAR v: C.VarT; s: ARRAY 256 OF CHAR; trust: BOOLEAN;
 	BEGIN
 		UnitAssert.True(Stackmove.Trusted("Tasks") & Stackmove.Trusted("Kernel") & Stackmove.Trusted("LinKernel")
 			& Stackmove.Trusted("Taskarch"), "kernel trusted");
 		UnitAssert.True(~Stackmove.Trusted("System_devStackMoveSys") & ~Stackmove.Trusted("Task")
 			& ~Stackmove.Trusted("Kern"), "others not trusted");
-		Stackmove.Reset; Stackmove.SetMode(Stackmove.exact); Stackmove.trustRule := FALSE;
-		NEW(v); Start(v); Pump; Stackmove.Off; Stackmove.trustRule := TRUE;
+		Stackmove.Reset; Stackmove.SetMode(Stackmove.exact);
+		trust := Stackmove.trustRule; Stackmove.trustRule := FALSE;	(* прежнее значение — у прогона ProbeNoTrust *)
+		NEW(v); Start(v); Pump; Stackmove.Off; Stackmove.trustRule := trust;
 		Stackmove.PinReport(s);
 		UnitAssert.EqualInt(0, Stackmove.moves, "no move without the list");
 		UnitAssert.True(Tasks.Failed(v) & (Kernel.err = 137), "trap 137");
