@@ -51,6 +51,13 @@ MODULE RaftSm;
 
 	PROCEDURE (sm: StateMachine) Restore* (b: Bytes), NEW, ABSTRACT;
 
+	PROCEDURE (sm: StateMachine) Query* (IN q: ARRAY OF BYTE; len: INTEGER): Bytes, NEW, EXTENSIBLE;
+	(** Чтение без изменения: ответ на запрос q[0 .. len-1]. Его зовёт водитель
+		узла (RaftNode) после подтверждения ReadIndex. По умолчанию — снимок. *)
+	BEGIN
+		RETURN sm.Snapshot()
+	END Query;
+
 	PROCEDURE PutInt (VAR b: ARRAY OF BYTE; i, x: INTEGER);
 	BEGIN
 		b[i] := SHORT(SHORT(x MOD 256)); b[i + 1] := SHORT(SHORT(x DIV 256 MOD 256));
