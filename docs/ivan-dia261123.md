@@ -161,7 +161,7 @@ DIA261123». Дерево заменено содержимым снимка.
 | Консольный цикл | `Cons/Mod/Interp.cp` | поверх буфера 4096 |
 | Этап 2: реестр стеков | `System/Mod64/Kernel.cp` | полностью |
 | `Get/SetTryContext`, сигнальный стек | `Lin/Mod64/Kernel.cp` | поверх `InitSignalStack` Ивана |
-| Тесты | `<Подсистема>/Mod/Tests*.cp`, `tools/tests.txt` | `.odc.txt` → `.cp` без изменений |
+| Тесты | `<Подсистема>_tests/Mod/*.cp`, `tools/tests.txt` | `.odc.txt` → `.cp` без изменений |
 | `tools/test64.c`, `tools/ocf.py` | `tools/` | без изменений |
 | `tools/*.sh` | `tools/` | переписаны под `dev0Linux` и `blackbox-console` |
 

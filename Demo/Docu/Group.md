@@ -45,6 +45,6 @@ DemoGroup: entered=8 completed=0 cancelled=3 failedWorker=1 groupFailed=1 alive=
 
 ## Test
 
-`DemoTests.TestProcGroupCancel` checks one error, one trapped member,
+`Demo_testsExamples.TestProcGroupCancel` checks one error, one trapped member,
 three cancelled members, zero completed, an empty failed group and no
 unexpected failure of the run.

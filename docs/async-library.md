@@ -110,12 +110,12 @@ AsyncIO.Accept(l, s, timeout);           (* принять соединение 
 
 ### Замеры
 
-`AsyncTestsIO.TestEcho1000` (localhost): 1000 одновременных соединений,
+`Async_testsIO.TestEcho1000` (localhost): 1000 одновременных соединений,
 эхо-обмен, соединения остаются открытыми. Прогон занимает 2.8–3.1 с.
 Пока 1000 соединений молчат, процессорное время процесса за 1 с —
 7–50 мс (0.7–5 %; зависит от периода опроса).
 
-`AsyncTestsChannels` — 9 тестов: Once, встреча (100 сообщений с проверкой
+`Async_testsChannels` — 9 тестов: Once, встреча (100 сообщений с проверкой
 порядка), ограниченный буфер, почтовый ящик с `WITH`, Select по двум
 каналам, тайм-аут, отсутствие «протухших» предложений после тайм-аута,
 отправка в полный буфер, повторный `Fill`.
@@ -173,12 +173,12 @@ init (`LinIntInit`, `WinIntInit`, `WinInit`) пул не заводят.
 (`getaddrinfo`). Тела заданий не выделяют память из кучи. Отладочный
 счётчик `Kernel.WorkerAllocs`/`EnterWorker` удалён: он был общим флагом
 без атомарности и проверял дисциплину только косвенно; тест
-`AsyncTestsWorkers` оставляет медленный вызов, файл и `getaddrinfo`.
+`Async_testsWorkers` оставляет медленный вызов, файл и `getaddrinfo`.
 
 Замер (Linux): `SlowJob` (usleep 300 мс) в рабочей нити; задача ждёт
 `Execute`, главный цикл за это время сделал 285 шагов, тест занял
 301 мс. Значит, заморозки нет. Разрешение `localhost` и файловый обмен —
-1–2 мс. Windows (`AsyncTestsWinWorkers` под wine): `Sleep(300)` — 304 мс,
+1–2 мс. Windows (`Async_testsWinWorkers` под wine): `Sleep(300)` — 304 мс,
 главный цикл делает шаги; файл и `getaddrinfo("localhost")` — 2 мс;
 `AsyncWork.Workers() = 4`.
 
@@ -267,7 +267,7 @@ MPI: 0 — управляющий (клиент), 1..size−1 — процесс
 не запускает. `Unload` в определении без результата — отказ только в
 журнале.
 
-Клиент `RobustTestsClient` написан только против этого определения в
+Клиент `Robust_testsClient` написан только против этого определения в
 стиле MPI: `rank = 0` режет работу на части, раздаёт `Push`, собирает
 `Pull`; `Do` компутона — ветвь «остальные считают» в процессе
 BlackBox. Формула доклада «инициализация → [[отправка/приём]n,
@@ -324,7 +324,7 @@ wait: EndMsg > done; done:
 Проигравшее предложение состояние протокола не меняет; нарушение
 трапует задачу, исполняющую операцию.
 
-Тесты — `AsyncTestsProtocol`: корректный диалог «Запрос → Ответ* → Конец»
+Тесты — `Async_testsProtocol`: корректный диалог «Запрос → Ответ* → Конец»
 (состояние `done`, `IsFinal`), нарушение порядка (`UnitAssert.Traps`),
 канал без протокола, отказ разбора описания.
 
@@ -362,9 +362,9 @@ wait: EndMsg > done; done:
 указатель на объект выгруженного модуля, иначе следующий `Collect`
 разыменует его таблицу методов.
 
-Тест — `SystemTestsUnload`: модуль `SystemTestsUnloadCode` (y = x*x) собирается
+Тест — `System_testsUnload`: модуль `System_testsUnloadCode` (y = x*x) собирается
 в мир, затем тест перекомпилирует его в y = x*x + 1000 через
-`DevCompiler64.CompileText`, зовёт `Unload("SystemTestsUnloadCode")` и
+`DevCompiler64.CompileText`, зовёт `Unload("System_testsUnloadCode")` и
 проверяет, что следующий `Push` даёт 1009; после теста исходный `.ocf`
 собирается обратно. Отдельно проверяются отказы для `AsyncComputon` и
 `Kernel`.
@@ -409,7 +409,7 @@ wait: EndMsg > done; done:
 - Windows x64: пул рабочих нитей `CreateThread` и опрос готовности
   сделаны — фасад `AsyncWork` с делегатами `AsyncWorkLin`/`AsyncWorkWin`,
   регистрация ленивая из `AsyncWork.Ensure`; под wine идут
-  `AsyncTestsWinWorkers` 4/4. GUI-прогон Windows (`WinInit`) собирается, но
+  `Async_testsWinWorkers` 4/4. GUI-прогон Windows (`WinInit`) собирается, но
   отдельного теста под wine нет.
 - MPI: нет повтора при гибели ранга и `Unload` (mpiexec гасит мир).
 - Перемещение `Reliable`-повторов на уровень транспорта (сейчас повтор

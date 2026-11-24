@@ -34,5 +34,5 @@ DemoSieve: primes=25 sum=1060 max=97
 
 ## Test
 
-`DemoTests.TestProcSieve` checks 25 primes, sum 1060, largest 97 and
+`Demo_testsExamples.TestProcSieve` checks 25 primes, sum 1060, largest 97 and
 no traps.

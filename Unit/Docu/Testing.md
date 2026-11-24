@@ -8,7 +8,7 @@ A test is an exported parameterless procedure whose name starts with
 ## Writing a test
 
 ```
-MODULE TextTests;
+MODULE Text_testsWriter;
 	IMPORT TextModels, UnitAssert;
 
 	VAR t: TextModels.Model;
@@ -24,14 +24,17 @@ MODULE TextTests;
 		UnitAssert.EqualInt(2, t.Length(), "length after two chars")
 	END TestWriteAtEnd;
 
-END TextTests.
+END Text_testsWriter.
 ```
 
-Place modules as `<Subsystem>Tests` in `<Subsystem>/Mod/Tests.cp`;
-several modules use `<Subsystem>Tests<Theme>` (`TextTestsWriter`).
-AMD64-only tests live in `<Subsystem>/Mod64/Tests<Theme>.cp`
-(`AsyncTestsChannels`). `CompileSubs` skips such files: tests are built
-by `tools/unit.sh`.
+Tests live in a separate `<Subsystem>_tests` subsystem next to the one
+under test: the file is `<Subsystem>_tests/Mod/<Theme>.cp` and the module
+is `<Subsystem>_tests<Theme>` (`Text_testsWriter` in
+`Text_tests/Mod/Writer.cp`). An entry point without a theme is
+`<Subsystem>_testsMain` (`Text_tests/Mod/Main.cp`). AMD64-only tests use
+`Mod64` in the same subsystem (`Async_tests/Mod64/Channels.cp`, module
+`Async_testsChannels`). Production builds do not include `*_tests`
+subsystems; tests are built on demand by `tools/unit.sh`.
 
 ## Rules
 
@@ -74,20 +77,20 @@ by `tools/unit.sh`.
 ## Running
 
 ```
-echo 'UnitRunner.Run UnitTests' | tools/run64.sh
-echo 'UnitRunner.Run TextTests slow proc' | tools/run64.sh
+echo 'UnitRunner.Run Unit_testsMain' | tools/run64.sh
+echo 'UnitRunner.Run Text_testsWriter slow proc' | tools/run64.sh
 
 tools/test.sh                 # modules from tools/tests.txt
 tools/test.sh --list
-tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
+tools/unit.sh Check_testsMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
 `UnitRunner.Run` arguments: a module name, a subsystem name, or `all`;
 `slow`, `gui`, `proc` enable those marks; `junit=FILE`, `tap`, `noquit`.
-A subsystem name selects loaded modules `<Sub>Tests` and
-`<Sub>Tests<Theme>` (for example, `Async` finds `AsyncTestsChannels`);
-`all` selects only modules whose name ends in `Tests`. The modules must
-already be loaded (linked) into the world.
+A subsystem name selects the loaded test modules of that subsystem:
+`System` finds `System_tests*`, `Async` finds `Async_tests*`. `all`
+selects every loaded module whose name contains `_tests`. The modules
+must already be loaded (linked) into the world.
 
 `tools/unit.sh` compiles the module with `tools/go64.sh` (up to three
 passes), runs it in a separate `blackbox-console`, and succeeds only when
@@ -97,7 +100,7 @@ crashes the process cannot take other modules down.
 
 ## Self-check
 
-`UnitTests` (in `Unit/Mod/Tests.cp`) verifies the runner itself:
-`UnitTestsProbe` contains a passing, a trapping, a failing, an empty and
+`Unit_testsMain` (in `Unit_tests/Mod/Main.cp`) verifies the runner itself:
+`Unit_testsProbe` contains a passing, a trapping, a failing, an empty and
 a slow test plus fixtures; `TestNestedRunner` runs the probe quietly and
 compares `PASS/FAIL/EMPTY/SKIP` counts.

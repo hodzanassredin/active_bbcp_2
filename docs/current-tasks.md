@@ -35,15 +35,28 @@
   разные. Замеры: 1,24 мкс на ход муравья (полный круг 1000 муравьёв ≈ 1,24 мс), кадр 0,76 мс, 9 шагов/с,
   1000 задач снимаются без остатка. Тесты — 19 проверок в `Test64Demo` (стены, БФС, скорости, доставка,
   1000 задач, пауза/шаг), GUI-этап `tools/test-demo-gui.sh` — `ok=1`. Документация — `Demo/Docu/Ants.md`.
-- s20 — готово: подсистема `Test64` расформирована (чистый перенос, поведение не менялось). Тесты переехали в
-  проверяемые подсистемы по соглашению `Unit/Docu/ru/Testing.md`: `SystemTests*` — в `System/Mod` (только amd64 —
-  `System/Mod64`), `DevTestsActive`/`DevTestsYield` — в `Dev/Mod`, `AsyncTests*` — в `Async/Mod64`, `DemoTests`/
-  `DemoTestsGui` — в `Demo/Mod`, `LinTestsFiles`, `CommTestsResolver`, `RobustTestsParallel`/`RobustTestsClient`;
-  фикстуры отказов — `Dev/Reject`, манифест — `tools/tests.txt`. Компилятор: `CompileSubs` пропускает
-  `<Sub>/Mod/Tests*.cp` (тесты собирает `tools/unit.sh`), ключ `^` разрешён тестовым модулям
-  `<Sub>Tests*`; `UnitRunner.Run <Подсистема>` находит `<Sub>Tests<Тема>`. `bootstrap.sh` не ставит
-  тестовые модули Dev в `Dev/Code`. Прогоны: test.sh 21/21 (107 тестов), test32 8/8 (44), wine 13/13,
-  check-reject 9/9, bootstrap 98 файлов B=C, `build64.sh --clean` с нуля. Счётчики до и после совпали.
+- s20 — готово (соглашение отменено в s21): подсистема `Test64` расформирована (чистый перенос, поведение
+  не менялось). Тесты переехали в проверяемые подсистемы, фикстуры отказов — в `Dev_tests/Reject`, манифест —
+  `tools/tests.txt`; компилятор и `bootstrap.sh` получили обходы под старое соглашение (полный список —
+  s21). Прогоны: test.sh 21/21 (107 тестов), test32 8/8 (44), wine 13/13, check-reject 9/9, bootstrap
+  98 файлов B=C, `build64.sh --clean` с нуля. Счётчики до и после совпали.
+- s21 — готово: тесты вынесены из проверяемых подсистем в отдельные `<Подсистема>_tests` рядом с ними.
+  Файл — `<Sub>_tests/Mod[64]/<Тема>.cp`, модуль — `<Sub>_tests<Тема>`, точка входа без темы —
+  `<Sub>_testsMain`; для Unit и Check тоже отдельные `Unit_tests`/`Check_tests`. Было → стало:
+  `System/Mod/Tests*.cp` → `System_tests/Mod/*.cp` (`System_testsMain`, `System_testsTasks`, ...),
+  `Dev/Mod/Tests*.cp` → `Dev_tests/Mod/*.cp` (`Dev_testsActive`, `Dev_testsYield`),
+  `Async/Mod64/Tests*.cp` → `Async_tests/Mod64/*.cp`, `Demo/Mod/Tests*.cp` → `Demo_tests/Mod/*.cp`
+  (`Demo_testsExamples`, `Demo_testsGui`), `Lin/Mod/TestsFiles.cp` → `Lin_tests/Mod/Files.cp`,
+  `Comm/Mod64/TestsResolver.cp` → `Comm_tests/Mod64/Resolver.cp`, `Robust/Mod64/Tests*.cp` →
+  `Robust_tests/Mod64/*.cp`, `Unit/Mod/Tests*.cp` → `Unit_tests/Mod/*.cp`,
+  `Check/Mod/Tests.cp` → `Check_tests/Mod/Main.cp`, `Dev/Reject` → `Dev_tests/Reject`.
+  Откачены правки компилятора s20: `IsTestsFile` в `CompileSubs` (Dev/Mod), `TestModule` и исключение
+  по подстроке `Tests` для ключа `^` в DevCPP — `FrameworkModule` сравнивает подсистему точно;
+  `bootstrap.sh` снова собирает `Dev` без обходов. Поставочные сборки подсистемы `*_tests` не включают:
+  тесты собирают `tools/unit.sh`/`tools/go64.sh` (x64), `tools/test32.sh` (i386),
+  `tools/test-win64.sh` (wine). `UnitRunner.Run System` ищет загруженные `System_tests*`,
+  `all` — имена с `_tests`. Прогоны: test.sh 21/21 (107), test32 8/8 (44), wine 13/13,
+  check-reject, bootstrap B=C, `build64.sh --clean` с нуля. Счётчики до и после совпали.
 
 ## Не делать
 

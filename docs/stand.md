@@ -16,46 +16,46 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Консольный запуск | `echo 'Команда' \| tools/run64.sh` | работает |
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
 | Тесты без окон | `tools/test.sh` (Unit) | 21 этап, все зелёные |
-| Временные файлы `LinFiles` | `LinTestsFiles` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
-| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: UnitTests 4/4, Files 3/3, Tasks 14/14, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
+| Временные файлы `LinFiles` | `Lin_testsFiles` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
+| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: Unit_testsMain 4/4, Files 3/3, Tasks 14/14, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
 | i386: C-тулчейн | `tools/i386-toolchain.sh` | без sudo; libtest32.so, ucontext |
 | Бутстрап i386 | `tools/bootstrap.sh` | три прохода, 98 файлов, B и C — 0 различий |
-| Этап 1: очередь и цикл | `SystemTests.TestProcActionTrap` | зелёный |
+| Этап 1: очередь и цикл | `System_testsMain.TestProcActionTrap` | зелёный |
 | Этап 1/3: GUI | `tools/test-gui.sh` (gtk4-broadwayd) | `ok=1`, 20 тиков, maxgap 108 мс |
-| Этап 4: мониторы | `SystemTestsMonitors` | 9 тестов, зелёные; реализация — `System/Mod/Monitors.cp` (s18) |
-| Этап 6: `[exclusive]`/`AWAIT` | `DevTestsActive` | 6 тестов, зелёные |
-| Этап 6: ключ уступок | `DevTestsYield` | 3 теста, зелёные |
-| Этап 7: каналы и выбор | `AsyncTestsChannels` | 9 тестов, зелёные |
-| Этап 7: ввод-вывод | `AsyncTestsIO` | 2 теста, зелёные (1000 соединений) |
-| Этап 8: рабочие нити | `AsyncTestsWorkers` | 4 теста, зелёные |
-| Этап 8: резолвер без сети | `CommTestsResolver` (`tools/test-resolver.sh`) | 1 тест: 10 010 мс, 9 449 шагов цикла |
-| Этап 9: компутоны | `AsyncTestsComputons` | 9 тестов, зелёные (1/4/16 процессов) |
+| Этап 4: мониторы | `System_testsMonitors` | 9 тестов, зелёные; реализация — `System/Mod/Monitors.cp` (s18) |
+| Этап 6: `[exclusive]`/`AWAIT` | `Dev_testsActive` | 6 тестов, зелёные |
+| Этап 6: ключ уступок | `Dev_testsYield` | 3 теста, зелёные |
+| Этап 7: каналы и выбор | `Async_testsChannels` | 9 тестов, зелёные |
+| Этап 7: ввод-вывод | `Async_testsIO` | 2 теста, зелёные (1000 соединений) |
+| Этап 8: рабочие нити | `Async_testsWorkers` | 4 теста, зелёные |
+| Этап 8: резолвер без сети | `Comm_testsResolver` (`tools/test-resolver.sh`) | 1 тест: 10 010 мс, 9 449 шагов цикла |
+| Этап 9: компутоны | `Async_testsComputons` | 9 тестов, зелёные (1/4/16 процессов) |
 | Этап 9: `RobustParallel` | `tools/test-robust.sh` | сумма 500500 на 1/4/16 процессах |
 | Этап 9: MPI | `tools/test-mpi.sh` (mpiexec -n 5) | 12 квадратов, 252 мс |
-| Этап 2: стеки | `SystemTests.TestProcGcStack`, `TestProcTrapStack` | зелёные; сборка на незнакомом стеке отменяется, а не HALT(126) |
-| Шаг 2а: индекс кластеров | `SystemTests.TestProcInHeap` | зелёный |
-| Замер 1/10/50 млн | `tools/bench-gc.sh SystemTestsGcBench.DoSmall` / `.Do` | выполнен |
-| Windows x64 | `tools/test-win64.sh` (wine) | UnitTests 4/4, SystemTestsWinTasks 5/5, AsyncTestsWinWorkers 4/4 |
+| Этап 2: стеки | `System_testsMain.TestProcGcStack`, `TestProcTrapStack` | зелёные; сборка на незнакомом стеке отменяется, а не HALT(126) |
+| Шаг 2а: индекс кластеров | `System_testsMain.TestProcInHeap` | зелёный |
+| Замер 1/10/50 млн | `tools/bench-gc.sh System_testsGcBench.DoSmall` / `.Do` | выполнен |
+| Windows x64 | `tools/test-win64.sh` (wine) | Unit_testsMain 4/4, System_testsWinTasks 5/5, Async_testsWinWorkers 4/4 |
 
 ## 2. Раскладка
 
 ```
 active_bb/                     репозиторий (ветка active2)
   <Подсистема>/Mod/*.cp        исходники (Mod64 — приоритетный вариант amd64)
-  Unit/Mod/*.cp                UnitAssert, UnitRunner, UnitTests
-  <Подсистема>/Mod/Tests*.cp   тесты: <Sub>Tests и <Sub>Tests<Тема>
-  <Подсистема>/Mod64/Tests*.cp тесты только для amd64 (Async, Robust, Win)
-  Dev/Reject/*.cp              фикстуры отказов компилятора (tools/check-reject.sh)
+  Unit/Mod/*.cp                UnitAssert, UnitRunner
+  <Подсистема>_tests/Mod/*.cp  тесты: <Sub>_tests<Тема>
+  <Подсистема>_tests/Mod64/*.cp тесты только для amd64 (Async, Robust, Win)
+  Dev_tests/Reject/*.cp        фикстуры отказов компилятора (tools/check-reject.sh)
   tools/tests.txt              манифест tools/test.sh
   System/Mod/Monitors.cp       мониторы, цепочки взятий, диагностика (s18)
   System/Mod64/Tasks.cp        задачи со своим стеком (этап 3, amd64)
   System/Mod/Tasks.cp          то же для i386 (переключатель на x86)
-  System/Mod64/TestsCo.cp      сопрограммы amd64 (libtest64.so)
-  System/Mod/TestsCo.cp        сопрограммы i386 (libtest32.so)
-  System/Mod64/TestsCRaw.cp    внешние объявления tools/test64.c (amd64)
-  System/Mod/TestsCRaw.cp      то же для i386 (libtest32.so)
-  System/Mod64/TestsClock.cp   наносекунды amd64 (clock_gettime)
-  System/Mod/TestsClock.cp     время i386 по Kernel.Time (Tasks, GcBench)
+  System_tests/Mod64/Co.cp     сопрограммы amd64 (libtest64.so)
+  System_tests/Mod/Co.cp       сопрограммы i386 (libtest32.so)
+  System_tests/Mod64/CRaw.cp   внешние объявления tools/test64.c (amd64)
+  System_tests/Mod/CRaw.cp     то же для i386 (libtest32.so)
+  System_tests/Mod64/Clock.cp  наносекунды amd64 (clock_gettime)
+  System_tests/Mod/Clock.cp    время i386 по Kernel.Time (Tasks, GcBench)
   Async/Mod64/Work.cp          фасад пула рабочих нитей (этап 8)
   Async/Mod64/WorkLin.cp       делегат pthread/pipe/Poller (Linux)
   Async/Mod64/WorkWin.cp       делегат CreateThread/события (Windows)
@@ -95,14 +95,14 @@ tools/build32.sh                  # i386-мир и консоль в build/BB32L
 tools/build32.sh --clean
 
 echo 'StdLog.String("hi"); StdLog.Ln' | tools/run64.sh
-echo 'SystemTestsBasic.Do' | tools/run64.sh
+echo 'System_testsBasic.Do' | tools/run64.sh
 ```
 
 `build64.sh` проверяет журнал на `N error(s) detected`, `~TRAP`,
 `syntax error`, `not found`; линковка обязана напечатать `ok`.
 Каталог установки переопределяется `BB64INSTALL`, i386-мир —
 `BB32INSTALL`. `build32.sh` линкует `DevLinker1.LinkElfExe` (ELF32,
-`Kernel+ … LinIntInit`); отдельно компилирует `Tasks` и тесты подсистем.
+`Kernel+ … LinIntInit`); отдельно компилирует `Tasks` (модуль Mod64).
 
 32-битный C-помощник `libtest32.so` собирается тем же `tools/test64.c`
 флагами `tools/i386-toolchain.sh`: сценарий идемпотентно скачивает
@@ -113,7 +113,7 @@ echo 'SystemTestsBasic.Do' | tools/run64.sh
 готовность проверяется пробником ucontext. Нет сети, пакета или
 32-битного рантайма — `SKIP i386-toolchain: причина` (код 0, пустой
 stdout), `build32.sh`/`test32.sh` тогда пропускают `libtest32.so` и
-`SystemTestsCoTests`, остальные тесты i386 идут.
+`System_testsCoTests`, остальные тесты i386 идут.
 
 ### Временные файлы `LinFiles` (`/tmp/odc…`)
 
@@ -144,7 +144,7 @@ stdout), `build32.sh`/`test32.sh` тогда пропускают `libtest32.so`
   `FINALIZE`; `Kernel.Quit` вызывает финализаторы, поэтому нормальный
   выход файлов не оставляет.
 
-Красный/зелёный тест — `LinTestsFiles` (`Lin/Mod/TestsFiles.cp`, marks
+Красный/зелёный тест — `Lin_testsFiles` (`Lin_tests/Mod/Files.cp`, marks
 `proc slow`): занимает все 100000 имён `odc00000`…`odc99999` и требует,
 чтобы временный файл всё равно создался, а после закрытия/финализации
 в каталоге не осталось имён «odc» + 9 цифр. На старом коде оба
@@ -163,7 +163,7 @@ stdout), `build32.sh`/`test32.sh` тогда пропускают `libtest32.so`
 ## 4. Быстрый цикл
 
 ```sh
-tools/go64.sh SystemTestsBasic Kernel   # amd64: DevCompiler64.CompileThis
+tools/go64.sh System_testsBasic Kernel   # amd64: DevCompiler64.CompileThis
 tools/go32.sh DevCPE DevCPT        # i386: DevCompiler.CompileThis
 ```
 
@@ -179,7 +179,7 @@ tools/go32.sh DevCPE DevCPT        # i386: DevCompiler.CompileThis
 ```sh
 tools/test.sh              # все модули из tools/tests.txt
 tools/test.sh --list
-tools/test.sh CheckTests   # выборочно
+tools/test.sh Check_testsMain   # выборочно
 ```
 
 Тесты идут через подсистему `Unit` (`UnitAssert`, `UnitRunner`,
@@ -191,122 +191,124 @@ tools/test.sh CheckTests   # выборочно
 `UnitRunner.Run <модуль> <marks>` и требует итог `failed 0` и код 0.
 TestProc-сценарии (ядро, сборщик, стеки, сигналы) помечены `proc` и
 потому не уносят остальные модули. Поставочные сборки
-(`build64.sh`, `build32.sh`, `test-win64.sh`) не компилируют
-`<Sub>/Mod/Tests*.cp`: `CompileSubs` их пропускает, тесты собирает
-`tools/unit.sh`; `UnitTests` и `UnitTestsProbe` — явными `CompileThis`.
+(`build64.sh`, `build32.sh`, `test-win64.sh`) не включают подсистемы
+`*_tests`: их нет в списке `CompileSubs`. Тесты собирает `tools/unit.sh`
+(x64) и `tools/test32.sh` (i386) по требованию.
 
 Результат: **21 этап, 107 тестов, 0 провалов** (манифест — 16
 модулей; остальные — отдельные сценарии) —
-- `LinTestsFiles` (marks=proc slow): заняты все имена `odc00000`…`odc99999`;
+- `Lin_testsFiles` (marks=proc slow): заняты все имена `odc00000`…`odc99999`;
   временный файл создаётся (красный на старом коде), после
   создания/закрытия и после финализатора имён «odc» + 9 цифр не
   остаётся (см. §3);
-- `SystemTests` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
-  TrapStack, InHeap (сценарии `SystemTests*`, точки входа в
-  `System/Mod/Tests.cp`);
-- `SystemTestsTasks` (marks=proc slow): 14 тестов задач — Yield,
+- `System_testsMain` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
+  TrapStack, InHeap (сценарии `System_tests*`, точки входа в
+  `System_tests/Mod/Main.cp`);
+- `System_testsTasks` (marks=proc slow): 14 тестов задач — Yield,
   производитель-потребитель, философы, отмена, изоляция трапа,
   проверки ожидания, группа, действие планировщика, нагрузка
   1 тыс. и 10 тыс. задач, уборка списка `all` в Reap после 10 тыс.
-  коротких задач (`System/Mod/TestsTasks.cp`, см. `docs/tasks.md`);
-- `UnitTests`: самопроверка Unit, включая вложенный прогон
-  `UnitTestsProbe` (PASS/FAIL/EMPTY/SKIP);
-- `DevTestsActive` (marks=proc): 6 тестов этапа 6 — AWAIT в методе,
+  коротких задач (`System_tests/Mod/Tasks.cp`, см. `docs/tasks.md`);
+- `Unit_testsMain`: самопроверка Unit, включая вложенный прогон
+  `Unit_testsProbe` (PASS/FAIL/EMPTY/SKIP);
+- `Dev_testsActive` (marks=proc): 6 тестов этапа 6 — AWAIT в методе,
   в процедуре модуля и с локальным условием, ложное условие не будит,
   результаты всех видов, RETURN из середины, снятие при трапе и во
-  вложенном Try (`Dev/Mod/TestsActive.cp`);
-- `DevTestsYield` (marks=proc, ключ `^`): 3 теста — счётный цикл
+  вложенном Try (`Dev_tests/Mod/Active.cp`);
+- `Dev_testsYield` (marks=proc, ключ `^`): 3 теста — счётный цикл
   уступает другим задачам, не уступает в мониторе и вне задачи,
-  отмена срабатывает в точке уступки (`Dev/Mod/TestsYield.cp`);
-- `CheckTests` (marks=proc): три пробы Ивана — RealFormat, Math,
+  отмена срабатывает в точке уступки (`Dev_tests/Mod/Yield.cp`);
+- `Check_testsMain` (marks=proc): три пробы Ивана — RealFormat, Math,
   CCallAlias;
-- `AsyncTestsChannels` (marks=proc): 9 тестов этапа 7 — Once (в т.ч.
+- `Async_testsChannels` (marks=proc): 9 тестов этапа 7 — Once (в т.ч.
   повторный Fill), встреча на 100 сообщениях, ограниченный буфер,
   почтовый ящик с `WITH`, Select, тайм-аут, отсутствие протухших
   предложений, отправка в полный буфер;
-- `AsyncTestsIO` (marks=proc): эхо-сервер и HTTP-ответ на localhost;
+- `Async_testsIO` (marks=proc): эхо-сервер и HTTP-ответ на localhost;
   1000 одновременных соединений, при простое — 7–50 мс CPU за 1 с;
-- `AsyncTestsWorkers` (marks=proc): медленный вызов в рабочей нити не
+- `Async_testsWorkers` (marks=proc): медленный вызов в рабочей нити не
   замораживает цикл (300 мс, 285 шагов), `getaddrinfo`, файловый
   обмен;
-- `AsyncTestsComputons` (marks=proc): 12 квадратов на 1, 4 и 16 локальных
+- `Async_testsComputons` (marks=proc): 12 квадратов на 1, 4 и 16 локальных
   процессах, повтор после `SIGKILL` исполнителя (414 мс), ошибка `Do`, альтернатива `AltPull` в `Select`;
-- `AsyncTestsProtocol` (marks=proc): 6 тестов этапа 10 — корректный диалог,
+- `Async_testsProtocol` (marks=proc): 6 тестов этапа 10 — корректный диалог,
   нарушение порядка, канал без протокола, отказ разбора описания,
   правильная и нарушающая порядок отправка через `Select` (`SendAlt`);
-- `CommTestsResolver` (marks=proc, отдельный сценарий): в `unshare -rmn`
+- `Comm_testsResolver` (marks=proc, отдельный сценарий): в `unshare -rmn`
   с dummy-интерфейсом и своим resolv.conf несуществующее имя ждёт
   тайм-аут резолвера (10 010 мс) в рабочей нити, главный цикл делает
   9 449 шагов; без `unshare`/`ip`/`mount` — `SKIP` с причиной;
-- `RobustTestsParallel` (отдельный сценарий): клиент, написанный
+- `Robust_testsParallel` (отдельный сценарий): клиент, написанный
   только против определения `RobustParallel`, считает сумму 1..1000
   на 1, 4 и 16 процессах (`ROBUST_SIZE`); все три прогона дают 500500;
-- `AsyncTestsMpi` (отдельный сценарий): 12 квадратов на 4 исполнителях
+- `Async_testsMpi` (отдельный сценарий): 12 квадратов на 4 исполнителях
   через `mpiexec -n 5` (MPICH 5.0.2 из `.work/venv`), 252 мс;
-- `DemoTestsGui` (отдельный сценарий): GTK4-хост под `gtk4-broadwayd`,
-  `--BB_RUN=DemoTestsGui.Run`; производитель-потребитель на
+- `Demo_testsGui` (отдельный сценарий): GTK4-хост под `gtk4-broadwayd`,
+  `--BB_RUN=Demo_testsGui.Run`; производитель-потребитель на
   `[exclusive]`+`ACTIVE.AWAIT` и тикер 100 мс: `ok=1`, 20 тиков,
   maxgap 108 мс, 100 элементов, сумма 5050;
 - `DemoAntsGui` (отдельный сценарий `tools/test-demo-gui.sh`): окно
   `DemoAnts` под `gtk4-broadwayd`, `--BB_RUN=DemoAnts.GuiCheck`,
   поле 160×100 и 1000 муравьёв, итог `DemoAnts: ok=1`;
-- `SystemTestsUnload` (marks=proc): перекомпиляция `SystemTestsUnloadCode`,
+- `System_testsUnload` (marks=proc): перекомпиляция `System_testsUnloadCode`,
   выгрузка у исполнителей и загрузка новой версии; отказ для занятых
   модулей;
-- `SystemTestsUnloadGuard` (marks=proc): модуль-мишень загружен через `Meta`
+- `System_testsUnloadGuard` (marks=proc): модуль-мишень загружен через `Meta`
   (refcnt = 0) и не выгружается, пока его кадр на главном стеке или на
-  стеке спящей задачи; без кадров — выгружается (`System/Mod/TestsUnloadGuard.cp`);
-- `AsyncTestsWinWorkers` (отдельный сценарий `tools/test-win64.sh`): под
+  стеке спящей задачи; без кадров — выгружается (`System_tests/Mod/UnloadGuard.cp`);
+- `Async_testsWinWorkers` (отдельный сценарий `tools/test-win64.sh`): под
   wine — медленный `Sleep(300)` в рабочей нити (задача ждёт, главный
   цикл делает шаги), запись/чтение файла, `getaddrinfo("localhost")` и
-  4 нити пула (`Async/Mod64/TestsWinWorkers.cp`).
+  4 нити пула (`Async_tests/Mod64/WinWorkers.cp`).
 
 ### i386 (32-битная цель)
 
 ```sh
 tools/build32.sh              # мир и консоль в build/BB32LIN
-tools/test32.sh               # сборка + UnitTests, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
+tools/test32.sh               # мир, тесты i386 и 8 модулей: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
 tools/test32.sh --list
-tools/test32.sh SystemTestsTasks   # только указанные модули (без сборки)
+tools/test32.sh System_testsTasks   # только указанные модули (без сборки)
 ```
 
 `build32.sh` компилирует `DevCompiler`-ом из `dev0Linux` подсистемы
 `Mod` в `build/BB32LIN` и линкует `blackbox-console` через
 `DevLinker1.LinkElfExe` (ELF32, `Kernel+ … LinIntInit`). Отдельно
-компилируются `Tasks` и тесты подсистем: тесту уступок `DevTestsYield`
-нужен ключ `^`, а в общем списке `CompileSubs` опции не задать. `test32.sh`
-запускает каждый модуль отдельным процессом и требует `failed 0` и
-хотя бы один `PASS` (иначе все `SKIP` прошли бы как успех).
+компилируется `Tasks` (модуль Mod64 вне `CompileSubs`). Поставочная
+сборка подсистемы `*_tests` не включает: тестовые модули i386
+компилирует `test32.sh` перед прогоном (тесту уступок `Dev_testsYield`
+нужен ключ `^`). `test32.sh` запускает каждый модуль отдельным
+процессом и требует `failed 0` и хотя бы один `PASS` (иначе все `SKIP`
+прошли бы как успех).
 
 На i386 работают этапы 2–6: реестр стеков и `Kernel.Try` на стеке
 (`System/Mod/Kernel.cp`), мониторы `Lock/Unlock/Wait/Await`, `Poll`,
 `CallCond` (кадр в `BX`), `Tasks` со своим стеком (mmap + сторожевая
 страница в `LinKernel`), `[exclusive]` (пролог/эпилог `CPC486`),
-`ACTIVE.AWAIT` и ключ `^`. Тест `LinTestsFiles` и временные имена
-проверены и на i386. `SystemTestsUnloadGuard` подтверждает и на i386, что
+`ACTIVE.AWAIT` и ключ `^`. Тест `Lin_testsFiles` и временные имена
+проверены и на i386. `System_testsUnloadGuard` подтверждает и на i386, что
 `Kernel.UnloadMod` не выгружает модуль с живым кадром на главном стеке
 и на стеке спящей задачи (положительный контроль — без кадров модуль
 выгружается). Сопрограммы этапа 2 проверяются и на i386: обёртки —
-`System/Mod/TestsCo.cp` над `libtest32.so` (тот же `tools/test64.c`;
+`System_tests/Mod/Co.cp` над `libtest32.so` (тот же `tools/test64.c`;
 собирается `tools/build32.sh` флагами `tools/i386-toolchain.sh`, см.
-§3). Точки входа Unit — `SystemTestsCoTests` (`TestProcGcStack`,
+§3). Точки входа Unit — `System_testsCoTests` (`TestProcGcStack`,
 `TestProcTrapStack`): сборка мусора на втором стеке и изоляция
 контекста `Kernel.Try` между стеками. `co_now` на i386 остаётся по
-`Kernel.Time` — для `SystemTestsTasks` этого достаточно; отдельный
-`SystemTestsClock` не даёт задачам тянуть C-библиотеку. Без 32-битного
-тулчейна `test32.sh` пропускает только `SystemTestsCoTests` (SKIP с
-причиной). Для amd64 обёртки лежат в `System/Mod64/TestsCo.cp`.
+`Kernel.Time` — для `System_testsTasks` этого достаточно; отдельный
+`System_testsClock` не даёт задачам тянуть C-библиотеку. Без 32-битного
+тулчейна `test32.sh` пропускает только `System_testsCoTests` (SKIP с
+причиной). Для amd64 обёртки лежат в `System_tests/Mod64/Co.cp`.
 
-`SystemTestsSupport` остался адаптером: `Check`/`Fail` учитываются в
+`System_testsSupport` остался адаптером: `Check`/`Fail` учитываются в
 `UnitAssert`, маркеры `SYSTEMTESTS-PASS/FAIL` сохранены для `bench-gc.sh`.
-`SystemTestsPump` и `SystemTestsGcBench` в манифест не входят; замер —
+`System_testsPump` и `System_testsGcBench` в манифест не входят; замер —
 `tools/bench-gc.sh`.
 
 ### Ловушка консоли
 
 Консольный init не ставит `Kernel.trapViewer`, поэтому при
 `trapViewer = NIL` любой трап фатален даже внутри `Kernel.Try`.
-`SystemTestsSupport.Begin` ставит пустой viewer — это дефект каркаса, не ядра
+`System_testsSupport.Begin` ставит пустой viewer — это дефект каркаса, не ядра
 теста. В норме viewer должен ставить консольный init.
 
 ## 6. Этапы 1–6 на `.cp`
@@ -364,7 +366,7 @@ tools/test32.sh SystemTestsTasks   # только указанные модул�
 
 ## 7. Замер
 
-`tools/bench-gc.sh SystemTestsGcBench.DoSmall` после шага 2а (1 и 10 млн):
+`tools/bench-gc.sh System_testsGcBench.DoSmall` после шага 2а (1 и 10 млн):
 
 | Сценарий | Время | На объект | Кластеров |
 |---|---:|---:|---:|
@@ -386,7 +388,7 @@ tools/test32.sh SystemTestsTasks   # только указанные модул�
 
 ### Задачи (этап 3)
 
-`UnitRunner.Run SystemTestsTasks proc slow`:
+`UnitRunner.Run System_testsTasks proc slow`:
 
 | Задачи | Стек | Setup | Шаги | Переключений | На переключение | RSS |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -402,13 +404,13 @@ tools/test32.sh SystemTestsTasks   # только указанные модул�
 
 | Сценарий | Что меряем | Результат |
 |---|---|---|
-| `CommTestsResolver` | ожидание `getaddrinfo` в нити, шаги цикла | 10 010 мс, 9 449 шагов |
-| `RobustTestsParallel` | сумма на 1/4/16 процессах | 500500, 1/11/13 мс |
-| `AsyncTestsMpi` | 12 квадратов, `mpiexec -n 5` | 252 мс, 0 ошибок |
-| `DemoTestsGui` | 100 элементов, тикер 100 мс | 2 015 мс, maxgap 111 мс |
-| `SystemTestsWinTasks` (wine) | Yield, буфер, трап, Join, стек | 5/5, 32 мс худший |
-| `AsyncTestsWinWorkers` (wine) | Sleep 300 мс в нити, файл, getaddrinfo | 4/4, 304 мс медленный |
-| `UnitTests` (wine) | самопроверка Unit | 4/4 |
+| `Comm_testsResolver` | ожидание `getaddrinfo` в нити, шаги цикла | 10 010 мс, 9 449 шагов |
+| `Robust_testsParallel` | сумма на 1/4/16 процессах | 500500, 1/11/13 мс |
+| `Async_testsMpi` | 12 квадратов, `mpiexec -n 5` | 252 мс, 0 ошибок |
+| `Demo_testsGui` | 100 элементов, тикер 100 мс | 2 015 мс, maxgap 111 мс |
+| `System_testsWinTasks` (wine) | Yield, буфер, трап, Join, стек | 5/5, 32 мс худший |
+| `Async_testsWinWorkers` (wine) | Sleep 300 мс в нити, файл, getaddrinfo | 4/4, 304 мс медленный |
+| `Unit_testsMain` (wine) | самопроверка Unit | 4/4 |
 
 ## 8. Что открыто
 
@@ -423,7 +425,7 @@ tools/test32.sh SystemTestsTasks   # только указанные модул�
   (`tools/bootstrap.sh` ставит `Dev/Code`, который загрузчик читает
   раньше упакованного).
 - Отдельного `[code]`-переключателя стеков нет; `SwitchSave/Restore`
-  зовут обёртки `SystemTestsCo`.
+  зовут обёртки `System_testsCo`.
 - `MPI` ставится в пользовательское пространство (`uv pip install
   mpich` в `.work/venv`), транспорт — `AsyncMpi`; mpiexec запускает
   ранг 0 как тест, ранги 1..n как `AsyncMpi.WorkerLoop`. Гибель ранга
@@ -437,8 +439,8 @@ tools/test32.sh SystemTestsTasks   # только указанные модул�
   `AsyncWork.Ensure`), базовые init пул не заводят. `AsyncWorkWin` держит
   очередь под `CRITICAL_SECTION`, готовность забирает действие
   `Services` (окна не блокируются), файлы и `getaddrinfo` — через
-  `CreateFileA`/WS2_32. Под wine идут UnitTests 4/4, SystemTestsWinTasks 5/5
-  и AsyncTestsWinWorkers 4/4. GUI-прогон Windows отдельным тестом не
+  `CreateFileA`/WS2_32. Под wine идут Unit_testsMain 4/4, System_testsWinTasks 5/5
+  и Async_testsWinWorkers 4/4. GUI-прогон Windows отдельным тестом не
   проверяется.
 - i386: этапы 2–6 перенесены (реестр стеков, мониторы, `Tasks`,
   `[exclusive]`, `ACTIVE.AWAIT`, ключ `^`) — см. §5. Осталось
@@ -521,11 +523,11 @@ LinKernel, Loop, Services, Console, Init/IntInit», потому что `Cons/In
 - `Lin/Mod/Init.cp`, `Lin/Mod/IntInit.cp`
 - `Win/Mod/Init.cp`, `Win/Mod/IntInit.cp`
 
-Убрать `Async/`, `Robust/`, тестовые модули (`System/Mod/Tests*.cp`,
-`System/Mod64/Tests*.cp`, `Dev/Mod/Tests*.cp`, `Dev/Reject/`,
-`Lin/Mod/TestsFiles.cp`, `Async/Mod64/Tests*.cp`,
-`Comm/Mod64/TestsResolver.cp`, `Robust/Mod64/Tests*.cp`,
-`Demo/Mod/Tests*.cp`), `System/Mod/Tasks.cp`,
+Убрать `Async/`, `Robust/`, тестовые модули (`System_tests/Mod/*.cp`,
+`System_tests/Mod64/*.cp`, `Dev_tests/Mod/*.cp`, `Dev_tests/Reject/`,
+`Lin_tests/Mod/Files.cp`, `Async_tests/Mod64/*.cp`,
+`Comm_tests/Mod64/Resolver.cp`, `Robust_tests/Mod64/*.cp`,
+`Demo_tests/Mod/*.cp`), `System/Mod/Tasks.cp`,
 `System/Mod64/Tasks.cp`, а с s18 ещё и `System/Mod/Monitors.cp`.
 `Unit` в снимке отсутствует и зовёт `Kernel.GetTrapViewer` — в базовый
 мир не входит.
