@@ -40,6 +40,7 @@ MODULE Tasks;
 	CONST
 		nameLen = 64;
 		defaultStack = 256 * 1024;
+		directMax = 64;	(* переключений задача → задача подряд, без возврата к Step *)
 		poolMax = 1024;		(* сколько свободных стеков пул держит в покое *)
 		trimStep = 16;		(* сколько лишних стеков шаг планировщика возвращает ядру *)
 		word = Taskarch.word;
@@ -115,6 +116,7 @@ MODULE Tasks;
 		slice: LONGINT;
 		lastPoll: LONGINT;	(* когда Kernel.RequestPoll поднимался последний раз *)
 		lastWake: LONGINT;	(* время последнего просмотра спящих в Step *)
+		direct: INTEGER;	(* прямых переключений с последнего возврата в Step *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
 		(* Пул свободных стеков: односвязный список через верхние слова самого
@@ -320,6 +322,30 @@ MODULE Tasks;
 		END
 	END WakeWaiters;
 
+	(* --- уход с процессора ------------------------------------------------ *)
+
+	PROCEDURE Leave;
+	(* Пред: current # NIL — задача, которая уже записала своё новое состояние
+	   (Ready и в очереди готовых или одно из ожиданий).
+	   Пост: current снова исполняется — та же задача, что вызвала Leave.
+	   Следующая готовая получает процессор прямо со стека уходящей задачи,
+	   без захода на стек планировщика; после directMax таких переходов
+	   подряд управление идёт в Step, который смотрит часы, будит спящих,
+	   поднимает флаг Poll и отдаёт главный цикл по кванту.
+	   Инвариант: на стеке планировщика ждёт ровно один Step; задача, которая
+	   из него ушла, может вернуться в него с любой другой задачей в current. *)
+		VAR me, t: Task;
+	BEGIN
+		me := current;
+		IF (readyHead # NIL) & (direct < directMax) THEN
+			INC(direct);
+			t := Dequeue(); current := t; t.state := Running;
+			IF t # me THEN SwitchTo(me.sp, t.sp, me.stackRec) END
+		ELSE
+			SwitchTo(me.sp, schedSP, me.stackRec)
+		END
+	END Leave;
+
 	(* --- проверки точек ожидания ------------------------------------------ *)
 
 	PROCEDURE InFramework (): BOOLEAN;
@@ -367,7 +393,7 @@ MODULE Tasks;
 				Finish; RETURN
 			END;
 			t.state := Parked;
-			SwitchTo(t.sp, schedSP, t.stackRec)
+			Leave
 		END
 	END WaitOwnGroup;
 
@@ -537,7 +563,7 @@ MODULE Tasks;
 	BEGIN
 		CheckWait("Yield");
 		current.state := Ready; Enqueue(current);
-		SwitchTo(current.sp, schedSP, current.stackRec)
+		Leave
 	END Yield;
 
 	PROCEDURE Sleep* (ms: LONGINT);
@@ -547,7 +573,7 @@ MODULE Tasks;
 		current.deadline := Kernel.Time() + ms;
 		current.state := Sleeping; INC(current.sleepSeq);
 		PushSleeper(current);
-		SwitchTo(current.sp, schedSP, current.stackRec);
+		Leave;
 		current.wake := FALSE;	(* Unpark разбудил сон, а не будущий Park *)
 		CheckWait("Sleep")
 	END Sleep;
@@ -571,7 +597,7 @@ MODULE Tasks;
 			current.wnext := t.waiters; t.waiters := current;
 			REPEAT
 				current.state := Waiting;
-				SwitchTo(current.sp, schedSP, current.stackRec);
+				Leave;
 				IF current.cancel & ~IsDone(t) THEN RemoveWaiter(t, current) END;
 				CheckWait("Join")
 			UNTIL IsDone(t)
@@ -584,7 +610,7 @@ MODULE Tasks;
 		CheckWait("Park");
 		IF current.wake THEN current.wake := FALSE; RETURN END;
 		current.state := Parked;
-		SwitchTo(current.sp, schedSP, current.stackRec);
+		Leave;
 		current.wake := FALSE;	(* пробуждение потреблено этим Park *)
 		CheckWait("Park")
 	END Park;
@@ -597,7 +623,7 @@ MODULE Tasks;
 	BEGIN
 		CheckWait("monitor wait");
 		current.state := Parked;
-		SwitchTo(current.sp, schedSP, current.stackRec);
+		Leave;
 		CheckWait("monitor wait")
 	END ParkMonitor;
 
@@ -732,7 +758,7 @@ MODULE Tasks;
 			IF t = NIL THEN CheckDeadlock; EXIT END;
 			current := t; t.state := Running;
 			SwitchTo(schedSP, t.sp, schedStack);
-			current := NIL;
+			t := current; current := NIL; direct := 0;	(* вернулась, возможно, другая задача *)
 			IF IsDone(t) THEN Reap(t) END;
 			now := Kernel.Time();
 			IF now - t0 >= slice THEN EXIT END

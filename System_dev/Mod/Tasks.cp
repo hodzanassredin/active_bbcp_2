@@ -50,12 +50,16 @@ MODULE System_devTasks;
 		FlagSleeper = POINTER TO RECORD (Tasks.Task) flag: BOOLEAN END;
 		TrapParent = POINTER TO RECORD (Tasks.Task) child: LongSleeper END;
 		TwoGroups = POINTER TO RECORD (Tasks.Task) long: LongSleeper; same: BOOLEAN END;
+		Spinner = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		StopSleeper = POINTER TO RECORD (Tasks.Task) END;
+		CountYielder = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
 		ProbeAction = POINTER TO RECORD (Services.Action) END;
 
 	VAR forks: ARRAY 5 OF Fork;
+		stopSpin: BOOLEAN;
 
 	(* --- вспомогательное -------------------------------------------------- *)
 
@@ -718,5 +722,61 @@ MODULE System_devTasks;
 		UnitAssert.EqualInt(Tasks.Finished, Tasks.State(p.long), "parent waited for the first child");
 		UnitAssert.True(Pump(2000), "tasks finished")
 	END TestProcNewGroupTwice;
+
+	(* --- прямое переключение задача → задача ------------------------------ *)
+
+	PROCEDURE (t: Spinner) Run;
+	BEGIN
+		WHILE ~stopSpin DO INC(t.n); Tasks.Yield END
+	END Run;
+
+	PROCEDURE (t: StopSleeper) Run;
+	BEGIN
+		Tasks.Sleep(2); stopSpin := TRUE
+	END Run;
+
+	PROCEDURE (t: CountYielder) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO 5 DO INC(t.n); Tasks.Yield END
+	END Run;
+
+	PROCEDURE TestProcDirectStepBounded*;
+	(** Две задачи уступают друг другу без конца: Step всё равно отдаёт
+		управление главному циклу по кванту, а спящая задача просыпается
+		и останавливает их. Одна задача, уступающая сама себе, тоже не
+		держит Step. *)
+		VAR a, b: Spinner; z: StopSleeper; t0, dt: LONGINT;
+	BEGIN
+		stopSpin := FALSE;
+		NEW(a); Tasks.Start(a);
+		t0 := Kernel.Time(); Tasks.Step; dt := Kernel.Time() - t0;
+		UnitAssert.True(dt < 200, "one yielding task: Step returns");
+		UnitAssert.True(a.n > 64, "one yielding task ran past the direct limit");
+		NEW(b); Tasks.Start(b);
+		t0 := Kernel.Time(); Tasks.Step; dt := Kernel.Time() - t0;
+		UnitAssert.True(dt < 200, "two yielding tasks: Step returns");
+		NEW(z); Tasks.Start(z);
+		UnitAssert.True(Pump(2000), "sleeper woke among yielding tasks and stopped them");
+		UnitAssert.True(b.n > 0, "second task ran")
+	END TestProcDirectStepBounded;
+
+	PROCEDURE TestProcDirectFinishAndTrap*;
+	(** Задача, получившая процессор прямо от соседки, завершается или
+		трапает: планировщик убирает именно её, соседки доходят до конца. *)
+		VAR a, c: CountYielder; bad: Bad; once: Once;
+	BEGIN
+		counter := 0;
+		NEW(a); Tasks.Start(a);
+		NEW(bad); Tasks.Start(bad);
+		NEW(once); Tasks.Start(once);
+		NEW(c); Tasks.Start(c);
+		UnitAssert.True(Pump(2000), "all finished");
+		UnitAssert.EqualInt(5, a.n, "first yielder");
+		UnitAssert.EqualInt(5, c.n, "last yielder");
+		UnitAssert.EqualInt(1, counter, "once ran");
+		UnitAssert.True(Tasks.Failed(bad), "trapped task failed");
+		UnitAssert.True(~Tasks.Failed(a) & ~Tasks.Failed(c), "neighbours not failed")
+	END TestProcDirectFinishAndTrap;
 
 END System_devTasks.
