@@ -79,6 +79,13 @@ DEFINITION Tasks;
 
 		Group = POINTER TO RECORD END;
 
+		StackDir = POINTER TO ABSTRACT RECORD
+			(d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: SYSTEM.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+			(d: StackDir) FreeStack- (lo, hi: SYSTEM.ADDRESS), NEW, ABSTRACT;
+			(d: StackDir) Drain-, NEW, EMPTY;
+			(d: StackDir) Overflow- (t: Task), NEW, EMPTY
+		END;
+
 	PROCEDURE Cancel (t: Task);
 	PROCEDURE Count (): INTEGER;
 	PROCEDURE Current (): Task;
@@ -106,6 +113,22 @@ DEFINITION Tasks;
 	PROCEDURE Switches (): LONGINT;
 	PROCEDURE Unpark (t: Task);
 	PROCEDURE Yield;
+
+	PROCEDURE DefaultStackSize (): INTEGER;
+	PROCEDURE InitStackDir (d: StackDir; reserve: INTEGER; checked, keep: BOOLEAN);
+	PROCEDURE ModuleChecked (m: Kernel.Module): BOOLEAN;
+	PROCEDURE NewDenseDir (reserve: INTEGER): StackDir;
+	PROCEDURE NewGuardDir (): StackDir;
+	PROCEDURE NewSlabDir (): StackDir;
+	PROCEDURE PoolCount (): INTEGER;
+	PROCEDURE RunChecked (t: Task): BOOLEAN;
+	PROCEDURE SetDefaultStackSize (size: INTEGER);
+	PROCEDURE SetStackDir (d: StackDir);
+	PROCEDURE StackDirOf (): StackDir;
+	PROCEDURE StackDirOfTask (t: Task): StackDir;
+	PROCEDURE UseDenseStacks;
+	PROCEDURE UseGuardStacks;
+	PROCEDURE UseSlabStacks;
 
 END Tasks.
 ```
@@ -239,6 +262,51 @@ NEW, ABSTRACT
 Пред: `State(t) = New` — трап 21.
 Пред: `size >= 0` — трап 22. Верхний предел здесь не проверяется; размер больше 64 МБ отвергает
 `StartIn` (трап 22).
+
+**PROCEDURE SetDefaultStackSize (size: INTEGER)**, **DefaultStackSize (): INTEGER**
+Размер стека задач без `SetStackSize`; по умолчанию 256 КБ.
+
+Пред: `size > 0` — трап 20.
+
+**TYPE StackDir**
+Поставщик стеков задач, сменный каталог в духе `Files.Directory`. Свободные стеки поставщика
+лежат в его пуле, и стек из пула `Tasks` выдаёт без вызова поставщика. `NewStack` зовётся при
+пустом пуле, `FreeStack` — когда пул возвращает лишнее ядру, `Drain` — когда у поставщика не
+осталось стеков у задач. `Overflow` — точка расширения: её зовут, когда канарейка у дна стека
+задачи испорчена; затем задача получает трап 126 (в точке переключения) или помечается ошибочной
+(при уборке). Роста стека нет.
+
+**PROCEDURE NewGuardDir (): StackDir**, **NewSlabDir (): StackDir**, **NewDenseDir (reserve: INTEGER): StackDir**
+Три поставщика: отдельный стек со сторожевой страницей; плиты по 64 стека со сторожем под каждым
+(по умолчанию); плотные плиты по 64 стека вплотную со сторожем под плитой. У плотного поставщика
+`Kernel.stkLo` задачи на `reserve` байт выше дна стека, у дна лежит канарейка, и стек получает
+только задача, чей метод `Run` собран с ключом `%` (`RunChecked`); остальные получают стек со
+сторожем.
+
+Пред (`NewDenseDir`): `reserve >= 8` — трап 20.
+
+**PROCEDURE InitStackDir (d: StackDir; reserve: INTEGER; checked, keep: BOOLEAN)**
+Свойства поставщика вне модуля: запас ниже `Kernel.stkLo`, требование ключа `%` у `Run`, запрет
+возвращать стеки ядру по одному.
+
+Пред: `d # NIL` — трап 20. Пред: `d` ещё не выдавал стеков — трап 21. Пред: `reserve = 0` или
+`reserve >= 8` — трап 22.
+
+**PROCEDURE SetStackDir (d: StackDir)**, **StackDirOf (): StackDir**, **StackDirOfTask (t: Task): StackDir**
+Поставщик новых задач; поставщик, выдавший стек `t` (`NIL`, если стека нет). Живая задача
+возвращает стек своему поставщику и после смены.
+
+Пред (`SetStackDir`): `d # NIL` — трап 20.
+
+**PROCEDURE UseGuardStacks**, **UseSlabStacks**, **UseDenseStacks**
+Команды выбора поставщика при запуске, во входном потоке: `Tasks.UseDenseStacks` (запас 8 КБ).
+
+**PROCEDURE ModuleChecked (m: Kernel.Module): BOOLEAN**, **RunChecked (t: Task): BOOLEAN**
+Модуль собран с ключом `%` (бит 12 опций модуля); метод `Run` динамического типа `t` лежит в
+таком модуле.
+
+**PROCEDURE PoolCount (): INTEGER**
+Свободных стеков в пулах всех поставщиков.
 
 **PROCEDURE Count (): INTEGER**
 Число запущенных и не убранных в `Reap` задач.
@@ -390,6 +458,13 @@ END ObxTasks.
 После завершения задачи `Reap` возвращает её стек в пул. Следующая задача того же размера берёт
 стек из пула без системного вызова. Пул держит до 1024 свободных стеков; излишек планировщик
 возвращает ядру (`munmap`) не больше 16 стеков за шаг.
+
+Поставщика стеков меняют `SetStackDir` или командой при запуске. Плотный поставщик убирает
+сторожевую страницу у каждого стека: 100 тыс. задач со стеком 4 КБ занимают около 430 МБ и
+3 тыс. отображений вместо 200 тыс. Защита у него другая: проверка границы в прологе (ключ `%`),
+запас под код без проверки и канарейка у дна; порча за пределами запаса ловится в ближайшей точке
+переключения трапом 126, но соседний стек к этому моменту может быть испорчен. Разбор стратегий и
+замеры — `docs/stacks-study.md`, раздел 6.5.
 
 **Цена.** Числа, условия и команды воспроизведения собраны в `docs/measurements.md`, раздел 2. При
 load average 15,2–15,9 (24.11.2026), стеки 64 КБ:

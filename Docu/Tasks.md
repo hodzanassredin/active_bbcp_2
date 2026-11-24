@@ -78,6 +78,13 @@ DEFINITION Tasks;
 
 		Group = POINTER TO RECORD END;
 
+		StackDir = POINTER TO ABSTRACT RECORD
+			(d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: SYSTEM.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+			(d: StackDir) FreeStack- (lo, hi: SYSTEM.ADDRESS), NEW, ABSTRACT;
+			(d: StackDir) Drain-, NEW, EMPTY;
+			(d: StackDir) Overflow- (t: Task), NEW, EMPTY
+		END;
+
 	PROCEDURE Cancel (t: Task);
 	PROCEDURE Count (): INTEGER;
 	PROCEDURE Current (): Task;
@@ -105,6 +112,22 @@ DEFINITION Tasks;
 	PROCEDURE Switches (): LONGINT;
 	PROCEDURE Unpark (t: Task);
 	PROCEDURE Yield;
+
+	PROCEDURE DefaultStackSize (): INTEGER;
+	PROCEDURE InitStackDir (d: StackDir; reserve: INTEGER; checked, keep: BOOLEAN);
+	PROCEDURE ModuleChecked (m: Kernel.Module): BOOLEAN;
+	PROCEDURE NewDenseDir (reserve: INTEGER): StackDir;
+	PROCEDURE NewGuardDir (): StackDir;
+	PROCEDURE NewSlabDir (): StackDir;
+	PROCEDURE PoolCount (): INTEGER;
+	PROCEDURE RunChecked (t: Task): BOOLEAN;
+	PROCEDURE SetDefaultStackSize (size: INTEGER);
+	PROCEDURE SetStackDir (d: StackDir);
+	PROCEDURE StackDirOf (): StackDir;
+	PROCEDURE StackDirOfTask (t: Task): StackDir;
+	PROCEDURE UseDenseStacks;
+	PROCEDURE UseGuardStacks;
+	PROCEDURE UseSlabStacks;
 
 END Tasks.
 ```
@@ -240,6 +263,52 @@ Pre: `t # NIL` — trap 20.
 Pre: `State(t) = New` — trap 21.
 Pre: `size >= 0` — trap 22. The upper limit is not checked here; `StartIn` rejects a size above
 64 MB (trap 22).
+
+**PROCEDURE SetDefaultStackSize (size: INTEGER)**, **DefaultStackSize (): INTEGER**
+Stack size of tasks without `SetStackSize`; 256 KB by default.
+
+Pre: `size > 0` — trap 20.
+
+**TYPE StackDir**
+Provider of task stacks, a replaceable directory in the manner of `Files.Directory`. Free stacks of a
+provider lie in its pool, and `Tasks` hands out a pooled stack without calling the provider.
+`NewStack` is called when the pool is empty, `FreeStack` when the pool returns surplus to the kernel,
+`Drain` when no task holds a stack of the provider. `Overflow` is an extension point: it is called
+when the canary at the bottom of a task stack is damaged; then the task gets trap 126 (at a switch
+point) or is marked failed (at reaping). Stacks do not grow.
+
+**PROCEDURE NewGuardDir (): StackDir**, **NewSlabDir (): StackDir**, **NewDenseDir (reserve: INTEGER): StackDir**
+Three providers: a separate stack with a guard page; slabs of 64 stacks with a guard under each
+(the default); dense slabs of 64 adjacent stacks with one guard under the slab. With the dense
+provider `Kernel.stkLo` of a task lies `reserve` bytes above the stack bottom, a canary lies at the
+bottom, and only a task whose `Run` method is compiled with the key `%` (`RunChecked`) gets such a
+stack; other tasks get a guarded stack.
+
+Pre (`NewDenseDir`): `reserve >= 8` — trap 20.
+
+**PROCEDURE InitStackDir (d: StackDir; reserve: INTEGER; checked, keep: BOOLEAN)**
+Properties of a provider defined outside the module: reserve below `Kernel.stkLo`, the `%` key
+required of `Run`, no returning stacks to the kernel one by one.
+
+Pre: `d # NIL` — trap 20. Pre: `d` has not handed out stacks — trap 21. Pre: `reserve = 0` or
+`reserve >= 8` — trap 22.
+
+**PROCEDURE SetStackDir (d: StackDir)**, **StackDirOf (): StackDir**, **StackDirOfTask (t: Task): StackDir**
+Provider of new tasks; provider that gave the stack of `t` (`NIL` without a stack). A live task
+returns its stack to its own provider after a change.
+
+Pre (`SetStackDir`): `d # NIL` — trap 20.
+
+**PROCEDURE UseGuardStacks**, **UseSlabStacks**, **UseDenseStacks**
+Commands that choose the provider at startup, in the input stream: `Tasks.UseDenseStacks` (reserve
+8 KB).
+
+**PROCEDURE ModuleChecked (m: Kernel.Module): BOOLEAN**, **RunChecked (t: Task): BOOLEAN**
+The module is compiled with the key `%` (bit 12 of module options); the `Run` method of the dynamic
+type of `t` lies in such a module.
+
+**PROCEDURE PoolCount (): INTEGER**
+Free stacks in the pools of all providers.
 
 **PROCEDURE Count (): INTEGER**
 The number of tasks started and not yet removed in `Reap`.
@@ -391,6 +460,13 @@ physical memory.
 After a task finishes, `Reap` returns its stack to the pool. The next task of the same size takes a
 stack from the pool without a system call. The pool keeps up to 1024 free stacks; the scheduler
 returns the surplus to the kernel (`munmap`), at most 16 stacks per step.
+
+The stack provider is changed by `SetStackDir` or by a command at startup. The dense provider
+removes the guard page of each stack: 100 thousand tasks with 4 KB stacks take about 430 MB and
+3 thousand mappings instead of 200 thousand. Its protection is different: the bound check in the
+prologue (key `%`), a reserve for unchecked code and a canary at the bottom; damage beyond the
+reserve is caught at the next switch point by trap 126, but the neighbouring stack may already be
+damaged. Strategies and measurements: `docs/stacks-study.md`, section 6.5.
 
 **Cost.** Numbers, conditions and reproduction commands are collected in `docs/measurements.md`,
 section 2. At load average 15.2–15.9 (24.11.2026), 64 KB stacks:
