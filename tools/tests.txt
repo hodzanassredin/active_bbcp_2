@@ -16,6 +16,7 @@ Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
 Async_devIO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
 Async_devWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
 Async_devComputons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
+Async_devBench|proc slow|900|AsyncSelect AsyncChan AsyncOnce System_devCRaw System_devClock
 Async_devProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
 System_devUnload|proc|600|System_devUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 System_devUnloadGuard|proc|300|System_devUnloadGuardCode
