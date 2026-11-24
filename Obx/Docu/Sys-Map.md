@@ -90,5 +90,8 @@ ObxChan2  docu/sources		a mailbox: sending never waits
 ObxSelect0  docu/sources		selection with a timeout
 ObxProto0  docu/sources		a dialogue protocol checked at every send
 ObxOnce  docu/sources		a single-assignment variable
+ObxStm0  docu/sources		a transaction: a trap in a transfer loses no money
+ObxStm1  docu/sources		Retry: waiting for a condition over two variables
+ObxStm2  docu/sources		OrElse: pay with one card or the other
 ObxWork0  docu/sources		a blocking call on a worker thread
 ObxComputon  docu/sources		a computon executed in a separate process

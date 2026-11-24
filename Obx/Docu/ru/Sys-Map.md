@@ -15,5 +15,8 @@ ObxChan2  docu/sources		почтовый ящик: отправка не ждё�
 ObxSelect0  docu/sources		выбор с тайм-аутом
 ObxProto0  docu/sources		протокол диалога, проверка при каждой отправке
 ObxOnce  docu/sources		однократная переменная
+ObxStm0  docu/sources		транзакция: трап в переводе не теряет денег
+ObxStm1  docu/sources		Retry: ожидание условия над двумя переменными
+ObxStm2  docu/sources		OrElse: оплата с одной карты или с другой
 ObxWork0  docu/sources		блокирующий вызов в рабочей нити
 ObxComputon  docu/sources		компутон в отдельном процессе
