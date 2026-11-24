@@ -68,6 +68,18 @@ echo "build64: компиляция подсистем:$subs"
 	if [ -d "$BB/Robust/Mod" ] || [ -d "$BB/Robust/Mod64" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Robust"
 	fi
+	# Примеры Obx на задачах и каналах лежат в Obx/Mod64: обход CompileSubs
+	# их не берёт (им нужны Tasks и Async, которые собираются выше), поэтому
+	# каждый — отдельным CompileThis. Примеры друг друга не импортируют.
+	case " $subs " in
+	*" Obx "*)
+		for f in "$BB"/Obx/Mod64/*.cp; do
+			[ -f "$f" ] || continue
+			b=$(basename "$f" .cp)
+			echo "DevCompiler64.CompileThis Obx$b"
+		done
+		;;
+	esac
 	# Demo — примеры задач, мониторов и каналов (ACTIVE + Async).
 	case " $subs " in
 	*" Demo "*)

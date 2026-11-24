@@ -158,6 +158,24 @@ if [ "$rungui" -eq 1 ]; then
 	esac
 fi
 
+# Примеры документации: текст в .md совпадает с файлом модуля, вывод
+# команды страницы примера — с блоком журнала на ней.
+runex=1
+if [ -n "$only" ]; then
+	case " $only " in *" Examples "*) ;; *) runex=0;; esac
+fi
+if [ "$runex" -eq 1 ]; then
+	total=$((total + 1))
+	echo "test: Examples (tools/check-examples.sh --run)"
+	if "$BB/tools/check-examples.sh" --run; then
+		ok=$((ok + 1)); echo "PASS Examples"; summary="$summary
+  OK   Examples"
+	else
+		bad=$((bad + 1)); echo "FAIL Examples"; summary="$summary
+  BAD  Examples"
+	fi
+fi
+
 echo "== test: всего $total, прошло $ok, провалов $bad, пропущено $skipped"
 [ -n "$summary" ] && printf '%s\n' "$summary"
 [ $bad -eq 0 ]
