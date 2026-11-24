@@ -189,7 +189,7 @@ MODULE DevCPT;
 		   Создаётся заново на каждую компиляцию, чтобы не тащить
 		   ссылки и used-флаги прошлого модуля. *)
 		kernelScope, kernelSave: Object;
-		kPoll*, kLock*, kUnlock*, kAwait*, kLockAt*, kMonTok*, kMonTop*, kMonEnd*: Object;
+		kPoll*, kLock*, kUnlock*, kAwait*, kLockAt*, kMonTok*, kMonTop*, kMonEnd*, kStkLo*: Object;
 		(* kernelScope создаётся по первому требованию (EnsureKernel):
 		   иначе каждый модуль импортировал бы "$$" — Kernel. *)
 		moduleMon: Object;	(* скрытая глобальная монитора модуля *)
@@ -1710,6 +1710,7 @@ MODULE DevCPT;
 		KVar("monTok", adrtyp, external, kMonTok);
 		KVar("monTop", adrtyp, external, kMonTop);
 		KVar("monEnd", adrtyp, externalR, kMonEnd);
+		KVar("stkLo", adrtyp, external, kStkLo);
 		kernelScope := topScope;
 		GlbMod[nofGmod] := topScope; INC(nofGmod);
 		CloseScope

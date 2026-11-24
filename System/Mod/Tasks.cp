@@ -166,12 +166,14 @@ MODULE Tasks;
 
 	PROCEDURE SetCurrent (t: Task);
 	(* Пост: current = t; Kernel.monTok — адрес t^ (Kernel.mainToken при
-	   t = NIL); взятия мониторов быстрым путём прежнего токена отданы
+	   t = NIL); Kernel.stkLo — низ стека t (0 при t = NIL); взятия мониторов быстрым путём прежнего токена отданы
 	   таблице Monitors до смены токена. *)
 	BEGIN
 		IF Kernel.monTop # Kernel.monBase THEN Kernel.FlushMonitors END;
 		current := t;
-		IF t # NIL THEN Kernel.monTok := S.ADR(t^) ELSE Kernel.monTok := Kernel.mainToken END
+		IF t # NIL THEN Kernel.monTok := S.ADR(t^); Kernel.stkLo := t.lo
+		ELSE Kernel.monTok := Kernel.mainToken; Kernel.stkLo := 0
+		END
 	END SetCurrent;
 
 	(* --- очереди ---------------------------------------------------------- *)

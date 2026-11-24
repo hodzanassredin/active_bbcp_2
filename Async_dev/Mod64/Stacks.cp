@@ -178,6 +178,29 @@ MODULE Async_devStacks;
 		Load1(10000, 64 * 1024, 10, "scale10k"); Load1(10000, 64 * 1024, 10, "scale10k-warm")
 	END Scale;
 
+	PROCEDURE Empty (x: INTEGER): INTEGER;
+	BEGIN
+		RETURN x + 1
+	END Empty;
+
+	PROCEDURE Fib (n: INTEGER): INTEGER;
+	BEGIN
+		IF n < 2 THEN RETURN n END;
+		RETURN Fib(n - 1) + Fib(n - 2)
+	END Fib;
+
+	PROCEDURE Calls*;
+	(** Цена вызова: пустая процедура 1e8 раз и рекурсия Fib(30); с ключом
+		компилятора "%" к каждому вызову прибавляется проверка границы стека. *)
+		VAR i, x: INTEGER; t0: LONGINT;
+	BEGIN
+		x := 0; t0 := System_devClock.now();
+		FOR i := 1 TO 100000000 DO x := Empty(x) END;
+		W("BENCH call ops=100000000 nsPerOp10="); N((System_devClock.now() - t0) DIV 10000000); Console.WriteLn;
+		t0 := System_devClock.now(); x := Fib(30);
+		W("BENCH fib30 ms="); N((System_devClock.now() - t0) DIV 1000000); W(" x="); N(x); Console.WriteLn
+	END Calls;
+
 	PROCEDURE LoadSmall*;
 	(** То же со стеком 8 КБ (свежий процесс: пул отдаёт стек только того же размера). *)
 	BEGIN

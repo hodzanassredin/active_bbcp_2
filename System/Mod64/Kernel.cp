@@ -441,6 +441,11 @@ MODULE Kernel;
 			таблица Monitors; 0 — свободен и записи в таблице нет. *)
 		monTok*, monTop*: S.ADDRESS;
 		monBase-, monEnd-: S.ADDRESS;
+		(* Низ стека текущей задачи для проверки границы в прологе (ключ
+		   компилятора "%"); 0 — не задача. Пролог проверяет
+		   SP - stkLo < запас + кадр как беззнаковое: на чужой нити и
+		   сигнальном стеке SP вне [stkLo, stkLo + запас), и проверка молчит. *)
+		stkLo*: S.ADDRESS;
 		monStk: ARRAY monStkLen OF MonEntry;
 		sched-: Scheduler;	(* read-only: Monitors читает токен/park/unpark/name *)
 		pollWanted: BOOLEAN;	(* главный цикл просит уступить в Kernel.Poll *)

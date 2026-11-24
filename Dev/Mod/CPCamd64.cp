@@ -76,6 +76,7 @@ MODULE DevCPCamd64;
 		(* GenCode *)
 		SAHF = 9EH; WAIT = 9BH;
 
+		stackReserve = 1024;	(* запас под проверкой границы: вызовы без проверки (libc, ядро) *)
 		(* condition codes *)
 		ccB = 2; ccAE = 3; ccBE = 6; ccA = 7; (* unsigned *)
 		ccL = 12; ccGE = 13; ccLE = 14; ccG = 15; (* signed *)
@@ -2647,6 +2648,19 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		END
 	END UnlockExit;
 
+	PROCEDURE StackCheck (size: INTEGER);
+	(** Ключ "%": трап 137, если SP - Kernel.stkLo < stackReserve + size
+		(беззнаково). Портит RAX и R11. *)
+		VAR x, r: DevCPLamd64.Item;
+	BEGIN
+		DevCPT.EnsureKernel;
+		KVarItem(DevCPT.kStkLo, x); DevCPLamd64.MakeReg(r, AX, Pointer); DevCPLamd64.GenMove(x, r);
+		GenB(49H); GenB(89H); GenB(0E3H);	(* mov r11, rsp *)
+		GenB(49H); GenB(29H); GenB(0C3H);	(* sub r11, rax *)
+		GenB(49H); GenB(81H); GenB(0FBH); GenD(stackReserve + size);	(* cmp r11, imm32 *)
+		DevCPLamd64.GenAssert(ccAE, 137)
+	END StackCheck;
+
 	PROCEDURE Enter* (proc: DevCPT.Object; empty, useFpu: BOOLEAN);
 		VAR sp, fp, r, r1: DevCPLamd64.Item; par: DevCPT.Object; adr, size, np, off: INTEGER;
 	BEGIN
@@ -2684,6 +2698,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				uwCodes[0] := 5; uwCodes[1] := 3; uwCodes[2] := 2; uwCodes[3] := 50H;
 				adr := proc.conval.intval2; size := -adr;
 				IF size < 0 THEN DevCPM.err(214); size := 256 END;
+				IF DevCPM.stackChk IN DevCPM.options THEN StackCheck(size) END;
 				IF isGuarded IN proc.conval.setval THEN
 					DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPush(r);
 					DevCPLamd64.MakeReg(r, DI, Pointer); DevCPLamd64.GenPush(r);

@@ -1723,7 +1723,7 @@ MODULE DevCPP;
 			END ;
 			(* "$$" создаётся после импортов: псевдозапись «Kernel» для
 			   отпечатка CondProc иначе перехватила бы импорт Kernel. *)
-			IF (DevCPM.yieldPts IN DevCPM.options) & DevCPM.noerr THEN DevCPT.EnsureKernel END;
+			IF (DevCPM.options * {DevCPM.yieldPts, DevCPM.stackChk} # {}) & DevCPM.noerr THEN DevCPT.EnsureKernel END;
 			IF DevCPM.noerr THEN TDinit := NIL; lastTDinit := NIL; c := DevCPM.errpos;
 				Block(procdec, statseq); DevCPB.AttachSynth(procdec);
 				DevCPB.Enter(procdec, statseq, NIL); prog := procdec;

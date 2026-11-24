@@ -92,6 +92,7 @@ MODULE DevCPM;
 		sysAMD64* = 12; (* target supports the explicit Windows x64 ABI *)
 		yieldPts* = 13;	(* ключ точек уступки: Kernel.Poll на обратном переходе *)
 		allSysVal* = 14;
+		stackChk* = 16;	(* ключ "%": проверка границы стека задачи в прологе (amd64) *)
 		sysImp* = 15;
 		trap* = 31;
 		exclusive* = 32;	(* sysflag процедуры [exclusive] *)

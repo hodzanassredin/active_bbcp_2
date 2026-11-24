@@ -28,9 +28,10 @@ trap 'rm -f "$MARK" "$LOG" "$LOG.cmd"' EXIT
 echo 'DevCompiler64.InitLogMarks' >> "$LOG.cmd"
 echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')" >> "$LOG.cmd"
 for m in "$@"; do
-	# Модуль с суффиксом опций: Dev_devYield^ -> CompileThis Dev_devYield ^
+	# Модуль с суффиксом опций: Dev_devYield^ -> CompileThis Dev_devYield ^,
+	# System_devStackChk% -> CompileThis System_devStackChk % (проверка границы стека)
 	opt=""
-	case "$m" in *\^) opt="^"; m="${m%^}";; esac
+	case "$m" in *\^) opt="^"; m="${m%^}";; *%) opt="%"; m="${m%\%}";; esac
 	echo "DevCompiler64.CompileThis $m $opt" >> "$LOG.cmd"
 done
 echo 'DevLibrarian.DisableDevLib' >> "$LOG.cmd"

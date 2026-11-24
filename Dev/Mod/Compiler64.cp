@@ -24,6 +24,7 @@ MODULE DevCompiler64;
 		checks = 0; allchecks = 1; assert = 2; obj = 3; ref = 4;
 		allref = 5; srcpos = 6; reallib = 7; signatures = 8;
 		yieldPts = 13;	(* ключ точек уступки, символ "^" в CompileThis *)
+		stackChk = 12;	(* проверка границы стека в прологе, символ "%"; 14 занят: DevCPE.pVarInd *)
 		hint = 29; oberon = 30; errorTrap = 31;
 		defopt = {checks, assert, obj, ref, allref, srcpos, signatures};
 
@@ -55,6 +56,7 @@ MODULE DevCompiler64;
 		IF errorTrap IN opt THEN INCL(DevCPM.options, DevCPM.trap) END;
 		IF oberon IN opt THEN INCL(DevCPM.options, DevCPM.oberon) END;
 		IF yieldPts IN opt THEN INCL(DevCPM.options, DevCPM.yieldPts) END;
+		IF stackChk IN opt THEN INCL(DevCPM.options, DevCPM.stackChk) END;
 		IF DevCPT.processor # DevCPV.processor THEN
 			DevCPT.processor := DevCPV.processor;
 			DevCPT.InitDefault;  (* reload NIL size and SYSTEM.ADDRESS size  *)
@@ -196,6 +198,7 @@ MODULE DevCompiler64;
 			ELSIF opt[i] = "@" THEN INCL(opts, errorTrap)
 			ELSIF opt[i] = "$" THEN INCL(opts, oberon)
 			ELSIF opt[i] = "^" THEN INCL(opts, yieldPts)
+			ELSIF opt[i] = "%" THEN INCL(opts, stackChk)
 			END;
 			INC(i)
 		END;
@@ -317,7 +320,7 @@ MODULE DevCompiler64;
 			s.Scan; one := TRUE;
 			WHILE (s.start < end) & (s.type = TextMappers.char) &
 				((s.char = "-") OR (s.char = "+") OR (s.char = "!")
-				OR (s.char = "*") OR (s.char = "?") OR (s.char = "^") OR (s.char = "("))
+				OR (s.char = "*") OR (s.char = "?") OR (s.char = "^") OR (s.char = "%") OR (s.char = "("))
 			DO
 				IF s.char = "(" THEN
 					WHILE (s.start < end) & ((s.type # TextMappers.char) OR (s.char # ")")) DO
@@ -364,6 +367,7 @@ MODULE DevCompiler64;
 					ELSIF s.char = "@" THEN INCL(opts, errorTrap)
 					ELSIF s.char = "$" THEN INCL(opts, oberon)
 					ELSIF s.char = "^" THEN INCL(opts, yieldPts)
+					ELSIF s.char = "%" THEN INCL(opts, stackChk)
 					ELSIF s.char = "(" THEN
 						s.Scan;
 						WHILE (s.start < end) & (s.type = TextMappers.string) DO
