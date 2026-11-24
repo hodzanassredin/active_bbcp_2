@@ -19,10 +19,14 @@ MODULE Async_devProtocol;
 			m: AsyncSelect.Msg; idx, done: INTEGER
 		END;
 
+		SendTask = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; m: AsyncSelect.Msg END;
+		RecvTask = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; got: AsyncSelect.Msg END;
+
 	VAR
 		box: AsyncChan.Mailbox;
 		proto: AsyncProto.Protocol;
 		altSend: AltSendTask;
+		sender: SendTask;
 
 	PROCEDURE Contains (IN s, pattern: ARRAY OF CHAR): BOOLEAN;
 		VAR i, j: INTEGER; found: BOOLEAN;
@@ -176,5 +180,46 @@ MODULE Async_devProtocol;
 		UnitAssert.True(Contains(msg, "EndMsg"), "violation names the message");
 		altSend := NIL
 	END TestAltSendBadOrder;
+
+	(* --- отложенная отправка ---------------------------------------------- *)
+
+	PROCEDURE (t: SendTask) Run;
+	BEGIN
+		t.c.Send(t.m)
+	END Run;
+
+	PROCEDURE (t: RecvTask) Run;
+	BEGIN
+		t.c.Recv(t.got)
+	END Run;
+
+	PROCEDURE SenderOver (): BOOLEAN;
+		VAR st: INTEGER;
+	BEGIN
+		st := Tasks.State(sender);
+		RETURN (st = Tasks.Finished) OR (st = Tasks.Cancelled)
+	END SenderOver;
+
+	PROCEDURE TestDeferredSendViolationTrapsSender*;
+	(** Отправитель встречи ждёт получателя. Нарушение протокола — ошибка
+		отправителя: трапует он, а получатель продолжает ждать. *)
+		VAR c: AsyncChan.Chan; s: SendTask; r: RecvTask; m: EndMsg; state: INTEGER;
+	BEGIN
+		proto := AsyncProto.New(desc);
+		c := AsyncChan.NewChan();
+		AsyncChan.SetProtocol(c, proto);
+		state := c.protoState;
+		NEW(m); NEW(s); s.c := c; s.m := m; sender := s;
+		Tasks.Start(s);
+		NEW(r); r.c := c; r.got := NIL;
+		Tasks.Start(r);
+		UnitAssert.True(PumpUntil(5000, SenderOver), "violating sender ends");
+		UnitAssert.True(Tasks.Failed(s), "sender trapped on protocol violation");
+		UnitAssert.True(~Tasks.Failed(r), "receiver did not trap");
+		UnitAssert.True(r.got = NIL, "refused message not delivered");
+		UnitAssert.EqualInt(state, c.protoState, "protocol state unchanged");
+		Tasks.Cancel(r);
+		sender := NIL
+	END TestDeferredSendViolationTrapsSender;
 
 END Async_devProtocol.

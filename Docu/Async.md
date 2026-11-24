@@ -277,7 +277,10 @@ Checks:
 2. `SendAlt` checks the message at the moment the offer is actually performed: on immediate
    registration, when a receiver takes a deposited offer, or when room appears in a buffer. A losing
    offer does not change the state.
-3. A violation prints `AsyncChan protocol: <text>` to the console and traps the task with code 21.
+3. A violation prints `AsyncChan protocol: <text>` to the console and traps the sender with code 21.
+   The protocol is checked at the moment the send takes place. If the sender was waiting for a
+   receiver or for space, the sender gets the trap, not the task that would have received the
+   message; the message is not delivered.
    The text remains in `LastViolation`; the expected messages are listed in the violation text.
 4. Without a protocol `CheckSend` returns after one `NIL` test; there is no overhead.
 5. Attaching a protocol resets the state to the start state.

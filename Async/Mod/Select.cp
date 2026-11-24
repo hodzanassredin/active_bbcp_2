@@ -41,6 +41,7 @@ MODULE AsyncSelect;
 			ctx: Ctx;
 			idx: INTEGER;
 			kind: INTEGER;
+			refused: BOOLEAN;	(* отправка отвергнута протоколом; трап — у отправителя *)
 			msg, got: Msg
 		END;
 
@@ -162,19 +163,36 @@ MODULE AsyncSelect;
 		IF (i > 0) & (label[i-1] = "^") THEN label[i-1] := 0X END
 	END MessageLabel;
 
-	PROCEDURE CheckSend* (c: Core; m: Msg);
-	(** Проверить отправку по протоколу. Без протокола — один тест NIL. *)
+	PROCEDURE SendAllowed (c: Core; m: Msg): BOOLEAN;
+	(* Шаг протокола для сообщения m. Пост: TRUE — состояние протокола
+	   продвинуто; FALSE — состояние прежнее, текст нарушения выведен и
+	   доступен через AsyncProto.LastViolation. Без протокола — TRUE. *)
 		VAR label: Kernel.Name; ok: BOOLEAN; msg: AsyncProto.Message;
 	BEGIN
-		IF c.proto = NIL THEN RETURN END;
+		IF c.proto = NIL THEN RETURN TRUE END;
 		MessageLabel(m, label);
 		AsyncProto.Step(c.proto, c.protoState, label$, ok);
 		IF ~ok THEN
 			AsyncProto.LastViolation(c.proto, msg);
-			Console.WriteStr("AsyncChan protocol: "); Console.WriteStr(msg$); Console.WriteLn;
-			ASSERT(FALSE, 21)
-		END
+			Console.WriteStr("AsyncChan protocol: "); Console.WriteStr(msg$); Console.WriteLn
+		END;
+		RETURN ok
+	END SendAllowed;
+
+	PROCEDURE CheckSend* (c: Core; m: Msg);
+	(** Проверить отправку по протоколу; нарушение — трап 21 у вызывающего. *)
+	BEGIN
+		IF ~SendAllowed(c, m) THEN ASSERT(FALSE, 21) END
 	END CheckSend;
+
+	PROCEDURE Refuse (o: Offer);
+	(* Пред: o — предложение-отправка, снятое с очереди; протокол отверг
+	   его сообщение. Пост: решение принято, отправитель разбужен и трапует
+	   сам (трап 21): нарушение — ошибка отправителя, а не задачи, которая
+	   исполняет его предложение. *)
+	BEGIN
+		o.refused := TRUE; Decide(o.ctx, o.idx)
+	END Refuse;
 
 	PROCEDURE Enqueue (VAR head, tail: Offer; o: Offer);
 	BEGIN
@@ -320,10 +338,13 @@ MODULE AsyncSelect;
 			s := PopLive(c.waitS, c.waitST, TRUE);
 			IF s = NIL THEN RETURN END;
 			m := s.msg;
-			CheckSend(c, m);	(* отложенная отправка совершается здесь *)
-			AppendItem(c, m);
-			Decide(s.ctx, s.idx);
-			CompleteRecv(c)
+			IF SendAllowed(c, m) THEN	(* отложенная отправка совершается здесь *)
+				AppendItem(c, m);
+				Decide(s.ctx, s.idx);
+				CompleteRecv(c)
+			ELSE
+				Refuse(s)
+			END
 		END
 	END CompleteSend;
 
@@ -374,14 +395,16 @@ MODULE AsyncSelect;
 			c.direct := FALSE; c.directTask := NIL;
 			RETURN TRUE
 		END;
-		s := PopLive(c.waitS, c.waitST, TRUE);
-		IF s # NIL THEN
-			CheckSend(c, s.msg);	(* отправка предложения совершается здесь *)
-			m := s.msg;
-			Decide(s.ctx, s.idx);
-			RETURN TRUE
-		END;
-		RETURN FALSE
+		LOOP
+			s := PopLive(c.waitS, c.waitST, TRUE);
+			IF s = NIL THEN RETURN FALSE END;
+			IF SendAllowed(c, s.msg) THEN	(* отправка предложения совершается здесь *)
+				m := s.msg;
+				Decide(s.ctx, s.idx);
+				RETURN TRUE
+			END;
+			Refuse(s)
+		END
 	END TakeRendezvous;
 
 	(* --- регистрация альтернатив ------------------------------------------ *)
@@ -492,7 +515,8 @@ MODULE AsyncSelect;
 		VAR o: Offer;
 	BEGIN
 		IF freeOffers # NIL THEN o := freeOffers; freeOffers := o.next ELSE NEW(o) END;
-		o.next := NIL; o.ctx := ctx; o.idx := idx; o.kind := kind; o.msg := msg; o.got := NIL;
+		o.next := NIL; o.ctx := ctx; o.idx := idx; o.kind := kind; o.refused := FALSE;
+		o.msg := msg; o.got := NIL;
 		RETURN o
 	END TakeOffer;
 
@@ -536,7 +560,7 @@ MODULE AsyncSelect;
 		предложение в очереди waitS: получатель забирает его сообщение и
 		будит задачу без передачи монитора, поэтому отправитель не стоит на
 		входе в монитор, пока получатель работает. *)
-		VAR ctx: Ctx; o: Offer; locked: BOOLEAN;
+		VAR ctx: Ctx; o: Offer; locked, refused: BOOLEAN;
 	BEGIN
 		locked := Enter(c);
 		Prune(c);
@@ -549,8 +573,10 @@ MODULE AsyncSelect;
 			Leave(c, locked)
 		ELSE
 			ctx := TakeCtx(); o := TakeOffer(ctx, 0, SendKind, m);
-			WaitOne(c, o, locked);	(* CompleteSend проверит протокол в момент отправки *)
-			FreeOffer(o); FreeCtx(ctx)
+			WaitOne(c, o, locked);	(* протокол проверяется в момент отправки *)
+			refused := o.refused;
+			FreeOffer(o); FreeCtx(ctx);
+			ASSERT(~refused, 21)
 		END
 	END QueueSend;
 
@@ -578,7 +604,8 @@ MODULE AsyncSelect;
 	(** Дождаться ровно одной альтернативы; вернуть её индекс.
 		Результат приёма — ops[i].got. Только из задачи. *)
 		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer;
-			i, n, tIdx, winner: INTEGER; tMs: LONGINT; timer: Timer; done, signals, locked: BOOLEAN;
+			i, n, tIdx, winner: INTEGER; tMs: LONGINT; timer: Timer;
+			done, signals, locked, refused: BOOLEAN;
 	BEGIN
 		ASSERT(Tasks.InTask(), 20);
 		n := LEN(ops); ASSERT(n <= maxAlt, 21);
@@ -633,6 +660,7 @@ MODULE AsyncSelect;
 		END;
 		winner := ctx.winner;
 		done := (0 <= winner) & (winner < n);
+		refused := done & (offers[winner] # NIL) & offers[winner].refused;
 		IF done THEN
 			IF (ops[winner].kind = RecvKind) & (offers[winner] # NIL) THEN
 				ops[winner].got := offers[winner].got
@@ -642,6 +670,7 @@ MODULE AsyncSelect;
 			IF offers[i] # NIL THEN FreeOffer(offers[i]) END
 		END;
 		IF ~signals & (timer = NIL) THEN FreeCtx(ctx) END;	(* сигнал может помнить ctx *)
+		ASSERT(~refused, 21);	(* протокол отверг отложенную отправку этой задачи *)
 		RETURN winner
 	END Select;
 
