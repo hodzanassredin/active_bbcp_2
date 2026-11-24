@@ -241,8 +241,8 @@ is tens of megabytes. After a task finishes its stack is released (`munmap`).
 | 10,000 | 119 ms | 160 ms | 40,000 | 4.0 µs | 655 MB |
 
 Each task yields and then finishes; one task accounts for two entries and four switches. The peak
-RSS of the 10,000-task run is about 47 MB. The test prints the numbers in `BENCH` lines; the
-reproduction command is:
+RSS of the 10,000-task run is about 47 MB (measured with `/usr/bin/time -v` around the same
+command). The test prints the numbers in `BENCH` lines; the reproduction command is:
 
 ```sh
 printf 'UnitRunner.Run System_devTasks proc slow quit\n' | tools/run64.sh
