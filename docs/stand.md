@@ -513,11 +513,24 @@ LinKernel, Loop, Services, Console, Init/IntInit», потому что `Cons/In
 - `Win/Mod/Init.cp`, `Win/Mod/IntInit.cp`
 
 Убрать `Async/`, `Robust/`, `Test64/`, `System/Mod/Tasks.cp`,
-`System/Mod64/Tasks.cp`. `Unit` в снимке отсутствует и зовёт
-`Kernel.GetTrapViewer` — в базовый мир не входит.
+`System/Mod64/Tasks.cp`, а с s18 ещё и `System/Mod/Monitors.cp`.
+`Unit` в снимке отсутствует и зовёт `Kernel.GetTrapViewer` — в базовый
+мир не входит.
 
 Результат: новый компилятор собрал базовый мир `@Lin`
 (`Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket`),
 линковка `blackbox-console` прошла, `StdLog.String` отработал; бутстрап
 в этом дереве — 98 файлов, B и C совпали. Формат `.ocf`/`.osf` и
 структур ядра не менялся.
+
+Повтор опыта после s18 (24.11.2026, тот же worktree, затем удалён):
+бутстрап снова дал B = C побайтно (98 файлов), базовый мир собрался и
+`StdLog.String` отработал. Список откатываемых файлов **не стал
+короче**: те же 12 файлов плюс удаление нового `System/Mod/Monitors.cp`.
+Польза выноса в другом: код мониторов больше не надо «вырезать» из
+двух `Kernel.cp` — достаточно подставить старые `Kernel.cp` и удалить
+модуль; зато init-модули и `Tasks` приходится возвращать вместе с
+ядром, как и раньше. Для бутстрапа в отдельном worktree нужен был
+готовый `.work/i386` (скопирован из основного дерева): `bootstrap.sh`
+собирает только `Dev` и без символов базовых модулей падает на первом
+проходе.
