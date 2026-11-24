@@ -158,6 +158,7 @@ MODULE Monitors;
 			y := SHORT(x MOD 16); IF y < 0 THEN y := y + 16 END;
 			a[i] := dg[y]; DEC(i); x := x DIV 16
 		UNTIL (x = 0) OR (i < 0);
+		WHILE i >= 0 DO a[i] := "0"; DEC(i) END;	(* печатается с a[0]: старшие разряды — нули *)
 		a[16] := 0X;
 		MonStr(a)
 	END MonHex;

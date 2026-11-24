@@ -98,11 +98,6 @@ ObxComputon  docu/sources		a computon executed in a separate process
 ObxActor0  docu/sources		the first actor: Spawn, Tell, Ask, Shutdown
 ObxActor1  docu/sources		supervision: a trap, and a restart loses the state
 ObxActor2  docu/sources		a bank: Resume keeps the account balances
-
-Content-Addressed Store
-ObxCas0  docu/sources		a block named by its hash: deduplication
-ObxCas1  docu/sources		cutting two nearly equal inputs by content
-ObxCas2  docu/sources		two authors publish change sets, one rebases
 ObxBank0  docu/sources		tutorial: an action and a task doing the same work
 ObxBank1  docu/sources		tutorial: clerks, Join, Sleep, cancellation, a group
 ObxBank2  docu/sources		tutorial: waiting for money without a monitor and with AWAIT
@@ -110,3 +105,8 @@ ObxBank3  docu/sources		tutorial: deadlock on the monitors of two accounts
 ObxBank4  docu/sources		tutorial: transfers as transactions, Retry, OrElse
 ObxBank5  docu/sources		tutorial: a cashier owns the accounts, requests via a mailbox
 ObxBank6  docu/sources		tutorial: selecting a request, closing or a timeout; a promise
+
+Content-Addressed Store
+ObxCas0  docu/sources		a block named by its hash: deduplication
+ObxCas1  docu/sources		cutting two nearly equal inputs by content
+ObxCas2  docu/sources		two authors publish change sets, one rebases

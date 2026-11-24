@@ -24,11 +24,6 @@ ObxComputon  docu/sources		компутон в отдельном процесс
 ObxActor0  docu/sources		первый актор: Spawn, Tell, Ask, Shutdown
 ObxActor1  docu/sources		надзор: трап и перезапуск теряет состояние
 ObxActor2  docu/sources		банк: Resume сохраняет остатки счетов
-
-Хранилище по содержимому
-ObxCas0  docu/sources		блок называется своим хешем: дедупликация
-ObxCas1  docu/sources		нарезка двух почти одинаковых входов по содержимому
-ObxCas2  docu/sources		два автора публикуют наборы изменений, один переносит свой
 ObxBank0  docu/sources		учебник: действие и задача делают одну работу
 ObxBank1  docu/sources		учебник: кассиры, Join, Sleep, отмена, группа
 ObxBank2  docu/sources		учебник: ожидание денег без монитора и с AWAIT
@@ -36,3 +31,8 @@ ObxBank3  docu/sources		учебник: тупик на мониторах дв�
 ObxBank4  docu/sources		учебник: переводы транзакциями, Retry, OrElse
 ObxBank5  docu/sources		учебник: кассир владеет счетами, заявки через ящик
 ObxBank6  docu/sources		учебник: выбор из заявки, закрытия и тайм-аута; обещание
+
+Хранилище по содержимому
+ObxCas0  docu/sources		блок называется своим хешем: дедупликация
+ObxCas1  docu/sources		нарезка двух почти одинаковых входов по содержимому
+ObxCas2  docu/sources		два автора публикуют наборы изменений, один переносит свой
