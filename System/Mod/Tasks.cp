@@ -164,6 +164,13 @@ MODULE Tasks;
 		Kernel.SwitchRestore(self)
 	END SwitchTo;
 
+	PROCEDURE SetCurrent (t: Task);
+	(* Пост: current = t; токен крючка ядра — адрес t^ (0 при t = NIL). *)
+	BEGIN
+		current := t;
+		IF t # NIL THEN schedHook.token := S.ADR(t^) ELSE schedHook.token := 0 END
+	END SetCurrent;
+
 	(* --- очереди ---------------------------------------------------------- *)
 
 	PROCEDURE Enqueue (t: Task);
@@ -339,7 +346,7 @@ MODULE Tasks;
 		me := current;
 		IF (readyHead # NIL) & (direct < directMax) THEN
 			INC(direct);
-			t := Dequeue(); current := t; t.state := Running;
+			t := Dequeue(); SetCurrent(t); t.state := Running;
 			IF t # me THEN SwitchTo(me.sp, t.sp, me.stackRec) END
 		ELSE
 			SwitchTo(me.sp, schedSP, me.stackRec)
@@ -756,9 +763,9 @@ MODULE Tasks;
 			IF now # lastWake THEN lastWake := now; WakeSleepers(now) END;
 			t := Dequeue();
 			IF t = NIL THEN CheckDeadlock; EXIT END;
-			current := t; t.state := Running;
+			SetCurrent(t); t.state := Running;
 			SwitchTo(schedSP, t.sp, schedStack);
-			t := current; current := NIL; direct := 0;	(* вернулась, возможно, другая задача *)
+			t := current; SetCurrent(NIL); direct := 0;	(* вернулась, возможно, другая задача *)
 			IF IsDone(t) THEN Reap(t) END;
 			now := Kernel.Time();
 			IF now - t0 >= slice THEN EXIT END
@@ -868,12 +875,6 @@ MODULE Tasks;
 
 (* --- крючок планировщика для ядра ------------------------------------- *)
 
-	PROCEDURE (s: Sched) current (): S.ADDRESS;
-	(** Токен текущей задачи для Monitors; 0 — главный стек. *)
-	BEGIN
-		IF current # NIL THEN RETURN S.VAL(S.ADDRESS, S.ADR(current^)) ELSE RETURN 0 END
-	END current;
-
 	PROCEDURE (s: Sched) park;
 	BEGIN
 		ParkMonitor
@@ -940,6 +941,6 @@ CLOSE
 		all := all.next
 	END;
 	DrainPool;
-	readyHead := NIL; readyTail := NIL; heap := NIL; heapN := 0; nSleeping := 0; current := NIL;
+	readyHead := NIL; readyTail := NIL; heap := NIL; heapN := 0; nSleeping := 0; SetCurrent(NIL);
 	scheduled := FALSE; inStep := FALSE
 END Tasks.

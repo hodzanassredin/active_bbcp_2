@@ -8,7 +8,7 @@ MODULE System_devTasks;
 	tools/unit.sh гонит модуль отдельным процессом. Нагрузка на 10 тыс.
 	задач помечена TestSlow… и включается в манифесте marks=proc,slow. *)
 
-	IMPORT S := SYSTEM, Kernel, Monitors, Services, Tasks, UnitAssert, System_devClock, Console, Strings;
+	IMPORT S := SYSTEM, ACTIVE, Kernel, Monitors, Services, Tasks, UnitAssert, System_devClock, Console, Strings;
 
 	CONST
 		benchStack = 64 * 1024;
@@ -53,6 +53,8 @@ MODULE System_devTasks;
 		Spinner = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 		StopSleeper = POINTER TO RECORD (Tasks.Task) END;
 		CountYielder = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Room = POINTER TO RECORD inside, overlaps, visits: INTEGER END;
+		Visitor = POINTER TO RECORD (Tasks.Task) room: Room END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -778,5 +780,33 @@ MODULE System_devTasks;
 		UnitAssert.True(Tasks.Failed(bad), "trapped task failed");
 		UnitAssert.True(~Tasks.Failed(a) & ~Tasks.Failed(c), "neighbours not failed")
 	END TestProcDirectFinishAndTrap;
+
+	PROCEDURE [exclusive] (r: Room) Visit, NEW;
+		VAR i: INTEGER;
+	BEGIN
+		INC(r.inside);
+		IF r.inside > 1 THEN INC(r.overlaps) END;
+		FOR i := 1 TO 3 DO Tasks.Yield END;
+		DEC(r.inside); INC(r.visits)
+	END Visit;
+
+	PROCEDURE (t: Visitor) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO 20 DO t.room.Visit; Tasks.Yield END
+	END Run;
+
+	PROCEDURE TestProcDirectMonitorToken*;
+	(** Задача уступает внутри исключающей процедуры прямо соседке; соседка
+		видит свой токен, а не токен владельца, и ждёт выхода. *)
+		VAR r: Room; v: ARRAY 3 OF Visitor; i: INTEGER;
+	BEGIN
+		NEW(r);
+		FOR i := 0 TO 2 DO NEW(v[i]); v[i].room := r; Tasks.Start(v[i]) END;
+		UnitAssert.True(Pump(2000), "all finished");
+		UnitAssert.EqualInt(0, r.overlaps, "never two inside");
+		UnitAssert.EqualInt(60, r.visits, "all visits done");
+		UnitAssert.EqualInt(0, Monitors.LockDepth(), "main stack holds no monitor")
+	END TestProcDirectMonitorToken;
 
 END System_devTasks.

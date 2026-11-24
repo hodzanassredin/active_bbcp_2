@@ -182,12 +182,8 @@ MODULE Monitors;
 		VAR s: Kernel.Scheduler; t: S.ADDRESS;
 	BEGIN
 		s := Kernel.sched;
-		IF s # NIL THEN
-			t := s.current();
-			IF t = 0 THEN RETURN mainToken ELSE RETURN t END
-		ELSE
-			RETURN mainToken
-		END
+		IF s # NIL THEN t := s.token ELSE t := 0 END;
+		IF t = 0 THEN RETURN mainToken ELSE RETURN t END
 	END CurrentToken;
 
 	PROCEDURE UnparkTask (t: S.ADDRESS);
@@ -688,9 +684,12 @@ MODULE Monitors;
 	   остальное (занятый чужим, очереди, другой токен) — медленный путь. *)
 
 	PROCEDURE (h: Hook) lock (obj: S.ADDRESS);
-		VAR m: Monitor; r: LockRec; t: S.ADDRESS;
+		VAR m: Monitor; r: LockRec; t: S.ADDRESS; s: Kernel.Scheduler;
 	BEGIN
-		t := CurrentToken(); m := hot;
+		s := Kernel.sched;	(* CurrentToken на месте *)
+		IF s # NIL THEN t := s.token ELSE t := 0 END;
+		IF t = 0 THEN t := mainToken END;
+		m := hot;
 		IF (t = curTok) & (cur # NIL) & (m # NIL) & (m.key = obj) & (freeLocks # NIL)
 				& ((m.owner = 0) OR (m.owner = t)) THEN
 			IF m.owner = 0 THEN m.obj := S.VAL(ANYPTR, obj); m.owner := t; m.count := 1 ELSE INC(m.count) END;
@@ -702,9 +701,12 @@ MODULE Monitors;
 	END lock;
 
 	PROCEDURE (h: Hook) unlock (obj: S.ADDRESS);
-		VAR m: Monitor; r: LockRec; t: S.ADDRESS;
+		VAR m: Monitor; r: LockRec; t: S.ADDRESS; s: Kernel.Scheduler;
 	BEGIN
-		t := CurrentToken(); m := hot;
+		s := Kernel.sched;	(* CurrentToken на месте *)
+		IF s # NIL THEN t := s.token ELSE t := 0 END;
+		IF t = 0 THEN t := mainToken END;
+		m := hot;
 		IF (t = curTok) & (cur # NIL) & (m # NIL) & (m.key = obj) & (m.owner = t)
 				& (cur.head # NIL) & (cur.head.mon = m)
 				& ((m.count > 1) OR (m.wait = NIL) & (m.enter = NIL)) THEN
