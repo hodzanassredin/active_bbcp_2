@@ -27,6 +27,8 @@ ObxActor2  docu/sources		банк: Resume сохраняет остатки сч
 ObxActor3  docu/sources		счёт с журналом в Kv переживает перезапуск
 ObxActor4  docu/sources		снимки и история изменений (аудит)
 ObxActor5  docu/sources		CQRS: отчёт «обороты по счетам» догоняет журнал
+ObxActor6  docu/sources		два узла: Ask через узел, поддельный адрес, потеря узла
+ObxActor7  docu/sources		сага: перевод между узлами переживает падение координатора
 ObxBank0  docu/sources		учебник: действие и задача делают одну работу
 ObxBank1  docu/sources		учебник: кассиры, Join, Sleep, отмена, группа
 ObxBank2  docu/sources		учебник: ожидание денег без монитора и с AWAIT

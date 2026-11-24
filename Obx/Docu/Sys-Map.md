@@ -101,6 +101,8 @@ ObxActor2  docu/sources		a bank: Resume keeps the account balances
 ObxActor3  docu/sources		an account with a Kv journal survives a restart
 ObxActor4  docu/sources		snapshots and an audit history
 ObxActor5  docu/sources		CQRS: a turnover report catches up with the journal
+ObxActor6  docu/sources		two nodes: Ask across a node, a forged address, node loss
+ObxActor7  docu/sources		a saga: a transfer between nodes survives a coordinator crash
 ObxBank0  docu/sources		tutorial: an action and a task doing the same work
 ObxBank1  docu/sources		tutorial: clerks, Join, Sleep, cancellation, a group
 ObxBank2  docu/sources		tutorial: waiting for money without a monitor and with AWAIT
