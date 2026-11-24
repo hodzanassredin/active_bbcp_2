@@ -253,28 +253,49 @@ MODULE ActorNet;
 
 	(* --- тело кадра ---------------------------------------------------------- *)
 
-	PROCEDURE (b: Box) Externalize- (VAR wr: Stores.Writer);
+	PROCEDURE WriteMsg* (VAR wr: Stores.Writer; m: Msg);
+	(** Письмо m (может быть NIL) — полем другого письма или тела кадра:
+		имя модуля и типа, затем m.Write. Удобно последним полем. *)
 		VAR t: Kernel.Type; mod, typ: Kernel.Name;
 	BEGIN
-		b.Externalize^(wr); wr.WriteVersion(0);
-		t := Kernel.TypeOf(b.m^); Kernel.GetModName(t.mod, mod); Kernel.GetTypeName(t, typ);
-		wr.WriteString(mod); wr.WriteString(typ);
-		b.m.Write(wr)
+		IF m = NIL THEN wr.WriteBool(FALSE)
+		ELSE
+			wr.WriteBool(TRUE);
+			t := Kernel.TypeOf(m^); Kernel.GetModName(t.mod, mod); Kernel.GetTypeName(t, typ);
+			wr.WriteString(mod); wr.WriteString(typ);
+			m.Write(wr)
+		END
+	END WriteMsg;
+
+	PROCEDURE ReadMsg* (VAR rd: Stores.Reader; OUT m: Msg);
+	(** Письмо, записанное WriteMsg. Тип ищется только среди загруженных
+		модулей; не найден — m = NIL и rd.cancelled (дальше читать нельзя). *)
+		VAR mod, typ: Kernel.Name; md: Kernel.Module; t: Kernel.Type; p: S.PTR; a: ANYPTR; has: BOOLEAN;
+	BEGIN
+		m := NIL; rd.ReadBool(has);
+		IF has & ~rd.cancelled THEN
+			rd.ReadString(mod); rd.ReadString(typ);
+			md := Kernel.ThisLoadedMod(mod); t := NIL;	(* кадр не загружает модулей *)
+			IF md # NIL THEN t := Kernel.ThisType(md, typ) END;
+			a := NIL;
+			IF t # NIL THEN Kernel.NewObj(p, t); a := S.VAL(ANYPTR, p) END;
+			IF (a # NIL) & (a IS Msg) THEN m := a(Msg); m.Read(rd)
+			ELSE rd.TurnIntoAlien(Stores.alienComponent)
+			END
+		END
+	END ReadMsg;
+
+	PROCEDURE (b: Box) Externalize- (VAR wr: Stores.Writer);
+	BEGIN
+		b.Externalize^(wr); wr.WriteVersion(0); WriteMsg(wr, b.m)
 	END Externalize;
 
 	PROCEDURE (b: Box) Internalize- (VAR rd: Stores.Reader);
-		VAR v: INTEGER; mod, typ: Kernel.Name; m: Kernel.Module; t: Kernel.Type; p: S.PTR; a: ANYPTR;
+		VAR v: INTEGER;
 	BEGIN
 		b.Internalize^(rd); IF rd.cancelled THEN RETURN END;
 		rd.ReadVersion(0, 0, v); IF rd.cancelled THEN RETURN END;
-		rd.ReadString(mod); rd.ReadString(typ);
-		m := Kernel.ThisLoadedMod(mod); t := NIL;	(* кадр не загружает модулей: тип только среди загруженных *)
-		IF m # NIL THEN t := Kernel.ThisType(m, typ) END;
-		a := NIL;
-		IF t # NIL THEN Kernel.NewObj(p, t); a := S.VAL(ANYPTR, p) END;
-		IF (a # NIL) & (a IS Msg) THEN b.m := a(Msg); b.m.Read(rd)
-		ELSE b.m := NIL	(* тип не найден: кадр отклонит Deliver *)
-		END
+		ReadMsg(rd, b.m)	(* тип не найден: b.m = NIL, кадр отклонит Deliver *)
 	END Internalize;
 
 	(* --- адрес в письме ------------------------------------------------------- *)

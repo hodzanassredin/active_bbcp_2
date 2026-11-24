@@ -37,7 +37,8 @@ MODULE ActorPersist;
 		Actor* = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
 			seq-: LONGINT;	(** номер последнего применённого события *)
 			snapEvery*: INTEGER;	(** снимок каждые snapEvery событий; 0 — только по SaveSnapshot *)
-			journal*: ActorJournal.Journal
+			journal*: ActorJournal.Journal;
+			stream*: ActorCore.Name	(** поток журнала; "" — имя ящика c.name *)
 		END;
 
 		(** Посетитель событий потока (читатель-представление, CQRS). *)
@@ -70,6 +71,11 @@ MODULE ActorPersist;
 	PROCEDURE (v: Visitor) Visit* (e: Event), NEW, ABSTRACT;
 	(** Пост: событие e (с метаданными в e.meta) учтено. *)
 
+	PROCEDURE (a: Actor) S (c: ActorCore.Context; OUT s: ActorCore.Name), NEW;
+	BEGIN
+		IF a.stream # "" THEN s := a.stream$ ELSE s := c.name$ END
+	END S;
+
 	PROCEDURE (a: Actor) J (): ActorJournal.Journal, NEW;
 	BEGIN
 		IF a.journal # NIL THEN RETURN a.journal ELSE RETURN ActorJournal.dir END
@@ -88,10 +94,10 @@ MODULE ActorPersist;
 	PROCEDURE (a: Actor) Recover (c: ActorCore.Context), NEW;
 	(* Пост: состояние = снимок + события после него; seq — последний номер. *)
 		VAR j: ActorJournal.Journal; data: ActorJournal.Bytes; len, res: INTEGER; s: Stores.Store;
-			r: Replayer;
+			r: Replayer; st: ActorCore.Name;
 	BEGIN
 		j := a.J(); a.seq := 0;
-		j.LoadSnapshot(c.name, a.seq, data, len, res);
+		a.S(c, st); j.LoadSnapshot(st, a.seq, data, len, res);
 		IF res = ActorJournal.ok THEN
 			ActorCodec.dir.Decode(data, len, s, res);
 			IF res # ActorCodec.ok THEN HALT(decodeTrap) END;
@@ -99,12 +105,12 @@ MODULE ActorPersist;
 		ELSIF res # ActorJournal.absent THEN HALT(storeTrap)
 		END;
 		NEW(r); r.a := a; r.res := ActorCodec.ok;
-		j.Read(c.name, a.seq + 1, r, res);
+		j.Read(st, a.seq + 1, r, res);
 		IF res # ActorJournal.ok THEN HALT(storeTrap) END;
 		IF r.res # ActorCodec.ok THEN HALT(decodeTrap) END
 	END Recover;
 
-	PROCEDURE (a: Actor) Receive* (c: ActorCore.Context; m: ActorCore.Msg);
+	PROCEDURE (a: Actor) Receive* (c: ActorCore.Context; m: ActorCore.Msg), EXTENSIBLE;
 	BEGIN
 		IF m IS ActorCore.Started THEN a.Recover(c); a.Handle(c, replayComplete)
 		ELSE a.Handle(c, m)
@@ -114,31 +120,31 @@ MODULE ActorPersist;
 	PROCEDURE (a: Actor) SaveSnapshot* (c: ActorCore.Context), NEW;
 	(** Пред: вызов из обработчика a (не проверяется); a.seq > 0 — 20.
 		Пост: снимок состояния после события seq сохранён; ошибка — трап storeTrap. *)
-		VAR data: ActorJournal.Bytes; len, res: INTEGER;
+		VAR data: ActorJournal.Bytes; len, res: INTEGER; st: ActorCore.Name;
 	BEGIN
 		ASSERT(a.seq > 0, 20);
 		ActorCodec.dir.Encode(a.Snapshot(), data, len);
-		a.J().SaveSnapshot(c.name, a.seq, data, len, res);
+		a.S(c, st); a.J().SaveSnapshot(st, a.seq, data, len, res);
 		IF res # ActorJournal.ok THEN HALT(storeTrap) END
 	END SaveSnapshot;
 
 	PROCEDURE (a: Actor) Persist* (c: ActorCore.Context; e: Event; cause: LONGINT), NEW;
 	(** Записать событие и применить его.
 		Пред: вызов из обработчика a (не проверяется); e # NIL — 20.
-		Пост: e записано в поток c.name с номером seq + 1, автором — отправителем
+		Пост: e записано в поток (stream или c.name) с номером seq + 1, автором — отправителем
 		команды (c.Sender(); без отправителя — сам c.name),
 		причиной cause и временем записи; затем a.Apply(e); seq увеличен;
 		снимок, если seq делится на snapEvery. Поток дописан другим — трап
 		conflictTrap, ошибка хранилища — storeTrap; в обоих случаях e не
 		применено. Точек переключения нет. *)
-		VAR data: ActorJournal.Bytes; len, res: INTEGER; m: ActorJournal.Meta; from: ActorCore.Ref;
+		VAR data: ActorJournal.Bytes; len, res: INTEGER; m: ActorJournal.Meta; from: ActorCore.Ref; st: ActorCore.Name;
 	BEGIN
 		ASSERT(e # NIL, 20);
 		m.seq := a.seq + 1; m.time := ActorJournal.Now(); m.cause := cause;
 		from := c.Sender();
 		IF from # NIL THEN m.author := from.name$ ELSE m.author := c.name$ END;
 		ActorCodec.dir.Encode(e, data, len);
-		a.J().Append(c.name, a.seq, m, data, len, res);
+		a.S(c, st); a.J().Append(st, a.seq, m, data, len, res);
 		IF res = ActorJournal.conflict THEN HALT(conflictTrap)
 		ELSIF res # ActorJournal.ok THEN HALT(storeTrap)
 		END;
