@@ -177,12 +177,6 @@ MODULE AsyncSelect;
 		RETURN ok
 	END SendAllowed;
 
-	PROCEDURE CheckSend* (c: Core; m: Msg);
-	(** Проверить отправку по протоколу; нарушение — трап 21 у вызывающего. *)
-	BEGIN
-		IF ~SendAllowed(c, m) THEN ASSERT(FALSE, 21) END
-	END CheckSend;
-
 	PROCEDURE Refuse (o: Offer);
 	(* Пред: o — предложение-отправка, снятое с очереди; протокол отверг
 	   его сообщение. Пост: решение принято, отправитель разбужен и трапует
@@ -348,12 +342,14 @@ MODULE AsyncSelect;
 	   Протокол проверяется в тот момент, когда отправка действительно
 	   совершается: здесь или при снятии отложенного предложения в
 	   Take/CompleteSend. Проигравшее предложение состояние протокола не
-	   меняет. Пост: TRUE — предложение исполнено; FALSE — оно в очереди. *)
+	   меняет. Пост: TRUE — решение принято: предложение исполнено или
+	   отвергнуто протоколом (o.refused, трап 21 — в конце Select, после
+	   снятия всех предложений); FALSE — предложение в очереди. *)
 		VAR refused: BOOLEAN;
 	BEGIN
 		IF o.kind = SendKind THEN
 			IF Put(c, o.msg, o.ctx, refused) THEN RETURN TRUE END;
-			ASSERT(~refused, 21);
+			IF refused THEN o.refused := TRUE; RETURN TRUE END;
 			Enqueue(c.waitS, c.waitST, o)
 		ELSE
 			IF Take(c, o.ctx, o.got) THEN RETURN TRUE END;

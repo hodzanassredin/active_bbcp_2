@@ -22,12 +22,15 @@ MODULE Async_devProtocol;
 		SendTask = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; m: AsyncSelect.Msg END;
 		RecvTask = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; got: AsyncSelect.Msg END;
 		AltChanSend = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; m: AsyncSelect.Msg END;
+		TwoAltTask = POINTER TO RECORD (Tasks.Task) got: INTEGER END;
+		NumMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 
 	VAR
 		box: AsyncChan.Mailbox;
 		proto: AsyncProto.Protocol;
 		altSend: AltSendTask;
 		sender: Tasks.Task;
+		other: AsyncChan.Chan;	(* второй канал Select с нарушающей отправкой *)
 
 	PROCEDURE Contains (IN s, pattern: ARRAY OF CHAR): BOOLEAN;
 		VAR i, j: INTEGER; found: BOOLEAN;
@@ -253,5 +256,47 @@ MODULE Async_devProtocol;
 		Tasks.Cancel(r);
 		sender := NIL
 	END TestDeferredAltSendViolationTrapsSender;
+
+	(* --- нарушение при регистрации Select --------------------------------- *)
+
+	PROCEDURE BadSelect;
+		VAR ops: ARRAY 2 OF AsyncSelect.Op; m: EndMsg;
+	BEGIN
+		NEW(m);
+		AsyncChan.RecvAlt(other, ops[0]);
+		AsyncChan.SendAlt(box, m, ops[1]);
+		IF AsyncChan.Select(ops) >= 0 THEN END
+	END BadSelect;
+
+	PROCEDURE (t: TwoAltTask) Run;
+		VAR m: AsyncSelect.Msg;
+	BEGIN
+		UnitAssert.Traps(BadSelect, "violating select send traps");
+		other.Recv(m);
+		WITH m: NumMsg DO t.got := m.n ELSE t.got := -1 END
+	END Run;
+
+	PROCEDURE AllDone (): BOOLEAN;
+	BEGIN
+		RETURN Tasks.Count() = 0
+	END AllDone;
+
+	PROCEDURE TestSelectViolationWithdrawsOtherOffers*;
+	(** Нарушение протокола при регистрации Select трапует задачу после
+		снятия всех её предложений: приём на втором канале, поставленный
+		до нарушения, не перехватывает следующее сообщение этого канала. *)
+		VAR t: TwoAltTask; s: SendTask; m: NumMsg;
+	BEGIN
+		proto := AsyncProto.New(desc);
+		box := AsyncChan.NewMailbox();
+		AsyncChan.SetProtocol(box, proto);
+		other := AsyncChan.NewChan();
+		NEW(t); t.got := 0; Tasks.Start(t); Tasks.Step;
+		NEW(m); m.n := 7; NEW(s); s.c := other; s.m := m; Tasks.Start(s);
+		UnitAssert.True(PumpUntil(3000, AllDone), "tasks finish");
+		UnitAssert.True(~Tasks.Failed(t), "task survived its own trap");
+		UnitAssert.EqualInt(7, t.got, "next message reaches the later Recv");
+		IF Tasks.Count() > 0 THEN Tasks.Cancel(t); Tasks.Cancel(s) END
+	END TestSelectViolationWithdrawsOtherOffers;
 
 END Async_devProtocol.
