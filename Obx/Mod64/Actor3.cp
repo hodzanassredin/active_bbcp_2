@@ -1,10 +1,9 @@
 MODULE ObxActor3;
-	IMPORT Services, Tasks, Console, Strings, Stores, Files, CasStore,
-		ActorCore, ActorSup, ActorRun, ActorJournal, ActorPersist, ActorFileJournal;
+	IMPORT Services, Tasks, Console, Strings, Stores, KvStore, KvDb, KvLin,
+		ActorCore, ActorSup, ActorRun, ActorJournal, ActorPersist, ActorKvJournal;
 
 	CONST
-		dir = "/tmp/obxactor3";
-		file = "account.jrn";
+		file = "/tmp/obxactor3.kv";	(* база Kv с журналом *)
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -22,7 +21,7 @@ MODULE ObxActor3;
 
 		Account = POINTER TO RECORD (ActorPersist.Actor)
 			balance: INTEGER;
-			ops: ARRAY 16 OF LONGINT; nOps: INTEGER	(* выполненные списания *)
+			ops: ARRAY 16 OF LONGINT; nOps: INTEGER	(* последние 16 списаний *)
 		END;
 		Bank = POINTER TO RECORD (ActorCore.Actor) END;
 
@@ -70,14 +69,14 @@ MODULE ObxActor3;
 	PROCEDURE (a: Account) Done (op: LONGINT): BOOLEAN, NEW;
 		VAR i: INTEGER;
 	BEGIN
-		i := 0; WHILE (i < a.nOps) & (a.ops[i] # op) DO INC(i) END;
-		RETURN i < a.nOps
+		i := 0; WHILE (i < MIN(a.nOps, 16)) & (a.ops[i] # op) DO INC(i) END;
+		RETURN i < MIN(a.nOps, 16)
 	END Done;
 
 	PROCEDURE (a: Account) Apply (e: ActorPersist.Event);
 	BEGIN
 		WITH e: Deposited DO INC(a.balance, e.sum)
-		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps] := e.op; INC(a.nOps)
+		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps MOD 16] := e.op; INC(a.nOps)
 		ELSE
 		END
 	END Apply;
@@ -115,10 +114,11 @@ MODULE ObxActor3;
 	(* --- водитель --------------------------------------------------------- *)
 
 	PROCEDURE OpenJournal;
-		VAR res: INTEGER;
+		VAR st: KvStore.Store; db: KvDb.Db; res: INTEGER;
 	BEGIN
-		journal := ActorFileJournal.Open(Files.dir.This(dir), file, CasStore.NewMem(), res);
-		ASSERT(res = ActorJournal.ok, 100)
+		KvLin.Open(file, st, res); ASSERT(res = KvStore.ok, 100);
+		KvDb.Open(st, db, res); ASSERT(res = KvDb.ok, 101);
+		journal := ActorKvJournal.New(db)
 	END OpenJournal;
 
 	PROCEDURE StartBank;
@@ -161,9 +161,9 @@ MODULE ObxActor3;
 		s := starts; NEW(crash); ActorCore.Tell(acct, crash);
 		WHILE starts = s DO Tasks.Sleep(1) END;
 		Show("after a trap and restart");
-		StopBank; journal.Close;	(* как при падении процесса: в памяти ничего не осталось *)
+		StopBank; journal.Close;	(* как при новом запуске: в памяти ничего не осталось *)
 		OpenJournal; StartBank;
-		Show("after reopening the file");
+		Show("after reopening the base");
 		ActorCore.Tell(acct, w);
 		Show("op 1 sent again");
 		StopBank; journal.Close;
@@ -173,7 +173,7 @@ MODULE ObxActor3;
 	PROCEDURE Do*;
 		VAR d: Driver;
 	BEGIN
-		Files.dir.Delete(Files.dir.This(dir), file);
+		KvLin.Delete(file);
 		starts := 0; OpenJournal;
 		IF ActorRun.n = 0 THEN ActorRun.Start(2) END;
 		NEW(d); Tasks.Start(d);

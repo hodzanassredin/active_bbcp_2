@@ -1,21 +1,20 @@
 # Overview by Example: ObxActor3
 
-An account with a file journal: a trap, a restart and reopening the file do not change the balance.
+An account with a journal in a Kv base: a trap, a restart and reopening the base do not change the balance.
 
 The account is a persistent actor (`ActorPersist.Actor`). The handler does not change the balance
-itself: it writes an event, and `Apply` changes the balance. The journal is the file
-`/tmp/obxactor3/account.jrn` (`ActorFileJournal`). A withdrawal carries an operation number, and a
+itself: it writes an event, and `Apply` changes the balance. The journal is a `Kv` base in the
+file `/tmp/obxactor3.kv` (`ActorKvJournal`); each event write is committed to the medium (`Sync`). A withdrawal carries an operation number, and a
 repeat of the same operation does not withdraw again. The example belongs to the guide
 `Actor/Docu/Actors.md` (section 8).
 
 ```
 MODULE ObxActor3;
-	IMPORT Services, Tasks, Console, Strings, Stores, Files, CasStore,
-		ActorCore, ActorSup, ActorRun, ActorJournal, ActorPersist, ActorFileJournal;
+	IMPORT Services, Tasks, Console, Strings, Stores, KvStore, KvDb, KvLin,
+		ActorCore, ActorSup, ActorRun, ActorJournal, ActorPersist, ActorKvJournal;
 
 	CONST
-		dir = "/tmp/obxactor3";
-		file = "account.jrn";
+		file = "/tmp/obxactor3.kv";	(* база Kv с журналом *)
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -33,7 +32,7 @@ MODULE ObxActor3;
 
 		Account = POINTER TO RECORD (ActorPersist.Actor)
 			balance: INTEGER;
-			ops: ARRAY 16 OF LONGINT; nOps: INTEGER	(* выполненные списания *)
+			ops: ARRAY 16 OF LONGINT; nOps: INTEGER	(* последние 16 списаний *)
 		END;
 		Bank = POINTER TO RECORD (ActorCore.Actor) END;
 
@@ -81,14 +80,14 @@ MODULE ObxActor3;
 	PROCEDURE (a: Account) Done (op: LONGINT): BOOLEAN, NEW;
 		VAR i: INTEGER;
 	BEGIN
-		i := 0; WHILE (i < a.nOps) & (a.ops[i] # op) DO INC(i) END;
-		RETURN i < a.nOps
+		i := 0; WHILE (i < MIN(a.nOps, 16)) & (a.ops[i] # op) DO INC(i) END;
+		RETURN i < MIN(a.nOps, 16)
 	END Done;
 
 	PROCEDURE (a: Account) Apply (e: ActorPersist.Event);
 	BEGIN
 		WITH e: Deposited DO INC(a.balance, e.sum)
-		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps] := e.op; INC(a.nOps)
+		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps MOD 16] := e.op; INC(a.nOps)
 		ELSE
 		END
 	END Apply;
@@ -126,10 +125,11 @@ MODULE ObxActor3;
 	(* --- водитель --------------------------------------------------------- *)
 
 	PROCEDURE OpenJournal;
-		VAR res: INTEGER;
+		VAR st: KvStore.Store; db: KvDb.Db; res: INTEGER;
 	BEGIN
-		journal := ActorFileJournal.Open(Files.dir.This(dir), file, CasStore.NewMem(), res);
-		ASSERT(res = ActorJournal.ok, 100)
+		KvLin.Open(file, st, res); ASSERT(res = KvStore.ok, 100);
+		KvDb.Open(st, db, res); ASSERT(res = KvDb.ok, 101);
+		journal := ActorKvJournal.New(db)
 	END OpenJournal;
 
 	PROCEDURE StartBank;
@@ -172,9 +172,9 @@ MODULE ObxActor3;
 		s := starts; NEW(crash); ActorCore.Tell(acct, crash);
 		WHILE starts = s DO Tasks.Sleep(1) END;
 		Show("after a trap and restart");
-		StopBank; journal.Close;	(* как при падении процесса: в памяти ничего не осталось *)
+		StopBank; journal.Close;	(* как при новом запуске: в памяти ничего не осталось *)
 		OpenJournal; StartBank;
-		Show("after reopening the file");
+		Show("after reopening the base");
 		ActorCore.Tell(acct, w);
 		Show("op 1 sent again");
 		StopBank; journal.Close;
@@ -184,7 +184,7 @@ MODULE ObxActor3;
 	PROCEDURE Do*;
 		VAR d: Driver;
 	BEGIN
-		Files.dir.Delete(Files.dir.This(dir), file);
+		KvLin.Delete(file);
 		starts := 0; OpenJournal;
 		IF ActorRun.n = 0 THEN ActorRun.Start(2) END;
 		NEW(d); Tasks.Start(d);
@@ -212,7 +212,7 @@ The log shows:
 ```
 account: deposit 100, withdraw 30 twice as op 1: balance 70, events 2
 account: after a trap and restart: balance 70, events 2
-account: after reopening the file: balance 70, events 2
+account: after reopening the base: balance 70, events 2
 account: op 1 sent again: balance 70, events 2
 ```
 
@@ -229,9 +229,10 @@ of done operations is restored by the same `Apply`, because it is part of the ev
 separate state.
 
 Then the driver stops the bank and closes the journal: nothing of the account remains in the process
-memory, as after a process crash. The file is opened again; `ActorFileJournal.Open` reads its records,
-checks the checksums and builds the stream index. The new account recovers the same balance, and a
+memory, as on a new run of the program. The base is opened again (`KvLin.Open`, `KvDb.Open`): opening takes
+the last whole meta, and the account events are read by a cursor over the keys `"e" + stream`. The
+new account recovers the same balance, and a
 repeat of operation 1 again changes nothing.
 
 In this example we saw an event instead of a change in place, recovery after a trap and after
-reopening the file, and a repeated command that does not withdraw twice.
+reopening the base, and a repeated command that does not withdraw twice.
