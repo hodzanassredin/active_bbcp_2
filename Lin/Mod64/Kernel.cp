@@ -376,7 +376,11 @@ MODULE LinKernel;
 		VAR res: INTEGER; context: Libc.sigjmp_buf; oldContext: POINTER TO Libc.sigjmp_buf;
 	BEGIN
 		oldContext := currentTryContext;
-		res := Libc.sigsetjmp(context, Libc.TRUE);
+		(* Маска сигналов не сохраняется: обработчики трапов ставятся с SA_NODEFER,
+		   трап маску не меняет, и siglongjmp возвращает ту же маску. Сохранение
+		   стоило бы системного вызова rt_sigprocmask на каждый Try (условия
+		   AWAIT вычисляются под Try). *)
+		res := Libc.sigsetjmp(context, Libc.FALSE);
 		currentTryContext := S.ADR(context);
 		IF res = 0 THEN (* first time around *)
 			h(a, b, c);
