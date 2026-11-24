@@ -193,7 +193,8 @@ echo 'Команда' | tools/run64.sh
 tools/go64.sh Test64Basic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
 tools/build32.sh                  # i386-мир + консоль в build/BB32LIN
-tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield, UnloadGuard
+tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
+tools/i386-toolchain.sh           # 32-битный C-тулчейн без sudo (флаги gcc)
 tools/test.sh                     # 19 этапов, 86 проверок
 tools/test-resolver.sh            # этап 8: резолвер в unshare -rmn
 tools/test-robust.sh              # RobustParallel на 1/4/16 процессах
@@ -221,8 +222,13 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   без MPICH — `SKIP`), `Test64Gui` (под `gtk4-broadwayd`, без него —
   `SKIP`). Модуль `Test64Files` (`proc slow`) занимает все 100000
   имён `odcNNNNN` и проверяет уникальные временные имена `LinFiles`.
-  `tools/test32.sh` гоняет Unit, Files, Tasks, Monitors, Active, Yield
-  и UnloadGuard на i386 (`tools/build32.sh`, ELF32 `blackbox-console`).
+  `tools/test32.sh` гоняет Unit, Files, Tasks, Monitors, Active, Yield,
+  CoTests и UnloadGuard на i386 (`tools/build32.sh`, ELF32
+  `blackbox-console`). Сопрограммы этапа 2 проверяет `Test64CoTests`
+  через `libtest32.so`: `tools/i386-toolchain.sh` без sudo готовит
+  `.work/i386dev` (`apt-get download libc6-dev-i386` и
+  `lib32gcc-N-dev`, `dpkg-deb -x`, правка `libc.so`) и печатает флаги
+  gcc; нет сети/пакета — SKIP, `Test64CoTests` пропускается.
   Итог — 19 этапов, 86 проверок.
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
@@ -329,10 +335,9 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   (mpiexec гасит мир); `pack-dev0-linux` (в снимке отсутствует;
   `tools/bootstrap.sh` пересобирает только `Dev`), вытеснение по
   сигналу и нити ОС; библиотека `Async/Mod64` (каналы, рабочие нити,
-  компутоны) на i386 не собирается, C-помощник сопрограмм
-  `libtest64.so` 32-битный не собран (`Test64Co` на i386 — заглушка,
-  `co_now` по `Kernel.Time`), индекс кластеров шага 2а остался только
-  в Mod64; отложенные финализаторы, нагрузочный тест «1000 задач час».
+  компутоны) на i386 не собирается, индекс кластеров шага 2а остался
+  только в Mod64; отложенные финализаторы, нагрузочный тест «1000
+  задач час».
 - Подробности: `docs/ivan-dia261123.md` (разбор снимка и таблица
   изменений), `docs/stand.md` (стенд), `docs/gc-bench.md` (замер),
   `docs/async-library.md` (каналы, рабочие нити, компутоны).

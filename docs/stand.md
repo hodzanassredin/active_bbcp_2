@@ -17,7 +17,8 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
 | Тесты без окон | `tools/test.sh` (Unit) | 19 этапов, 86 проверок, все зелёные |
 | Временные файлы `LinFiles` | `Test64Files` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
-| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | UnitTests 4/4, Tasks 13/13, Monitors 9/9, Active 6/6, Yield 3/3, Files 3/3, UnloadGuard 2/2 |
+| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: UnitTests 4/4, Files 3/3, Tasks 13/13, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
+| i386: C-тулчейн | `tools/i386-toolchain.sh` | без sudo; libtest32.so, ucontext |
 | Бутстрап i386 | `tools/bootstrap.sh` | три прохода, 98 файлов, B и C — 0 различий |
 | Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
 | Этап 1/3: GUI | `tools/test-gui.sh` (gtk4-broadwayd) | `ok=1`, 20 тиков, maxgap 108 мс |
@@ -46,7 +47,11 @@ active_bb/                     репозиторий (ветка active2)
   System/Mod64/Tasks.cp        задачи со своим стеком (этап 3, amd64)
   System/Mod/Tasks.cp          то же для i386 (переключатель на x86)
   Test64/Mod64/Co.cp           сопрограммы amd64 (libtest64.so)
-  Test64/Mod/Co.cp             i386-заглушка (co_now по Kernel.Time)
+  Test64/Mod/Co.cp             сопрограммы i386 (libtest32.so)
+  Test64/Mod64/CRaw.cp         внешние объявления tools/test64.c (amd64)
+  Test64/Mod/CRaw.cp           то же для i386 (libtest32.so)
+  Test64/Mod64/Clock.cp        наносекунды amd64 (clock_gettime)
+  Test64/Mod/Clock.cp          время i386 по Kernel.Time (Tasks, GcBench)
   Async/Mod64/Work.cp          фасад пула рабочих нитей (этап 8)
   Async/Mod64/WorkLin.cp       делегат pthread/pipe/Poller (Linux)
   Async/Mod64/WorkWin.cp       делегат CreateThread/события (Windows)
@@ -62,6 +67,10 @@ active_bb/                     репозиторий (ветка active2)
     libtest64.so               помощник тестов (ucontext)
   build/BB32LIN/               i386-мир (tools/build32.sh, в git не входит)
     blackbox-console           консольный ELF32 (Kernel+ … LinIntInit)
+    libtest32.so               помощник тестов i386 (ucontext)
+  .work/i386dev/               32-битный C-тулчейн без sudo (в git не входит)
+    root/usr/lib32, root/usr/lib/gcc/…  libc6-dev-i386 и lib32gcc-N-dev
+    flags.txt                  флаги gcc из tools/i386-toolchain.sh
 ```
 
 `DevLibrarian.EnableDevLib('.work/BB64LIN', 'Mod64')` выбирает
@@ -90,6 +99,17 @@ echo 'Test64Basic.Do' | tools/run64.sh
 Каталог установки переопределяется `BB64INSTALL`, i386-мир —
 `BB32INSTALL`. `build32.sh` линкует `DevLinker1.LinkElfExe` (ELF32,
 `Kernel+ … LinIntInit`); отдельно компилирует `Tasks` и тесты `Test64`.
+
+32-битный C-помощник `libtest32.so` собирается тем же `tools/test64.c`
+флагами `tools/i386-toolchain.sh`: сценарий идемпотентно скачивает
+`apt-get download libc6-dev-i386` и `lib32gcc-<N>-dev` (N — версия
+системного gcc) в `.work/i386dev/debs`, распаковывает `dpkg-deb -x` в
+`.work/i386dev/root` и правит `root/usr/lib32/libc.so` (путь к
+`libc_nonshared.a` — внутри root). Установки в систему и sudo не нужно;
+готовность проверяется пробником ucontext. Нет сети, пакета или
+32-битного рантайма — `SKIP i386-toolchain: причина` (код 0, пустой
+stdout), `build32.sh`/`test32.sh` тогда пропускают `libtest32.so` и
+`Test64CoTests`, остальные тесты i386 идут.
 
 ### Временные файлы `LinFiles` (`/tmp/odc…`)
 
@@ -234,7 +254,7 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 
 ```sh
 tools/build32.sh              # мир и консоль в build/BB32LIN
-tools/test32.sh               # сборка + UnitTests, Files, Tasks, Monitors, Active, Yield, UnloadGuard
+tools/test32.sh               # сборка + UnitTests, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
 tools/test32.sh --list
 tools/test32.sh Test64Tasks   # только указанные модули (без сборки)
 ```
@@ -255,10 +275,16 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
 проверены и на i386. `Test64UnloadGuard` подтверждает и на i386, что
 `Kernel.UnloadMod` не выгружает модуль с живым кадром на главном стеке
 и на стеке спящей задачи (положительный контроль — без кадров модуль
-выгружается). `Test64Co` для i386 — без C-помощника: `co_now`
-строится по `Kernel.Time`, сопрограммы этапа 2 не проверяются
-(32-битного `libtest64.so` нет); для amd64 обёртки лежат в
-`Test64/Mod64/Co.cp`.
+выгружается). Сопрограммы этапа 2 проверяются и на i386: обёртки —
+`Test64/Mod/Co.cp` над `libtest32.so` (тот же `tools/test64.c`;
+собирается `tools/build32.sh` флагами `tools/i386-toolchain.sh`, см.
+§3). Точки входа Unit — `Test64CoTests` (`TestProcGcStack`,
+`TestProcTrapStack`): сборка мусора на втором стеке и изоляция
+контекста `Kernel.Try` между стеками. `co_now` на i386 остаётся по
+`Kernel.Time` — для `Test64Tasks` этого достаточно; отдельный
+`Test64Clock` не даёт задачам тянуть C-библиотеку. Без 32-битного
+тулчейна `test32.sh` пропускает только `Test64CoTests` (SKIP с
+причиной). Для amd64 обёртки лежат в `Test64/Mod64/Co.cp`.
 
 `Test64Support` остался адаптером: `Check`/`Fail` учитываются в
 `UnitAssert`, маркеры `TEST64-PASS/FAIL` сохранены для `bench-gc.sh`.
@@ -404,10 +430,8 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
 - i386: этапы 2–6 перенесены (реестр стеков, мониторы, `Tasks`,
   `[exclusive]`, `ACTIVE.AWAIT`, ключ `^`) — см. §5. Осталось
   x64-специфичным: библиотека `Async` (`Async/Mod64`: каналы, рабочие
-  нити, компутоны — на 32-битной цели не собирается), C-помощник
-  сопрограмм `libtest64.so` (нет 32-битного тулчейна; на i386
-  `Test64Co.co_now` берётся из `Kernel.Time`), оптимизация шага 2а
-  (индекс кластеров) — она осталась только в Mod64. Старый
+  нити, компутоны — на 32-битной цели не собирается), оптимизация
+  шага 2а (индекс кластеров) — она осталась только в Mod64. Старый
   `dev0Linux` содержит дореформенный `LinFiles`, поэтому
   `clean_host_temp` для его запусков сохранён (§3).
   Условие `AWAIT` не проверяется на обращения к `VAR`-параметрам чужих
