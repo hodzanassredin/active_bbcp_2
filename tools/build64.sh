@@ -34,11 +34,19 @@ fi
 LOG="${TMPDIR:-/tmp}/build64-$$.log"
 trap 'rm -f "$LOG" "$LOG.cmd"' EXIT
 
+# Demo собирается отдельно: её модули используют ACTIVE и Async, а Demo
+# в общем списке CompileSubs мешает псевдомодуль ACTIVE. Из общего
+# списка её имя убираем.
+core=""
+for s in $subs; do
+	[ "$s" = Demo ] || core="$core $s"
+done
+
 echo "build64: компиляция подсистем:$subs"
 {
 	echo 'DevCompiler64.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
-	echo "DevCompiler64.CompileSubs @Lin $subs"
+	[ -n "$core" ] && echo "DevCompiler64.CompileSubs @Lin $core"
 	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
 	# LinThreads нужны самой подсистеме Async (AsyncSelect, AsyncComputon),
 	# поэтому идут до неё.
@@ -60,6 +68,19 @@ echo "build64: компиляция подсистем:$subs"
 	if [ -d "$BB/Robust/Mod" ] || [ -d "$BB/Robust/Mod64" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Robust"
 	fi
+	# Demo — примеры задач, мониторов и каналов (ACTIVE + Async).
+	case " $subs " in
+	*" Demo "*)
+		if [ -d "$BB/Demo/Mod" ]; then
+			echo "DevCompiler64.CompileThis DemoSupport"
+			for m in DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup \
+				DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong \
+				DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool; do
+				echo "DevCompiler64.CompileThis $m"
+			done
+		fi
+		;;
+	esac
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$BB/dev0Linux" < "$LOG.cmd" > "$LOG" 2>&1; then
@@ -100,7 +121,7 @@ if [ "$gui" -eq 1 ]; then
 		mkdir -p "$INSTALL/$sub"
 		cp -a "$BB/$sub/Rsrc/." "$INSTALL/$sub/Rsrc/"
 	done
-	for d in Docu Obx/Docu Lin/Docu Unit/Docu; do
+	for d in Docu Obx/Docu Demo/Docu Lin/Docu Unit/Docu; do
 		[ -d "$BB/$d" ] || continue
 		mkdir -p "$INSTALL/$d"
 		cp -a "$BB/$d/." "$INSTALL/$d/"

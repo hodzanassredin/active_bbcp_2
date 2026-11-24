@@ -19,3 +19,5 @@ Test64Computons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce L
 Test64Protocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
 Test64Unload|proc|600|Test64UnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 Test64UnloadGuard|proc|300|Test64UnloadGuardCode
+# Примеры Demo: задачи, мониторы, каналы, муравьи (amd64).
+Test64Demo|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool

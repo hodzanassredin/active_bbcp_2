@@ -134,6 +134,30 @@ if [ "$rungui" -eq 1 ]; then
 	esac
 fi
 
+rungui=1
+if [ -n "$only" ]; then
+	case " $only " in *" Test64DemoGui "*) ;; *) rungui=0;; esac
+fi
+if [ "$rungui" -eq 1 ]; then
+	total=$((total + 1))
+	echo "test: Test64DemoGui (окно DemoAnts под gtk4-broadwayd)"
+	rout=$("$BB/tools/test-demo-gui.sh" 2>&1); rrc=$?
+	printf '%s\n' "$rout"
+	case "$rout" in
+		SKIP*)
+			skipped=$((skipped + 1)); echo "SKIP Test64DemoGui"; summary="$summary
+  SKIP Test64DemoGui" ;;
+		*)
+			if [ $rrc -eq 0 ]; then
+				ok=$((ok + 1)); echo "PASS Test64DemoGui"; summary="$summary
+  OK   Test64DemoGui"
+			else
+				bad=$((bad + 1)); echo "FAIL Test64DemoGui"; summary="$summary
+  BAD  Test64DemoGui"
+			fi ;;
+	esac
+fi
+
 echo "== test: всего $total, прошло $ok, провалов $bad, пропущено $skipped"
 [ -n "$summary" ] && printf '%s\n' "$summary"
 [ $bad -eq 0 ]
