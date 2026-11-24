@@ -355,13 +355,20 @@ MODULE System_devTasks;
 	END TestProcHaltNearStackBottom;
 
 	PROCEDURE TestProcWaitGuards*;
-		VAR t: Probe;
+		VAR t: Probe; c: Counter;
 	BEGIN
 		UnitAssert.Traps(WaitOutside, "wait outside a task must trap");
 		NEW(t); Tasks.Start(t);
 		UnitAssert.True(Pump(2000), "probe task finished");
 		UnitAssert.True(~waitFailed, "Yield inside an action handler trapped");
-		UnitAssert.True(Tasks.Failed(t), "probe task failed as expected")
+		UnitAssert.True(Tasks.Failed(t), "probe task failed as expected");
+		(* Трап внутри Do в задаче снимает флаг обработчика: иначе каждая
+		   следующая задача считала бы, что ждать нельзя. *)
+		UnitAssert.True(~Services.executingAction, "handler flag cleared after the trap");
+		counter := 0;
+		NEW(c); Tasks.Start(c);
+		UnitAssert.True(Pump(2000), "next task finished");
+		UnitAssert.True(~Tasks.Failed(c) & (counter = 10), "next task yielded normally")
 	END TestProcWaitGuards;
 
 	PROCEDURE TestProcNoLostWake*;
