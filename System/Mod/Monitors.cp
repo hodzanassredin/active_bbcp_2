@@ -79,6 +79,11 @@ MODULE Monitors;
 		nofMonitors: INTEGER;	(* записей в таблице, диагностика *)
 		freeMonitors: Monitor;	(* свободные записи: Lock без соперников не выделяет *)
 		freeLocks: LockRec;	(* свободные записи цепочки взятий *)
+		(* Свободные записи очередей входа и ожидания: блокирующая операция не
+		   выделяет памяти. Инвариант: записи свободных списков не лежат ни в
+		   одной очереди монитора. *)
+		freeTaskRefs: TaskRef;
+		freeWaitRefs: WaitRef;
 
 		chains: ARRAY chainHash OF Chain;
 		freeChains: Chain;
@@ -151,13 +156,6 @@ MODULE Monitors;
 			RETURN mainToken
 		END
 	END CurrentToken;
-
-	PROCEDURE IsTask (): BOOLEAN;
-		VAR s: Kernel.Scheduler;
-	BEGIN
-		s := Kernel.sched;
-		RETURN (s # NIL) & (s.current() # 0)
-	END IsTask;
 
 	PROCEDURE UnparkTask (t: S.ADDRESS);
 		VAR s: Kernel.Scheduler;
@@ -301,6 +299,36 @@ MODULE Monitors;
 		END;
 		q.next := NIL
 	END RemoveEnter;
+
+	PROCEDURE TakeTaskRef (t: S.ADDRESS): TaskRef;
+	(* Пост: запись вне очередей, task = t. *)
+		VAR q: TaskRef;
+	BEGIN
+		IF freeTaskRefs # NIL THEN q := freeTaskRefs; freeTaskRefs := q.next ELSE NEW(q) END;
+		q.next := NIL; q.task := t;
+		RETURN q
+	END TakeTaskRef;
+
+	PROCEDURE FreeTaskRef (q: TaskRef);
+	(* Пред: q снята с очереди входа. *)
+	BEGIN
+		q.task := 0; q.next := freeTaskRefs; freeTaskRefs := q
+	END FreeTaskRef;
+
+	PROCEDURE TakeWaitRef (t: S.ADDRESS; cond: CondProc; frame: S.ADDRESS): WaitRef;
+	(* Пост: запись вне очередей, поля заданы, trap = 0. *)
+		VAR w: WaitRef;
+	BEGIN
+		IF freeWaitRefs # NIL THEN w := freeWaitRefs; freeWaitRefs := w.next ELSE NEW(w) END;
+		w.next := NIL; w.task := t; w.cond := cond; w.frame := frame; w.trap := 0;
+		RETURN w
+	END TakeWaitRef;
+
+	PROCEDURE FreeWaitRef (w: WaitRef);
+	(* Пред: w снята с очереди ожидания. *)
+	BEGIN
+		w.task := 0; w.cond := NIL; w.frame := 0; w.next := freeWaitRefs; freeWaitRefs := w
+	END FreeWaitRef;
 
 	(* -------------------- цепочки взятий по токену ------------------------ *)
 
@@ -546,16 +574,17 @@ MODULE Monitors;
 		VAR me: S.ADDRESS; m: Monitor; q: TaskRef;
 	BEGIN
 		IF obj = 0 THEN MonFail("Lock: NIL object") END;
-		me := CurrentToken();
+		me := curTok;	(* Sync в крючке уже прочитал токен *)
 		m := GetMon(obj);
 		IF m.owner = me THEN
 			INC(m.count); ChainPush(m)
 		ELSIF m.owner = 0 THEN
 			m.owner := me; m.count := 1; ChainPush(m)
-		ELSIF IsTask() THEN
-			NEW(q); q.task := me; AppendEnter(m, q);
+		ELSIF me # mainToken THEN
+			q := TakeTaskRef(me); AppendEnter(m, q);
 			ParkNow;
-			IF m.owner # me THEN MonFail("Lock: woken without the monitor") END
+			IF m.owner # me THEN MonFail("Lock: woken without the monitor") END;
+			FreeTaskRef(q)	(* HandOff снял её с очереди входа *)
 			(* запись о взятии уже добавлена PushTo при передаче *)
 		ELSE
 			MonFail("Lock: monitor is held by another task")
@@ -567,7 +596,7 @@ MODULE Monitors;
 		если счётчик стал нулём, монитор передаётся ждущему или входящему. *)
 		VAR me: S.ADDRESS; m: Monitor; r: LockRec;
 	BEGIN
-		me := CurrentToken();
+		me := curTok;
 		m := FindMon(obj);
 		IF (m = NIL) OR (m.owner # me) THEN
 			MonFail("Unlock: monitor is not held by the caller")
@@ -591,13 +620,13 @@ MODULE Monitors;
 		в цикле WHILE. *)
 		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
 	BEGIN
-		IF ~IsTask() THEN MonFail("Wait: wait outside a task") END;
-		me := CurrentToken();
+		me := curTok;
+		IF me = mainToken THEN MonFail("Wait: wait outside a task") END;
 		m := FindMon(obj);
 		IF (m = NIL) OR (m.owner # me) THEN
 			MonFail("Wait: monitor is not held by the caller")
 		END;
-		NEW(w); w.task := me; w.cond := NIL; w.frame := 0; w.trap := 0;
+		w := TakeWaitRef(me, NIL, 0);
 		AppendWait(m, w);
 		saved := m.count;
 		m.count := 0;
@@ -605,6 +634,7 @@ MODULE Monitors;
 		HandOff(m, me);
 		ParkNow;
 		IF m.owner # me THEN MonFail("Wait: woken without the monitor") END;
+		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
 		m.count := saved
 	END DoWait;
 
@@ -616,15 +646,15 @@ MODULE Monitors;
 		Трап в условии переадресуется ждущей задаче. *)
 		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
 	BEGIN
-		IF ~IsTask() THEN MonFail("Await: wait outside a task") END;
+		me := curTok;
+		IF me = mainToken THEN MonFail("Await: wait outside a task") END;
 		IF cond = NIL THEN MonFail("Await: NIL condition") END;
-		me := CurrentToken();
 		m := FindMon(obj);
 		IF (m = NIL) OR (m.owner # me) THEN
 			MonFail("Await: monitor is not held by the caller")
 		END;
 		IF Kernel.CallCond(cond, frame) THEN RETURN END;	(* компилятор тоже проверяет до вызова *)
-		NEW(w); w.task := me; w.cond := cond; w.frame := frame; w.trap := 0;
+		w := TakeWaitRef(me, cond, frame);
 		AppendWait(m, w);
 		saved := m.count;
 		m.count := 0;
@@ -639,6 +669,7 @@ MODULE Monitors;
 			HALT(121)
 		END;
 		IF m.owner # me THEN MonFail("Await: woken without the monitor") END;
+		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
 		m.count := saved
 	END DoAwait;
 

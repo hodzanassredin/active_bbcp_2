@@ -36,6 +36,8 @@ MODULE Async_devChannels;
 		MonitorHolder = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
 		WaitMux = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan END;
 		RaceSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
+		Echo = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
+		EchoBack = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 
 	VAR
 		onceDone: BOOLEAN;
@@ -57,6 +59,7 @@ MODULE Async_devChannels;
 
 		holderLocked, muxDone: BOOLEAN;
 		muxIdx, muxVal: INTEGER;
+		echoAllocs: LONGINT;	(* выделений за вторую сотню обменов Echo *)
 
 	PROCEDURE Pump (ms: LONGINT): BOOLEAN;
 		(** Главный цикл без окна: действия Services (планировщик и
@@ -393,5 +396,38 @@ MODULE Async_devChannels;
 		UnitAssert.EqualInt(77, muxVal, "message was received");
 		UnitAssert.True(~Monitors.IsLocked(b), "second monitor released")
 	END TestProcSelectWhileMonitorWait;
+
+	(* --- обмен без выделений памяти --------------------------------------- *)
+
+	PROCEDURE (t: Echo) Run;
+		VAR i: INTEGER; m: NumMsg; x: AsyncSelect.Msg; c0: LONGINT;
+	BEGIN
+		NEW(m); x := m; c0 := 0;
+		FOR i := 1 TO t.n DO
+			IF i = t.n DIV 2 THEN c0 := Kernel.AllocCount() END;
+			t.a.Send(x); t.b.Recv(x)
+		END;
+		echoAllocs := Kernel.AllocCount() - c0
+	END Run;
+
+	PROCEDURE (t: EchoBack) Run;
+		VAR i: INTEGER; x: AsyncSelect.Msg;
+	BEGIN
+		FOR i := 1 TO t.n DO t.a.Recv(x); t.b.Send(x) END
+	END Run;
+
+	PROCEDURE TestProcRendezvousNoAlloc*;
+	(* Блокирующий обмен через встречу берёт записи ожидания из свободных
+	   списков: после разогрева сотня обменов не выделяет памяти. *)
+		VAR p: Echo; q: EchoBack;
+	BEGIN
+		NEW(p); NEW(q);
+		p.a := AsyncChan.NewChan(); p.b := AsyncChan.NewChan(); p.n := 200;
+		q.a := p.a; q.b := p.b; q.n := 200;
+		echoAllocs := -1;
+		Tasks.Start(p); Tasks.Start(q);
+		UnitAssert.True(Pump(5000), "exchange finished");
+		UnitAssert.EqualInt(0, SHORT(echoAllocs), "no allocations per blocking exchange")
+	END TestProcRendezvousNoAlloc;
 
 END Async_devChannels.
