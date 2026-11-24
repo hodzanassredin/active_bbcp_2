@@ -9,6 +9,10 @@
 # упакованном dev0Linux; линковка — DevLinker1.LinkElfExe (ELF32).
 # Tasks и тесты Test64 компилируются отдельными CompileThis: CompileSubs
 # спотыкается о псевдомодуль ACTIVE (как в build64.sh).
+#
+# 32-битный C-помощник libtest32.so (ucontext, тот же tools/test64.c)
+# собирается флагами tools/i386-toolchain.sh; без тулчейна — пропуск
+# (тесты сопрограмм тогда не запускаются, см. tools/test32.sh).
 set -e
 . "$(dirname "$0")/env.sh"
 
@@ -32,6 +36,22 @@ if [ "$clean" -eq 1 ]; then
 	find "$INSTALL" \( -name '*.ocf' -o -name '*.osf' \) -delete
 fi
 
+# libtest32.so: флаги готовит tools/i386-toolchain.sh (идемпотентно,
+# без sudo). Пустой stdout — тулчейна нет, это пропуск, а не ошибка.
+if I386FLAGS=$("$BB/tools/i386-toolchain.sh"); then
+	if [ -n "$I386FLAGS" ]; then
+		echo "build32: собираю libtest32.so"
+		# shellcheck disable=SC2086
+		if ! gcc $I386FLAGS -shared -fPIC -O2 -o "$INSTALL/libtest32.so" "$BB/tools/test64.c"; then
+			echo "build32: сборка libtest32.so не удалась" >&2; exit 1
+		fi
+	else
+		echo "build32: пропускаю libtest32.so (нет 32-битного C-тулчейна)"
+	fi
+else
+	echo "build32: пропускаю libtest32.so (tools/i386-toolchain.sh не отработал)" >&2
+fi
+
 LOG="${TMPDIR:-/tmp}/build32-$$.log"
 trap 'rm -f "$LOG" "$LOG.cmd" "$LOG.link"' EXIT
 
@@ -40,11 +60,15 @@ echo "build32: компиляция подсистем"
 	echo 'DevCompiler.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod')"
 	echo "DevCompiler.CompileSubs @Lin $SUBS"
+	echo "DevCompiler.CompileThis Test64Clock"
 	echo "DevCompiler.CompileThis Tasks"
 	echo "DevCompiler.CompileThis Test64Support"
 	echo "DevCompiler.CompileThis Test64CRaw"
 	echo "DevCompiler.CompileThis Test64Co"
 	echo "DevCompiler.CompileThis Test64Basic"
+	echo "DevCompiler.CompileThis Test64GcStack"
+	echo "DevCompiler.CompileThis Test64TrapStack"
+	echo "DevCompiler.CompileThis Test64CoTests"
 	echo "DevCompiler.CompileThis Test64Tasks"
 	echo "DevCompiler.CompileThis Test64Monitors"
 	echo "DevCompiler.CompileThis Test64Active"

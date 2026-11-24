@@ -1,6 +1,9 @@
-/* libtest64.so — помощник тестов Test64: переключение стека в одной нити
-   через ucontext (getcontext/makecontext/swapcontext).
-   Собирается tools/test.sh: cc -shared -fPIC -O2 -o <BB64LIN>/libtest64.so.
+/* libtest64.so / libtest32.so — помощник тестов Test64: переключение стека
+   в одной нити через ucontext (getcontext/makecontext/swapcontext).
+   amd64: tools/test.sh и tools/bench-gc.sh собирают cc -shared -fPIC -O2
+   в <BB64LIN>/libtest64.so. i386: tools/build32.sh и tools/test32.sh
+   собирают тот же исходник флагами tools/i386-toolchain.sh в
+   <BB32LIN>/libtest32.so.
 
    Стеки: t64_co_create — mmap + сторожевая страница PROT_NONE (вне кучи CP);
    t64_co_create_on — готовый стек (например, NEW-массив в куче CP).
@@ -78,6 +81,7 @@ int t64_co_yield (void) {
 
 void *t64_co_stack_base (void) { return stk; }
 void *t64_co_stack_low (void) { return stk_lo; }
+void *t64_co_stack_high (void) { return stk_hi; }
 long t64_co_stack_size (void) { return stksz; }
 
 int t64_co_release (void) {
