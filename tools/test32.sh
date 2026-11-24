@@ -1,5 +1,6 @@
 #!/bin/sh
-# Прогон i386-мира: Unit_devMain и расширение этапов 2–6 на 32-битной цели.
+# Прогон i386-мира: Unit_devMain, расширение этапов 2–6 и хранилище Cas на
+# 32-битной цели.
 #
 #   tools/test32.sh              # build32.sh, затем все модули
 #   tools/test32.sh System_devTasks  # только указанные модули (мир не собирается)
@@ -28,7 +29,12 @@ Dev_devActive|proc|300
 Dev_devYield|proc|300
 System_devCoTests|proc|300
 System_devUnloadGuard|proc|300
-Async_devStm|proc|300'
+Async_devStm|proc|300
+Cas_devHash||180
+Cas_devStore||180
+Cas_devChunk||180
+Cas_devTree||300
+Cas_devChange||180'
 
 LIST=0; only=""
 for a in "$@"; do
@@ -61,7 +67,8 @@ compile_dev32() {
 			System_devCoTests System_devTasks System_devMonitors \
 			Dev_devActive Lin_devFiles 'Dev_devYield^' \
 			System_devUnloadGuardCode System_devUnloadGuard \
-			AsyncProto AsyncSelect AsyncChan Async_devStm; do
+			AsyncProto AsyncSelect AsyncChan Async_devStm \
+			Cas_devHash Cas_devStore Cas_devChunk Cas_devTree Cas_devChange; do
 			opt=""
 			case "$m" in *\^) opt="^"; m="${m%^}";; esac
 			echo "DevCompiler.CompileThis $m $opt"
