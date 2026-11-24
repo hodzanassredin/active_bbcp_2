@@ -153,7 +153,7 @@ MODULE ActorNet;
 	(* Пост: m — метка имени name от секрета n. *)
 		VAR f: Buf; id: CasHash.Id; i: INTEGER;
 	BEGIN
-		PutBytes(f, n.secret, LEN(n.secret)); PutName(f, name);
+		f.n := 0; PutBytes(f, n.secret, LEN(n.secret)); PutName(f, name);
 		CasHash.Of(f.b^, 0, f.n, id);
 		FOR i := 0 TO macLen - 1 DO m[i] := id[i] END
 	END Mac;
@@ -337,7 +337,7 @@ MODULE ActorNet;
 		VAR f: Buf; i, len: INTEGER; b: Box; data: Bytes; smac: Mac; save: Node;
 	BEGIN
 		IF ~n.up THEN RETURN END;
-		INC(n.seq);
+		INC(n.seq); f.n := 0;
 		Put(f, kind, 1); PutName(f, n.name); Put(f, n.incarnation, 8); Put(f, n.seq, 8);
 		PutName(f, name); PutBytes(f, mac, macLen);
 		save := cur; cur := n;
