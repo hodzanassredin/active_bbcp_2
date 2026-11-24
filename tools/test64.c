@@ -122,6 +122,16 @@ long test64_vmas (void) {
 	return n;
 }
 
+/* Память процесса в байтах: resident из /proc/self/statm. */
+long test64_rss (void) {
+	FILE *f = fopen ("/proc/self/statm", "r");
+	long size = 0, res = 0;
+	if (f == NULL) return -1;
+	if (fscanf (f, "%ld %ld", &size, &res) != 2) res = -1;
+	fclose (f);
+	return res < 0 ? -1 : res * sysconf (_SC_PAGESIZE);
+}
+
 /* Окно счётчиков perf stat --control fd:CTL,ACK -D -1: фаза phase замера
    включает (on # 0) или выключает счётчики, если она названа в PERF_PHASE.
    Без PERF_CTL_FD ничего не делает. */
