@@ -128,13 +128,12 @@ that task serves its mailbox, and the pool executors stay free; in the test
 `TestDedicatedLeavesPoolFree` a pool of one executor answers another actor while the actor with its
 own task sleeps.
 
-A free executor waits in `Tasks.Park`, and `Tell` wakes it with `Tasks.Unpark`. `Unpark` outside a
-task, from a command or from a `Services` action, moves the scheduler step to the earliest deadline
-by itself, so a letter from the main stack starts to be processed in the next step of the main loop.
-This waiting has a consequence: when all executors are free and there are no other tasks, the
-scheduler sees only waiting tasks without deadlines and prints the line `Tasks: deadlock: no ready
-tasks and no wake-up deadlines` to `Console`. It is a message, not a trap: the first letter wakes an
-executor, and work goes on.
+A free executor waits in `Tasks.ParkExternal`, and `Tell` wakes it with `Tasks.Unpark`. `Unpark`
+outside a task, from a command or from a `Services` action, moves the scheduler step to the earliest
+deadline by itself, so a letter from the main stack starts to be processed in the next step of the
+main loop. `ParkExternal` is a wait for an event from outside: a letter may come from the main
+stack, so a free pool does not count as a deadlock (`TestIdlePoolIsNoDeadlock`). Consequence: while
+the pool is alive, the scheduler does not report even a complete deadlock of the other tasks.
 
 An actor cannot ask itself with `Ask`: the question would land in its own mailbox, the mailbox is
 held by the waiting handler, and no answer would ever come. Therefore `Ask` from the handler of an
@@ -422,8 +421,8 @@ a watcher, `Stop` stops the receiver. A local address is the mailbox itself (`Co
 would extend `Ref` with its own type, and `ActorCore.InitRef` fills in its node and name.
 
 The reply address of `Ask` is a `Ref` too. While `Ask` waits, the address stands in a registry under
-the name `"$ask/number"`, and the directory finds it by that name like an actor; after `Ask` returns,
-the name leaves the directory.
+the name `"$ask/number"`, and the directory finds it by that name like an actor; after `Ask` returns, and after
+the waiting task is cancelled, the name leaves the directory (`TestCancelledAskLeavesNoReplyAddress`).
 
 An address is looked up by name in the directory `ActorCore.dir`, following the pattern of
 `Files.dir`: the abstract type `Directory` with the method `Lookup(node, name)`, the variables `dir`
@@ -456,8 +455,7 @@ and an address keeps two names of 128 characters.
 - No persistence: `Restart` creates an instance with the initial state.
 - No transport: a `Ref` of another node can be described, but nobody delivers to it.
 - One strategy, `OneForOne`; "all for one" is not implemented.
-- When the pool is free and there are no other tasks, the scheduler prints `Tasks: deadlock`
-  (section 3).
+- While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
 - `Ask` to itself from the handler traps with code 23.
 
 ## 12. Interface
