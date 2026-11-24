@@ -72,6 +72,11 @@ echo "build64: компиляция подсистем:$subs"
 	if [ -d "$BB/Actor/Mod" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Actor"
 	fi
+	# Kv — хранилище «ключ -> значение»; KvLin нужен LinLibc, поэтому
+	# подсистема идёт после основного списка (на Windows её нет).
+	if [ -d "$BB/Kv/Mod" ]; then
+		echo "DevCompiler64.CompileSubs @Lin Kv"
+	fi
 	# Примеры Obx на задачах и каналах лежат в Obx/Mod64: обход CompileSubs
 	# их не берёт (им нужны Tasks и Async, которые собираются выше), поэтому
 	# каждый — отдельным CompileThis. Примеры друг друга не импортируют.
