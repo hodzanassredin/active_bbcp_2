@@ -246,7 +246,12 @@ MODULE Kernel;
 		MonitorHook* = POINTER TO ABSTRACT RECORD END;
 
 		(* Крючок планировщика: реализация в Tasks. *)
-		Scheduler* = POINTER TO ABSTRACT RECORD END;
+		Scheduler* = POINTER TO ABSTRACT RECORD
+			(** Токен текущей задачи; 0 — главный стек. Инвариант: планировщик
+				держит его верным в любой момент, когда исполняется код вне
+				самого переключения; Monitors читает поле без вызова. *)
+			token*: S.ADDRESS
+		END;
 
 		(* Реестр стеков. Одна запись на любой стек: главный, задача,
 		   сигнальный. *)
@@ -426,7 +431,6 @@ MODULE Kernel;
 	PROCEDURE (h: MonitorHook) endTry* (mark: INTEGER), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) purge*, NEW, ABSTRACT;
 
-	PROCEDURE (s: Scheduler) current* (): S.ADDRESS, NEW, ABSTRACT;	(* 0 — главный стек *)
 	PROCEDURE (s: Scheduler) park*, NEW, ABSTRACT;
 	PROCEDURE (s: Scheduler) unpark* (task: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (s: Scheduler) name* (task: S.ADDRESS; OUT name: ARRAY OF CHAR), NEW, ABSTRACT;
