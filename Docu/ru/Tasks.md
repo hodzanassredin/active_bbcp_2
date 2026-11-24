@@ -83,7 +83,8 @@ DEFINITION Tasks;
 			(d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: SYSTEM.ADDRESS): BOOLEAN, NEW, ABSTRACT;
 			(d: StackDir) FreeStack- (lo, hi: SYSTEM.ADDRESS), NEW, ABSTRACT;
 			(d: StackDir) Drain-, NEW, EMPTY;
-			(d: StackDir) Overflow- (t: Task), NEW, EMPTY
+			(d: StackDir) Overflow- (t: Task), NEW, EMPTY;
+			(d: StackDir) Grow- (t: Task; regs: SYSTEM.ADDRESS): BOOLEAN, NEW, EXTENSIBLE
 		END;
 
 	PROCEDURE Cancel (t: Task);
@@ -121,6 +122,12 @@ DEFINITION Tasks;
 	PROCEDURE NewGuardDir (): StackDir;
 	PROCEDURE NewSlabDir (): StackDir;
 	PROCEDURE PoolCount (): INTEGER;
+	PROCEDURE PrepareBin (d: StackDir; size: INTEGER);
+	PROCEDURE ReleaseStack (t: Task; size: INTEGER; lo, hi: SYSTEM.ADDRESS);
+	PROCEDURE ReplaceStack (t: Task; newSize: INTEGER; OUT oldLo, oldHi, newLo, newHi: SYSTEM.ADDRESS;
+		OUT oldSize: INTEGER): BOOLEAN;
+	PROCEDURE StackBounds (t: Task; OUT lo, hi: SYSTEM.ADDRESS);
+	PROCEDURE StackReserve (d: StackDir): INTEGER;
 	PROCEDURE RunChecked (t: Task): BOOLEAN;
 	PROCEDURE SetDefaultStackSize (size: INTEGER);
 	PROCEDURE SetStackDir (d: StackDir);
@@ -274,7 +281,12 @@ NEW, ABSTRACT
 пустом пуле, `FreeStack` — когда пул возвращает лишнее ядру, `Drain` — когда у поставщика не
 осталось стеков у задач. `Overflow` — точка расширения: её зовут, когда канарейка у дна стека
 задачи испорчена; затем задача получает трап 126 (в точке переключения) или помечается ошибочной
-(при уборке). Роста стека нет.
+(при уборке); расти там уже поздно. `Grow` — точка расширения роста стека: код текущей задачи,
+собранный с ключом `%`, упёрся в `Kernel.stkLo` (трап 137); её зовёт обработчик трапа платформы на
+сигнальном стеке через `Kernel.Scheduler.grow`. `TRUE` — поставщик дал задаче стек больше
+(`ReplaceStack`), перенёс занятую часть, поправил адреса и регистры и отдал старый
+(`ReleaseStack`); исполнение продолжается за трапом. По умолчанию `FALSE` — трап 137. Свободные
+стеки пул держит по запрошенным размерам.
 
 **PROCEDURE NewGuardDir (): StackDir**, **NewSlabDir (): StackDir**, **NewDenseDir (reserve: INTEGER): StackDir**
 Три поставщика: отдельный стек со сторожевой страницей; плиты по 64 стека со сторожем под каждым
@@ -300,6 +312,21 @@ NEW, ABSTRACT
 
 **PROCEDURE UseGuardStacks**, **UseSlabStacks**, **UseDenseStacks**
 Команды выбора поставщика при запуске, во входном потоке: `Tasks.UseDenseStacks` (запас 8 КБ).
+
+**PROCEDURE ReplaceStack (...)**, **ReleaseStack (...)**, **PrepareBin (d: StackDir; size: INTEGER)**,
+**StackBounds (t: Task; OUT lo, hi)**, **StackReserve (d: StackDir): INTEGER**
+Для поставщика, который растит стеки в `Grow`. `ReplaceStack` даёт текущей задаче `t` стек размера
+`newSize` от того же поставщика и обновляет границы задачи, запись стека ядра, `Kernel.stkLo` и
+канарейку; содержимое не переносит. `ReleaseStack` отдаёт прежний стек в пул. `PrepareBin` заранее
+заводит корзину пула размера: `Grow` идёт в обработчике трапа, и выделять память в куче там нельзя.
+
+Пред (`ReplaceStack`): `t` — текущая задача — трап 20.
+
+Растущие стеки (Linux amd64): команда `Stackmove.UseGrowingStacks` — новые задачи стартуют со стеком
+4 КБ из плотных плит (запас 2 КБ, канарейка), стек удваивается по трапу 137 до 8 МБ; выше — трап 137.
+Стек переносится, только если каждый кадр на нём из модуля, собранного с `%` без `SYSTEM`, или из
+доверенного модуля (`Stackmove`, `docs/stack-copy-study.md`); иначе тоже трап 137. Стек не
+уменьшается.
 
 **PROCEDURE ModuleChecked (m: Kernel.Module): BOOLEAN**, **RunChecked (t: Task): BOOLEAN**
 Модуль собран с ключом `%` (бит 12 опций модуля); метод `Run` динамического типа `t` лежит в

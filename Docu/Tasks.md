@@ -82,7 +82,8 @@ DEFINITION Tasks;
 			(d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: SYSTEM.ADDRESS): BOOLEAN, NEW, ABSTRACT;
 			(d: StackDir) FreeStack- (lo, hi: SYSTEM.ADDRESS), NEW, ABSTRACT;
 			(d: StackDir) Drain-, NEW, EMPTY;
-			(d: StackDir) Overflow- (t: Task), NEW, EMPTY
+			(d: StackDir) Overflow- (t: Task), NEW, EMPTY;
+			(d: StackDir) Grow- (t: Task; regs: SYSTEM.ADDRESS): BOOLEAN, NEW, EXTENSIBLE
 		END;
 
 	PROCEDURE Cancel (t: Task);
@@ -120,6 +121,12 @@ DEFINITION Tasks;
 	PROCEDURE NewGuardDir (): StackDir;
 	PROCEDURE NewSlabDir (): StackDir;
 	PROCEDURE PoolCount (): INTEGER;
+	PROCEDURE PrepareBin (d: StackDir; size: INTEGER);
+	PROCEDURE ReleaseStack (t: Task; size: INTEGER; lo, hi: SYSTEM.ADDRESS);
+	PROCEDURE ReplaceStack (t: Task; newSize: INTEGER; OUT oldLo, oldHi, newLo, newHi: SYSTEM.ADDRESS;
+		OUT oldSize: INTEGER): BOOLEAN;
+	PROCEDURE StackBounds (t: Task; OUT lo, hi: SYSTEM.ADDRESS);
+	PROCEDURE StackReserve (d: StackDir): INTEGER;
 	PROCEDURE RunChecked (t: Task): BOOLEAN;
 	PROCEDURE SetDefaultStackSize (size: INTEGER);
 	PROCEDURE SetStackDir (d: StackDir);
@@ -275,7 +282,12 @@ provider lie in its pool, and `Tasks` hands out a pooled stack without calling t
 `NewStack` is called when the pool is empty, `FreeStack` when the pool returns surplus to the kernel,
 `Drain` when no task holds a stack of the provider. `Overflow` is an extension point: it is called
 when the canary at the bottom of a task stack is damaged; then the task gets trap 126 (at a switch
-point) or is marked failed (at reaping). Stacks do not grow.
+point) or is marked failed (at reaping); it is too late to grow there. `Grow` is the extension point
+of stack growth: code of the current task compiled with `%` hit `Kernel.stkLo` (trap 137); the
+platform trap handler calls it on the signal stack through `Kernel.Scheduler.grow`. `TRUE` means the
+provider gave the task a larger stack (`ReplaceStack`), moved the used part, fixed the addresses and
+registers and released the old stack (`ReleaseStack`); execution continues after the trap. The default
+`FALSE` leaves trap 137. Free stacks are pooled per requested size.
 
 **PROCEDURE NewGuardDir (): StackDir**, **NewSlabDir (): StackDir**, **NewDenseDir (reserve: INTEGER): StackDir**
 Three providers: a separate stack with a guard page; slabs of 64 stacks with a guard under each
@@ -302,6 +314,22 @@ Pre (`SetStackDir`): `d # NIL` — trap 20.
 **PROCEDURE UseGuardStacks**, **UseSlabStacks**, **UseDenseStacks**
 Commands that choose the provider at startup, in the input stream: `Tasks.UseDenseStacks` (reserve
 8 KB).
+
+**PROCEDURE ReplaceStack (...)**, **ReleaseStack (...)**, **PrepareBin (d: StackDir; size: INTEGER)**,
+**StackBounds (t: Task; OUT lo, hi)**, **StackReserve (d: StackDir): INTEGER**
+For a provider that grows stacks in `Grow`. `ReplaceStack` gives the current task `t` a stack of
+`newSize` from the same provider and updates the task bounds, the kernel stack record,
+`Kernel.stkLo` and the canary; the content is not moved. `ReleaseStack` returns the old stack to the
+pool. `PrepareBin` creates the pool bin of a size beforehand: `Grow` runs in the trap handler and may
+not allocate heap memory.
+
+Pre (`ReplaceStack`): `t` is the current task — trap 20.
+
+Growing stacks (Linux amd64): the command `Stackmove.UseGrowingStacks` makes new tasks start with a
+4 KB stack from dense slabs (reserve 2 KB, canary) that doubles on trap 137 up to 8 MB; above that the
+task gets trap 137. A stack is moved only if every frame on it belongs to a module compiled with `%`
+without `SYSTEM` or to a trusted module (`Stackmove`, `docs/stack-copy-study.md`); otherwise trap 137
+too. Stacks never shrink.
 
 **PROCEDURE ModuleChecked (m: Kernel.Module): BOOLEAN**, **RunChecked (t: Task): BOOLEAN**
 The module is compiled with the key `%` (bit 12 of module options); the `Run` method of the dynamic

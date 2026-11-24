@@ -43,12 +43,13 @@ MODULE Stackmove;
 		   может вырасти, либо известны переносу (контексты Try). Только здесь. *)
 		trustedList = " Kernel LinKernel Tasks Taskarch ";	(* ядро: собрано без %, карт нет *)
 		(* Доверенные с картами: импортируют SYSTEM, но собраны с % (без ключа — закрепляют). *)
-		trustedMapped = " ";
+		trustedMapped = " Stores Dialog Monitors Services UnitAssert Math CommTCP__Lin AsyncComputon ";
 		(* Процедуры доверенных модулей, чей кадр всё же закрепляет стек: держат адрес стека
 		   через вызов, где стек может вырасти (Kernel.NewObj пишет в VAR-параметр после NewRec,
-		   а там сборка с финализаторами; Await — кадр ждущего в параметре). CallCond — [code],
-		   встраивается в Monitors, а Monitors не доверен. *)
-		pinnedProcs = " Kernel.NewObj Kernel.Await ";
+		   а там сборка с финализаторами; Kernel.Await и Monitors.DoAwait — кадр ждущего в
+		   параметре, а DoAwait кладёт его в запись ожидания после вызова условия и HandOff).
+		   CallCond — [code], встраивается в DoAwait. *)
+		pinnedProcs = " Kernel.NewObj Kernel.Await Monitors.DoAwait ";
 		maxProcPins = 8;
 		(* поставщик *)
 		growStart* = 4096;	(** стартовый стек UseGrowingStacks *)

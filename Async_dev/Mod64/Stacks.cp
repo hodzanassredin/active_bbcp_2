@@ -17,7 +17,7 @@ MODULE Async_devStacks;
 	Модуль собирается с ключом % (go64 Async_devStacks%), иначе плотный
 	поставщик отдаёт задачам этого модуля стеки со сторожем. *)
 
-	IMPORT S := SYSTEM, ACTIVE, Kernel, Tasks, AsyncSelect, AsyncChan, System_devCRaw, System_devClock,
+	IMPORT S := SYSTEM, ACTIVE, Kernel, Tasks, Stackmove, AsyncSelect, AsyncChan, System_devCRaw, System_devClock,
 		Console, Strings;
 
 	CONST
@@ -209,9 +209,14 @@ MODULE Async_devStacks;
 	END Calls;
 
 	PROCEDURE Mass1 (n, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
+	BEGIN
+		MassDir(Tasks.NewDenseDir(reserve), n, size, reserve, tag)
+	END Mass1;
+
+	PROCEDURE MassDir (d: Tasks.StackDir; n, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
 		VAR i: INTEGER; t: Once; old: Tasks.StackDir; t0, t1, t2, t3, r0, r1, r2, vmas: LONGINT;
 	BEGIN
-		old := Tasks.StackDirOf(); Tasks.SetStackDir(Tasks.NewDenseDir(reserve));
+		old := Tasks.StackDirOf(); Tasks.SetStackDir(d);
 		counter := 0; r0 := System_devCRaw.c_rss(); t0 := System_devClock.now();
 		FOR i := 1 TO n DO
 			NEW(t); Tasks.SetStackSize(t, size); Tasks.Start(t);
@@ -228,7 +233,7 @@ MODULE Async_devStacks;
 		W(" rssMB="); N((r1 - r0) DIV (1024 * 1024)); W(" vmas="); N(vmas);
 		W(" runMs="); N((t2 - t3) DIV 1000000); W(" rssAfterMB="); N((r2 - r0) DIV (1024 * 1024)); Console.WriteLn;
 		Tasks.SetStackDir(old)
-	END Mass1;
+	END MassDir;
 
 	PROCEDURE Mass100k4*;
 	BEGIN Mass1(100000, 4096, 2048, "mass100k-4k")
@@ -245,6 +250,23 @@ MODULE Async_devStacks;
 	PROCEDURE Mass1m8*;
 	BEGIN Mass1(1000000, 8192, 2048, "mass1m-8k")
 	END Mass1m8;
+
+	PROCEDURE MassGrow100k*;
+	(** Растущие стеки (Stackmove.GrowDir): старт 4 КБ, запас 2 КБ. *)
+	BEGIN MassDir(Stackmove.NewGrowDir(2048, 8 * 1024 * 1024), 100000, 4096, 2048, "mass100k-grow4k")
+	END MassGrow100k;
+
+	PROCEDURE MassGrow1m*;
+	BEGIN MassDir(Stackmove.NewGrowDir(2048, 8 * 1024 * 1024), 1000000, 4096, 2048, "mass1m-grow4k")
+	END MassGrow1m;
+
+	PROCEDURE MassGrow10k*;
+	BEGIN MassDir(Stackmove.NewGrowDir(2048, 8 * 1024 * 1024), 10000, 4096, 2048, "mass10k-grow4k")
+	END MassGrow10k;
+
+	PROCEDURE Mass10k8*;
+	BEGIN Mass1(10000, 8192, 2048, "mass10k-8k")
+	END Mass10k8;
 
 	PROCEDURE LoadSmall*;
 	(** То же со стеком 8 КБ (свежий процесс: пул отдаёт стек только того же размера). *)
