@@ -1,20 +1,5 @@
-MODULE ActorDemoBank;
-(** Пример: счета и переводы на акторах.
-
-	Банк — супервизор; его дети — счета и переводы. Перевод снимает сумму
-	со счёта-источника, затем кладёт её на счёт-получатель и сообщает банку
-	итог. Каждый сотый перевод несёт нулевую сумму: счёт трапует на
-	предусловии, банк возобновляет его (Resume), состояние счёта
-	сохраняется, перевод не получает ответа и по тайм-ауту простоя
-	считается отказанным. Restart здесь потерял бы остаток счёта: без
-	журнала состояние нового экземпляра — начальное.
-
-	В конце задача-водитель спрашивает остатки (Ask) и проверяет
-	инвариант: сумма денег постоянна.
-
-	Команда: ActorDemoBank.Run *)
-
-	IMPORT Kernel, Services, Tasks, Console, Strings, ActorCore, ActorSup, ActorRun;
+MODULE ObxActor2;
+	IMPORT Services, Tasks, Console, Strings, ActorCore, ActorSup, ActorRun;
 
 	CONST
 		accounts = 10;
@@ -43,11 +28,9 @@ MODULE ActorDemoBank;
 
 	VAR
 		acct: ARRAY accounts OF ActorCore.Ref;
-		bank: ActorCore.Ref;
 		nextFrom, nextTo, nextAmount: INTEGER;	(* параметры следующего перевода для фабрики *)
 		finished, succeeded: INTEGER;
 		total: INTEGER;
-		over: BOOLEAN;
 		done: Done; refused: Refused; getBalance: GetBalance;
 
 	PROCEDURE WriteInt (x: INTEGER);
@@ -157,29 +140,26 @@ MODULE ActorDemoBank;
 			ELSE total := MIN(INTEGER)
 			END
 		END;
-		ActorCore.StopActor(bank);
-		over := TRUE
+		Console.WriteStr("bank: transfers "); WriteInt(transfers);
+		Console.WriteStr(", done "); WriteInt(succeeded);
+		Console.WriteStr(", refused "); WriteInt(transfers - succeeded); Console.WriteLn;
+		Console.WriteStr("bank: total "); WriteInt(total);
+		Console.WriteStr(", at start "); WriteInt(accounts * initial);
+		IF total = accounts * initial THEN Console.WriteStr(": kept") ELSE Console.WriteStr(": BROKEN") END;
+		Console.WriteLn;
+		ActorRun.Shutdown
 	END Run;
 
-	PROCEDURE Run*;
-		VAR p: ActorCore.Props; d: Driver; t0: LONGINT;
+	PROCEDURE Do*;
+		VAR p: ActorCore.Props; d: Driver;
 	BEGIN
 		NEW(done); NEW(refused); NEW(getBalance);
-		finished := 0; succeeded := 0; over := FALSE;
+		finished := 0; succeeded := 0;
 		IF ActorRun.n = 0 THEN ActorRun.Start(4) END;
-		t0 := Kernel.Time();
 		p := ActorCore.NewProps(NewBank); p.strategy := ActorSup.NewOneForOne(ActorCore.Resume, 0, 1000);
-		bank := ActorCore.Spawn(NIL, p, "");
+		IF ActorCore.Spawn(NIL, p, "bank") = NIL THEN END;
 		NEW(d); Tasks.Start(d);
-		WHILE ~over DO Services.actionHook.Step END;
-		Console.WriteStr("ActorDemoBank: переводов "); WriteInt(transfers);
-		Console.WriteStr(", выполнено "); WriteInt(succeeded);
-		Console.WriteStr(", отказано "); WriteInt(transfers - succeeded);
-		Console.WriteStr(", "); WriteInt(SHORT(Kernel.Time() - t0)); Console.WriteStr(" мс"); Console.WriteLn;
-		Console.WriteStr("ActorDemoBank: сумма "); WriteInt(total);
-		Console.WriteStr(", в начале "); WriteInt(accounts * initial);
-		IF total = accounts * initial THEN Console.WriteStr(": сумма сохранена") ELSE Console.WriteStr(": СУММА НАРУШЕНА") END;
-		Console.WriteLn
-	END Run;
+		WHILE Tasks.Count() > 0 DO Services.actionHook.Step END
+	END Do;
 
-END ActorDemoBank.
+END ObxActor2.

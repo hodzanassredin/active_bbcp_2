@@ -95,6 +95,9 @@ ObxStm1  docu/sources		Retry: waiting for a condition over two variables
 ObxStm2  docu/sources		OrElse: pay with one card or the other
 ObxWork0  docu/sources		a blocking call on a worker thread
 ObxComputon  docu/sources		a computon executed in a separate process
+ObxActor0  docu/sources		the first actor: Spawn, Tell, Ask, Shutdown
+ObxActor1  docu/sources		supervision: a trap, and a restart loses the state
+ObxActor2  docu/sources		a bank: Resume keeps the account balances
 
 Content-Addressed Store
 ObxCas0  docu/sources		a block named by its hash: deduplication

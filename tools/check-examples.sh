@@ -30,6 +30,7 @@ if [ $# -eq 0 ]; then
 	set -- Docu/Tasks.md Docu/ru/Tasks.md Docu/Async.md Docu/ru/Async.md \
 		Unit/Docu/Testing.md Unit/Docu/ru/Testing.md \
 		Cas/Docu/Cas.md Cas/Docu/ru/Cas.md \
+		Actor/Docu/Actors.md Actor/Docu/ru/Actors.md \
 		Obx/Docu/*.md Obx/Docu/ru/*.md Demo/Docu/*.md
 fi
 tmp=$(mktemp -d)
