@@ -702,8 +702,9 @@ lost; the client repeats it with the same operation number.
 and bring up its own activation of a key. Only one of them can write: an event is written with a
 number check (`Append` with the expected `seq`), the second activation gets `conflict` and stops
 (`ActorPersist.conflictTrap`), and the next letter brings it up with the other's event already in
-(`TestSplitBrainOneWriter`). Before writing, the second activation may read stale state; agreeing on
-the owner is stage 5.
+(`TestSplitBrainOneWriter`). Before writing, the second activation may read stale state. A replicated
+log is the `Raft` subsystem (`Raft/Docu/Raft.md`, decision record 0025); an `ActorPersist` journal on top
+of it is not done yet, and the limit stays.
 
 `TestSeeds` runs 100 seeds: three nodes, five keys, twenty operations; the network loses and
 duplicates frames, nodes crash and come back, and the client repeats unacknowledged operations.

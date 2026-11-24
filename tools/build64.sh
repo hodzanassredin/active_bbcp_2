@@ -148,7 +148,7 @@ if [ "$gui" -eq 1 ]; then
 		mkdir -p "$INSTALL/$sub"
 		cp -a "$BB/$sub/Rsrc/." "$INSTALL/$sub/Rsrc/"
 	done
-	for d in Docu Obx/Docu Demo/Docu Lin/Docu Unit/Docu Cas/Docu Actor/Docu; do
+	for d in Docu Obx/Docu Demo/Docu Lin/Docu Unit/Docu Cas/Docu Actor/Docu Raft/Docu; do
 		[ -d "$BB/$d" ] || continue
 		mkdir -p "$INSTALL/$d"
 		cp -a "$BB/$d/." "$INSTALL/$d/"
