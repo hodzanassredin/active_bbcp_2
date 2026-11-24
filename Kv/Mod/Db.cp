@@ -21,13 +21,20 @@ MODULE KvDb;
 	не меньше w (ReleasePending). Список свободных на носителе содержит и
 	free, и pending: после открытия читателей нет.
 
-	Задачи. Внутри Begin, Get, Put, Delete, курсора и Commit нет точек
-	переключения: ввод-вывод синхронный. Пишущая транзакция одна; Begin(TRUE)
-	при открытой пишущей — трап 21 (ждать её конца на месте нельзя: в той же
-	задаче это вечное ожидание). Задачам, которые пишут по очереди, нужен
-	общий монитор вокруг транзакции. *)
+	Задачи. Внутри Get, Put, Delete, курсора и Commit нет точек
+	переключения: ввод-вывод синхронный. Пишущая транзакция одна. Begin(TRUE)
+	из другой задачи, пока пишущая открыта, ждёт её конца (Tasks.Park) в
+	очереди по порядку прихода; это единственная точка переключения Kv.
+	Отменённая ждущая задача уходит из очереди. Из той же задачи или вне
+	задачи ждать нельзя (ожидание вечное) — трап 21.
 
-	IMPORT Utf, KvPages, KvStore, KvTree;
+	Update и View исполняют тело транзакции под Kernel.Try: трап тела, в том
+	числе отмена задачи (127), закрывает транзакцию через Abort и передаётся
+	дальше с тем же номером. Без них трап при открытой транзакции оставляет
+	её открытой навсегда: пишущая запирает базу для всех, читающая держит
+	страницы. *)
+
+	IMPORT S := SYSTEM, Kernel, Tasks, Utf, KvPages, KvStore, KvTree;
 
 	CONST
 		ok* = KvStore.ok;
@@ -53,6 +60,7 @@ MODULE KvDb;
 			pending: Pending;
 			readers: Tx;	(* открытые читающие *)
 			writer: Tx;
+			queue: Waiter;	(* задачи, ждущие Begin(TRUE), по порядку прихода *)
 			res: INTEGER	(* ошибка фиксации: база требует переоткрытия *)
 		END;
 
@@ -64,8 +72,16 @@ MODULE KvDb;
 			tree: KvTree.Tree;
 			res-: INTEGER;	(** первая ошибка среды в транзакции *)
 			next: Tx;	(* в списке читателей *)
-			space: Space
+			space: Space;
+			task: Tasks.Task	(* задача писателя; NIL — вне задачи *)
 		END;
+
+		Waiter = POINTER TO RECORD
+			task: Tasks.Task;
+			next: Waiter
+		END;
+
+		Body* = POINTER TO ABSTRACT RECORD END;
 
 		Space = POINTER TO RECORD (KvTree.Space)
 			tx: Tx;
@@ -264,13 +280,86 @@ MODULE KvDb;
 
 	(* --- транзакции ------------------------------------------------------ *)
 
-	PROCEDURE (db: Db) Begin* (write: BOOLEAN): Tx, NEW;
-	(** Начать транзакцию над снимком последней фиксации.
-		Пред: база не закрыта — 20; write -> нет открытой пишущей — 21.
-		Пост: открытая транзакция; после ошибки фиксации у неё res # ok. *)
-		VAR tx: Tx; s: Space;
+	(* --- трапы и ожидание писателя ------------------------------------- *)
+
+	PROCEDURE Pass (code: INTEGER);
+		(* передать трап дальше с тем же номером: HALT принимает только константу *)
 	BEGIN
-		ASSERT(db.store # NIL, 20); ASSERT(~write OR (db.writer = NIL), 21);
+		IF (code < 0) OR (code > 128) THEN HALT(128) END;
+		CASE code OF
+		  0: HALT(0) | 1: HALT(1) | 2: HALT(2) | 3: HALT(3) | 4: HALT(4) | 5: HALT(5) | 6: HALT(6) | 7: HALT(7)
+		| 8: HALT(8) | 9: HALT(9) | 10: HALT(10) | 11: HALT(11) | 12: HALT(12) | 13: HALT(13) | 14: HALT(14) | 15: HALT(15)
+		| 16: HALT(16) | 17: HALT(17) | 18: HALT(18) | 19: HALT(19) | 20: HALT(20) | 21: HALT(21) | 22: HALT(22) | 23: HALT(23)
+		| 24: HALT(24) | 25: HALT(25) | 26: HALT(26) | 27: HALT(27) | 28: HALT(28) | 29: HALT(29) | 30: HALT(30) | 31: HALT(31)
+		| 32: HALT(32) | 33: HALT(33) | 34: HALT(34) | 35: HALT(35) | 36: HALT(36) | 37: HALT(37) | 38: HALT(38) | 39: HALT(39)
+		| 40: HALT(40) | 41: HALT(41) | 42: HALT(42) | 43: HALT(43) | 44: HALT(44) | 45: HALT(45) | 46: HALT(46) | 47: HALT(47)
+		| 48: HALT(48) | 49: HALT(49) | 50: HALT(50) | 51: HALT(51) | 52: HALT(52) | 53: HALT(53) | 54: HALT(54) | 55: HALT(55)
+		| 56: HALT(56) | 57: HALT(57) | 58: HALT(58) | 59: HALT(59) | 60: HALT(60) | 61: HALT(61) | 62: HALT(62) | 63: HALT(63)
+		| 64: HALT(64) | 65: HALT(65) | 66: HALT(66) | 67: HALT(67) | 68: HALT(68) | 69: HALT(69) | 70: HALT(70) | 71: HALT(71)
+		| 72: HALT(72) | 73: HALT(73) | 74: HALT(74) | 75: HALT(75) | 76: HALT(76) | 77: HALT(77) | 78: HALT(78) | 79: HALT(79)
+		| 80: HALT(80) | 81: HALT(81) | 82: HALT(82) | 83: HALT(83) | 84: HALT(84) | 85: HALT(85) | 86: HALT(86) | 87: HALT(87)
+		| 88: HALT(88) | 89: HALT(89) | 90: HALT(90) | 91: HALT(91) | 92: HALT(92) | 93: HALT(93) | 94: HALT(94) | 95: HALT(95)
+		| 96: HALT(96) | 97: HALT(97) | 98: HALT(98) | 99: HALT(99) | 100: HALT(100) | 101: HALT(101) | 102: HALT(102) | 103: HALT(103)
+		| 104: HALT(104) | 105: HALT(105) | 106: HALT(106) | 107: HALT(107) | 108: HALT(108) | 109: HALT(109) | 110: HALT(110) | 111: HALT(111)
+		| 112: HALT(112) | 113: HALT(113) | 114: HALT(114) | 115: HALT(115) | 116: HALT(116) | 117: HALT(117) | 118: HALT(118) | 119: HALT(119)
+		| 120: HALT(120) | 121: HALT(121) | 122: HALT(122) | 123: HALT(123) | 124: HALT(124) | 125: HALT(125) | 126: HALT(126) | 127: HALT(127)
+		| 128: HALT(128)
+		END
+	END Pass;
+
+	PROCEDURE ParkBody (a, b, c: S.ADDRESS);
+	BEGIN
+		Tasks.Park; S.PUT(a, TRUE)
+	END ParkBody;
+
+	PROCEDURE Unlink (db: Db; w: Waiter);
+		VAR p: Waiter;
+	BEGIN
+		IF db.queue = w THEN db.queue := w.next
+		ELSE
+			p := db.queue;
+			WHILE (p # NIL) & (p.next # w) DO p := p.next END;
+			IF p # NIL THEN p.next := w.next END
+		END
+	END Unlink;
+
+	PROCEDURE WakeNext (db: Db);
+	BEGIN
+		IF (db.writer = NIL) & (db.queue # NIL) THEN Tasks.Unpark(db.queue.task) END
+	END WakeNext;
+
+	PROCEDURE WaitTurn (db: Db);
+		(* ждать в очереди, пока писателя нет и эта задача первая; трап
+			ожидания (отмена — 127) снимает задачу из очереди и идёт дальше *)
+		VAR w, p: Waiter; ok: BOOLEAN; code: INTEGER;
+	BEGIN
+		NEW(w); w.task := Tasks.Current();
+		IF db.queue = NIL THEN db.queue := w
+		ELSE p := db.queue; WHILE p.next # NIL DO p := p.next END; p.next := w
+		END;
+		WHILE (db.writer # NIL) OR (db.queue # w) DO
+			ok := FALSE;
+			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(ParkBody)), S.ADR(ok), 0, 0);
+			IF ~ok THEN code := Kernel.err; Unlink(db, w); WakeNext(db); Pass(code) END
+		END;
+		db.queue := w.next
+	END WaitTurn;
+
+	PROCEDURE (db: Db) Begin* (write: BOOLEAN): Tx, NEW;
+	(** Начать транзакцию над снимком последней фиксации. Пишущую, пока
+		открыта пишущая другой задачи, — ждать её конца по порядку прихода.
+		Пред: база не закрыта — 20.
+		Пред: write -> пишущей нет или она другой задачи, а вызов из задачи — 21.
+		Пост: открытая транзакция; после ошибки фиксации у неё res # ok. *)
+		VAR tx: Tx; s: Space; cur: Tasks.Task;
+	BEGIN
+		ASSERT(db.store # NIL, 20);
+		IF write THEN
+			cur := Tasks.Current();
+			IF ~Tasks.InTask() THEN cur := NIL END;
+			ASSERT((db.writer = NIL) OR (cur # NIL) & (db.writer.task # cur), 21);
+			IF (cur # NIL) & ((db.writer # NIL) OR (db.queue # NIL)) THEN WaitTurn(db) END
+		END;
 		NEW(tx); tx.db := db; tx.write := write; tx.open := TRUE; tx.meta := db.meta;
 		tx.res := db.res;
 		IF write THEN
@@ -279,7 +368,7 @@ MODULE KvDb;
 			s.nfree0 := db.nfree; NEW(s.free0, MAX(1, db.nfree));
 			IF db.nfree > 0 THEN Move(db.free, s.free0, db.nfree) END;
 			tx.tree := KvTree.Open(db.pager, s, tx.meta.root);
-			db.writer := tx
+			tx.task := cur; db.writer := tx
 		ELSE
 			tx.tree := KvTree.Open(db.pager, NIL, tx.meta.root);
 			tx.next := db.readers; db.readers := tx
@@ -292,7 +381,7 @@ MODULE KvDb;
 		VAR db: Db; r: Tx;
 	BEGIN
 		db := tx.db; tx.open := FALSE;
-		IF tx.write THEN db.writer := NIL
+		IF tx.write THEN db.writer := NIL; WakeNext(db)
 		ELSIF db.readers = tx THEN db.readers := tx.next
 		ELSE
 			r := db.readers;
@@ -405,6 +494,48 @@ MODULE KvDb;
 		ASSERT(tx.open, 20);
 		RETURN KvTree.Edge(tx.tree, TRUE)
 	END Last;
+
+	(* --- тело транзакции ------------------------------------------------- *)
+
+	PROCEDURE (b: Body) Do- (tx: Tx), NEW, ABSTRACT;
+	(** Тело транзакции для Update и View. *)
+
+	PROCEDURE DoBody (a, b, c: S.ADDRESS);
+		VAR body: Body;
+	BEGIN
+		body := S.VAL(Body, b); body.Do(S.VAL(Tx, c)); S.PUT(a, TRUE)
+	END DoBody;
+
+	PROCEDURE Run (db: Db; write: BOOLEAN; body: Body; OUT res: INTEGER);
+		VAR tx: Tx; ok: BOOLEAN; code: INTEGER;
+	BEGIN
+		ASSERT(body # NIL, 20);
+		tx := db.Begin(write); ok := FALSE;
+		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(DoBody)), S.ADR(ok), S.VAL(S.ADDRESS, body), S.VAL(S.ADDRESS, tx));
+		IF ~ok THEN code := Kernel.err; tx.Abort; Pass(code)
+		ELSIF tx.open THEN tx.Commit(res)
+		ELSE res := tx.res
+		END
+	END Run;
+
+	PROCEDURE Update* (db: Db; body: Body; OUT res: INTEGER);
+	(** Исполнить body.Do в пишущей транзакции и зафиксировать её. Тело
+		может закрыть транзакцию само (Abort) — тогда ничего не фиксируется.
+		Пред: body # NIL — 20; пред. Begin(TRUE).
+		Пост: res — результат Commit (или tx.res, если тело закрыло её само);
+		трап тела — транзакция откачена, трап передан с тем же номером. *)
+	BEGIN
+		Run(db, TRUE, body, res)
+	END Update;
+
+	PROCEDURE View* (db: Db; body: Body);
+	(** Исполнить body.Do в читающей транзакции и закрыть её.
+		Пред: body # NIL — 20. Пост: трап тела — транзакция закрыта, трап
+		передан с тем же номером. *)
+		VAR res: INTEGER;
+	BEGIN
+		Run(db, FALSE, body, res)
+	END View;
 
 	(* --- проверка целостности ------------------------------------------- *)
 

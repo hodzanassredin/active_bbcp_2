@@ -27,7 +27,7 @@ for a in "$@"; do
 	esac
 done
 
-SUBS="Lin System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket Unit Kv"
+SUBS="Lin System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket Unit"
 
 [ -x "$DEV0" ] || { echo "build32: нет $DEV0" >&2; exit 2; }
 clean_host_temp
@@ -65,6 +65,8 @@ echo "build32: компиляция подсистем"
 	echo "DevCompiler.CompileThis Tasks"
 	# AsyncStm зависит только от Tasks и Kernel и собирается и для i386.
 	echo "DevCompiler.CompileThis AsyncStm"
+	# Kv использует Tasks (очередь писателей), поэтому собирается после них.
+	echo "DevCompiler.CompileSubs @Lin Kv"
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$DEV0" < "$LOG.cmd" > "$LOG" 2>&1; then

@@ -37,7 +37,8 @@ Cas_devTree||300
 Cas_devChange||180
 Kv_devBasic|proc|300
 Kv_devTree|proc|600
-Kv_devCrash|proc|1200'
+Kv_devCrash|proc|1200
+Kv_devTasks|proc|300'
 
 LIST=0; only=""
 for a in "$@"; do
@@ -72,7 +73,7 @@ compile_dev32() {
 			System_devUnloadGuardCode System_devUnloadGuard \
 			AsyncProto AsyncSelect AsyncChan Async_devStm \
 			Cas_devHash Cas_devStore Cas_devChunk Cas_devTree Cas_devChange \
-			Kv_devModel Kv_devBasic Kv_devTree Kv_devCrash; do
+			Kv_devModel Kv_devBasic Kv_devTree Kv_devCrash Kv_devTasks; do
 			opt=""
 			case "$m" in *\^) opt="^"; m="${m%^}";; esac
 			echo "DevCompiler.CompileThis $m $opt"

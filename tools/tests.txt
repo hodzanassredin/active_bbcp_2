@@ -37,3 +37,5 @@ Actor_devBench|proc slow|600|ActorCore ActorSup ActorRun System_devCRaw System_d
 Kv_devBasic|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devCrash|proc|900|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+Kv_devTasks|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+Kv_devBench|proc slow|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
