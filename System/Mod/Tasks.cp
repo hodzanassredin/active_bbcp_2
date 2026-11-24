@@ -172,10 +172,13 @@ MODULE Tasks;
 	END SwitchTo;
 
 	PROCEDURE SetCurrent (t: Task);
-	(* Пост: current = t; токен крючка ядра — адрес t^ (0 при t = NIL). *)
+	(* Пост: current = t; Kernel.monTok — адрес t^ (Kernel.mainToken при
+	   t = NIL); взятия мониторов быстрым путём прежнего токена отданы
+	   таблице Monitors до смены токена. *)
 	BEGIN
+		IF Kernel.monTop # Kernel.monBase THEN Kernel.FlushMonitors END;
 		current := t;
-		IF t # NIL THEN schedHook.token := S.ADR(t^) ELSE schedHook.token := 0 END
+		IF t # NIL THEN Kernel.monTok := S.ADR(t^) ELSE Kernel.monTok := Kernel.mainToken END
 	END SetCurrent;
 
 	(* --- очереди ---------------------------------------------------------- *)

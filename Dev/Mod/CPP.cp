@@ -1208,6 +1208,12 @@ MODULE DevCPP;
 				GetParams;	(* may change proc := fwd !!! *)
 				ASSERT(DevCPT.topScope # NIL);
 				CheckExclusive(proc, sys, level);
+				(* Исключающий метод: у записи — скрытое поле владельца монитора.
+				   Поле добавляется, пока размер записи не вычислен (SIZE). *)
+				IF (sys = DevCPM.exclusive) & (recTyp # NIL) & (recTyp.comp = Record) & (recTyp.sysflag = 0)
+						& ~DevCPT.EnsureMonField(recTyp) THEN
+					err(225)
+				END;
 				GetAttributes(proc, baseProc, recTyp);
 				IF (fwd # NIL) & (fwdAttr / proc.conval.setval * {absAttr, empAttr, extAttr} # {}) THEN err(184) END;
 				CheckOverwrite(proc, baseProc, recTyp);

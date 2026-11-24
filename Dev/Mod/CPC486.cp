@@ -2218,6 +2218,103 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		END
 	END MonitorArg;
 
+	(* Быстрый путь: поле владельца объекта (как в CPCamd64; слово — 4 байта,
+	   запись стека взятий — 8). *)
+	PROCEDURE MonFieldOff (proc: DevCPT.Object; OUT off: INTEGER): BOOLEAN;
+		VAR rt: DevCPT.Struct; f: DevCPT.Object;
+	BEGIN
+		off := 0;
+		IF proc.mode = TProc THEN
+			rt := proc.link.typ;
+			IF rt.form # Pointer THEN RETURN FALSE END;
+			f := DevCPT.MonField(rt.BaseTyp);
+			IF f = NIL THEN RETURN FALSE END;
+			off := f.adr; RETURN TRUE
+		ELSE
+			RETURN TRUE
+		END
+	END MonFieldOff;
+
+	PROCEDURE C4 (d: INTEGER);
+	BEGIN
+		DevCPL486.GenCode(d MOD 256); DevCPL486.GenCode(d DIV 100H MOD 256);
+		DevCPL486.GenCode(d DIV 10000H MOD 256); DevCPL486.GenCode(d DIV 1000000H MOD 256)
+	END C4;
+
+	PROCEDURE KVarItem (obj: DevCPT.Object; VAR x: DevCPL486.Item);
+	BEGIN
+		obj.used := TRUE;
+		x.mode := Abs; x.obj := obj; x.offset := 0; x.scale := 0; x.form := Pointer
+	END KVarItem;
+
+	PROCEDURE ObjToReg (proc: DevCPT.Object; reg: INTEGER);
+		VAR x, r: DevCPL486.Item;
+	BEGIN
+		DevCPL486.MakeReg(r, reg, Pointer);
+		IF proc.mode = TProc THEN
+			x.mode := Ind; x.reg := BP; x.offset := proc.link.adr; x.scale := 0; x.form := Pointer;
+			DevCPL486.GenMove(x, r)
+		ELSE
+			x.mode := Abs; x.obj := DevCPT.ModuleMonitor(); x.offset := x.obj.adr;
+			x.scale := 0; x.form := Pointer;
+			DevCPL486.GenLoadAdr(x, r)
+		END
+	END ObjToReg;
+
+	PROCEDURE FastLockEntry (proc: DevCPT.Object; off: INTEGER);
+	(** Как в CPCamd64: портит EAX, ECX, EDX; EBX сохраняется. *)
+		VAR x, r: DevCPL486.Item; slow, done: DevCPL486.Label;
+	BEGIN
+		DevCPT.EnsureKernel; slow := 0; done := 0;
+		ObjToReg(proc, AX);
+		DevCPL486.GenCode(83H); DevCPL486.GenCode(0B8H); C4(off); DevCPL486.GenCode(0);	(* cmp dword [eax+off], 0 *)
+		DevCPL486.GenJump(ccNE, slow, FALSE);
+		KVarItem(DevCPT.kMonTop, x); DevCPL486.MakeReg(r, CX, Pointer); DevCPL486.GenMove(x, r);
+		KVarItem(DevCPT.kMonEnd, x); DevCPL486.MakeReg(r, DX, Pointer); DevCPL486.GenMove(x, r);
+		DevCPL486.GenCode(39H); DevCPL486.GenCode(0D1H);	(* cmp ecx, edx *)
+		DevCPL486.GenJump(ccAE, slow, FALSE);
+		KVarItem(DevCPT.kMonTok, x); DevCPL486.MakeReg(r, DX, Pointer); DevCPL486.GenMove(x, r);
+		DevCPL486.GenCode(89H); DevCPL486.GenCode(90H); C4(off);	(* mov [eax+off], edx *)
+		DevCPL486.GenCode(89H); DevCPL486.GenCode(01H);	(* mov [ecx], eax *)
+		DevCPL486.GenCode(0C7H); DevCPL486.GenCode(41H); DevCPL486.GenCode(4); C4(off);	(* mov dword [ecx+4], off *)
+		DevCPL486.GenCode(83H); DevCPL486.GenCode(0C1H); DevCPL486.GenCode(8);	(* add ecx, 8 *)
+		KVarItem(DevCPT.kMonTop, x); DevCPL486.MakeReg(r, CX, Pointer); DevCPL486.GenMove(r, x);
+		DevCPL486.GenJump(ccAlways, done, FALSE);
+		DevCPL486.SetLabel(slow);
+		DevCPT.kLockAt.used := TRUE;
+		DevCPL486.MakeReg(r, BX, Pointer); DevCPL486.GenPush(r);
+		DevCPL486.GenCode(68H); C4(off);	(* push off *)	(* параметры кладутся справа налево *)
+		DevCPL486.MakeReg(r, AX, Pointer); DevCPL486.GenPush(r);
+		x.mode := XProc; x.obj := DevCPT.kLockAt; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPL486.GenCall(x);
+		DevCPL486.MakeReg(r, BX, Pointer); DevCPL486.GenPop(r);
+		DevCPL486.SetLabel(done)
+	END FastLockEntry;
+
+	PROCEDURE^ UnlockExit (proc: DevCPT.Object);
+
+	PROCEDURE FastUnlockExit (proc: DevCPT.Object; off: INTEGER);
+	(** Как в CPCamd64; результат в EAX:EDX и ST0 сохраняется. *)
+		VAR x, r: DevCPL486.Item; slow, done: DevCPL486.Label;
+	BEGIN
+		DevCPT.EnsureKernel; slow := 0; done := 0;
+		DevCPL486.GenCode(52H);	(* push edx *)
+		ObjToReg(proc, CX);
+		KVarItem(DevCPT.kMonTok, x); DevCPL486.MakeReg(r, DX, Pointer); DevCPL486.GenMove(x, r);
+		DevCPL486.GenCode(39H); DevCPL486.GenCode(91H); C4(off);	(* cmp [ecx+off], edx *)
+		DevCPL486.GenJump(ccNE, slow, FALSE);
+		DevCPL486.GenCode(0C7H); DevCPL486.GenCode(81H); C4(off); C4(0);	(* mov dword [ecx+off], 0 *)
+		KVarItem(DevCPT.kMonTop, x); DevCPL486.MakeReg(r, DX, Pointer); DevCPL486.GenMove(x, r);
+		DevCPL486.GenCode(83H); DevCPL486.GenCode(0EAH); DevCPL486.GenCode(8);	(* sub edx, 8 *)
+		KVarItem(DevCPT.kMonTop, x); DevCPL486.MakeReg(r, DX, Pointer); DevCPL486.GenMove(r, x);
+		DevCPL486.GenCode(5AH);	(* pop edx *)
+		DevCPL486.GenJump(ccAlways, done, FALSE);
+		DevCPL486.SetLabel(slow);
+		DevCPL486.GenCode(5AH);	(* pop edx *)
+		UnlockExit(proc);
+		DevCPL486.SetLabel(done)
+	END FastUnlockExit;
+
 	PROCEDURE LockEntry (proc: DevCPT.Object);
 	(** Kernel.Lock(монитор) после кадра процедуры. BX (статическая связь)
 		сохраняется: Lock — обычная CP-процедура. *)
@@ -2260,7 +2357,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	END UnlockExit;
 
 	PROCEDURE Enter* (proc: DevCPT.Object; empty, useFpu: BOOLEAN);
-		VAR sp, fp, r, r1: DevCPL486.Item; par: DevCPT.Object; adr, size, np: INTEGER;
+		VAR sp, fp, r, r1: DevCPL486.Item; par: DevCPT.Object; adr, size, np, off: INTEGER;
 	BEGIN
 		procedureUsesFpu := useFpu;
 		SetReg({AX, CX, DX, SI, DI});
@@ -2312,7 +2409,9 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 					DevCPL486.MakeReg(r, BX, Pointer); DevCPL486.GenMove(fp, r)
 				END
 			END;
-			IF ~empty & (proc.sysflag = exclusive) THEN LockEntry(proc) END
+			IF ~empty & (proc.sysflag = exclusive) THEN
+				IF MonFieldOff(proc, off) THEN FastLockEntry(proc, off) ELSE LockEntry(proc) END
+			END
 		ELSIF ~empty THEN (* enter module *)
 			DevCPL486.GenPush(fp);
 			DevCPL486.GenMove(sp, fp);
@@ -2323,11 +2422,13 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	END Enter;
 	
 	PROCEDURE Exit* (proc: DevCPT.Object; empty: BOOLEAN);
-		VAR sp, fp, r, x: DevCPL486.Item; size: INTEGER;
+		VAR sp, fp, r, x: DevCPL486.Item; size, off: INTEGER;
 	BEGIN
 		DevCPL486.MakeReg(sp, SP, Pointer); DevCPL486.MakeReg(fp, BP, Pointer);
 		IF proc # NIL THEN (* exit proc *)
-			IF ~empty & (proc.sysflag = exclusive) THEN UnlockExit(proc) END;
+			IF ~empty & (proc.sysflag = exclusive) THEN
+				IF MonFieldOff(proc, off) THEN FastUnlockExit(proc, off) ELSE UnlockExit(proc) END
+			END;
 			IF proc.sysflag # noframe THEN
 				IF ~empty OR NeedOutPtrInit(proc) THEN
 					IF isGuarded IN proc.conval.setval THEN	(* remove exception frame *)

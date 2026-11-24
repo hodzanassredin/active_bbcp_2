@@ -42,7 +42,10 @@ MODULE Monitors;
 	CONST
 		monHash = 64;	(* корзин в таблице мониторов *)
 		chainHash = 64;	(* корзин в таблице цепочек взятий *)
-		mainToken = 1;	(* токен главного стека: адреса выровнены, 1 не совпадёт *)
+		mainToken = Kernel.mainToken;	(* токен главного стека *)
+		managed = 2;	(* поле владельца: монитором управляет таблица *)
+		word = SIZE(S.ADDRESS);
+		monName = "@mon";	(* скрытое поле владельца, которое заводит компилятор *)
 
 	TYPE
 		CondProc = Kernel.CondProc;
@@ -66,6 +69,7 @@ MODULE Monitors;
 			key: S.ADDRESS;	(* адрес объекта: ключ таблицы *)
 			obj: ANYPTR;		(* объект, пока монитор занят или в очередях: корень сборщика; у свободной записи hot — NIL *)
 			owner: S.ADDRESS;	(* токен владельца; 0 — свободен *)
+			off: S.ADDRESS;	(* смещение поля владельца в объекте; -1 — поля нет *)
 			count: INTEGER;		(* глубина повторного входа *)
 			enter, enterTail: TaskRef;
 			wait, waitTail: WaitRef
@@ -129,6 +133,9 @@ MODULE Monitors;
 		   перезапускается) не доходит ни до одного endTry: взятия снимает
 		   purge, если открыт только Try самой уборки. *)
 		mainTries: INTEGER;
+		(* Последний тип, для которого искали поле владельца, и ответ. *)
+		fieldType: Kernel.Type;
+		fieldOff: S.ADDRESS;
 
 	(* -------------------- диагностика ------------------------------------ *)
 
@@ -180,11 +187,8 @@ MODULE Monitors;
 	(* -------------------- планировщик (через крючок ядра) ---------------- *)
 
 	PROCEDURE CurrentToken (): S.ADDRESS;
-		VAR s: Kernel.Scheduler; t: S.ADDRESS;
 	BEGIN
-		s := Kernel.sched;
-		IF s # NIL THEN t := s.token ELSE t := 0 END;
-		IF t = 0 THEN RETURN mainToken ELSE RETURN t END
+		RETURN Kernel.monTok
 	END CurrentToken;
 
 	PROCEDURE UnparkTask (t: S.ADDRESS);
@@ -243,23 +247,33 @@ MODULE Monitors;
 		RETURN m
 	END TakeMon;
 
-	PROCEDURE NewMon (obj: S.ADDRESS): Monitor;
+	PROCEDURE NewMon (obj, off: S.ADDRESS): Monitor;
+	(* Пред: записи с ключом obj в таблице нет. Пост: off >= 0 — поле
+	   владельца объекта = managed. *)
 		VAR m: Monitor; i: INTEGER;
 	BEGIN
 		i := MonIndex(obj);
 		m := TakeMon();
 		m.next := monBuckets[i]; monBuckets[i] := m;
-		m.key := obj; m.obj := NIL; m.owner := 0; m.count := 0;
+		m.key := obj; m.off := off; m.obj := NIL; m.owner := 0; m.count := 0;
+		IF off >= 0 THEN S.PUT(obj + off, S.VAL(S.ADDRESS, managed)) END;
 		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
 		INC(nofMonitors);
 		RETURN m
 	END NewMon;
 
-	PROCEDURE GetMon (obj: S.ADDRESS): Monitor;
+	PROCEDURE^ DropMon (m: Monitor);
+
+	PROCEDURE GetMon (obj, off: S.ADDRESS): Monitor;
+	(** Запись монитора obj. Свободная запись без очередей с другим off —
+		след умершего объекта по тому же адресу: она заменяется. *)
 		VAR m: Monitor;
 	BEGIN
 		m := FindMon(obj);
-		IF m = NIL THEN m := NewMon(obj) END;
+		IF (m # NIL) & (m.off # off) & (m.owner = 0) & (m.enter = NIL) & (m.wait = NIL) THEN
+			DropMon(m); m := NIL
+		END;
+		IF m = NIL THEN m := NewMon(obj, off) END;
 		RETURN m
 	END GetMon;
 
@@ -275,7 +289,8 @@ MODULE Monitors;
 			IF p # NIL THEN p.next := m.next END
 		END;
 		IF hot = m THEN hot := NIL END;
-		m.key := 0; m.obj := NIL; m.owner := 0; m.count := 0;
+		IF m.off >= 0 THEN S.PUT(m.key + m.off, S.VAL(S.ADDRESS, 0)) END;	(* снова быстрый путь *)
+		m.key := 0; m.off := -1; m.obj := NIL; m.owner := 0; m.count := 0;
 		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
 		m.next := freeMonitors; freeMonitors := m;
 		DEC(nofMonitors)
@@ -288,7 +303,9 @@ MODULE Monitors;
 	BEGIN
 		IF (m # NIL) & (m.owner = 0) & (m.enter = NIL) & (m.wait = NIL) THEN
 			m.obj := NIL;
-			IF m # hot THEN
+			IF m.off >= 0 THEN
+				DropMon(m)	(* поле владельца снова 0: следующий вход — быстрый путь *)
+			ELSIF m # hot THEN
 				old := hot; hot := m;
 				IF (old # NIL) & (old.owner = 0) & (old.enter = NIL) & (old.wait = NIL) THEN DropMon(old) END
 			END
@@ -593,7 +610,7 @@ MODULE Monitors;
 
 	(* -------------------- операции над мониторами ------------------------- *)
 
-	PROCEDURE DoLock (obj: S.ADDRESS);
+	PROCEDURE DoLock (obj, off: S.ADDRESS);
 	(** Взять монитор объекта. Повторный вход разрешён (счётчик).
 		Занятый чужим монитор: задача ждёт; главный стек или отсутствие
 		Tasks — трап. *)
@@ -602,7 +619,7 @@ MODULE Monitors;
 		IF obj = 0 THEN MonErr("Lock: NIL object") END;
 		ASSERT(obj # 0, 20);
 		me := curTok;	(* Sync в крючке уже прочитал токен *)
-		m := GetMon(obj);
+		m := GetMon(obj, off);
 		IF m.owner = me THEN
 			INC(m.count); ChainPush(m)
 		ELSIF m.owner = 0 THEN
@@ -677,37 +694,96 @@ MODULE Monitors;
 		m.count := saved
 	END DoAwait;
 
+	(* -------------------- поле владельца и быстрый путь ------------------ *)
+
+	PROCEDURE FieldOf (obj: S.ADDRESS): S.ADDRESS;
+	(** Пред: obj — запись в куче. Пост: смещение скрытого поля владельца
+		"@mon" ближайшего к корню типа цепочки, где оно есть; -1 — поля нет.
+		Ответ для последнего типа запоминается. *)
+		VAR t, b: Kernel.Type; lev, i: INTEGER; name: Kernel.Name; d: Kernel.Directory; p: ANYPTR;
+	BEGIN
+		p := S.VAL(ANYPTR, obj); t := Kernel.TypeOf(p^);
+		IF t # fieldType THEN
+			fieldType := t; fieldOff := -1;
+			lev := 0;
+			WHILE (fieldOff < 0) & (lev <= Kernel.LevelOf(t)) DO
+				b := t.base[lev]; d := b.fields;
+				IF d # NIL THEN
+					i := 0;
+					WHILE (fieldOff < 0) & (i < d.num) DO
+						Kernel.GetObjName(b.mod, S.VAL(Kernel.Object, S.ADR(d.obj[i])), name);
+						IF name = monName THEN fieldOff := d.obj[i].offs END;
+						INC(i)
+					END
+				END;
+				INC(lev)
+			END
+		END;
+		RETURN fieldOff
+	END FieldOf;
+
+	PROCEDURE Flush;
+	(** Пост: Kernel.monTop = Kernel.monBase; каждое взятие быстрым путём
+		стало записью таблицы (поле владельца = managed, владелец — monTok,
+		счётчик 1) и записью цепочки в прежнем порядке. *)
+		VAR a, key, off: S.ADDRESS; obj: ANYPTR; m: Monitor;
+	BEGIN
+		IF Kernel.monTop # Kernel.monBase THEN
+			Sync;
+			a := Kernel.monBase;
+			WHILE a # Kernel.monTop DO
+				S.GET(a, obj); S.GET(a + word, off);
+				S.PUT(a, S.VAL(S.ADDRESS, 0));	(* не удерживать объект *)
+				key := S.VAL(S.ADDRESS, obj);
+				m := GetMon(key, off);
+				m.obj := obj; m.owner := curTok; m.count := 1; ChainPush(m);
+				INC(a, 2 * word)
+			END;
+			Kernel.monTop := Kernel.monBase
+		END
+	END Flush;
+
 	(* -------------------- крючок для ядра -------------------------------- *)
 
-	(* Быстрый путь lock/unlock: тот же токен, что у кэша цепочки, объект —
-	   hot, запись взятия из свободного списка. Действия те же, что у
-	   DoLock/DoUnlock на этом случае, без поиска в таблицах и вызовов;
-	   остальное (занятый чужим, очереди, другой токен) — медленный путь. *)
+	(* Быстрый путь lock/unlock для объектов без поля владельца: тот же токен,
+	   что у кэша цепочки, объект — hot, запись взятия из свободного списка.
+	   Действия те же, что у DoLock/DoUnlock на этом случае; остальное
+	   (поле владельца, занятый чужим, очереди, другой токен) — медленный путь.
+	   Каждый вход сначала сбрасывает взятия быстрым путём компилятора (Flush). *)
 
 	PROCEDURE (h: Hook) lock (obj: S.ADDRESS);
-		VAR m: Monitor; r: LockRec; t: S.ADDRESS; s: Kernel.Scheduler;
+		VAR m: Monitor; r: LockRec; t, off: S.ADDRESS;
 	BEGIN
-		s := Kernel.sched;	(* CurrentToken на месте *)
-		IF s # NIL THEN t := s.token ELSE t := 0 END;
-		IF t = 0 THEN t := mainToken END;
-		m := hot;
-		IF (t = curTok) & (cur # NIL) & (m # NIL) & (m.key = obj) & (freeLocks # NIL)
+		IF obj = 0 THEN MonErr("Lock: NIL object") END;
+		ASSERT(obj # 0, 20);
+		Flush;
+		off := FieldOf(obj);
+		t := Kernel.monTok; m := hot;
+		IF (off < 0) & (t = curTok) & (cur # NIL) & (m # NIL) & (m.key = obj) & (m.off < 0) & (freeLocks # NIL)
 				& ((m.owner = 0) OR (m.owner = t)) THEN
 			IF m.owner = 0 THEN m.obj := S.VAL(ANYPTR, obj); m.owner := t; m.count := 1 ELSE INC(m.count) END;
 			r := freeLocks; freeLocks := r.next;
 			r.mon := m; r.next := cur.head; cur.head := r; INC(cur.depth)
 		ELSE
-			Sync; DoLock(obj)
+			Sync; DoLock(obj, off)
 		END
 	END lock;
 
-	PROCEDURE (h: Hook) unlock (obj: S.ADDRESS);
-		VAR m: Monitor; r: LockRec; t: S.ADDRESS; s: Kernel.Scheduler;
+	PROCEDURE (h: Hook) lockAt (obj, off: S.ADDRESS);
 	BEGIN
-		s := Kernel.sched;	(* CurrentToken на месте *)
-		IF s # NIL THEN t := s.token ELSE t := 0 END;
-		IF t = 0 THEN t := mainToken END;
-		m := hot;
+		Flush; Sync; DoLock(obj, off)
+	END lockAt;
+
+	PROCEDURE (h: Hook) flush;
+	BEGIN
+		Flush
+	END flush;
+
+	PROCEDURE (h: Hook) unlock (obj: S.ADDRESS);
+		VAR m: Monitor; r: LockRec; t: S.ADDRESS;
+	BEGIN
+		Flush;
+		t := Kernel.monTok; m := hot;
 		IF (t = curTok) & (cur # NIL) & (m # NIL) & (m.key = obj) & (m.owner = t)
 				& (cur.head # NIL) & (cur.head.mon = m)
 				& ((m.count > 1) OR (m.wait = NIL) & (m.enter = NIL)) THEN
@@ -721,19 +797,19 @@ MODULE Monitors;
 
 	PROCEDURE (h: Hook) await (cond: CondProc; frame, obj: S.ADDRESS);
 	BEGIN
-		Sync; DoAwait(cond, frame, obj)
+		Flush; Sync; DoAwait(cond, frame, obj)
 	END await;
 
 	PROCEDURE (h: Hook) beginTry (): INTEGER;
 	BEGIN
-		Sync;
+		Flush; Sync;
 		IF curTok = mainToken THEN INC(mainTries) END;
 		IF cur # NIL THEN RETURN cur.depth ELSE RETURN 0 END
 	END beginTry;
 
 	PROCEDURE (h: Hook) endTry (mark: INTEGER);
 	BEGIN
-		Sync;
+		Flush; Sync;
 		IF curTok = mainToken THEN DEC(mainTries) END;
 		ReleaseTo(mark)
 	END endTry;
@@ -745,7 +821,7 @@ MODULE Monitors;
 		главного стека: исключающие процедуры, прерванные трапом, выходят
 		из своих мониторов (сообщение о языке, раздел 8). *)
 	BEGIN
-		Sync; PurgeCurrent;
+		Flush; Sync; PurgeCurrent;
 		IF (curTok = mainToken) & (mainTries <= 1) THEN ReleaseTo(0) END
 	END purge;
 
@@ -756,6 +832,7 @@ MODULE Monitors;
 		VAR m: Monitor;
 	BEGIN
 		IF obj = NIL THEN RETURN FALSE END;
+		Flush;
 		m := FindMon(S.VAL(S.ADDRESS, obj));
 		RETURN (m # NIL) & (m.owner # 0)
 	END IsLocked;
@@ -764,9 +841,11 @@ MODULE Monitors;
 	(** Пост: число взятий мониторов текущей задачей (главным стеком),
 		плюс один на время перебора условий при передаче монитора;
 		планировщик не уступает в точке опроса, пока оно > 0. *)
+		VAR n: INTEGER;
 	BEGIN
-		Sync;
-		IF cur # NIL THEN RETURN cur.depth + handing ELSE RETURN handing END
+		Sync;	(* взятия быстрым путём лежат на стеке ядра: сбрасывать их незачем *)
+		IF cur # NIL THEN n := cur.depth + handing ELSE n := handing END;
+		RETURN n + SHORT((Kernel.monTop - Kernel.monBase) DIV (2 * word))
 	END LockDepth;
 
 	(* -------------------- запросы для тестов и отладки -------------------- *)
@@ -775,6 +854,7 @@ MODULE Monitors;
 	(** Пост: число записей во всех очередях входа и ожидания. *)
 		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef;
 	BEGIN
+		Flush;
 		n := 0; i := 0;
 		WHILE i < monHash DO
 			m := monBuckets[i];
@@ -793,6 +873,7 @@ MODULE Monitors;
 		их очереди. Зовёт и планировщик при тупике. *)
 		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef; nm: ARRAY 64 OF CHAR;
 	BEGIN
+		Flush;	(* взятия быстрым путём текущего токена — в таблицу *)
 		MonStr("Kernel: monitor dump"); MonLn;
 		n := 0; i := 0;
 		WHILE i < monHash DO
@@ -825,5 +906,6 @@ MODULE Monitors;
 
 BEGIN
 	NEW(hook);
+	fieldType := NIL; fieldOff := -1;
 	Kernel.SetMonitorHook(hook)
 END Monitors.

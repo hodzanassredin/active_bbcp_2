@@ -35,6 +35,8 @@ MODULE Kernel;
 	IMPORT S := SYSTEM, COM;
 
 	CONST
+		mainToken* = 1;	(** токен главного стека в monTok: адреса задач выровнены, 1 с ними не совпадёт *)
+		monStkLen = 64;	(* взятий быстрым путём без возврата в Monitors *)
 		strictStackSweep = TRUE;
 		(* Правило запуска сборки (как GOGC): при нехватке свободного блока
 		   NewBlock собирает, только если с прошлой сборки выделено не меньше
@@ -246,11 +248,13 @@ MODULE Kernel;
 		MonitorHook* = POINTER TO ABSTRACT RECORD END;
 
 		(* Крючок планировщика: реализация в Tasks. *)
-		Scheduler* = POINTER TO ABSTRACT RECORD
-			(** Токен текущей задачи; 0 — главный стек. Инвариант: планировщик
-				держит его верным в любой момент, когда исполняется код вне
-				самого переключения; Monitors читает поле без вызова. *)
-			token*: S.ADDRESS
+		Scheduler* = POINTER TO ABSTRACT RECORD END;
+
+		(* Взятие монитора быстрым путём: объект и смещение его поля владельца
+		   (скрытое поле "@mon" или сама скрытая переменная монитора модуля). *)
+		MonEntry = RECORD
+			obj: ANYPTR;	(* корень сборщика, пока взятие на стеке *)
+			off: S.ADDRESS
 		END;
 
 		(* Реестр стеков. Одна запись на любой стек: главный, задача,
@@ -392,6 +396,17 @@ MODULE Kernel;
 
 		(* Крючки: мониторы ставит Monitors, планировщик — Tasks. *)
 		monitorHook: MonitorHook;
+		(** Быстрый путь [exclusive] (код порождает компилятор):
+			monTok — токен исполняемого кода (адрес записи задачи или mainToken),
+			пишет планировщик при смене задачи;
+			[monBase, monTop) — взятия быстрым путём текущего токена,
+			по записи MonEntry; monEnd — предел.
+			Инвариант: поле владельца объекта равно monTok тогда и только тогда,
+			когда объект лежит в [monBase, monTop); 2 — монитором управляет
+			таблица Monitors; 0 — свободен и записи в таблице нет. *)
+		monTok*, monTop*: S.ADDRESS;
+		monBase-, monEnd-: S.ADDRESS;
+		monStk: ARRAY monStkLen OF MonEntry;
 		sched-: Scheduler;	(* read-only: Monitors читает токен/park/unpark/name *)
 		pollWanted: BOOLEAN;
 
@@ -425,6 +440,8 @@ MODULE Kernel;
 		bootInfo-: BootInfo;
 
 	PROCEDURE (h: MonitorHook) lock* (obj: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) lockAt* (obj, off: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) flush*, NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) unlock* (obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) await* (cond: CondProc; frame, obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) beginTry* (): INTEGER, NEW, ABSTRACT;
@@ -1958,11 +1975,19 @@ MODULE Kernel;
 		END
 	END UnregisterStack;
 
+	PROCEDURE FlushMonitors*;
+	(** Пост: monTop = monBase; взятия быстрым путём переданы таблице
+		Monitors на токен monTok. Зовётся до смены monTok и до ухода со стека. *)
+	BEGIN
+		IF (monTop # monBase) & (monitorHook # NIL) THEN monitorHook.flush END
+	END FlushMonitors;
+
 	PROCEDURE SwitchSave* (s: Stack);
 	(** Сохранить состояние исполнения текущего стека перед переключением.
 		s — запись текущего стека; NIL — найти её по указателю стека. *)
 		VAR sp, fpp: S.ADDRESS; ar: AdrRef;
 	BEGIN
+		IF monTop # monBase THEN FlushMonitors END;	(* взятия быстрым путём — этого стека *)
 		S.GETREG(SP, sp);
 		IF s = NIL THEN s := StackOf(sp) END;
 		IF s # NIL THEN
@@ -2183,6 +2208,13 @@ MODULE Kernel;
 			IF sched.poll() THEN pollWanted := FALSE END
 		END
 	END Poll;
+
+	PROCEDURE LockAt* (obj: S.ADDRESS; off: INTEGER);
+	(** Медленный путь [exclusive] с полем владельца: obj + off — поле. *)
+	BEGIN
+		IF monitorHook # NIL THEN monitorHook.lockAt(obj, off)
+		ELSE MonitorFail("Lock") END
+	END LockAt;
 
 	PROCEDURE Lock* (obj: ANYPTR);
 	BEGIN
@@ -2895,6 +2927,8 @@ MODULE Kernel;
 	
 BEGIN
 	IF modList = NIL THEN	(* only once *)
+		monTok := mainToken; monBase := S.ADR(monStk[0]); monTop := monBase;
+		monEnd := monBase + monStkLen * SIZE(MonEntry);
 		IF bootInfo # NIL THEN
 			modList := bootInfo.modList	(* boot loader initializes the bootInfo struct *)
 		ELSE

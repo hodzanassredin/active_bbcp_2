@@ -15,6 +15,7 @@ MODULE DevCPT;
 	IMPORT DevCPM, Utf;
 
 	CONST
+		monFieldName = "@mon";	(* скрытое поле владельца монитора *)
 		MaxIdLen = 256;
 	
 	TYPE
@@ -188,7 +189,7 @@ MODULE DevCPT;
 		   Создаётся заново на каждую компиляцию, чтобы не тащить
 		   ссылки и used-флаги прошлого модуля. *)
 		kernelScope, kernelSave: Object;
-		kPoll*, kLock*, kUnlock*, kAwait*: Object;
+		kPoll*, kLock*, kUnlock*, kAwait*, kLockAt*, kMonTok*, kMonTop*, kMonEnd*: Object;
 		(* kernelScope создаётся по первому требованию (EnsureKernel):
 		   иначе каждый модуль импортировал бы "$$" — Kernel. *)
 		moduleMon: Object;	(* скрытая глобальная монитора модуля *)
@@ -1668,6 +1669,12 @@ MODULE DevCPT;
 		obj.conval := NewConst()	(* генератор читает conval.setval *)
 	END KProc;
 
+	PROCEDURE KVar (IN name: Name; typ: Struct; vis: BYTE; VAR obj: Object);
+	BEGIN
+		Insert(name, obj);
+		obj.mode := Var; obj.typ := typ; obj.vis := vis; obj.library := NIL
+	END KVar;
+
 	PROCEDURE CreateKernel;
 	(** Область "$$" — как в GetComKernel (DevCPVamd64), но создаётся
 		на каждую компиляцию и содержит все точки входа ядра, которые
@@ -1698,6 +1705,11 @@ MODULE DevCPT;
 		par2 := MakeKernelPar("frame", adrtyp); par.link := par2;
 		par3 := MakeKernelPar("obj", anyptrtyp); par2.link := par3;
 		KProc("Await", notyp, par, kAwait);
+		par := MakeKernelPar("obj", adrtyp); par2 := MakeKernelPar("off", int32typ); par.link := par2;
+		KProc("LockAt", notyp, par, kLockAt);
+		KVar("monTok", adrtyp, external, kMonTok);
+		KVar("monTop", adrtyp, external, kMonTop);
+		KVar("monEnd", adrtyp, externalR, kMonEnd);
 		kernelScope := topScope;
 		GlbMod[nofGmod] := topScope; INC(nofGmod);
 		CloseScope
@@ -1723,6 +1735,73 @@ MODULE DevCPT;
 		topScope := kernelSave
 	END CloseKernel;
 
+	(* --- скрытое поле владельца монитора "@mon" --------------------------- *)
+
+	PROCEDURE OwnMonField (typ: Struct): Object;
+	(* Поле "@mon", объявленное в самом typ (без базовых). *)
+		VAR o: Object;
+	BEGIN
+		o := typ.link;
+		WHILE o # NIL DO
+			IF monFieldName < o.name^ THEN o := o.left
+			ELSIF monFieldName > o.name^ THEN o := o.right
+			ELSE RETURN o
+			END
+		END;
+		RETURN NIL
+	END OwnMonField;
+
+	PROCEDURE MonField* (rec: Struct): Object;
+	(** Поле владельца монитора для записей типа rec: "@mon" ближайшего к
+		корню типа цепочки rec, где оно есть; NIL — поля нет. Ближайшее к
+		корню, а не к rec: если база получила поле после расширения, обе
+		пользуются одним полем. *)
+		VAR t: Struct; o, res: Object;
+	BEGIN
+		res := NIL; t := rec;
+		WHILE (t # NIL) & (t # undftyp) & (t.comp = Record) DO
+			o := OwnMonField(t);
+			IF o # NIL THEN res := o END;
+			t := t.BaseTyp
+		END;
+		RETURN res
+	END MonField;
+
+	PROCEDURE Reinsert (o: Object; typ: Struct);
+		VAR l, r, old: Object;
+	BEGIN
+		IF o # NIL THEN
+			l := o.left; r := o.right; o.left := NIL; o.right := NIL;
+			InsertThisField(o, typ, old);
+			Reinsert(l, typ); Reinsert(r, typ)
+		END
+	END Reinsert;
+
+	PROCEDURE EnsureMonField* (rec: Struct): BOOLEAN;
+	(** Пред: rec — запись модуля, у которой объявляется исключающий метод.
+		Пост: TRUE — у rec или её базы есть поле "@mon" (адрес, экспорт только
+		для чтения: расширения в других модулях находят его в символьном файле);
+		FALSE — размер rec уже вычислен, поле добавить нельзя.
+		Новое поле — последнее в списке полей rec. Дерево имён записи с корнем
+		в первом поле: у записи без полей дерево перестраивается с корнем в "@mon". *)
+		VAR f, o, root: Object;
+	BEGIN
+		IF MonField(rec) # NIL THEN RETURN TRUE END;
+		IF rec.size # -1 THEN RETURN FALSE END;
+		f := NewObj(); f.leaf := TRUE; f.name := NewName(monFieldName);
+		f.mode := Fld; f.typ := adrtyp; f.vis := externalR; f.link := NIL;
+		root := rec.link;
+		IF (root # NIL) & (root.mode = Fld) THEN
+			InsertThisField(f, rec, o); ASSERT(o = NIL, 100);
+			WHILE root.link # NIL DO root := root.link END;
+			root.link := f
+		ELSE
+			rec.link := NIL; InsertThisField(f, rec, o);
+			Reinsert(root, rec)
+		END;
+		RETURN TRUE
+	END EnsureMonField;
+
 	PROCEDURE ModuleMonitor* (): Object;
 	(** Скрытая глобальная переменная модуля — объект монитора для
 		[exclusive]-процедур верхнего уровня и их ACTIVE.AWAIT. *)
@@ -1731,7 +1810,7 @@ MODULE DevCPT;
 		IF moduleMon = NIL THEN
 			kernelSave := topScope; topScope := GlbMod[0];	(* область модуля *)
 			Insert("@monitor", moduleMon);
-			moduleMon.mode := Var; moduleMon.typ := int32typ;
+			moduleMon.mode := Var; moduleMon.typ := adrtyp;	(* поле владельца быстрого пути *)
 			moduleMon.vis := internal; moduleMon.leaf := TRUE;
 			o := topScope.scope;
 			IF o = NIL THEN topScope.scope := moduleMon
