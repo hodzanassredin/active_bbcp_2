@@ -113,8 +113,10 @@ the monitor.
 
 ### 3.1. Rendezvous
 
-`Chan` stores no messages. `Send` deposits the message and waits until the receiver takes it; `Recv`
-waits for a deposit or a sender offer. A send completes only after the receive.
+`Chan` stores no messages: it is a bounded channel of capacity 0. `Send` without a waiting receiver
+joins the sender queue and waits until a receiver takes the message; `Recv` without a waiting sender
+joins the receiver queue. A send completes only after the receive; senders are served in arrival
+order.
 
 ```
 c := AsyncChan.NewChan();
@@ -122,8 +124,8 @@ c.Send(m);        (* returns after Recv *)
 c.Recv(m);        (* waits for a sender *)
 ```
 
-`Send` and `Recv` are two phases of the rendezvous: the sender leaves a deposit, the receiver takes
-it and wakes the sender.
+The side that arrives second performs the offer of the first and wakes it. A send and a receive of
+one `Select` on one channel do not perform each other.
 
 ### 3.2. Bounded Buffer
 
@@ -220,8 +222,8 @@ Rules:
    `ms <= 0` fires immediately if no alternative is ready.
 5. An external signal ready during registration (`Arm` returned `TRUE`) wins immediately. Otherwise
    the signal owner later calls `SignalReady`.
-6. After waking, the task withdraws the losing offers; an active sender deposit is rolled back. The
-   field `got` is filled only for the winning receive.
+6. After waking, the task withdraws the losing offers. An offer is not performed against an offer
+   of the same `Select`. The field `got` is filled only for the winning receive.
 7. Cancellation while waiting traps the task in `Tasks.Park`. Offers remain in the channels and are
    removed lazily: a channel considers an offer dead when the task has reached `Finished` or
    `Cancelled`.
@@ -275,14 +277,14 @@ Checks:
 
 1. A direct `Send` checks the message at entry, before any possible wait.
 2. `SendAlt` checks the message at the moment the offer is actually performed: on immediate
-   registration, when a receiver takes a deposited offer, or when room appears in a buffer. A losing
+   registration, when a receiver takes a waiting offer, or when room appears in a buffer. A losing
    offer does not change the state.
 3. A violation prints `AsyncChan protocol: <text>` to the console and traps the sender with code 21.
    The protocol is checked at the moment the send takes place. If the sender was waiting for a
    receiver or for space, the sender gets the trap, not the task that would have received the
    message; the message is not delivered.
    The text remains in `LastViolation`; the expected messages are listed in the violation text.
-4. Without a protocol `CheckSend` returns after one `NIL` test; there is no overhead.
+4. Without a protocol the check returns after one `NIL` test; there is no overhead.
 5. Attaching a protocol resets the state to the start state.
 
 Limits: at most 32 states and 128 transitions; a state name and a label are at most 31 characters;
@@ -604,9 +606,10 @@ alternative without timers: the operation runs at once (to a waiting receiver, i
 the queue or from a waiting sender) or puts an offer into `waitS`/`waitR` and sleeps in
 `Tasks.Park`. The other side performs the offer and wakes the task without handing over the
 monitor, so a buffer sender keeps adding messages while the receiver has not yet started draining.
-A `Select` send into a rendezvous without a waiting receiver deposits `item` with the `deposit` flag
-(`depOffer`). `Prune` on every channel access rolls back a deposit whose offer lost or whose task
-finished. An offer is dead when the task is in `Finished` or `Cancelled`, not merely cancelled.
+A rendezvous is a channel of capacity 0: a send without a receiver, direct or from `Select`, always
+waits in `waitS`, and the receiver takes the first live offer from there. An offer is not performed
+against an offer with the same `ctx`. Dead offers are removed when a queue is walked in search of a
+partner. An offer is dead when the task is in `Finished` or `Cancelled`, not merely cancelled.
 
 ### 10.2. I/O
 

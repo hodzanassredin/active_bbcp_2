@@ -42,6 +42,8 @@ MODULE Async_devChannels;
 		PlainSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; n: INTEGER END;
 		Picker = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 		EchoBack = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
+		SelfSelect = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
+		AltSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; n: INTEGER END;
 
 	VAR
 		onceDone: BOOLEAN;
@@ -65,6 +67,7 @@ MODULE Async_devChannels;
 		muxIdx, muxVal: INTEGER;
 		echoAllocs: LONGINT;
 		drained, picked: INTEGER;	(* выделений за вторую сотню обменов Echo *)
+		selfIdx: INTEGER; selfGot: AsyncSelect.Msg;
 
 	PROCEDURE Pump (ms: LONGINT): BOOLEAN;
 		(** Главный цикл без окна: действия Services (планировщик и
@@ -503,5 +506,64 @@ MODULE Async_devChannels;
 		UnitAssert.EqualInt(total, picked, "every message selected");
 		UnitAssert.True(Tasks.Switches() - sw < 3 * total, "about two switches per select")
 	END TestProcSelectRendezvousSwitches;
+
+	(* --- встреча: задача не встречается сама с собой ---------------------- *)
+
+	PROCEDURE (t: SelfSelect) Run;
+		VAR ops: ARRAY 3 OF AsyncSelect.Op; m: NumMsg;
+	BEGIN
+		NEW(m); m.n := 5;
+		AsyncChan.SendAlt(t.c, m, ops[0]);
+		AsyncChan.RecvAlt(t.c, ops[1]);
+		AsyncChan.TimeoutAlt(50, ops[2]);
+		selfIdx := AsyncChan.Select(ops);
+		selfGot := ops[1].got
+	END Run;
+
+	PROCEDURE TestSelectSendRecvSameChanTimesOut*;
+	(* Отправка и приём одного Select на одной встрече не исполняют друг
+	   друга: других задач нет, побеждает тайм-аут. *)
+		VAR t: SelfSelect;
+	BEGIN
+		selfIdx := -1; selfGot := NIL;
+		NEW(t); t.c := AsyncChan.NewChan(); Tasks.Start(t);
+		UnitAssert.True(Pump(3000), "select finishes");
+		UnitAssert.True(~Tasks.Failed(t), "select did not trap");
+		UnitAssert.EqualInt(2, selfIdx, "timeout alternative wins");
+		UnitAssert.True(selfGot = NIL, "nothing received from itself")
+	END TestSelectSendRecvSameChanTimesOut;
+
+	(* --- встреча: отправители в порядке прихода -------------------------- *)
+
+	PROCEDURE (t: AltSender) Run;
+		VAR ops: ARRAY 1 OF AsyncSelect.Op; m: NumMsg;
+	BEGIN
+		NEW(m); m.n := t.n;
+		AsyncChan.SendAlt(t.c, m, ops[0]);
+		IF AsyncChan.Select(ops) # 0 THEN HALT(60) END
+	END Run;
+
+	PROCEDURE NextNum (c: AsyncChan.Chan): INTEGER;
+		VAR m: AsyncSelect.Msg;
+	BEGIN
+		c.Recv(m);	(* отправитель ждёт: ожидания нет, главный стек допустим *)
+		WITH m: NumMsg DO RETURN m.n ELSE RETURN -1 END
+	END NextNum;
+
+	PROCEDURE TestRendezvousSendersFifo*;
+	(* Ждущие отправители встречи — прямые и через Select — обслуживаются
+	   в порядке прихода. *)
+		VAR c: AsyncChan.Chan; s1, s3: LateSender; s2: AltSender;
+	BEGIN
+		c := AsyncChan.NewChan();
+		NEW(s1); s1.c := c; s1.n := 1; Tasks.Start(s1); Tasks.Step;
+		NEW(s2); s2.c := c; s2.n := 2; Tasks.Start(s2); Tasks.Step;
+		NEW(s3); s3.c := c; s3.n := 3; Tasks.Start(s3); Tasks.Step;
+		UnitAssert.True(Tasks.State(s3) = Tasks.Parked, "senders wait");
+		UnitAssert.EqualInt(1, NextNum(c), "first sender first");
+		UnitAssert.EqualInt(2, NextNum(c), "select sender second");
+		UnitAssert.EqualInt(3, NextNum(c), "third sender third");
+		UnitAssert.True(Pump(3000), "senders finish")
+	END TestRendezvousSendersFifo;
 
 END Async_devChannels.
