@@ -2,6 +2,7 @@ MODULE LinIntInit;
 
 	IMPORT
 		Kernel,
+		Monitors (* реализация Kernel.Lock/Unlock/Wait/Await *) ,
 		StdInterpreter (* Dialog.SetCallHook *) ,
 		LinConsole (* Console.SetHook *) ,
 		

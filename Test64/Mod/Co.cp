@@ -40,6 +40,13 @@ MODULE Test64Co;
 		RETURN res
 	END co_create_on;
 
+	PROCEDURE co_create_raw* (entry, arg: SYSTEM.ADDRESS; size: LONGINT): INTEGER;
+	(** Стек вне реестра ядра: проверка безопасной сборки мусора на
+		незнакомом стеке (MarkLocals не трапает и не сканирует его). *)
+	BEGIN
+		RETURN Test64CRaw.c_create(entry, arg, size)
+	END co_create_raw;
+
 	(** Войти/продолжить сопрограмму (сохранить текущий контекст). *)
 	PROCEDURE co_resume* (): INTEGER;
 		VAR res: INTEGER;

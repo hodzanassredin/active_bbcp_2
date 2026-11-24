@@ -8,7 +8,7 @@ MODULE Test64Tasks;
 	tools/unit.sh гонит модуль отдельным процессом. Нагрузка на 10 тыс.
 	задач помечена TestSlow… и включается в манифесте marks=proc,slow. *)
 
-	IMPORT Kernel, Services, Tasks, UnitAssert, Test64Clock, Console, Strings;
+	IMPORT Kernel, Monitors, Services, Tasks, UnitAssert, Test64Clock, Console, Strings;
 
 	CONST
 		benchStack = 64 * 1024;
@@ -440,8 +440,8 @@ MODULE Test64Tasks;
 	BEGIN
 		NEW(mon); NEW(h); h.mon := mon;
 		Tasks.Start(h);
-		WHILE ~Kernel.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
-		UnitAssert.True(Kernel.IsLocked(mon), "holder took the monitor");
+		WHILE ~Monitors.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
+		UnitAssert.True(Monitors.IsLocked(mon), "holder took the monitor");
 		NEW(p); p.mon := mon; Tasks.Start(p);
 		Tasks.Step;	(* probe ушёл в Park *)
 		UnitAssert.True(Tasks.State(p) = Tasks.Parked, "probe parked");
@@ -450,7 +450,7 @@ MODULE Test64Tasks;
 		UnitAssert.True(ok, "tasks finished");
 		UnitAssert.True(~Tasks.Failed(p), "probe survived the monitor wait");
 		UnitAssert.True(p.got, "probe acquired the monitor");
-		UnitAssert.True(~Kernel.IsLocked(mon), "monitor released")
+		UnitAssert.True(~Monitors.IsLocked(mon), "monitor released")
 	END TestProcParkWakeFlag;
 
 END Test64Tasks.

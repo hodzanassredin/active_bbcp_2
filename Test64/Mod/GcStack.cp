@@ -22,6 +22,7 @@ MODULE Test64GcStack;
 	TYPE Obj = POINTER TO RECORD tag: INTEGER; pad: ARRAY 8 OF LONGINT END;
 
 	VAR finalized: BOOLEAN; fin4242: BOOLEAN; coError: INTEGER; coDone: BOOLEAN;
+		rawDone: BOOLEAN; rawErr: INTEGER;
 
 	PROCEDURE (o: Obj) FINALIZE;
 	BEGIN
@@ -57,6 +58,21 @@ MODULE Test64GcStack;
 		coDone := TRUE
 	END Work;
 
+	PROCEDURE [ccall] RawWork (arg: SYSTEM.ADDRESS);
+	(** Сборка мусора на стеке, которого нет в реестре ядра (обратный
+		вызов из C): раньше MarkLocals трапал HALT(126). Теперь сборка
+		отменяется целиком, поэтому объект, на который ссылается только
+		этот стек, остаётся цел. *)
+		VAR o: Obj;
+	BEGIN
+		NEW(o); o.tag := 777;
+		Test64Support.Check(~Kernel.InRegisteredStack(SYSTEM.ADR(o)),
+			"raw stack must not be in the kernel registry");
+		Kernel.Collect; Kernel.Collect;
+		IF o.tag = 777 THEN rawErr := 0 ELSE rawErr := 1 END;
+		rawDone := TRUE
+	END RawWork;
+
 	PROCEDURE Do*;
 		VAR res: INTEGER; base: SYSTEM.ADDRESS;
 	BEGIN
@@ -77,6 +93,19 @@ MODULE Test64GcStack;
 		Test64Support.Check(~fin4242,
 			"FINALIZE ran for object still reachable from second stack");
 		res := Test64Co.co_release();
+
+		(* Незнакомый стек: сборка не должна трапать и не должна
+		   освобождать объекты, на которые он ссылается. *)
+		rawDone := FALSE; rawErr := 0;
+		res := Test64Co.co_create_raw(SYSTEM.ADR(RawWork), 0, 1024 * 1024);
+		Test64Support.Check(res = 0, "raw co_create failed");
+		res := Test64Co.co_resume();
+		Test64Support.Check(res = 0, "raw co_resume failed");
+		Test64Support.Check(rawDone, "GC on an unregistered stack did not finish");
+		Test64Support.Check(rawErr = 0,
+			"GC on an unregistered stack touched a reachable object");
+		res := Test64Co.co_release();
+
 		Test64Support.End
 	END Do;
 

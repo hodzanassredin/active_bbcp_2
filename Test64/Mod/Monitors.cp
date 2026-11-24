@@ -8,7 +8,7 @@ MODULE Test64Monitors;
 	(кадр не используется — компиляторную схему с вложенной процедурой
 	проверит этап 6). *)
 
-	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert, Console, Strings;
+	IMPORT S := SYSTEM, Kernel, Monitors, Tasks, UnitAssert, Console, Strings;
 
 	CONST
 		items = 200;	(* сколько всего произведено в нагрузочном буфере *)
@@ -74,12 +74,12 @@ MODULE Test64Monitors;
 	BEGIN
 		NEW(mon2);
 		Kernel.Lock(mon2);
-		UnitAssert.True(Kernel.IsLocked(mon2), "first entry");
+		UnitAssert.True(Monitors.IsLocked(mon2), "first entry");
 		Kernel.Lock(mon2);
 		Kernel.Unlock(mon2);
-		UnitAssert.True(Kernel.IsLocked(mon2), "still locked after one unlock");
+		UnitAssert.True(Monitors.IsLocked(mon2), "still locked after one unlock");
 		Kernel.Unlock(mon2);
-		UnitAssert.True(~Kernel.IsLocked(mon2), "free after two unlocks")
+		UnitAssert.True(~Monitors.IsLocked(mon2), "free after two unlocks")
 	END TestProcRecursiveLock;
 
 	PROCEDURE TestProcUnlockErrors*;
@@ -88,7 +88,7 @@ MODULE Test64Monitors;
 		UnitAssert.Traps(UnlockFree, "unlock of a free monitor must trap");
 		Kernel.Lock(mon2); Kernel.Unlock(mon2);
 		UnitAssert.Traps(UnlockFree, "second unlock must trap");
-		UnitAssert.True(~Kernel.IsLocked(mon2), "monitor is free")
+		UnitAssert.True(~Monitors.IsLocked(mon2), "monitor is free")
 	END TestProcUnlockErrors;
 
 	PROCEDURE TestProcWaitOutsideTask*;
@@ -96,7 +96,7 @@ MODULE Test64Monitors;
 		NEW(mon2);
 		UnitAssert.Traps(WaitOutside, "Wait outside a task must trap");
 		UnitAssert.Traps(AwaitOutside, "Await outside a task must trap");
-		UnitAssert.True(~Kernel.IsLocked(mon2), "nothing stayed locked")
+		UnitAssert.True(~Monitors.IsLocked(mon2), "nothing stayed locked")
 	END TestProcWaitOutsideTask;
 
 	(* --- снятие при трапе ------------------------------------------------ *)
@@ -117,7 +117,7 @@ MODULE Test64Monitors;
 	BEGIN
 		Kernel.Lock(mon);
 		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(InnerLocked)), 0, 0, 0);
-		outerStill := Kernel.IsLocked(mon);	(* внешний вход пережил трап *)
+		outerStill := Monitors.IsLocked(mon);	(* внешний вход пережил трап *)
 		Kernel.Unlock(mon)
 	END OuterLocked;
 
@@ -125,12 +125,12 @@ MODULE Test64Monitors;
 	BEGIN
 		NEW(mon);
 		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TakeAndTrap)), 0, 0, 0);
-		UnitAssert.True(~Kernel.IsLocked(mon), "trap released the monitor");
+		UnitAssert.True(~Monitors.IsLocked(mon), "trap released the monitor");
 
 		outerStill := FALSE;
 		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(OuterLocked)), 0, 0, 0);
 		UnitAssert.True(outerStill, "nested Try kept the outer entry");
-		UnitAssert.True(~Kernel.IsLocked(mon), "outer Unlock freed the monitor")
+		UnitAssert.True(~Monitors.IsLocked(mon), "outer Unlock freed the monitor")
 	END TestProcTrapReleases;
 
 	(* --- ограниченный буфер на ручных Lock/Wait/Unlock ------------------- *)
@@ -172,7 +172,7 @@ MODULE Test64Monitors;
 		UnitAssert.EqualInt(items, produced, "all items produced");
 		UnitAssert.EqualInt(items, consumed, "all items consumed");
 		UnitAssert.True(count <= cap, "buffer stayed within capacity");
-		UnitAssert.EqualInt(0, Kernel.WaitersCount(), "no stale monitor waiters");
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "no stale monitor waiters");
 		UnitAssert.True(~Tasks.Failed(p1) & ~Tasks.Failed(p2), "producers did not trap");
 		UnitAssert.True(~Tasks.Failed(c1) & ~Tasks.Failed(c2), "consumers did not trap")
 	END TestProcManualBuffer;
@@ -224,14 +224,14 @@ MODULE Test64Monitors;
 		NEW(mon); shared := FALSE;
 		NEW(w); NEW(s); Tasks.Start(w);
 		n := 0;
-		WHILE (Kernel.WaitersCount() = 0) & (Tasks.Count() > 0) & (n < 100) DO Tasks.Step; INC(n) END;
-		UnitAssert.True(Kernel.WaitersCount() > 0, "waiter registered its condition");
+		WHILE (Monitors.WaitersCount() = 0) & (Tasks.Count() > 0) & (n < 100) DO Tasks.Step; INC(n) END;
+		UnitAssert.True(Monitors.WaitersCount() > 0, "waiter registered its condition");
 		Tasks.Start(s);
 		UnitAssert.True(Pump(5000), "waiter and setter finished");
 		UnitAssert.True(shared, "condition became true");
 		UnitAssert.True(~Tasks.Failed(w) & ~Tasks.Failed(s), "no traps");
-		UnitAssert.True(~Kernel.IsLocked(mon), "monitor free at the end");
-		UnitAssert.EqualInt(0, Kernel.WaitersCount(), "wait queues empty")
+		UnitAssert.True(~Monitors.IsLocked(mon), "monitor free at the end");
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "wait queues empty")
 	END TestProcAwaitCondition;
 
 	PROCEDURE TestProcConditionTrapForwarded*;
@@ -241,16 +241,16 @@ MODULE Test64Monitors;
 		NEW(w); NEW(s);
 		Tasks.Start(w);
 		n := 0;
-		WHILE (Kernel.WaitersCount() = 0) & (Tasks.Count() > 0) & (n < 100) DO Tasks.Step; INC(n) END;
-		UnitAssert.True(Kernel.WaitersCount() > 0, "waiter with TrapCond is asleep");
+		WHILE (Monitors.WaitersCount() = 0) & (Tasks.Count() > 0) & (n < 100) DO Tasks.Step; INC(n) END;
+		UnitAssert.True(Monitors.WaitersCount() > 0, "waiter with TrapCond is asleep");
 		Tasks.Start(s);
 		UnitAssert.True(Pump(5000), "tasks finished after the condition trap");
 		(* трап в условии случился в Unlock задачи-сеттера и был
 		   переадресован ждущей: она failed, сеттер — нет *)
 		UnitAssert.True(Tasks.Failed(w), "trap was forwarded to the waiter");
 		UnitAssert.True(~Tasks.Failed(s), "setter survived the condition trap");
-		UnitAssert.True(~Kernel.IsLocked(mon), "monitor released after a condition trap");
-		UnitAssert.EqualInt(0, Kernel.WaitersCount(), "wait queues cleaned")
+		UnitAssert.True(~Monitors.IsLocked(mon), "monitor released after a condition trap");
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "wait queues cleaned")
 	END TestProcConditionTrapForwarded;
 
 	(* --- тупик ------------------------------------------------------------ *)
@@ -275,11 +275,11 @@ MODULE Test64Monitors;
 		i := 0;
 		WHILE ~Tasks.Deadlocked() & (i < 50) DO Tasks.Step; INC(i) END;
 		UnitAssert.True(Tasks.Deadlocked(), "deadlock was detected");
-		UnitAssert.True(Kernel.WaitersCount() >= 2, "both tasks wait for a monitor");
+		UnitAssert.True(Monitors.WaitersCount() >= 2, "both tasks wait for a monitor");
 		Tasks.Cancel(t1); Tasks.Cancel(t2);
 		UnitAssert.True(Pump(3000), "cancelled tasks finished");
-		UnitAssert.EqualInt(0, Kernel.WaitersCount(), "wait queues cleaned after cancel");
-		UnitAssert.True(~Kernel.IsLocked(ma) & ~Kernel.IsLocked(mb), "monitors released")
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "wait queues cleaned after cancel");
+		UnitAssert.True(~Monitors.IsLocked(ma) & ~Monitors.IsLocked(mb), "monitors released")
 	END TestProcDeadlock;
 
 	(* --- сборщик держит объект под монитором ----------------------------- *)
@@ -305,12 +305,12 @@ MODULE Test64Monitors;
 		MakeHeld;	(* единственная ссылка — запись монитора *)
 		Scrub(32);	(* затереть след указателя на стеке *)
 		Kernel.Collect;
-		UnitAssert.True(Kernel.IsLocked(S.VAL(ANYPTR, gcAdr)),
+		UnitAssert.True(Monitors.IsLocked(S.VAL(ANYPTR, gcAdr)),
 			"monitor kept the object alive");
 		c := S.VAL(Cell, gcAdr);
 		UnitAssert.EqualInt(42, c.x, "object content intact");
 		Kernel.Unlock(S.VAL(ANYPTR, gcAdr));
-		UnitAssert.True(~Kernel.IsLocked(S.VAL(ANYPTR, gcAdr)), "released")
+		UnitAssert.True(~Monitors.IsLocked(S.VAL(ANYPTR, gcAdr)), "released")
 	END TestProcMonitorKeepsObject;
 
 END Test64Monitors.

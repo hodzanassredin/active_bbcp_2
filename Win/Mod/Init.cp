@@ -14,7 +14,7 @@ MODULE WinInit;
 	(** the first dynamically-loaded module *)
 
 	IMPORT
-		SYSTEM, Kernel, Services, Log, Dialog, Converters, Loop, Meta, 
+		SYSTEM, Kernel, Monitors, Services, Log, Dialog, Converters, Loop, Meta, 
 	
 	(* platform specific modules *)
 		WinApi,

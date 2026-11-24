@@ -44,12 +44,12 @@ MODULE Kernel;
 
 		processor* = 10;	(* i386 *)
 
-		(* Этапы 2–4 на i386 (по образцу Mod64): стек может занимать
-		   до maxStackScan байт; мониторы — побочная таблица по адресу
-		   объекта (monHash корзин, mainToken — токен главного стека). *)
+		(* Этап 2 на i386 (по образцу Mod64): стек может занимать
+		   до maxStackScan байт.
+		   Запас под область регистров, которую сырой переключатель кладёт
+		   ниже SP на момент SwitchSave. *)
 		maxStackScan = 64 * 1024 * 1024;
-		monHash = 64;
-		mainToken = 1;
+		switchSaveSlack = 64;
 
 		(* loader constants *)
 		done* = 0;
@@ -232,49 +232,15 @@ MODULE Kernel;
 			trapped: BOOLEAN
 		END;
 
-		(* Мониторы (этап 4, схема Мюллера для AWAIT) — по образцу Mod64.
-		   Monitor — запись на объект: владелец (токен задачи), глубина
-		   повторного входа, очередь входящих и очередь ждущих условия. *)
+		(* Мониторы (этап 4) вынесены в обычный модуль Monitors (s18).
+		   Ядро зовёт реализацию через один объект-крючок; сигнатуры
+		   экспортируемых Lock/Unlock/Wait/Await не менялись. *)
 		CondProc* = PROCEDURE (frame: S.ADDRESS): BOOLEAN;
 
-		TaskRef = POINTER TO RECORD
-			task: S.ADDRESS;	(* токен ждущей/входящей задачи *)
-			next: TaskRef
-		END;
+		MonitorHook* = POINTER TO ABSTRACT RECORD END;
 
-		WaitRef = POINTER TO RECORD
-			task: S.ADDRESS;
-			cond: CondProc;		(* NIL — ручной Wait *)
-			frame: S.ADDRESS;
-			trap: INTEGER;		(* трап при вычислении условия: переадресуется *)
-			next: WaitRef
-		END;
-
-		Monitor = POINTER TO MonitorRec;
-		MonitorRec = RECORD
-			next: Monitor;		(* цепочка корзины *)
-			obj: S.ADDRESS;		(* объект *)
-			owner: S.ADDRESS;	(* токен владельца; 0 — свободен *)
-			count: INTEGER;		(* глубина повторного входа *)
-			enter, enterTail: TaskRef;
-			wait, waitTail: WaitRef
-		END;
-
-		(* Одно взятие монитора: запись в цепочке текущего стека. *)
-		LockRec = POINTER TO RECORD
-			next: LockRec;
-			mon: Monitor
-		END;
-
-		(* Набор процедур планировщика, который ставит Tasks. *)
-		SchedCurrent* = PROCEDURE (): S.ADDRESS;
-		SchedPark* = PROCEDURE;
-		SchedUnpark* = PROCEDURE (task: S.ADDRESS);
-		SchedReady* = PROCEDURE (): BOOLEAN;
-		SchedDeadline* = PROCEDURE (): LONGINT;
-		SchedName* = PROCEDURE (task: S.ADDRESS; OUT name: ARRAY OF CHAR);
-		SchedStack* = PROCEDURE (task: S.ADDRESS): Stack;
-		SchedYield* = PROCEDURE;
+		(* Крючок планировщика: реализация в Tasks. *)
+		Scheduler* = POINTER TO ABSTRACT RECORD END;
 
 		(* Реестр стеков (этап 2). Одна запись на любой стек: главный,
 		   задача (этап 3), сигнальный. *)
@@ -286,8 +252,6 @@ MODULE Kernel;
 			fp: S.ADDRESS;			(* FP вызывающего SwitchSave *)
 			tryContext: S.ADDRESS;	(* платформенный контекст последнего Kernel.Try *)
 			trapStack: TrapCleaner;
-			lockChain: LockRec;
-			lockDepth: INTEGER;
 			tryCount: INTEGER;
 			signal: BOOLEAN;		(* сигнальный стек *)
 			main: BOOLEAN			(* главный стек процесса *)
@@ -380,7 +344,7 @@ MODULE Kernel;
 		END;
 
 	VAR
-		platform: POINTER [untagged] TO Platform;
+		platform-: POINTER [untagged] TO Platform;	(* read-only: диагностика Monitors *)
 		baseStack: INTEGER;	(* modList, root, and baseStack must be together for remote debugging *)
 		root: Cluster;	(* cluster list *)
 		modList-: Module;	(* root of module list *)
@@ -414,31 +378,13 @@ MODULE Kernel;
 		mainStack: Stack;
 		mainStackRec: StackDesc;	(* статическая запись: регистрация до кучи *)
 
-		(* Мониторы (этап 4). *)
-		monBuckets: ARRAY monHash OF Monitor;
-		nofMonitors: INTEGER;	(* записей в таблице, диагностика *)
-		freeMonitors: Monitor;	(* свободные записи: Lock без соперников не выделяет *)
-		freeLocks: LockRec;	(* свободные записи цепочки взятий *)
-
-		(* Планировщик: ставится Tasks.SetScheduler. *)
-		schedCurrent: SchedCurrent;
-		schedPark: SchedPark;
-		schedUnpark: SchedUnpark;
-		schedReady: SchedReady;
-		schedDeadline: SchedDeadline;
-		schedName: SchedName;
-		schedStack: SchedStack;
-		schedYield: SchedYield;
-		schedInstalled: BOOLEAN;
+		(* Крючки: мониторы ставит Monitors, планировщик — Tasks. *)
+		monitorHook: MonitorHook;
+		sched-: Scheduler;	(* read-only: Monitors читает токен/park/unpark/name *)
 		pollWanted: BOOLEAN;
 
 		(* Вычисление чужого условия внутри Unlock/Await. *)
-		condP: CondProc;
-		condF: S.ADDRESS;
-		condResult, condCompleted: BOOLEAN;
 		quietCleanup: INTEGER;	(* >0 — трап в чужом условии *)
-		lockChain: LockRec;		(* взятия мониторов текущим стеком *)
-		lockDepth: INTEGER;
 
 		trapViewer, trapChecker: Handler;
 		guarded: BOOLEAN; (** guarded => trap viewer (reporter) should not be called; this suppresses trap reporting *)
@@ -465,6 +411,20 @@ MODULE Kernel;
 		blog: BufLog;
 
 		bootInfo-: BootInfo;
+
+	PROCEDURE (h: MonitorHook) lock* (obj: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) unlock* (obj: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) wait* (obj: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) await* (cond: CondProc; frame, obj: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) beginTry* (): INTEGER, NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) endTry* (mark: INTEGER), NEW, ABSTRACT;
+	PROCEDURE (h: MonitorHook) purge*, NEW, ABSTRACT;
+
+	PROCEDURE (s: Scheduler) current* (): S.ADDRESS, NEW, ABSTRACT;	(* 0 — главный стек *)
+	PROCEDURE (s: Scheduler) park*, NEW, ABSTRACT;
+	PROCEDURE (s: Scheduler) unpark* (task: S.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (s: Scheduler) name* (task: S.ADDRESS; OUT name: ARRAY OF CHAR), NEW, ABSTRACT;
+	PROCEDURE (s: Scheduler) poll* (): BOOLEAN, NEW, ABSTRACT;
 
 	PROCEDURE (VAR p: Platform) PageSize* (): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) ProtectMemRead* (addr: S.ADDRESS; size: INTEGER): BOOLEAN, NEW, ABSTRACT;
@@ -1508,7 +1468,7 @@ MODULE Kernel;
 	(* Вызвать условие ждущего с кадром в BX (статическая связь CP):
 	   cond — в AX, frame — в стеке.
 	   pop ecx; push ebx; mov ebx,ecx; push ecx; call eax; pop ebx. *)
-	PROCEDURE [code] CallCond (cond: CondProc; frame: S.ADDRESS): BOOLEAN
+	PROCEDURE [code] CallCond* (cond: CondProc; frame: S.ADDRESS): BOOLEAN
 		059H, 053H, 089H, 0CBH, 051H, 0FFH, 0D0H, 05BH;
 
 	(*
@@ -1960,7 +1920,7 @@ MODULE Kernel;
 	BEGIN
 		s := S.VAL(Stack, NewRec(S.TYP(Stack)));
 		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
-		s.tryContext := 0; s.trapStack := NIL; s.lockChain := NIL; s.lockDepth := 0; s.tryCount := 0;
+		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
 		s.signal := signal; s.main := FALSE;
 		s.next := stacks; stacks := s;
 		RETURN s
@@ -2024,18 +1984,20 @@ MODULE Kernel;
 		S.GETREG(SP, sp);
 		s := StackOf(sp);
 		IF s # NIL THEN
-			s.sp := sp;
+			(* Скан спящего стека идёт от s.sp; сохраняемые переключателем
+			   регистры лежат ниже SP на момент вызова. Опускаем границу
+			   на запас, чтобы они попали в скан (но не ниже дна стека). *)
+			s.sp := sp - switchSaveSlack;
+			IF S.VAL(INTEGER, s.sp) < S.VAL(INTEGER, s.lo) THEN s.sp := s.lo END;
 			S.GETREG(FP, fpp);
 			ar := S.VAL(AdrRef, fpp);
 			s.fp := ar.a;
 			IF platform # NIL THEN s.tryContext := platform.GetTryContext() END;
 			s.trapStack := trapStack;
-			s.lockChain := lockChain;
-			s.lockDepth := lockDepth;
 			s.tryCount := tryCount
 		END;
 		IF platform # NIL THEN platform.SetTryContext(0) END;
-		trapStack := NIL; lockChain := NIL; lockDepth := 0; tryCount := 0
+		trapStack := NIL; tryCount := 0
 	END SwitchSave;
 
 	PROCEDURE SwitchRestore*;
@@ -2047,12 +2009,10 @@ MODULE Kernel;
 		IF s # NIL THEN
 			IF platform # NIL THEN platform.SetTryContext(s.tryContext) END;
 			trapStack := s.trapStack;
-			lockChain := s.lockChain;
-			lockDepth := s.lockDepth;
 			tryCount := s.tryCount
 		ELSE
 			IF platform # NIL THEN platform.SetTryContext(0) END;
-			trapStack := NIL; lockChain := NIL; lockDepth := 0; tryCount := 0
+			trapStack := NIL; tryCount := 0
 		END
 	END SwitchRestore;
 
@@ -2160,15 +2120,18 @@ MODULE Kernel;
 		IF nofcand > 0 THEN CheckCandidates END
 	END ScanStack;
 
-	PROCEDURE MarkLocals;
+	PROCEDURE MarkLocals (): BOOLEAN;
 	(* Скан ВСЕХ зарегистрированных стеков: текущего — от FP до его верха,
-	   спящих — от сохранённого указателя стека до верха. *)
+	   спящих — от сохранённого указателя стека до верха.
+	   Незнакомый стек (обратный вызов из C на чужой нити/стеке) не трапает
+	   и не сканируется: границы неизвестны. Возвращаем FALSE — сборка
+	   отменяется целиком, чтобы не освободить объекты этого стека. *)
 		VAR s, cur, interrupted: Stack; fp: S.ADDRESS;
 	BEGIN
 		UpdateHeapBounds;
 		S.GETREG(FP, fp);
 		cur := StackOf(fp);
-		IF cur = NIL THEN HALT(126) END;
+		IF cur = NIL THEN RETURN FALSE END;
 		interrupted := NIL;
 		IF cur.signal THEN
 			ScanStack(fp, cur.hi);
@@ -2183,10 +2146,11 @@ MODULE Kernel;
 				ScanStack(s.sp, s.hi)
 			END;
 			s := s.next
-		END
+		END;
+		RETURN TRUE
 	END MarkLocals;
 
-	(* -------------------- мониторы (этап 4) ------------------------------- *)
+	(* -------------------- крючки мониторов и планировщика ----------------- *)
 
 	PROCEDURE InHeapAddr (p: LONGINT): BOOLEAN;
 	(* p внутри какого-либо кластера кучи? *)
@@ -2202,406 +2166,29 @@ MODULE Kernel;
 
 	PROCEDURE ^ Try* (h: TryHandler; a, b, c: INTEGER);
 
-	PROCEDURE MonStr (IN s: ARRAY OF CHAR);
+	PROCEDURE SetMonitorHook* (h: MonitorHook);
 	BEGIN
-		IF (platform # NIL) & (platform.String # NIL) THEN platform.String(s) END
-	END MonStr;
+		monitorHook := h
+	END SetMonitorHook;
 
-	PROCEDURE MonLn;
+	PROCEDURE SetScheduler* (s: Scheduler);
 	BEGIN
-		IF (platform # NIL) & (platform.Ln # NIL) THEN platform.Ln END
-	END MonLn;
-
-	PROCEDURE MonInt (x: LONGINT);
-		VAR a: ARRAY 24 OF CHAR; b: ARRAY 24 OF CHAR; i, j, k: INTEGER; y: LONGINT; neg: BOOLEAN;
-	BEGIN
-		neg := x < 0; IF neg THEN x := -x END;
-		i := 0; REPEAT y := x MOD 10; b[i] := CHR(SHORT(y) + ORD('0')); INC(i); x := x DIV 10 UNTIL x = 0;
-		k := 0;
-		IF neg THEN a[k] := '-'; INC(k) END;
-		j := i - 1;
-		WHILE j >= 0 DO a[k] := b[j]; INC(k); DEC(j) END;
-		a[k] := 0X;
-		MonStr(a)
-	END MonInt;
-
-	PROCEDURE MonHex (x: LONGINT);
-		CONST digits = "0123456789ABCDEF";
-		VAR a: ARRAY 20 OF CHAR; dg: ARRAY 17 OF CHAR; i, y: INTEGER;
-	BEGIN
-		dg := digits;
-		i := 15;
-		REPEAT
-			y := SHORT(x MOD 16); IF y < 0 THEN y := y + 16 END;
-			a[i] := dg[y]; DEC(i); x := x DIV 16
-		UNTIL (x = 0) OR (i < 0);
-		a[16] := 0X;
-		MonStr(a)
-	END MonHex;
-
-	PROCEDURE MonFail (IN msg: ARRAY OF CHAR);
-	BEGIN
-		MonStr("Kernel: "); MonStr(msg); MonLn;
-		HALT(20)
-	END MonFail;
-
-	PROCEDURE TaskName (t: S.ADDRESS; OUT s: ARRAY OF CHAR);
-	BEGIN
-		IF t = 0 THEN s := "?"
-		ELSIF t = mainToken THEN s := "main"
-		ELSIF schedInstalled & (schedName # NIL) THEN schedName(t, s)
-		ELSE s := "?"
-		END
-	END TaskName;
-
-	PROCEDURE CurrentToken (): S.ADDRESS;
-		VAR t: S.ADDRESS;
-	BEGIN
-		IF schedInstalled & (schedCurrent # NIL) THEN
-			t := schedCurrent();
-			IF t = 0 THEN RETURN mainToken ELSE RETURN t END
-		ELSE
-			RETURN mainToken
-		END
-	END CurrentToken;
-
-	PROCEDURE IsTask (): BOOLEAN;
-	BEGIN
-		RETURN schedInstalled & (schedCurrent # NIL) & (schedCurrent() # 0)
-	END IsTask;
-
-	PROCEDURE UnparkTask (t: S.ADDRESS);
-	BEGIN
-		IF schedInstalled & (schedUnpark # NIL) & (t # 0) THEN schedUnpark(t) END
-	END UnparkTask;
-
-	PROCEDURE SchedParkNow;
-	BEGIN
-		IF schedInstalled & (schedPark # NIL) THEN schedPark()
-		ELSE MonFail("wait outside a task")
-		END
-	END SchedParkNow;
-
-	PROCEDURE MonIndex (p: S.ADDRESS): INTEGER;
-	BEGIN
-		RETURN SHORT(p DIV 16 MOD monHash)
-	END MonIndex;
-
-	PROCEDURE FindMon (obj: S.ADDRESS): Monitor;
-		VAR m: Monitor;
-	BEGIN
-		m := monBuckets[MonIndex(obj)];
-		WHILE (m # NIL) & (m.obj # obj) DO m := m.next END;
-		RETURN m
-	END FindMon;
-
-	PROCEDURE TakeMon (): Monitor;
-		VAR m: Monitor;
-	BEGIN
-		IF freeMonitors # NIL THEN
-			m := freeMonitors; freeMonitors := m.next; m.next := NIL
-		ELSE
-			m := S.VAL(Monitor, NewRec(S.TYP(Monitor)))
-		END;
-		RETURN m
-	END TakeMon;
-
-	PROCEDURE NewMon (obj: S.ADDRESS): Monitor;
-		VAR m: Monitor; i: INTEGER;
-	BEGIN
-		i := MonIndex(obj);
-		m := TakeMon();
-		m.next := monBuckets[i]; monBuckets[i] := m;
-		m.obj := obj; m.owner := 0; m.count := 0;
-		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
-		INC(nofMonitors);
-		RETURN m
-	END NewMon;
-
-	PROCEDURE GetMon (obj: S.ADDRESS): Monitor;
-		VAR m: Monitor;
-	BEGIN
-		m := FindMon(obj);
-		IF m = NIL THEN m := NewMon(obj) END;
-		RETURN m
-	END GetMon;
-
-	PROCEDURE DropMon (m: Monitor);
-		VAR i: INTEGER; p: Monitor;
-	BEGIN
-		i := MonIndex(m.obj);
-		IF monBuckets[i] = m THEN
-			monBuckets[i] := m.next
-		ELSE
-			p := monBuckets[i];
-			WHILE (p # NIL) & (p.next # m) DO p := p.next END;
-			IF p # NIL THEN p.next := m.next END
-		END;
-		m.obj := 0; m.owner := 0; m.count := 0;
-		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
-		m.next := freeMonitors; freeMonitors := m;
-		DEC(nofMonitors)
-	END DropMon;
-
-	PROCEDURE DropIfUnused (m: Monitor);
-	BEGIN
-		IF (m # NIL) & (m.owner = 0) & (m.enter = NIL) & (m.wait = NIL) THEN DropMon(m) END
-	END DropIfUnused;
-
-	PROCEDURE AppendWait (m: Monitor; w: WaitRef);
-	BEGIN
-		w.next := NIL;
-		IF m.waitTail = NIL THEN m.wait := w ELSE m.waitTail.next := w END;
-		m.waitTail := w
-	END AppendWait;
-
-	PROCEDURE RemoveWait (m: Monitor; w: WaitRef);
-		VAR p: WaitRef;
-	BEGIN
-		IF m.wait = w THEN
-			m.wait := w.next;
-			IF m.wait = NIL THEN m.waitTail := NIL END
-		ELSE
-			p := m.wait;
-			WHILE (p # NIL) & (p.next # w) DO p := p.next END;
-			IF p # NIL THEN
-				p.next := w.next;
-				IF m.waitTail = w THEN m.waitTail := p END
-			END
-		END;
-		w.next := NIL
-	END RemoveWait;
-
-	PROCEDURE AppendEnter (m: Monitor; q: TaskRef);
-	BEGIN
-		q.next := NIL;
-		IF m.enterTail = NIL THEN m.enter := q ELSE m.enterTail.next := q END;
-		m.enterTail := q
-	END AppendEnter;
-
-	PROCEDURE RemoveEnter (m: Monitor; q: TaskRef);
-		VAR p: TaskRef;
-	BEGIN
-		IF m.enter = q THEN
-			m.enter := q.next;
-			IF m.enter = NIL THEN m.enterTail := NIL END
-		ELSE
-			p := m.enter;
-			WHILE (p # NIL) & (p.next # q) DO p := p.next END;
-			IF p # NIL THEN
-				p.next := q.next;
-				IF m.enterTail = q THEN m.enterTail := p END
-			END
-		END;
-		q.next := NIL
-	END RemoveEnter;
-
-	PROCEDURE TakeLock (): LockRec;
-		VAR r: LockRec;
-	BEGIN
-		IF freeLocks # NIL THEN
-			r := freeLocks; freeLocks := r.next
-		ELSE
-			r := S.VAL(LockRec, NewRec(S.TYP(LockRec)))
-		END;
-		r.mon := NIL; r.next := NIL;
-		RETURN r
-	END TakeLock;
-
-	PROCEDURE FreeLock (r: LockRec);
-	BEGIN
-		r.mon := NIL; r.next := freeLocks; freeLocks := r
-	END FreeLock;
-
-	PROCEDURE ChainPush (m: Monitor);
-		VAR r: LockRec;
-	BEGIN
-		r := TakeLock();
-		r.mon := m; r.next := lockChain; lockChain := r; INC(lockDepth)
-	END ChainPush;
-
-	PROCEDURE PushTo (t: S.ADDRESS; m: Monitor);
-	(** Записать взятие в цепочку спящей задачи. *)
-		VAR s: Stack; r: LockRec;
-	BEGIN
-		s := NIL;
-		IF schedInstalled & (schedStack # NIL) THEN s := schedStack(t) END;
-		IF s # NIL THEN
-			r := TakeLock();
-			r.mon := m; r.next := s.lockChain; s.lockChain := r; INC(s.lockDepth)
-		END
-	END PushTo;
-
-	PROCEDURE CondBody (a, b, c: S.ADDRESS);
-	BEGIN
-		condCompleted := FALSE;
-		condResult := CallCond(condP, condF);	(* кадр ждущего — в BX *)
-		condCompleted := TRUE
-	END CondBody;
-
-	PROCEDURE EvalCond (p: CondProc; frame: S.ADDRESS; OUT ok: BOOLEAN; OUT code: INTEGER): BOOLEAN;
-	BEGIN
-		condP := p; condF := frame; condResult := FALSE; condCompleted := FALSE; code := 0;
-		INC(quietCleanup);
-		Try(CondBody, 0, 0, 0);
-		DEC(quietCleanup);
-		ok := condCompleted;
-		IF ~ok THEN code := err END;
-		RETURN condResult
-	END EvalCond;
-
-	PROCEDURE HandOff (m: Monitor; skip: S.ADDRESS);
-	(** Передать монитор: ждущий с истинным условием, затем ручной Wait,
-		затем первый входящий. *)
-		VAR w, nx: WaitRef; e: TaskRef; t: S.ADDRESS; ok: BOOLEAN; code: INTEGER;
-	BEGIN
-		w := m.wait;
-		WHILE w # NIL DO
-			nx := w.next;
-			IF (w.cond # NIL) & (w.task # skip) THEN
-				IF EvalCond(w.cond, w.frame, ok, code) THEN
-					RemoveWait(m, w);
-					m.owner := w.task; m.count := 1;
-					UnparkTask(w.task); RETURN
-				ELSIF ~ok THEN
-					RemoveWait(m, w);
-					w.trap := code;
-					m.owner := w.task; m.count := 1;
-					UnparkTask(w.task); RETURN
-				END
-			END;
-			w := nx
-		END;
-		IF skip # 0 THEN
-			e := m.enter;
-			IF e # NIL THEN
-				m.enter := e.next;
-				IF m.enter = NIL THEN m.enterTail := NIL END;
-				t := e.task; e.next := NIL;
-				m.owner := t; m.count := 1;
-				PushTo(t, m);
-				UnparkTask(t); RETURN
-			END
-		END;
-		w := m.wait;
-		WHILE (w # NIL) & ((w.cond # NIL) OR (w.task = skip)) DO w := w.next END;
-		IF w # NIL THEN
-			RemoveWait(m, w);
-			m.owner := w.task; m.count := 1;
-			UnparkTask(w.task); RETURN
-		END;
-		e := m.enter;
-		IF e # NIL THEN
-			m.enter := e.next;
-			IF m.enter = NIL THEN m.enterTail := NIL END;
-			t := e.task; e.next := NIL;
-			m.owner := t; m.count := 1;
-			PushTo(t, m);
-			UnparkTask(t); RETURN
-		END;
-		m.owner := 0; m.count := 0;
-		DropIfUnused(m)
-	END HandOff;
-
-	PROCEDURE ReleaseTo (depth: INTEGER);
-		VAR r: LockRec; m: Monitor; me: S.ADDRESS;
-	BEGIN
-		me := CurrentToken();
-		WHILE lockDepth > depth DO
-			r := lockChain;
-			IF r = NIL THEN lockDepth := depth; RETURN END;
-			lockChain := r.next; DEC(lockDepth);
-			m := r.mon; FreeLock(r);
-			IF m.owner = me THEN
-				DEC(m.count);
-				IF m.count <= 0 THEN
-					m.count := 0; m.owner := 0; HandOff(m, 0)
-				END
-			END
-		END
-	END ReleaseTo;
-
-	PROCEDURE PurgeCurrent;
-		VAR me: S.ADDRESS; i: INTEGER; m, nx: Monitor; w, wn: WaitRef; e, en: TaskRef;
-	BEGIN
-		me := CurrentToken();
-		i := 0;
-		WHILE i < monHash DO
-			m := monBuckets[i];
-			WHILE m # NIL DO
-				nx := m.next;
-				w := m.wait;
-				WHILE w # NIL DO
-					wn := w.next;
-					IF w.task = me THEN RemoveWait(m, w) END;
-					w := wn
-				END;
-				e := m.enter;
-				WHILE e # NIL DO
-					en := e.next;
-					IF e.task = me THEN RemoveEnter(m, e) END;
-					e := en
-				END;
-				DropIfUnused(m);
-				m := nx
-			END;
-			INC(i)
-		END
-	END PurgeCurrent;
-
-	PROCEDURE MarkLocks;
-	(** Цепочки взятий — корни сборщика. *)
-		VAR r: LockRec; s: Stack;
-	BEGIN
-		r := lockChain;
-		WHILE r # NIL DO
-			IF InHeapAddr(S.VAL(INTEGER, r)) THEN
-				Mark(S.VAL(Block, S.VAL(INTEGER, r) - 4))
-			END;
-			r := r.next
-		END;
-		s := stacks;
-		WHILE s # NIL DO
-			r := s.lockChain;
-			WHILE r # NIL DO
-				IF InHeapAddr(S.VAL(INTEGER, r)) THEN
-					Mark(S.VAL(Block, S.VAL(INTEGER, r) - 4))
-				END;
-				r := r.next
-			END;
-			s := s.next
-		END
-	END MarkLocks;
-
-	PROCEDURE MarkMonitors;
-		VAR i: INTEGER; m: Monitor;
-	BEGIN
-		MarkLocks;
-		i := 0;
-		WHILE i < monHash DO
-			m := monBuckets[i];
-			WHILE m # NIL DO
-				IF InHeapAddr(S.VAL(INTEGER, m)) THEN
-					Mark(S.VAL(Block, S.VAL(INTEGER, m) - 4))
-				END;
-				IF (m.obj # 0) & InHeapAddr(m.obj) THEN
-					Mark(S.VAL(Block, m.obj - 4))
-				END;
-				m := m.next
-			END;
-			INC(i)
-		END
-	END MarkMonitors;
-
-	PROCEDURE SetScheduler* (current: SchedCurrent; park: SchedPark; unpark: SchedUnpark;
-			ready: SchedReady; deadline: SchedDeadline; name: SchedName; stackOf: SchedStack;
-			yield: SchedYield);
-	BEGIN
-		schedCurrent := current; schedPark := park; schedUnpark := unpark;
-		schedReady := ready; schedDeadline := deadline; schedName := name;
-		schedStack := stackOf; schedYield := yield;
-		schedInstalled := (current # NIL) & (park # NIL) & (unpark # NIL)
+		sched := s
 	END SetScheduler;
+
+	PROCEDURE SetQuiet* (on: BOOLEAN);
+	BEGIN
+		IF on THEN INC(quietCleanup) ELSE DEC(quietCleanup) END
+	END SetQuiet;
+
+	PROCEDURE MonitorFail (IN what: ARRAY OF CHAR);
+	BEGIN
+		IF (platform # NIL) & (platform.String # NIL) THEN
+			platform.String("Kernel: "); platform.String(what);
+			platform.String(": monitors module is not loaded"); platform.Ln
+		END;
+		HALT(20)
+	END MonitorFail;
 
 	PROCEDURE RequestPoll*;
 	BEGIN
@@ -2609,166 +2196,35 @@ MODULE Kernel;
 	END RequestPoll;
 
 	PROCEDURE Poll*;
-	(** Точка уступки ключа компиляции. *)
 	BEGIN
-		IF pollWanted & (lockDepth = 0) & schedInstalled & (schedYield # NIL) & IsTask() THEN
-			pollWanted := FALSE;
-			schedYield
+		IF pollWanted & (sched # NIL) THEN
+			IF sched.poll() THEN pollWanted := FALSE END
 		END
 	END Poll;
 
 	PROCEDURE Lock* (obj: ANYPTR);
-	(** Взять монитор объекта. Повторный вход разрешён (счётчик). *)
-		VAR me: S.ADDRESS; m: Monitor; q: TaskRef;
 	BEGIN
-		IF obj = NIL THEN MonFail("Lock: NIL object") END;
-		me := CurrentToken();
-		m := GetMon(S.VAL(S.ADDRESS, obj));
-		IF m.owner = me THEN
-			INC(m.count); ChainPush(m)
-		ELSIF m.owner = 0 THEN
-			m.owner := me; m.count := 1; ChainPush(m)
-		ELSIF IsTask() THEN
-			q := S.VAL(TaskRef, NewRec(S.TYP(TaskRef)));
-			q.task := me; AppendEnter(m, q);
-			SchedParkNow;
-			IF m.owner # me THEN MonFail("Lock: woken without the monitor") END
-		ELSE
-			MonFail("Lock: monitor is held by another task")
-		END
+		IF monitorHook # NIL THEN monitorHook.lock(S.VAL(S.ADDRESS, obj))
+		ELSE MonitorFail("Lock") END
 	END Lock;
 
 	PROCEDURE Unlock* (obj: ANYPTR);
-		VAR me: S.ADDRESS; m: Monitor; r: LockRec;
 	BEGIN
-		me := CurrentToken();
-		m := FindMon(S.VAL(S.ADDRESS, obj));
-		IF (m = NIL) OR (m.owner # me) THEN
-			MonFail("Unlock: monitor is not held by the caller")
-		END;
-		r := lockChain;
-		IF (r = NIL) OR (r.mon # m) THEN
-			MonFail("Unlock: monitors must be released in LIFO order")
-		END;
-		lockChain := r.next; DEC(lockDepth); FreeLock(r);
-		DEC(m.count);
-		IF m.count = 0 THEN
-			m.owner := 0;
-			HandOff(m, 0)
-		END
+		IF monitorHook # NIL THEN monitorHook.unlock(S.VAL(S.ADDRESS, obj))
+		ELSE MonitorFail("Unlock") END
 	END Unlock;
 
 	PROCEDURE Wait* (obj: ANYPTR);
-		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
 	BEGIN
-		IF ~IsTask() THEN MonFail("Wait: wait outside a task") END;
-		me := CurrentToken();
-		m := FindMon(S.VAL(S.ADDRESS, obj));
-		IF (m = NIL) OR (m.owner # me) THEN
-			MonFail("Wait: monitor is not held by the caller")
-		END;
-		w := S.VAL(WaitRef, NewRec(S.TYP(WaitRef)));
-		w.task := me; w.cond := NIL; w.frame := 0; w.trap := 0;
-		AppendWait(m, w);
-		saved := m.count;
-		m.count := 0;
-		m.owner := 0;
-		HandOff(m, me);
-		SchedParkNow;
-		IF m.owner # me THEN MonFail("Wait: woken without the monitor") END;
-		m.count := saved
+		IF monitorHook # NIL THEN monitorHook.wait(S.VAL(S.ADDRESS, obj))
+		ELSE MonitorFail("Wait") END
 	END Wait;
 
 	PROCEDURE Await* (cond: CondProc; frame: S.ADDRESS; obj: ANYPTR);
-		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
 	BEGIN
-		IF ~IsTask() THEN MonFail("Await: wait outside a task") END;
-		IF cond = NIL THEN MonFail("Await: NIL condition") END;
-		me := CurrentToken();
-		m := FindMon(S.VAL(S.ADDRESS, obj));
-		IF (m = NIL) OR (m.owner # me) THEN
-			MonFail("Await: monitor is not held by the caller")
-		END;
-		IF CallCond(cond, frame) THEN RETURN END;
-		w := S.VAL(WaitRef, NewRec(S.TYP(WaitRef)));
-		w.task := me; w.cond := cond; w.frame := frame; w.trap := 0;
-		AppendWait(m, w);
-		saved := m.count;
-		m.count := 0;
-		m.owner := 0;
-		HandOff(m, me);
-		SchedParkNow;
-		IF w.trap # 0 THEN
-			MonStr("Kernel: Await: trap "); MonInt(w.trap);
-			MonStr(" in the condition"); MonLn;
-			HALT(121)
-		END;
-		IF m.owner # me THEN MonFail("Await: woken without the monitor") END;
-		m.count := saved
+		IF monitorHook # NIL THEN monitorHook.await(cond, frame, S.VAL(S.ADDRESS, obj))
+		ELSE MonitorFail("Await") END
 	END Await;
-
-	PROCEDURE IsLocked* (obj: ANYPTR): BOOLEAN;
-		VAR m: Monitor;
-	BEGIN
-		IF obj = NIL THEN RETURN FALSE END;
-		m := FindMon(S.VAL(S.ADDRESS, obj));
-		RETURN (m # NIL) & (m.owner # 0)
-	END IsLocked;
-
-	PROCEDURE MonitorCount* (): INTEGER;
-	BEGIN
-		RETURN nofMonitors
-	END MonitorCount;
-
-	PROCEDURE WaitersCount* (): INTEGER;
-		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef;
-	BEGIN
-		n := 0; i := 0;
-		WHILE i < monHash DO
-			m := monBuckets[i];
-			WHILE m # NIL DO
-				w := m.wait; WHILE w # NIL DO INC(n); w := w.next END;
-				e := m.enter; WHILE e # NIL DO INC(n); e := e.next END;
-				m := m.next
-			END;
-			INC(i)
-		END;
-		RETURN n
-	END WaitersCount;
-
-	PROCEDURE DumpMonitors*;
-		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef; nm: ARRAY 64 OF CHAR;
-	BEGIN
-		MonStr("Kernel: monitor dump"); MonLn;
-		n := 0; i := 0;
-		WHILE i < monHash DO
-			m := monBuckets[i];
-			WHILE m # NIL DO
-				INC(n);
-				MonStr("  monitor "); MonHex(m.obj);
-				IF m.owner = 0 THEN MonStr(": free")
-				ELSE
-					TaskName(m.owner, nm);
-					MonStr(": held by "); MonStr(nm); MonStr(" count="); MonInt(m.count)
-				END;
-				MonLn;
-				w := m.wait;
-				WHILE w # NIL DO
-					TaskName(w.task, nm); MonStr("    waits "); MonStr(nm);
-					IF w.cond = NIL THEN MonStr(" (manual)") ELSE MonStr(" (condition)") END;
-					MonLn; w := w.next
-				END;
-				e := m.enter;
-				WHILE e # NIL DO
-					TaskName(e.task, nm); MonStr("    enters "); MonStr(nm); MonLn;
-					e := e.next
-				END;
-				m := m.next
-			END;
-			INC(i)
-		END;
-		IF n = 0 THEN MonStr("  (no monitors)"); MonLn END
-	END DumpMonitors;
 
 	PROCEDURE MarkFinObj;
 		VAR f: FList;
@@ -2890,12 +2346,13 @@ MODULE Kernel;
 		IF (root # NIL) & ~blockCollect THEN
 			CallFinalizers;	(* trap cleanup *)
 			IF debug & (watcher # NIL) THEN watcher(1) END;
-			MarkGlobals;
-			MarkLocals;
-			MarkMonitors;	(* объекты под мониторами и сами записи таблицы *)
-			CheckFinalizers;
-			Sweep(TRUE);
-			CallFinalizers
+			(* Незнакомый текущий стек: сборку не начинаем — см. MarkLocals. *)
+			IF MarkLocals() THEN
+				MarkGlobals;
+				CheckFinalizers;
+				Sweep(TRUE);
+				CallFinalizers
+			END
 		END
 	END Collect;
 	
@@ -2903,11 +2360,11 @@ MODULE Kernel;
 	BEGIN
 		IF (root # NIL) & ~blockCollect THEN
 			IF debug & (watcher # NIL) THEN watcher(2) END;
-			MarkGlobals;
-			MarkLocals;
-			MarkMonitors;
-			MarkFinObj;
-			Sweep(FALSE)
+			IF MarkLocals() THEN
+				MarkGlobals;
+				MarkFinObj;
+				Sweep(FALSE)
+			END
 		END
 	END FastCollect;
 
@@ -3214,7 +2671,8 @@ MODULE Kernel;
 				t := trapStack; trapStack := trapStack.next; t.Cleanup
 			END;
 			IF (trapChecker # NIL) & (err # silentTrap) THEN trapChecker END;
-			PurgeCurrent;	(* задача, трапнувшая в ожидании, уходит из очередей *)
+			(* задача, трапнувшая в ожидании, уходит из очередей мониторов *)
+			IF monitorHook # NIL THEN monitorHook.purge END;
 			unit := u
 			(*EXCL(dirty, cleanup)*)
 		END
@@ -3226,16 +2684,16 @@ MODULE Kernel;
 	END SetTrapGuard;
 
 	PROCEDURE Try* (h: TryHandler; a, b, c: INTEGER);
-	(** Запоминает глубину цепочки мониторов: при трапе снимаются все
-		мониторы, взятые внутри h (этап 4). *)
-		VAR depth: INTEGER;
+	(** Мониторы вынесены в Monitors: крючок запоминает глубину цепочки
+		взятий и при трапе снимает всё, взятое внутри h (этап 4). *)
+		VAR mark: INTEGER;
 	BEGIN
 		IF ~platform.initialized THEN
 			log.String('Fatal: No Platform hook installed into Kernel'); log.Ln; Quit(1)
 		ELSE
-			depth := lockDepth;
+			IF monitorHook # NIL THEN mark := monitorHook.beginTry() ELSE mark := 0 END;
 			INC(tryCount); platform.Try(h, a, b, c); DEC(tryCount);
-			ReleaseTo(depth)
+			IF monitorHook # NIL THEN monitorHook.endTry(mark) END
 		END
 	END Try;
 	
@@ -3428,7 +2886,7 @@ MODULE Kernel;
 		mainStack := S.VAL(Stack, S.ADR(mainStackRec));
 		mainStack.lo := baseStack - maxStackScan; mainStack.hi := baseStack;
 		mainStack.sp := baseStack; mainStack.fp := 0; mainStack.tryContext := 0;
-		mainStack.trapStack := NIL; mainStack.lockChain := NIL; mainStack.lockDepth := 0; mainStack.tryCount := 0;
+		mainStack.trapStack := NIL; mainStack.tryCount := 0;
 		mainStack.signal := FALSE; mainStack.main := TRUE;
 		mainStack.next := NIL; stacks := mainStack
 	END SetPlatform;

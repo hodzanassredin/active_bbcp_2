@@ -9,7 +9,7 @@ MODULE Test64Active;
 	- трап внутри [exclusive] снимает монитор, в том числе во вложенном
 	 Kernel.Try. *)
 
-	IMPORT ACTIVE, S := SYSTEM, Kernel, Tasks, UnitAssert;
+	IMPORT ACTIVE, S := SYSTEM, Kernel, Monitors, Tasks, UnitAssert;
 
 	CONST
 		items = 50;
@@ -44,7 +44,7 @@ MODULE Test64Active;
 
 	PROCEDURE Waiters (): INTEGER;
 	BEGIN
-		RETURN Kernel.WaitersCount()
+		RETURN Monitors.WaitersCount()
 	END Waiters;
 
 	(* --- [exclusive] методы и процедуры модуля --------------------------- *)
@@ -116,7 +116,7 @@ MODULE Test64Active;
 	PROCEDURE [exclusive] (b: Box) Outer (x: INTEGER), NEW;
 	BEGIN
 		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(InnerCall)), 0, 0, 0);
-		outerHeld := Kernel.IsLocked(b)
+		outerHeld := Monitors.IsLocked(b)
 	END Outer;
 
 	PROCEDURE OuterCall;
@@ -172,7 +172,7 @@ MODULE Test64Active;
 		UnitAssert.True(w.done, "true condition woke the waiter");
 		UnitAssert.True(Pump(3000), "all tasks finished");
 		UnitAssert.EqualInt(0, Waiters(), "wait queues empty");
-		UnitAssert.True(~Kernel.IsLocked(b), "monitor released")
+		UnitAssert.True(~Monitors.IsLocked(b), "monitor released")
 	END TestProcAwaitMethod;
 
 	PROCEDURE TestProcAwaitModuleMonitor*;
@@ -216,7 +216,7 @@ MODULE Test64Active;
 		UnitAssert.EqualReal(2.5, b.Real(), 0.0001, "REAL result survives Unlock");
 		UnitAssert.True(b.Ptr(c) = c, "pointer result survives Unlock");
 		UnitAssert.EqualInt(1234567890123, b.Big(), "LONGINT result survives Unlock");
-		UnitAssert.True(~Kernel.IsLocked(b), "monitor free after functions")
+		UnitAssert.True(~Monitors.IsLocked(b), "monitor free after functions")
 	END TestProcExclusiveResults;
 
 	PROCEDURE TestProcExclusiveTrap*;
@@ -225,7 +225,7 @@ MODULE Test64Active;
 	BEGIN
 		NEW(b); tb := b;
 		UnitAssert.Traps(TrapCall, "trap inside [exclusive]");
-		UnitAssert.True(~Kernel.IsLocked(b), "trap released the monitor")
+		UnitAssert.True(~Monitors.IsLocked(b), "trap released the monitor")
 	END TestProcExclusiveTrap;
 
 	PROCEDURE TestProcExclusiveNestedTry*;
@@ -235,7 +235,7 @@ MODULE Test64Active;
 		NEW(b); tb := b; gb := b; outerHeld := FALSE;
 		OuterCall;	(* внутренний Try ловит трап *)
 		UnitAssert.True(outerHeld, "outer entry survived the inner Try");
-		UnitAssert.True(~Kernel.IsLocked(b), "all entries released")
+		UnitAssert.True(~Monitors.IsLocked(b), "all entries released")
 	END TestProcExclusiveNestedTry;
 
 END Test64Active.

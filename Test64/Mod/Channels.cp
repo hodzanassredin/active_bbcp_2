@@ -5,7 +5,7 @@ MODULE Test64Channels;
 	Pump. Прямые Recv без ожидания (данные уже есть) допустимы и на
 	главном стеке: AWAIT не вызывает Kernel.Await, если условие истинно. *)
 
-	IMPORT Kernel, Services, Tasks, AsyncSelect, AsyncChan, AsyncOnce, UnitAssert;
+	IMPORT Kernel, Monitors, Services, Tasks, AsyncSelect, AsyncChan, AsyncOnce, UnitAssert;
 
 	CONST
 		n = 100;
@@ -391,7 +391,7 @@ MODULE Test64Channels;
 		UnitAssert.True(~Tasks.Failed(m), "mux survived the monitor wait");
 		UnitAssert.EqualInt(0, muxIdx, "first alternative won");
 		UnitAssert.EqualInt(77, muxVal, "message was received");
-		UnitAssert.True(~Kernel.IsLocked(b), "second monitor released")
+		UnitAssert.True(~Monitors.IsLocked(b), "second monitor released")
 	END TestProcSelectWhileMonitorWait;
 
 END Test64Channels.

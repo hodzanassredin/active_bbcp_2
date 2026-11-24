@@ -27,7 +27,7 @@ MODULE Tasks;
 	  ссылаются в чужой стек» сводится к проверке, что сам объект задачи
 	  не лежит на стеке. *)
 
-	IMPORT S := SYSTEM, Kernel, Services, Models, Console, Strings;
+	IMPORT S := SYSTEM, Kernel, Monitors, Services, Models, Console, Strings;
 
 	CONST
 		nameLen = 64;
@@ -71,12 +71,14 @@ MODULE Tasks;
 		END;
 
 		SchedAction = POINTER TO RECORD (Services.Action) END;
+		Sched = POINTER TO RECORD (Kernel.Scheduler) END;
 
 	VAR
 		all, readyHead, readyTail, sleepers: Task;
 		current: Task;
 		schedSP: S.ADDRESS;
-		sched: SchedAction;
+		sched: SchedAction;	(* действие планировщика Services *)
+		schedHook: Sched;	(* крючок Kernel.Scheduler *)
 		scheduled, inStep: BOOLEAN;
 		alive: INTEGER;		(* незавершённых задач *)
 		slice: LONGINT;
@@ -519,7 +521,7 @@ MODULE Tasks;
 			IF ~deadlocked THEN
 				deadlocked := TRUE;
 				Msg("deadlock: no ready tasks and no wake-up deadlines");
-				Kernel.DumpMonitors
+				Monitors.DumpMonitors
 			END
 		ELSE
 			deadlocked := FALSE
@@ -658,15 +660,20 @@ MODULE Tasks;
 		END
 	END List;
 
-(* --- связь с ядром: мониторы этапа 4 ---------------------------------- *)
+(* --- крючок планировщика для ядра ------------------------------------- *)
 
-	PROCEDURE CurHook (): S.ADDRESS;
-	(** Токен текущей задачи для Kernel.Lock/Wait/Await; 0 — главный стек. *)
+	PROCEDURE (s: Sched) current (): S.ADDRESS;
+	(** Токен текущей задачи для Monitors; 0 — главный стек. *)
 	BEGIN
 		IF current # NIL THEN RETURN S.VAL(S.ADDRESS, S.ADR(current^)) ELSE RETURN 0 END
-	END CurHook;
+	END current;
 
-	PROCEDURE UnparkHook (a: S.ADDRESS);
+	PROCEDURE (s: Sched) park;
+	BEGIN
+		Park
+	END park;
+
+	PROCEDURE (s: Sched) unpark (a: S.ADDRESS);
 	(** Пробуждение ядром (передача монитора): НЕ трогать пользовательский
 		флаг wake — иначе следующий Tasks.Park вернулся бы сразу и Wait
 		стал бы холостым циклом. *)
@@ -676,56 +683,40 @@ MODULE Tasks;
 			t := S.VAL(Task, a);
 			IF t.state IN {Sleeping, Waiting, Parked} THEN MakeReady(t) END
 		END
-	END UnparkHook;
+	END unpark;
 
-	PROCEDURE ReadyHook (): BOOLEAN;
+	PROCEDURE (s: Sched) name (a: S.ADDRESS; OUT name: ARRAY OF CHAR);
 	BEGIN
-		RETURN HasReady()
-	END ReadyHook;
-
-	PROCEDURE DeadlineHook (): LONGINT;
-	BEGIN
-		RETURN NextDeadline()
-	END DeadlineHook;
-
-	PROCEDURE NameHook (a: S.ADDRESS; OUT s: ARRAY OF CHAR);
-	BEGIN
-		IF a = 0 THEN s := "?"
-		ELSE GetName(S.VAL(Task, a), s)
+		IF a = 0 THEN name := "?"
+		ELSE GetName(S.VAL(Task, a), name)
 		END
-	END NameHook;
+	END name;
 
-	PROCEDURE YieldHook;
-	(** Уступка из Kernel.Poll: только в задаче и вне каркаса. Отмена
-		проверяется в Yield (CheckWait): Poll — тоже точка отмены. *)
+	PROCEDURE (s: Sched) poll (): BOOLEAN;
+	(** Уступка из Kernel.Poll: только в задаче, вне каркаса и вне
+		монитора. Отмена проверяется в Yield (CheckWait): Poll — тоже
+		точка отмены. *)
 	BEGIN
-		IF (current # NIL) & ~InFramework() THEN Yield END
-	END YieldHook;
-
-	PROCEDURE StackHook (a: S.ADDRESS): Kernel.Stack;
-	(** Запись стека задачи: ядро добавляет взятие монитора в её цепочку
-		при передаче владения спящей задаче. *)
-		VAR t: Task;
-	BEGIN
-		IF a # 0 THEN
-			t := S.VAL(Task, a); RETURN t.stackRec
+		IF (current # NIL) & ~InFramework() & (Monitors.LockDepth() = 0) THEN
+			Yield; RETURN TRUE
 		ELSE
-			RETURN NIL
+			RETURN FALSE
 		END
-	END StackHook;
+	END poll;
 
 BEGIN
 	NEW(sched);
+	NEW(schedHook);
 	slice := defaultSlice;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
 	lastPoll := Kernel.Time();
 	lastWake := -1;	(* первый Step обязан просмотреть спящих *)
-	Kernel.SetScheduler(CurHook, Park, UnparkHook, ReadyHook, DeadlineHook, NameHook, StackHook, YieldHook)
+	Kernel.SetScheduler(schedHook)
 CLOSE
 	(* Выгрузка/завершение мира: в ядре не должно остаться указателей на
 	   процедуры этого модуля, а стеки живых задач надо вернуть платформе. *)
 	Services.RemoveAction(sched);
-	Kernel.SetScheduler(NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL);
+	Kernel.SetScheduler(NIL);
 	WHILE all # NIL DO
 		IF all.stackRec # NIL THEN Kernel.UnregisterStack(all.stackRec); all.stackRec := NIL END;
 		Kernel.FreeStack(all.lo, all.hi);
