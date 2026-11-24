@@ -25,6 +25,11 @@ MODULE System_devMonitors;
 		TrapSetter = POINTER TO RECORD (Tasks.Task) END;
 		TrapWaiter = POINTER TO RECORD (Tasks.Task) END;
 		DTask = POINTER TO RECORD (Tasks.Task) id: INTEGER END;
+		Big = POINTER TO RECORD a: ARRAY 1024 * 1024 OF BYTE END;
+		FastHolder = POINTER TO RECORD (Tasks.Task) END;
+		FastEnterer = POINTER TO RECORD (Tasks.Task) END;
+		FastWaiter = POINTER TO RECORD (Tasks.Task) END;
+		FastSetter = POINTER TO RECORD (Tasks.Task) END;
 
 	VAR
 		mon, mon2: Box;		(* объекты-мониторы *)
@@ -35,6 +40,11 @@ MODULE System_devMonitors;
 		outerStill: BOOLEAN;
 		gcAdr: LONGINT;
 		ma, mb: Box;		(* мониторы детектора тупика *)
+		mf: Box;		(* монитор тестов быстрого пути *)
+		holderDepth, holderLeft: INTEGER;	(* LockDepth внутри; 1 — держатель уже вышел *)
+		release: BOOLEAN;	(* главный стек отпускает держателя *)
+		enteredAfter: BOOLEAN;	(* входящий вошёл после выхода держателя *)
+		fastCond, waiterDone: BOOLEAN;
 
 	(* --- вспомогательное -------------------------------------------------- *)
 
@@ -316,5 +326,157 @@ MODULE System_devMonitors;
 		Kernel.Unlock(S.VAL(ANYPTR, gcAdr));
 		UnitAssert.True(~Monitors.IsLocked(S.VAL(ANYPTR, gcAdr)), "released")
 	END TestProcMonitorKeepsObject;
+
+	(* --- быстрый путь: монитор, ставший свободным последним ---------------- *)
+
+	(* Первая пара Lock/Unlock делает объект последним свободным монитором,
+	   следующий Lock идёт быстрым путём. *)
+	PROCEDURE Warm (b: Box);
+	BEGIN
+		Kernel.Lock(b); Kernel.Unlock(b)
+	END Warm;
+
+	PROCEDURE UnlockFast;
+	BEGIN
+		Kernel.Unlock(mf)
+	END UnlockFast;
+
+	PROCEDURE TestProcFastReentry*;
+	BEGIN
+		NEW(mf); Warm(mf);
+		Kernel.Lock(mf); Kernel.Lock(mf);
+		UnitAssert.EqualInt(2, Monitors.LockDepth(), "two entries in the chain");
+		Kernel.Unlock(mf);
+		UnitAssert.True(Monitors.IsLocked(mf), "still locked after one unlock");
+		Kernel.Unlock(mf);
+		UnitAssert.True(~Monitors.IsLocked(mf), "free after two unlocks");
+		UnitAssert.EqualInt(0, Monitors.LockDepth(), "chain empty");
+		UnitAssert.Traps(UnlockFast, "unlock of a free fast monitor must trap")
+	END TestProcFastReentry;
+
+	PROCEDURE TakeFastAndTrap (a, b, c: S.ADDRESS);
+	BEGIN
+		Kernel.Lock(mf);
+		NilCrash
+	END TakeFastAndTrap;
+
+	PROCEDURE TestProcFastTrapReleases*;
+	BEGIN
+		NEW(mf); Warm(mf);
+		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TakeFastAndTrap)), 0, 0, 0);
+		UnitAssert.True(~Monitors.IsLocked(mf), "trap released the fast monitor");
+		UnitAssert.EqualInt(0, Monitors.LockDepth(), "chain empty after the trap")
+	END TestProcFastTrapReleases;
+
+	PROCEDURE (t: FastHolder) Run;
+	BEGIN
+		Warm(mf);
+		Kernel.Lock(mf);
+		holderDepth := Monitors.LockDepth();
+		WHILE ~release DO Tasks.Yield END;	(* входящий встаёт в очередь *)
+		holderLeft := 1;
+		Kernel.Unlock(mf)	(* очередь не пуста: передача, а не быстрый выход *)
+	END Run;
+
+	PROCEDURE (t: FastEnterer) Run;
+	BEGIN
+		Kernel.Lock(mf);
+		enteredAfter := holderLeft = 1;
+		Kernel.Unlock(mf)
+	END Run;
+
+	PROCEDURE StepUntilParked (t: Tasks.Task): BOOLEAN;
+		VAR n: INTEGER;
+	BEGIN
+		n := 0;
+		WHILE (Tasks.State(t) # Tasks.Parked) & (Tasks.Count() > 0) & (n < 1000) DO Tasks.Step; INC(n) END;
+		RETURN Tasks.State(t) = Tasks.Parked
+	END StepUntilParked;
+
+	PROCEDURE TestProcFastContended*;
+		VAR h: FastHolder; e: FastEnterer;
+	BEGIN
+		NEW(mf); holderDepth := 0; holderLeft := 0; enteredAfter := FALSE; release := FALSE;
+		NEW(h); NEW(e); Tasks.Start(h); Tasks.Start(e);
+		UnitAssert.True(StepUntilParked(e), "enterer waits behind the fast holder");
+		release := TRUE;
+		UnitAssert.True(Pump(5000), "holder and enterer finished");
+		UnitAssert.EqualInt(1, holderDepth, "fast entry counted in LockDepth");
+		UnitAssert.True(enteredAfter, "enterer waited for the holder");
+		UnitAssert.True(~Tasks.Failed(h) & ~Tasks.Failed(e), "no traps");
+		UnitAssert.True(~Monitors.IsLocked(mf), "monitor free at the end");
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "queues empty")
+	END TestProcFastContended;
+
+	PROCEDURE TestProcFastCancelEntering*;
+		VAR h: FastHolder; e: FastEnterer; w0, i: INTEGER;
+	BEGIN
+		NEW(mf); holderLeft := 0; enteredAfter := FALSE; release := FALSE;
+		w0 := Monitors.WaitersCount();
+		NEW(h); NEW(e); Tasks.Start(h); Tasks.Start(e);
+		UnitAssert.True(StepUntilParked(e), "enterer waits behind the fast holder");
+		UnitAssert.EqualInt(w0 + 1, Monitors.WaitersCount(), "enterer queued");
+		Tasks.Cancel(e);
+		FOR i := 1 TO 10 DO Tasks.Step END;
+		release := TRUE;
+		UnitAssert.True(Pump(5000), "tasks finished");
+		UnitAssert.True(Tasks.State(e) = Tasks.Cancelled, "enterer cancelled");
+		UnitAssert.True(~enteredAfter, "cancelled enterer did not enter");
+		UnitAssert.True(~Tasks.Failed(h), "holder did not trap");
+		UnitAssert.True(~Monitors.IsLocked(mf), "monitor free at the end");
+		UnitAssert.EqualInt(w0, Monitors.WaitersCount(), "cancelled enterer left the queue")
+	END TestProcFastCancelEntering;
+
+	PROCEDURE FastCond (frame: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN fastCond
+	END FastCond;
+
+	PROCEDURE (t: FastWaiter) Run;
+	BEGIN
+		Warm(mf);
+		Kernel.Lock(mf);	(* быстрый вход *)
+		Kernel.Await(FastCond, 0, mf);
+		waiterDone := Monitors.IsLocked(mf) & (Monitors.LockDepth() = 1);
+		Kernel.Unlock(mf)
+	END Run;
+
+	PROCEDURE (t: FastSetter) Run;
+	BEGIN
+		Kernel.Lock(mf);	(* монитор свободен, есть ждущий *)
+		fastCond := TRUE;
+		Kernel.Unlock(mf)	(* ждущий есть: передача ему *)
+	END Run;
+
+	PROCEDURE TestProcFastAwait*;
+		VAR w: FastWaiter; s: FastSetter;
+	BEGIN
+		NEW(mf); fastCond := FALSE; waiterDone := FALSE;
+		NEW(w); NEW(s); Tasks.Start(w);
+		UnitAssert.True(StepUntilParked(w), "waiter asleep after a fast entry");
+		Tasks.Start(s);
+		UnitAssert.True(Pump(5000), "waiter and setter finished");
+		UnitAssert.True(waiterDone, "waiter woke holding the monitor");
+		UnitAssert.True(~Tasks.Failed(w) & ~Tasks.Failed(s), "no traps");
+		UnitAssert.True(~Monitors.IsLocked(mf), "monitor free at the end");
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "queues empty")
+	END TestProcFastAwait;
+
+	PROCEDURE LockBig;
+		VAR p: Big;
+	BEGIN
+		NEW(p); Kernel.Lock(p); Kernel.Unlock(p)
+	END LockBig;
+
+	PROCEDURE TestProcFreeMonitorReleasesObject*;
+	(** Свободный монитор, оставшийся в таблице (последний), не держит объект. *)
+		VAR a0, a1: LONGINT;
+	BEGIN
+		Kernel.Collect; a0 := Kernel.Allocated();
+		LockBig;
+		Scrub(32);
+		Kernel.Collect; a1 := Kernel.Allocated();
+		UnitAssert.True(a1 - a0 < 512 * 1024, "object of a free monitor was collected")
+	END TestProcFreeMonitorReleasesObject;
 
 END System_devMonitors.

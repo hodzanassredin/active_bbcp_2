@@ -13,6 +13,7 @@ MODULE Dev_devYield;
 		Chewer = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 		Short = POINTER TO RECORD (Tasks.Task) END;
 		Holder = POINTER TO RECORD (Tasks.Task) b: Box; n: INTEGER END;
+		WarmHolder = POINTER TO RECORD (Tasks.Task) b: Box; n: INTEGER END;
 		Contender = POINTER TO RECORD (Tasks.Task) b: Box END;
 		CondWaiter = POINTER TO RECORD (Tasks.Task) b: Box END;
 		CondSetter = POINTER TO RECORD (Tasks.Task) b: Box END;
@@ -50,6 +51,12 @@ MODULE Dev_devYield;
 
 	PROCEDURE (h: Holder) Run;
 	BEGIN h.b.Spin(h.n)
+	END Run;
+
+	PROCEDURE (h: WarmHolder) Run;
+	(* Первый вход оставляет монитор последним свободным: второй идёт
+	   быстрым путём Monitors. *)
+	BEGIN h.b.Spin(0); h.b.Spin(h.n)
 	END Run;
 
 	PROCEDURE (c: Contender) Run;
@@ -94,6 +101,19 @@ MODULE Dev_devYield;
 		UnitAssert.True(~contenderSaw, "Poll did not yield inside the monitor");
 		UnitAssert.True(Pump(5000), "both tasks finished")
 	END TestProcNoYieldInMonitor;
+
+	PROCEDURE TestProcNoYieldInFastMonitor*;
+		(** Poll не уступает и под монитором, взятым быстрым путём. *)
+		VAR b: Box; h: WarmHolder; c: Contender; n: INTEGER;
+	BEGIN
+		NEW(b); inside := FALSE; contenderSaw := TRUE;
+		NEW(h); h.b := b; h.n := 10000; NEW(c); c.b := b;
+		Tasks.Start(h); Tasks.Start(c);
+		n := 0;
+		WHILE (Tasks.Count() > 0) & (n < 5000) DO Kernel.RequestPoll; Tasks.Step; INC(n) END;
+		UnitAssert.True(~contenderSaw, "Poll did not yield inside the fast monitor");
+		UnitAssert.True(Pump(5000), "both tasks finished")
+	END TestProcNoYieldInFastMonitor;
 
 	PROCEDURE CountOnMain (n: INTEGER);
 		VAR i: INTEGER;
