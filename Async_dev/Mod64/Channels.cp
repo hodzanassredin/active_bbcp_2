@@ -39,6 +39,8 @@ MODULE Async_devChannels;
 		Echo = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 		Filler64 = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; n: INTEGER END;
 		Drainer64 = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; n: INTEGER END;
+		PlainSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; n: INTEGER END;
+		Picker = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 		EchoBack = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 
 	VAR
@@ -62,7 +64,7 @@ MODULE Async_devChannels;
 		holderLocked, muxDone: BOOLEAN;
 		muxIdx, muxVal: INTEGER;
 		echoAllocs: LONGINT;
-		drained: INTEGER;	(* выделений за вторую сотню обменов Echo *)
+		drained, picked: INTEGER;	(* выделений за вторую сотню обменов Echo *)
 
 	PROCEDURE Pump (ms: LONGINT): BOOLEAN;
 		(** Главный цикл без окна: действия Services (планировщик и
@@ -466,5 +468,40 @@ MODULE Async_devChannels;
 		(* кольцо и первые записи ожидания; на сообщение — ничего *)
 		UnitAssert.True(Kernel.AllocCount() - a < 16, "no allocations per message")
 	END TestProcBufferBatches;
+
+	(* --- встреча: ждущий отправитель не держит монитор ------------------- *)
+
+	PROCEDURE (t: PlainSender) Run;
+		VAR i: INTEGER; m: NumMsg;
+	BEGIN
+		NEW(m); m.n := 1;
+		FOR i := 1 TO t.n DO t.c.Send(m) END
+	END Run;
+
+	PROCEDURE (t: Picker) Run;
+		VAR i: INTEGER; ops: ARRAY 2 OF AsyncSelect.Op;
+	BEGIN
+		FOR i := 1 TO t.n DO
+			AsyncChan.RecvAlt(t.a, ops[0]); AsyncChan.RecvAlt(t.b, ops[1]);
+			IF AsyncChan.Select(ops) >= 0 THEN INC(picked) END
+		END
+	END Run;
+
+	PROCEDURE TestProcSelectRendezvousSwitches*;
+	(* Отправитель встречи ждёт предложением в очереди канала, а не на
+	   мониторе: Select забирает его сообщение без ожидания монитора, на
+	   выбор приходится два переключения (отправитель и Select), а не восемь. *)
+		CONST total = 2000;
+		VAR a, b: PlainSender; p: Picker; sw: LONGINT;
+	BEGIN
+		NEW(a); NEW(b); NEW(p);
+		a.c := AsyncChan.NewChan(); b.c := AsyncChan.NewChan(); a.n := total DIV 2; b.n := total DIV 2;
+		p.a := a.c; p.b := b.c; p.n := total;
+		picked := 0; sw := Tasks.Switches();
+		Tasks.Start(a); Tasks.Start(b); Tasks.Start(p);
+		UnitAssert.True(Pump(5000), "select exchange finished");
+		UnitAssert.EqualInt(total, picked, "every message selected");
+		UnitAssert.True(Tasks.Switches() - sw < 3 * total, "about two switches per select")
+	END TestProcSelectRendezvousSwitches;
 
 END Async_devChannels.

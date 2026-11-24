@@ -359,14 +359,6 @@ MODULE AsyncSelect;
 		RETURN TRUE
 	END DeliverToReceiver;
 
-	PROCEDURE DepositDirect* (c: Core; m: Msg);
-	(** Прямой Send кладёт вклад и ждёт, пока его заберут (taken). *)
-	BEGIN
-		Prune(c);
-		c.item := m; c.deposit := TRUE; c.depOffer := NIL;
-		c.direct := TRUE; c.directTask := Tasks.Current(); c.taken := FALSE
-	END DepositDirect;
-
 	PROCEDURE TakeRendezvous* (c: Core; OUT m: Msg): BOOLEAN;
 	(** Забрать вклад: прямого Send или предложения; или из очереди waitS. *)
 		VAR s: Offer;
@@ -539,17 +531,20 @@ MODULE AsyncSelect;
 	END WaitOne;
 
 	PROCEDURE QueueSend* (c: Core; m: Msg);
-	(** Отправить в Bounded или Mailbox; при полном буфере ждать места.
-		Ждущий отправитель — предложение в очереди waitS: получатель кладёт
-		его сообщение в освободившуюся ячейку и будит задачу без передачи
-		монитора, поэтому отправитель не стоит на входе в монитор, пока
-		получатель разбирает очередь. *)
+	(** Отправить: во встречу — ждущему получателю, в Bounded или Mailbox —
+		в очередь; иначе ждать получателя или места. Ждущий отправитель —
+		предложение в очереди waitS: получатель забирает его сообщение и
+		будит задачу без передачи монитора, поэтому отправитель не стоит на
+		входе в монитор, пока получатель работает. *)
 		VAR ctx: Ctx; o: Offer; locked: BOOLEAN;
 	BEGIN
-		ASSERT(c.kind # Rendezvous, 20);
 		locked := Enter(c);
 		Prune(c);
-		IF (c.kind = Mailbox) OR (c.count < c.capacity) THEN
+		IF (c.kind = Rendezvous) & ReceiverWaiting(c) THEN
+			CheckSend(c, m);
+			IF ~DeliverToReceiver(c, m) THEN HALT(100) END;	(* ReceiverWaiting нашёл живого *)
+			Leave(c, locked)
+		ELSIF (c.kind = Mailbox) OR (c.kind = Bounded) & (c.count < c.capacity) THEN
 			CheckSend(c, m); PutItem(c, m);
 			Leave(c, locked)
 		ELSE
@@ -560,14 +555,14 @@ MODULE AsyncSelect;
 	END QueueSend;
 
 	PROCEDURE QueueRecv* (c: Core; OUT m: Msg);
-	(** Принять из Bounded или Mailbox; при пустой очереди ждать. Данные
-		уже есть — ожидания нет, годится и главный стек. *)
-		VAR ctx: Ctx; o: Offer; locked: BOOLEAN;
+	(** Принять; нет отправителя или данных — ждать. Данные или ждущий
+		отправитель уже есть — ожидания нет, годится и главный стек. *)
+		VAR ctx: Ctx; o: Offer; locked, ok: BOOLEAN;
 	BEGIN
-		ASSERT(c.kind # Rendezvous, 20);
 		locked := Enter(c);
 		Prune(c);
-		IF TakeItem(c, m) THEN
+		IF c.kind = Rendezvous THEN ok := TakeRendezvous(c, m) ELSE ok := TakeItem(c, m) END;
+		IF ok THEN
 			Leave(c, locked)
 		ELSE
 			ctx := TakeCtx(); o := TakeOffer(ctx, 0, RecvKind, NIL);

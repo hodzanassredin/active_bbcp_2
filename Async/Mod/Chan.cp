@@ -1,15 +1,17 @@
 MODULE AsyncChan;
-(** Каналы на расширении языка: [exclusive] + ACTIVE.AWAIT.
+(** Каналы.
 
 	Chan — встреча (отправитель ждёт, пока получатель заберёт); Buffer —
-	ограниченная очередь; Mailbox — неограниченная. Все три — мониторы:
-	методы [exclusive] держат монитор объекта, ожидание условия отпускает
-	его. Alt/Select из AsyncSelect умеет ждать те же объекты: предложения
-	лежат в очередях ядра AsyncSelect, а прямой Send/Recv их обслуживает.
+	ограниченная очередь; Mailbox — неограниченная. Send и Recv —
+	AsyncSelect.QueueSend/QueueRecv: ждущая сторона кладёт предложение в
+	очередь ядра канала и спит в Tasks.Park, другая сторона исполняет его и
+	будит задачу. Канал — объект с монитором: если монитор держит задача
+	(Kernel.Lock), операции ждут его освобождения. Alt/Select из
+	AsyncSelect ждёт те же объекты через те же очереди.
 
 	Сообщение (AsyncSelect.Msg) после отправки не меняется. *)
 
-	IMPORT ACTIVE, AsyncSelect, AsyncProto;
+	IMPORT AsyncSelect, AsyncProto;
 
 	TYPE
 		Chan* = POINTER TO RECORD (AsyncSelect.Core) END;
@@ -46,31 +48,15 @@ MODULE AsyncChan;
 
 	(* --- встреча ---------------------------------------------------------- *)
 
-	PROCEDURE [exclusive] (c: Chan) Send* (m: AsyncSelect.Msg), NEW;
-		VAR done: BOOLEAN;
+	PROCEDURE (c: Chan) Send* (m: AsyncSelect.Msg), NEW;
+	(** Отправка завершается, когда получатель забрал сообщение. *)
 	BEGIN
-		IF c.proto # NIL THEN AsyncSelect.CheckSend(c, m) END;
-		done := FALSE;
-		LOOP
-			ACTIVE.AWAIT((c.waitR # NIL) OR ~c.deposit);
-			AsyncSelect.Prune(c);
-			IF AsyncSelect.DeliverToReceiver(c, m) THEN done := TRUE; EXIT END;
-			IF ~c.deposit THEN AsyncSelect.DepositDirect(c, m); EXIT END
-		END;
-		IF ~done THEN
-			(* вклад принят только когда получатель его забрал *)
-			ACTIVE.AWAIT(c.taken OR ~c.deposit);
-			IF c.taken THEN c.taken := FALSE END;
-			c.item := NIL; c.direct := FALSE; c.directTask := NIL
-		END
+		AsyncSelect.QueueSend(c, m)
 	END Send;
 
-	PROCEDURE [exclusive] (c: Chan) Recv* (OUT m: AsyncSelect.Msg), NEW;
+	PROCEDURE (c: Chan) Recv* (OUT m: AsyncSelect.Msg), NEW;
 	BEGIN
-		LOOP
-			ACTIVE.AWAIT(c.deposit OR (c.waitS # NIL));
-			IF AsyncSelect.TakeRendezvous(c, m) THEN EXIT END
-		END
+		AsyncSelect.QueueRecv(c, m)
 	END Recv;
 
 	(* --- ограниченный канал ----------------------------------------------- *)
