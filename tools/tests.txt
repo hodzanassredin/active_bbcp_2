@@ -38,6 +38,8 @@ Actor_devGrain|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec Acto
 Actor_devBench|proc slow|900|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal System_devCRaw System_devClock
 # Согласованный журнал Raft: симуляция ядра по зёрнам, инварианты, мутации.
 Raft_devSim||300|RaftCore RaftSm RaftStorage KvPages KvStore KvFault KvTree KvDb RaftKvStorage
+# Водитель узла RaftNode над ActorNetMem: сбои по зерну, инварианты, подтверждённое не теряется, мутации водителя.
+Raft_devNode|proc|900|ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim RaftCore RaftSm RaftStorage RaftNode
 # Хранилище Kv: страницы, дерево против эталона, обрыв питания в каждой точке фиксации.
 Kv_devBasic|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
