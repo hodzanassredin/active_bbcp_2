@@ -8,7 +8,7 @@ MODULE Async_devBench;
 	годятся для tools/prof.sh; тесты TestSlow… зовут их и проверяют
 	только итог обмена, а не время. Главный стек крутит Tasks.Step. *)
 
-	IMPORT ACTIVE, Tasks, AsyncSelect, AsyncChan, UnitAssert, System_devClock, Console, Strings;
+	IMPORT ACTIVE, Kernel, Tasks, AsyncSelect, AsyncChan, UnitAssert, System_devClock, Console, Strings;
 
 	CONST
 		million = 1000000;
@@ -35,6 +35,7 @@ MODULE Async_devBench;
 
 	VAR
 		sum, got: INTEGER;
+		allocs0: LONGINT;	(* Kernel.AllocCount в начале замера *)
 
 	(* --- вывод ------------------------------------------------------------ *)
 
@@ -52,7 +53,8 @@ MODULE Async_devBench;
 	PROCEDURE Report (IN name: ARRAY OF CHAR; ops: INTEGER; ns: LONGINT);
 	BEGIN
 		W("BENCH "); W(name); W(" ops="); N(ops); W(" totalNs="); N(ns);
-		W(" nsPerOp="); N(ns DIV ops); Console.WriteLn
+		W(" nsPerOp="); N(ns DIV ops);
+		W(" allocsPer1000="); N((Kernel.AllocCount() - allocs0) * 1000 DIV ops); Console.WriteLn
 	END Report;
 
 	PROCEDURE Run (IN name: ARRAY OF CHAR; ops: INTEGER; t0: LONGINT);
@@ -62,6 +64,13 @@ MODULE Async_devBench;
 		WHILE Tasks.Count() > 0 DO Tasks.Step END;
 		Report(name, ops, System_devClock.now() - t0)
 	END Run;
+
+	PROCEDURE Now (): LONGINT;
+	(* Начало замера: время и счётчик выделений. *)
+	BEGIN
+		allocs0 := Kernel.AllocCount();
+		RETURN System_devClock.now()
+	END Now;
 
 	PROCEDURE Go (t: Tasks.Task);
 	BEGIN
@@ -91,7 +100,7 @@ MODULE Async_devBench;
 		NEW(p); NEW(q);
 		p.a := AsyncChan.NewChan(); p.b := AsyncChan.NewChan(); p.n := n;
 		q.a := p.a; q.b := p.b; q.n := n;
-		t0 := System_devClock.now();
+		t0 := Now();
 		Go(p); Go(q);
 		Run("pingpong", n, t0)
 	END PingPongN;
@@ -120,7 +129,7 @@ MODULE Async_devBench;
 	BEGIN
 		sum := 0;
 		NEW(p); NEW(q); p.c := AsyncChan.NewBuffer(64); p.n := n; q.c := p.c; q.n := n;
-		t0 := System_devClock.now();
+		t0 := Now();
 		Go(p); Go(q);
 		Run("buffer64", n, t0)
 	END Buffer64N;
@@ -150,7 +159,7 @@ MODULE Async_devBench;
 	BEGIN
 		sum := 0;
 		NEW(t); NEW(t.b); t.n := n;
-		t0 := System_devClock.now();
+		t0 := Now();
 		Go(t);
 		Run("monitor", n, t0)
 	END MonitorN;
@@ -190,7 +199,7 @@ MODULE Async_devBench;
 		ASSERT((k = 2) OR (k = 8), 20); ASSERT(n MOD k = 0, 21);
 		got := 0;
 		NEW(r); r.k := k; r.n := n;
-		t0 := System_devClock.now();
+		t0 := Now();
 		FOR j := 0 TO k - 1 DO
 			r.cs[j] := AsyncChan.NewChan();
 			NEW(s); s.c := r.cs[j]; s.n := n DIV k; Go(s)
@@ -220,7 +229,7 @@ MODULE Async_devBench;
 		VAR i: INTEGER; t: Short; t0: LONGINT;
 	BEGIN
 		sum := 0;
-		t0 := System_devClock.now();
+		t0 := Now();
 		FOR i := 1 TO n DO NEW(t); Go(t) END;
 		Run(name, n, t0)
 	END SpawnN;
@@ -246,7 +255,7 @@ MODULE Async_devBench;
 	BEGIN
 		sum := 0;
 		NEW(a); NEW(b); a.n := n DIV 2; b.n := n DIV 2;
-		t0 := System_devClock.now();
+		t0 := Now();
 		Go(a); Go(b);
 		Run("yield", n, t0)
 	END YieldN;
