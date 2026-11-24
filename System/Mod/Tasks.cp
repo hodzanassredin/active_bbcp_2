@@ -341,13 +341,16 @@ MODULE Tasks;
 	   Следующая готовая получает процессор прямо со стека уходящей задачи,
 	   без захода на стек планировщика; после directMax таких переходов
 	   подряд управление идёт в Step, который смотрит часы, будит спящих,
-	   поднимает флаг Poll и отдаёт главный цикл по кванту.
+	   поднимает флаг Poll и отдаёт главный цикл по кванту. Задачу, которая
+	   ещё не исполнялась (t.sp = t.hi - stackHead), запускает Step: прямой
+	   первый запуск с холодного стека на холодный дороже на 15 % (замер
+	   10 тыс. задач, docs/stacks-study.md).
 	   Инвариант: на стеке планировщика ждёт ровно один Step; задача, которая
 	   из него ушла, может вернуться в него с любой другой задачей в current. *)
 		VAR me, t: Task;
 	BEGIN
 		me := current;
-		IF (readyHead # NIL) & (direct < directMax) THEN
+		IF (readyHead # NIL) & (direct < directMax) & (readyHead.sp # readyHead.hi - stackHead) THEN
 			INC(direct);
 			t := Dequeue(); SetCurrent(t); t.state := Running;
 			IF t # me THEN SwitchTo(me.sp, t.sp, me.stackRec) END
