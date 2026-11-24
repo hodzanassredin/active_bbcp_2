@@ -153,12 +153,34 @@ before it began, and nothing after. There may be any number of readers; they wai
 writer nor for each other. Example `ObxKv1` opens a reader, appends 500 events and shows that the reader
 still sees 1000 while a new one sees 1500.
 
-There is one writer. `Begin(TRUE)` while a writing transaction is open traps 21. Waiting in place is
-impossible: if the same task opens the second writing transaction, the wait is eternal, and on the main
-stack waiting is not allowed at all. Tasks that write in turn take a common monitor around the
-transaction.
+There is one writer. If another task calls `Begin(TRUE)` while a writing transaction is open, it waits
+for its end. Waiting tasks stand in a queue in order of arrival; a cancelled waiting task leaves the
+queue with trap 127. If the same task or code outside a task opens the second writer — trap 21: such a
+wait would be eternal, and on the main stack waiting is not allowed.
 
-Inside `Begin`, `Get`, `Put`, `Delete`, the cursor and `Commit` there are no switch points: input and
+The recommended way is `KvDb.Update(db, body, res)` and `KvDb.View(db, body)`. The body is an object
+with a method `Do(tx)`. `Update` runs the body and commits; if the body traps (or the task is cancelled,
+127), the transaction is rolled back and the trap goes on with the same number:
+
+```
+TYPE Add = POINTER TO RECORD (KvDb.Body) END;
+
+PROCEDURE (a: Add) Do (tx: KvDb.Tx);
+BEGIN
+	tx.Put(KvDb.Str("k")^, KvDb.Str("v")^)
+END Do;
+
+...	NEW(add); KvDb.Update(db, add, res)
+```
+
+`Begin` stays for manual control. A violation with a cost: a trap between `Begin` and `Commit` leaves the
+transaction open. Neither the compiler nor `Kv` catches it. An open writer locks the database: the next
+`Begin(TRUE)` of this task traps 21, other tasks wait forever. An open reader holds pages (section 6).
+Test `Kv_devTasks.TestUpdateTrapRollsBack` shows that `Update` removes this cost.
+
+`Begin(TRUE)` is the only switch point in `Kv`, and only when it has to wait.
+
+Inside `Get`, `Put`, `Delete`, the cursor and `Commit` there are no switch points: input and
 output are synchronous. A task that holds a transaction does not give up the processor in the middle
 of an operation, but may give it up between operations; the transaction stays open. A long `Sync` stops
 all tasks — as any blocking OS call from a task does.
@@ -184,8 +206,8 @@ and `Commit` returns the same code and rolls the transaction back. A write or `S
 leaves the database broken: every following transaction gets the same `res`; the database is closed and
 opened again. Both metas damaged — `Open` returns `corrupt`, without a trap.
 
-A contract violation is a trap: 20 — the transaction is closed, 21 — a second writer or a change in a
-reading transaction, 22 — a key longer than `KvTree.maxKey` (1024 bytes) or a cursor after the tree
+A contract violation is a trap: 20 — the transaction is closed, 21 — a second writer of the same task or
+outside a task, a change in a reading transaction, 22 — a key longer than `KvTree.maxKey` (1024 bytes) or a cursor after the tree
 changed. An empty key and an empty value are impossible: the language has no arrays of length 0.
 
 `tx.Check` checks the snapshot the transaction began with: node keys ascend and lie within the
@@ -222,6 +244,10 @@ DEFINITION KvDb;
 		ok = 0; ioError = 1; corrupt = 2;
 
 	TYPE
+		Body = POINTER TO ABSTRACT RECORD
+			(b: Body) Do- (tx: Tx), NEW, ABSTRACT
+		END;
+
 		Bytes = KvPages.Bytes;
 		Cursor = KvTree.Cursor;
 
@@ -248,6 +274,8 @@ DEFINITION KvDb;
 	PROCEDURE Open (s: KvStore.Store; OUT db: Db; OUT res: INTEGER);
 	PROCEDURE Str (IN s: ARRAY OF CHAR): Bytes;
 	PROCEDURE ToStr (IN b: ARRAY OF BYTE; OUT s: ARRAY OF CHAR);
+	PROCEDURE Update (db: Db; body: Body; OUT res: INTEGER);
+	PROCEDURE View (db: Db; body: Body);
 
 END KvDb.
 ```
@@ -263,8 +291,17 @@ Post: res = ok — db is open; corrupt — no whole meta or a damaged free list;
 
 ```
 Pre: the database is not closed — 20
-Pre: write -> no open writing transaction — 21
+Pre: write -> this task does not hold the writer; outside a task — no writer — 21
 Post: the transaction is open; after a commit error its res # ok
+```
+
+A writer from another task waits in order of arrival; cancelling the waiter — trap 127.
+
+`Update` opens a writing transaction, runs `body.Do` and commits; `View` does the same with a reader.
+
+```
+Pre: as for Begin
+Post: the body ended — res = the Commit code; the body trapped — the transaction is closed, the trap is passed with the same number
 ```
 
 `db.Close` closes the store. `db.Pages` is the number of pages of the last commit.
