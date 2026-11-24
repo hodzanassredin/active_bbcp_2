@@ -39,7 +39,7 @@ export WINEPREFIX="$PREFIX" WINEARCH=win64
 # 1. Каркас @Win. Первый прогон долгий; повторно — только с --rebuild.
 if [ "$rebuild" -eq 1 ] || [ ! -f "$OUT/System/Code/Kernel.ocf" ]; then
 	echo "test-win64: сборка каркаса @Win"
-	printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Win System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket\nDevLibrarian.DisableDevLib\n" \
+	printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Win System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket\nDevLibrarian.DisableDevLib\n" \
 		| timeout 1200 "$DEV0" >"$OUT/build.log" 2>&1 || {
 			echo "test-win64: сборка @Win не удалась:" >&2
 			tail -30 "$OUT/build.log" >&2; exit 1; }
