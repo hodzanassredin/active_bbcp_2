@@ -78,6 +78,11 @@ echo "build64: компиляция подсистем:$subs"
 	if [ -d "$BB/Actor/Mod" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Actor"
 	fi
+	# Raft — согласованный журнал; ядро ни от чего не зависит, слои над
+	# Kv и Actor импортируют их, поэтому Raft — после Actor.
+	if [ -d "$BB/Raft/Mod" ]; then
+		echo "DevCompiler64.CompileSubs @Lin Raft"
+	fi
 	# Примеры Obx на задачах и каналах лежат в Obx/Mod64: обход CompileSubs
 	# их не берёт (им нужны Tasks и Async, которые собираются выше), поэтому
 	# каждый — отдельным CompileThis. Примеры друг друга не импортируют.
