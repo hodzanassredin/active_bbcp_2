@@ -112,6 +112,11 @@ tools/go32.sh DevCPE DevCPT            # i386: DevCompiler.CompileThis
 имени модуля и передают его как ключ точек уступки. Первый `go32.sh` собирает базу i386
 (`DevCompiler.CompileSubs @Lin`), если её нет.
 
+Модули, которые линкуются в `blackbox-console` (`Kernel`, `LinKernel` и их импорты, в том числе
+`Monitors`), загрузчик берёт из исполняемого файла, а не из `Code`: после `go64.sh` такого модуля
+нужна перелинковка (`tools/build64.sh --console-only`). Какие модули грузятся с диска, показывает
+`strace -e trace=openat` вокруг `tools/run64.sh`.
+
 Файл `tools/env.sh:clean_host_temp` перед запуском `dev0Linux` удаляет из `/tmp` имена `odc` с
 пятью цифрами. Готовый `dev0Linux` содержит `LinFiles`, который создаёт такие имена и перебирает
 не более 200 вариантов; накопленный блок имён запирает конвертацию `.cp`. Живой процесс держит

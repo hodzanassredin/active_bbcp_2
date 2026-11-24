@@ -107,8 +107,9 @@ A *channel* is an object with the methods `Send` and `Recv`. The library provide
 | mailbox, `Mailbox` | `AsyncChan.NewMailbox()` | unbounded | never |
 
 All three are extensions of one record `AsyncSelect.Core`; the fields `kind` and `capacity`
-distinguish them. All three are monitors: the methods are `[exclusive]`, and waiting on a condition
-releases the monitor.
+distinguish them. A channel is an object with a monitor: if a task holds the monitor
+(`Kernel.Lock`), `Send` and `Recv` wait for its release. A waiting sender or receiver does not hold
+the monitor.
 
 ### 3.1. Rendezvous
 
@@ -561,8 +562,8 @@ Rules:
    processes do not execute common code on the common heap.
 3. `Select`, `AsyncIO` and `Pull` are called only from a task. `Send` into a mailbox, `Fill`,
    `Push`, `Try` and `Unload` do not require a task.
-4. All primitives are monitors: the methods are `[exclusive]`, waiting uses `ACTIVE.AWAIT` or
-   `Tasks.Park`.
+4. `Once` is a monitor: the methods are `[exclusive]`, waiting uses `ACTIVE.AWAIT`. Channels wait in
+   `Tasks.Park` and respect the monitor of the channel object when a task holds it.
 5. Cancellation of a task during a wait traps it; `Select` offers are removed lazily, and unfinished
    computon requests remain busy until `Stop`.
 
@@ -576,8 +577,16 @@ This section does not define behaviour; it describes how the behaviour is obtain
 two offer queues (`waitS`, `waitR`). An offer (`Offer`) stores a common context `Ctx`, the index of
 the alternative, the operation kind and the message.
 
-`Select` walks alternatives in index order. For a send or a receive it creates an offer and calls
-`Register` under the channel monitor. If `Register` performed the operation immediately, the
+Offers and contexts come from free lists and return there after `Select`: selection without a
+timeout does not allocate. The message queue of `Buffer` and `Mailbox` is a ring in an array; for `Buffer` its length
+is the capacity, for `Mailbox` the ring doubles when full.
+
+An operation on a channel between two wait points runs without switches: there is one thread and no
+preemption. So the channel monitor is taken (`Enter`) only when someone holds it: then the operation
+waits for its release; otherwise exclusion holds without the monitor.
+
+`Select` walks alternatives in index order. For a send or a receive it takes an offer and calls
+`Register`. If `Register` performed the operation immediately, the
 decision is made; otherwise the offer stays in the queue. The timeout with the smallest `ms`
 schedules a `Services` action; the task sleeps in `Tasks.Park` until `Ctx.decided` becomes true.
 
@@ -587,8 +596,13 @@ The decision is made by the first channel able to perform an offer: under its mo
 `Unpark` would move it to `Ready` without the monitor. After waking, the owner withdraws the losing
 offers (`Withdraw`); withdrawal is idempotent, so the winner is withdrawn by the same call.
 
-A direct rendezvous `Send` has two phases: it deposits the message with a `deposit` flag and waits
-for `taken`. `Prune` on every channel access rolls back a deposit whose offer lost or whose task
+Direct `Send` and `Recv` of all three kinds are `QueueSend` and `QueueRecv`, a selection of one
+alternative without timers: the operation runs at once (to a waiting receiver, into the queue, from
+the queue or from a waiting sender) or puts an offer into `waitS`/`waitR` and sleeps in
+`Tasks.Park`. The other side performs the offer and wakes the task without handing over the
+monitor, so a buffer sender keeps adding messages while the receiver has not yet started draining.
+A `Select` send into a rendezvous without a waiting receiver deposits `item` with the `deposit` flag
+(`depOffer`). `Prune` on every channel access rolls back a deposit whose offer lost or whose task
 finished. An offer is dead when the task is in `Finished` or `Cancelled`, not merely cancelled.
 
 ### 10.2. I/O
