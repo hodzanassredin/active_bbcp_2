@@ -233,7 +233,7 @@ MODULE Kernel;
 		END;
 
 		(* Мониторы реализует обычный модуль Monitors. Ядро зовёт реализацию
-		   через объект-крючок; сигнатуры экспортируемых Lock/Unlock/Wait/Await
+		   через объект-крючок; сигнатуры экспортируемых Lock/Unlock/Await
 		   совпадают с Kernel. *)
 		CondProc* = PROCEDURE (frame: S.ADDRESS): BOOLEAN;
 
@@ -414,7 +414,6 @@ MODULE Kernel;
 
 	PROCEDURE (h: MonitorHook) lock* (obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) unlock* (obj: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) wait* (obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) await* (cond: CondProc; frame, obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) beginTry* (): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) endTry* (mark: INTEGER), NEW, ABSTRACT;
@@ -2185,12 +2184,6 @@ MODULE Kernel;
 		IF monitorHook # NIL THEN monitorHook.unlock(S.VAL(S.ADDRESS, obj))
 		ELSE MonitorFail("Unlock") END
 	END Unlock;
-
-	PROCEDURE Wait* (obj: ANYPTR);
-	BEGIN
-		IF monitorHook # NIL THEN monitorHook.wait(S.VAL(S.ADDRESS, obj))
-		ELSE MonitorFail("Wait") END
-	END Wait;
 
 	PROCEDURE Await* (cond: CondProc; frame: S.ADDRESS; obj: ANYPTR);
 	BEGIN

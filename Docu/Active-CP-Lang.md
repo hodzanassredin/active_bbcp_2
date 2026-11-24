@@ -298,6 +298,7 @@ Monitor trap numbers (module `Monitors`; before the trap the environment writes 
 | 24 | await | awaiting outside a task |
 | 25 | await | the condition is `NIL` |
 | 60 | await | the condition trapped while another task evaluated it; the original number is in the console |
+| 100 | abnormal termination | the lock chain is shorter than its depth (an environment invariant is broken) |
 | 127 | switch point | the task is cancelled (module `Tasks`) |
 
 A program built only from the constructs of this report does not cause traps 22, 23 and 25: direct

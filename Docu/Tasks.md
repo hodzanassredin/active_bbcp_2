@@ -320,7 +320,7 @@ The wait check (`CheckWait`, section 3) traps in three cases:
    running — `wait inside an action handler or domain broadcast`, trap 21.
 
 `Yield`, `Sleep`, `Join` and `Park` pass this check. Waiting in a monitor outside a task
-(`Kernel.Wait`, `Kernel.Await`) traps 24 in the module `Monitors` (language report, section 8).
+(`Kernel.Await`) traps 24 in the module `Monitors` (language report, section 8).
 
 The rule: a task waits only in its own code, not in a framework callback. Framework code is atomic
 with respect to other tasks; a task talks to the framework through actions and the event loop.

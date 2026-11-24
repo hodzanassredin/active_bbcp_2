@@ -2,8 +2,8 @@ MODULE Monitors;
 (** Мониторы.
 
 	Ядро знает о мониторах только через один объект-крючок
-	Kernel.MonitorHook: экспортируемые Kernel.Lock/Unlock/Wait/Await
-	проверяют его и зовут методы. Компилятор зовёт четыре имени ядра;
+	Kernel.MonitorHook: экспортируемые Kernel.Lock/Unlock/Await
+	проверяют его и зовут методы. Компилятор зовёт три имени ядра;
 	их сигнатуры и отпечатки совпадают с Kernel.
 
 	Таблица мониторов, цепочки взятий, очереди ожидания и свободные
@@ -25,12 +25,14 @@ MODULE Monitors;
 	Трапы (перед трапом в консоль пишется «Kernel: <текст>»):
 		20	Lock: объект NIL
 		21	Lock: монитор держит другая задача, а вызов — с главного стека
-		22	Unlock, Wait, Await: монитор не у вызывающего
+		22	Unlock, Await: монитор не у вызывающего
 		23	Unlock: мониторы отпускаются не в порядке LIFO
-		24	Wait, Await: ожидание вне задачи
+		24	Await: ожидание вне задачи
 		25	Await: условие NIL
 		60	Await: постусловие не достигнуто — условие трапнуло при
 			вычислении другой задачей; исходный номер — в консоли
+		100	снятие взятий при трапе: цепочка короче своей глубины
+			(нарушен инвариант модуля)
 
 	Ожидание монитора — цикл «пока не владелец»: пробуждение без
 	монитора (посторонний Tasks.Unpark) ложное и не ошибка. *)
@@ -52,7 +54,7 @@ MODULE Monitors;
 
 		WaitRef = POINTER TO RECORD
 			task: S.ADDRESS;
-			cond: CondProc;		(* NIL — ручной Wait *)
+			cond: CondProc;
 			frame: S.ADDRESS;
 			trap: INTEGER;		(* трап при вычислении условия: переадресуется *)
 			next: WaitRef
@@ -109,6 +111,16 @@ MODULE Monitors;
 		condP: CondProc;
 		condF: S.ADDRESS;
 		condResult, condCompleted: BOOLEAN;
+		(* Глубина вложенных HandOff, перебирающих условия. Пока > 0, LockDepth
+		   считает монитор взятым: точка уступки в условии (прямой Kernel.Await
+		   с процедурой из модуля с ключом ^) не переключает задачу, и в
+		   передаваемый монитор никто не входит. *)
+		handing: INTEGER;
+		(* Число открытых Kernel.Try на главном стеке (beginTry без endTry).
+		   Трап главного стека вне Try (окно: зритель трапов, главный цикл
+		   перезапускается) не доходит ни до одного endTry: взятия снимает
+		   purge, если открыт только Try самой уборки. *)
+		mainTries: INTEGER;
 
 	(* -------------------- диагностика ------------------------------------ *)
 
@@ -463,21 +475,26 @@ MODULE Monitors;
 		RETURN condResult
 	END EvalCond;
 
-	(* Передать монитор: сначала ждущий с истинным условием, затем ручной
-	   Wait, затем первый входящий, иначе объект свободен. Условия
-	   вычисляются под удерживаемым монитором — новый владелец получает
-	   его атомарно и не может «перехватить» (семантика Active Oberon). *)
+	(* Передать монитор: сначала ждущий с истинным условием, затем первый
+	   входящий, иначе объект свободен. При переборе
+	   условий m.owner = 0, но переключения нет: handing > 0, и LockDepth
+	   запрещает уступку в Kernel.Poll. Поэтому между вычислением условия
+	   и передачей монитор никто не берёт, и новый владелец получает его
+	   атомарно (семантика Active Oberon). *)
 	PROCEDURE HandOff (m: Monitor; skip: S.ADDRESS);
-	(** skip — задача, которая сама уходит в ожидание (Wait/Await): ей
+	(** skip — задача, которая сама уходит в ожидание (Await): ей
 		монитор не передаётся, иначе она получила бы его обратно и
 		ожидание стало бы холостым циклом. *)
-		VAR w, nx: WaitRef; e: TaskRef; t: S.ADDRESS; ok: BOOLEAN; code: INTEGER;
+		VAR w, nx: WaitRef; e: TaskRef; t: S.ADDRESS; ok, res: BOOLEAN; code: INTEGER;
 	BEGIN
 		w := m.wait;
 		WHILE w # NIL DO
 			nx := w.next;
-			IF (w.cond # NIL) & (w.task # skip) THEN
-				IF EvalCond(w.cond, w.frame, ok, code) THEN
+			IF w.task # skip THEN
+				INC(handing);
+				res := EvalCond(w.cond, w.frame, ok, code);
+				DEC(handing);
+				IF res THEN
 					RemoveWait(m, w);
 					m.owner := w.task; m.count := 1;
 					UnparkTask(w.task); RETURN
@@ -490,28 +507,6 @@ MODULE Monitors;
 				END
 			END;
 			w := nx
-		END;
-		(* Уходящий ждущий (skip # 0) не смог продолжить по своему условию:
-		   он уступает сначала входящим, иначе два ждущих передают друг
-		   другу пустой монитор и входящие голодают (пинг-понг). *)
-		IF skip # 0 THEN
-			e := m.enter;
-			IF e # NIL THEN
-				m.enter := e.next;
-				IF m.enter = NIL THEN m.enterTail := NIL END;
-				t := e.task; e.next := NIL;
-				m.owner := t; m.count := 1;
-				PushTo(t, m);
-				UnparkTask(t); RETURN
-			END
-		END;
-		(* ручной Wait: первый ждущий без условия *)
-		w := m.wait;
-		WHILE (w # NIL) & ((w.cond # NIL) OR (w.task = skip)) DO w := w.next END;
-		IF w # NIL THEN
-			RemoveWait(m, w);
-			m.owner := w.task; m.count := 1;
-			UnparkTask(w.task); RETURN
 		END;
 		(* входящий *)
 		e := m.enter;
@@ -536,7 +531,7 @@ MODULE Monitors;
 		me := CurrentToken();
 		WHILE (cur # NIL) & (cur.depth > depth) DO
 			r := cur.head;
-			IF r = NIL THEN cur.depth := depth; RETURN END;
+			ASSERT(r # NIL, 100);	(* Инвариант: depth — длина цепочки head *)
 			cur.head := r.next; DEC(cur.depth);
 			m := r.mon; FreeLock(r);
 			(* Монитор, которым владеет другая задача (мы ждём в Await),
@@ -629,29 +624,6 @@ MODULE Monitors;
 		END
 	END DoUnlock;
 
-	PROCEDURE DoWait (obj: S.ADDRESS);
-	(** Ручное ожидание на мониторе: отпустить его и спать до передачи
-		монитора (Unlock) или до отмены. Вызывающий перепроверяет условие
-		в цикле WHILE. *)
-		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
-	BEGIN
-		me := curTok;
-		IF me = mainToken THEN MonErr("Wait: wait outside a task"); HALT(24) END;
-		m := FindMon(obj);
-		IF (m = NIL) OR (m.owner # me) THEN
-			MonErr("Wait: monitor is not held by the caller"); HALT(22)
-		END;
-		w := TakeWaitRef(me, NIL, 0);
-		AppendWait(m, w);
-		saved := m.count;
-		m.count := 0;
-		m.owner := 0;
-		HandOff(m, me);
-		REPEAT ParkNow UNTIL m.owner = me;	(* ложное пробуждение — ждём дальше *)
-		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
-		m.count := saved
-	END DoWait;
-
 	PROCEDURE DoAwait (cond: CondProc; frame: S.ADDRESS; obj: S.ADDRESS);
 	(** Условное ожидание (схема Мюллера): cond читает состояние в кадре
 		ждущего; если оно ложно, монитор отпускается и задача спит. Условия
@@ -700,11 +672,6 @@ MODULE Monitors;
 		Sync; DoUnlock(obj)
 	END unlock;
 
-	PROCEDURE (h: Hook) wait (obj: S.ADDRESS);
-	BEGIN
-		Sync; DoWait(obj)
-	END wait;
-
 	PROCEDURE (h: Hook) await (cond: CondProc; frame, obj: S.ADDRESS);
 	BEGIN
 		Sync; DoAwait(cond, frame, obj)
@@ -713,18 +680,26 @@ MODULE Monitors;
 	PROCEDURE (h: Hook) beginTry (): INTEGER;
 	BEGIN
 		Sync;
+		IF curTok = mainToken THEN INC(mainTries) END;
 		IF cur # NIL THEN RETURN cur.depth ELSE RETURN 0 END
 	END beginTry;
 
 	PROCEDURE (h: Hook) endTry (mark: INTEGER);
 	BEGIN
-		Sync; ReleaseTo(mark)
+		Sync;
+		IF curTok = mainToken THEN DEC(mainTries) END;
+		ReleaseTo(mark)
 	END endTry;
 
 	PROCEDURE (h: Hook) purge;
-	(** Вызывается ядром после трапа: задача уходит из очередей мониторов. *)
+	(** Вызывается ядром после трапа (из Kernel.Try уборки): задача уходит
+		из очередей мониторов. Трап главного стека вне пользовательского
+		Try (mainTries = 1 — открыт только Try уборки) снимает и все взятия
+		главного стека: исключающие процедуры, прерванные трапом, выходят
+		из своих мониторов (сообщение о языке, раздел 8). *)
 	BEGIN
-		Sync; PurgeCurrent
+		Sync; PurgeCurrent;
+		IF (curTok = mainToken) & (mainTries <= 1) THEN ReleaseTo(0) END
 	END purge;
 
 	(* -------------------- рабочие запросы -------------------------------- *)
@@ -739,11 +714,12 @@ MODULE Monitors;
 	END IsLocked;
 
 	PROCEDURE LockDepth* (): INTEGER;
-	(** Пост: число взятий мониторов текущей задачей (главным стеком);
+	(** Пост: число взятий мониторов текущей задачей (главным стеком),
+		плюс один на время перебора условий при передаче монитора;
 		планировщик не уступает в точке опроса, пока оно > 0. *)
 	BEGIN
 		Sync;
-		IF cur # NIL THEN RETURN cur.depth ELSE RETURN 0 END
+		IF cur # NIL THEN RETURN cur.depth + handing ELSE RETURN handing END
 	END LockDepth;
 
 	(* -------------------- запросы для тестов и отладки -------------------- *)
@@ -785,8 +761,7 @@ MODULE Monitors;
 				MonLn;
 				w := m.wait;
 				WHILE w # NIL DO
-					TaskName(w.task, nm); MonStr("    waits "); MonStr(nm);
-					IF w.cond = NIL THEN MonStr(" (manual)") ELSE MonStr(" (condition)") END;
+					TaskName(w.task, nm); MonStr("    waits "); MonStr(nm); MonStr(" (condition)");
 					MonLn; w := w.next
 				END;
 				e := m.enter;

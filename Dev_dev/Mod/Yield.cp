@@ -5,7 +5,7 @@ MODULE Dev_devYield;
 	вставлен Kernel.Poll. Проверяется, что счётный цикл в задаче уступает
 	другой задаче, но не уступает внутри монитора и вне задачи. *)
 
-	IMPORT ACTIVE, Kernel, Tasks, UnitAssert;
+	IMPORT S := SYSTEM, ACTIVE, Kernel, Tasks, UnitAssert;
 
 	TYPE
 		Box = POINTER TO RECORD v: INTEGER END;
@@ -14,11 +14,15 @@ MODULE Dev_devYield;
 		Short = POINTER TO RECORD (Tasks.Task) END;
 		Holder = POINTER TO RECORD (Tasks.Task) b: Box; n: INTEGER END;
 		Contender = POINTER TO RECORD (Tasks.Task) b: Box END;
+		CondWaiter = POINTER TO RECORD (Tasks.Task) b: Box END;
+		CondSetter = POINTER TO RECORD (Tasks.Task) b: Box END;
+		CondEnterer = POINTER TO RECORD (Tasks.Task) b: Box END;
 
 	VAR
 		chews, total: INTEGER;
 		shortDone, sawEarly: BOOLEAN;
 		inside, contenderSaw: BOOLEAN;
+		condFlag, inCond, enteredInCond: BOOLEAN;
 
 	PROCEDURE (c: Chewer) Run;
 		VAR i: INTEGER;
@@ -105,5 +109,50 @@ MODULE Dev_devYield;
 		CountOnMain(1000);
 		UnitAssert.EqualInt(1000, chews, "keyed loop outside a task completed")
 	END TestProcNoYieldOutsideTask;
+
+	(* --- условие с точкой уступки при передаче монитора ------------------- *)
+
+	PROCEDURE SlowCond (frame: S.ADDRESS): BOOLEAN;
+	(* Условие прямого Kernel.Await: цикл с точкой уступки (ключ ^). *)
+		VAR t0: LONGINT;
+	BEGIN
+		inCond := TRUE;
+		t0 := Kernel.Time();
+		WHILE Kernel.Time() - t0 < 10 DO Kernel.RequestPoll END;
+		inCond := FALSE;
+		RETURN condFlag
+	END SlowCond;
+
+	PROCEDURE (t: CondWaiter) Run;
+	BEGIN
+		Kernel.Lock(t.b); Kernel.Await(SlowCond, 0, t.b); Kernel.Unlock(t.b)
+	END Run;
+
+	PROCEDURE (t: CondSetter) Run;
+	BEGIN
+		Kernel.Lock(t.b); condFlag := TRUE; Kernel.Unlock(t.b)	(* Unlock вычисляет SlowCond *)
+	END Run;
+
+	PROCEDURE (t: CondEnterer) Run;
+	BEGIN
+		Kernel.Lock(t.b); enteredInCond := inCond; Kernel.Unlock(t.b)
+	END Run;
+
+	PROCEDURE TestProcNoEntryDuringHandOff*;
+		(** Пока уходящий перебирает условия ждущих, монитор занят: точка
+			уступки в условии не пускает в монитор другую задачу. *)
+		VAR b: Box; w: CondWaiter; s: CondSetter; e: CondEnterer; n: INTEGER;
+	BEGIN
+		NEW(b); condFlag := FALSE; inCond := FALSE; enteredInCond := FALSE;
+		NEW(w); w.b := b; Tasks.Start(w);
+		n := 0;
+		WHILE (Tasks.State(w) # Tasks.Parked) & (n < 100) DO Tasks.Step; INC(n) END;
+		UnitAssert.True(Tasks.State(w) = Tasks.Parked, "waiter waits");
+		NEW(s); s.b := b; NEW(e); e.b := b;
+		Tasks.Start(s); Tasks.Start(e);
+		UnitAssert.True(Pump(5000), "tasks finished");
+		UnitAssert.True(~Tasks.Failed(w) & ~Tasks.Failed(s) & ~Tasks.Failed(e), "no traps");
+		UnitAssert.True(~enteredInCond, "nobody entered while conditions were evaluated")
+	END TestProcNoEntryDuringHandOff;
 
 END Dev_devYield.

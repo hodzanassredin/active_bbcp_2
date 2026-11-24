@@ -247,13 +247,12 @@ MODULE Kernel;
 
 		(* Мониторы реализует обычный модуль Monitors.
 		   Ядро не импортирует его (циклическая зависимость): экспортируемые
-		   Lock/Unlock/Wait/Await — тонкие заглушки над одним объектом-
-		   крючком. Компилятор зовёт эти четыре имени; их сигнатуры и
+		   Lock/Unlock/Await — тонкие заглушки над одним объектом-
+		   крючком. Компилятор зовёт эти три имени; их сигнатуры и
 		   отпечатки совпадают с Kernel.
 
 		   CondProc — процедура условия: компилятор передаёт
-		   сюда адрес локальной процедуры и её кадр (статическую связь).
-		   Ручной Wait имеет cond = NIL. *)
+		   сюда адрес локальной процедуры и её кадр (статическую связь). *)
 		CondProc* = PROCEDURE (frame: S.ADDRESS): BOOLEAN;
 
 		(* Крючок мониторов: реализация в Monitors.
@@ -451,7 +450,6 @@ MODULE Kernel;
 
 	PROCEDURE (h: MonitorHook) lock* (obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) unlock* (obj: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) wait* (obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) await* (cond: CondProc; frame, obj: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) beginTry* (): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (h: MonitorHook) endTry* (mark: INTEGER), NEW, ABSTRACT;
@@ -2261,12 +2259,6 @@ MODULE Kernel;
 		IF monitorHook # NIL THEN monitorHook.unlock(S.VAL(S.ADDRESS, obj))
 		ELSE MonitorFail("Unlock") END
 	END Unlock;
-
-	PROCEDURE Wait* (obj: ANYPTR);
-	BEGIN
-		IF monitorHook # NIL THEN monitorHook.wait(S.VAL(S.ADDRESS, obj))
-		ELSE MonitorFail("Wait") END
-	END Wait;
 
 	PROCEDURE Await* (cond: CondProc; frame: S.ADDRESS; obj: ANYPTR);
 	BEGIN

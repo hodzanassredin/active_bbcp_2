@@ -138,7 +138,6 @@
 |---|---|---|
 | `AllocStack`, `FreeStack` | `Tasks` | обёртки над методами платформы; `AllocStack` добавляет проверку `size <= maxStackScan`. Убрать вместе с переносом `Tasks`, проверку перенести в `Tasks` |
 | `RegisterSignalStack` | `LinKernel.InitSignalStack` | слить с `RegisterStack` параметром |
-| `Wait` | тесты, `Docu/ru/Async.md` | оставить: документированное ручное ожидание |
 | `RequestPoll` | `Tasks` (планировщик), `Dev_devYield` | перенести в `Scheduler` |
 | `AllocCount` | `System/Mod/Loop` | оставить: пропуск сборки без выделений |
 | `platform-`, `sched-` | `Monitors` | обходятся только сменой API крючков |

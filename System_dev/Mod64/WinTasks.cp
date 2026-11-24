@@ -4,7 +4,7 @@ MODULE System_devWinTasks;
 	Отдельный модуль, а не System_devTasks: тот импортирует System_devCo с
 	ucontext/libtest64.so, которых на Windows нет. Здесь только
 	переносимая часть: стеки задач (VirtualAlloc + PAGE_NOACCESS),
-	переключение, Yield, мониторы Kernel.Lock/Wait/Unlock, изоляция
+	переключение, Yield, мониторы Kernel.Lock/Await/Unlock, изоляция
 	трапа и Join. *)
 
 	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert, Console, Strings;
@@ -49,10 +49,20 @@ MODULE System_devWinTasks;
 		UnitAssert.EqualInt(100, a.n + b.n, "both tasks counted all turns")
 	END TestProcYield;
 
+	PROCEDURE NotFull (frame: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN b.n < cap
+	END NotFull;
+
+	PROCEDURE NotEmpty (frame: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN b.n > 0
+	END NotEmpty;
+
 	PROCEDURE Put (x: INTEGER);
 	BEGIN
 		Kernel.Lock(b);
-		WHILE b.n = cap DO Kernel.Wait(b) END;
+		Kernel.Await(NotFull, 0, b);
 		b.item[b.tail] := x;
 		b.tail := (b.tail + 1) MOD cap;
 		INC(b.n);
@@ -62,7 +72,7 @@ MODULE System_devWinTasks;
 	PROCEDURE Get (OUT x: INTEGER);
 	BEGIN
 		Kernel.Lock(b);
-		WHILE b.n = 0 DO Kernel.Wait(b) END;
+		Kernel.Await(NotEmpty, 0, b);
 		x := b.item[b.head];
 		b.head := (b.head + 1) MOD cap;
 		DEC(b.n);

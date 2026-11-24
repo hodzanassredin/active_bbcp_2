@@ -232,7 +232,7 @@ allowed for `Dev_dev*` modules: `FrameworkModule` compares the subsystem name ex
 - The extension adds tasks with their own stacks, monitors, `[exclusive]`, `ACTIVE.AWAIT` and the
   yield-point key `^`. The language report is `Docu/ru/Active-CP-Lang.md`.
 - `System/Mod/Monitors.cp` implements monitors; the kernel keeps only `Kernel.Lock`, `Unlock`,
-  `Wait`, `Await` as stubs over `Kernel.MonitorHook`. The scheduler is set with
+  `Await` as stubs over `Kernel.MonitorHook`. The scheduler is set with
   `Kernel.SetScheduler` and is a `Kernel.Scheduler` object (`current`, `park`, `unpark`, `name`,
   `poll`).
 - `System/Mod64/Tasks.cp` implements tasks for amd64; `System/Mod/Tasks.cp` — for i386. Task

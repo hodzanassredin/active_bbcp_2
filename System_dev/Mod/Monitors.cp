@@ -1,10 +1,10 @@
 MODULE System_devMonitors;
-(** Тесты мониторов (Kernel.Lock/Unlock/Wait/Await).
+(** Тесты мониторов (Kernel.Lock/Unlock/Await).
 
 	Монитор — побочная запись ядра по адресу объекта. Все сценарии,
 	кроме проверок отказов, идут в задачах Tasks: ожидание вне задачи
 	и без планировщика — трап. Нагрузка — ограниченный буфер на ручных
-	Lock/Wait/Unlock; Await проверяется с модульной процедурой условия
+	Lock/Await/Unlock; Await проверяется с модульной процедурой условия
 	(кадр не используется — компиляторную схему с вложенной процедурой
 	проверяет Dev_devActive). *)
 
@@ -60,11 +60,6 @@ MODULE System_devMonitors;
 		Kernel.Unlock(mon2)
 	END UnlockFree;
 
-	PROCEDURE WaitOutside;
-	BEGIN
-		Kernel.Wait(mon2)
-	END WaitOutside;
-
 	PROCEDURE AwaitOutside;
 	BEGIN
 		Kernel.Await(NIL, 0, mon2)
@@ -94,7 +89,6 @@ MODULE System_devMonitors;
 	PROCEDURE TestProcWaitOutsideTask*;
 	BEGIN
 		NEW(mon2);
-		UnitAssert.Traps(WaitOutside, "Wait outside a task must trap");
 		UnitAssert.Traps(AwaitOutside, "Await outside a task must trap");
 		UnitAssert.True(~Monitors.IsLocked(mon2), "nothing stayed locked")
 	END TestProcWaitOutsideTask;
@@ -133,14 +127,24 @@ MODULE System_devMonitors;
 		UnitAssert.True(~Monitors.IsLocked(mon), "outer Unlock freed the monitor")
 	END TestProcTrapReleases;
 
-	(* --- ограниченный буфер на ручных Lock/Wait/Unlock ------------------- *)
+	(* --- ограниченный буфер на ручных Lock/Await/Unlock ------------------ *)
+
+	PROCEDURE NotFull (frame: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN count < cap
+	END NotFull;
+
+	PROCEDURE HasItemOrDone (frame: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN (count > 0) OR (produced >= items)
+	END HasItemOrDone;
 
 	PROCEDURE (p: Prod) Run;
 		VAR i: INTEGER;
 	BEGIN
 		FOR i := 1 TO items DIV 2 DO
 			Kernel.Lock(mon);
-			WHILE count = cap DO Kernel.Wait(mon) END;
+			Kernel.Await(NotFull, 0, mon);
 			buf[tail] := i; tail := (tail + 1) MOD cap; INC(count); INC(produced);
 			Kernel.Unlock(mon)
 		END
@@ -151,7 +155,7 @@ MODULE System_devMonitors;
 	BEGIN
 		LOOP
 			Kernel.Lock(mon);
-			WHILE (count = 0) & (produced < items) DO Kernel.Wait(mon) END;
+			Kernel.Await(HasItemOrDone, 0, mon);
 			IF count > 0 THEN
 				x := buf[head]; head := (head + 1) MOD cap; DEC(count); INC(consumed);
 				Kernel.Unlock(mon)
