@@ -154,7 +154,7 @@ tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat6
 
 ```sh
 tools/build32.sh              # мир и консоль в build/BB32LIN
-tools/test32.sh               # Unit_devMain, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
+tools/test32.sh               # Unit_devMain, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard, Cas
 tools/test32.sh --list
 tools/test32.sh System_devTasks   # только указанные модули (мир не собирается)
 ```

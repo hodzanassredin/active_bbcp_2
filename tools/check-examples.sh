@@ -29,6 +29,7 @@ if [ $# -eq 0 ]; then
 	# командой, и в проверку не входят.
 	set -- Docu/Tasks.md Docu/ru/Tasks.md Docu/Async.md Docu/ru/Async.md \
 		Unit/Docu/Testing.md Unit/Docu/ru/Testing.md \
+		Cas/Docu/Cas.md Cas/Docu/ru/Cas.md \
 		Obx/Docu/*.md Obx/Docu/ru/*.md Demo/Docu/*.md
 fi
 tmp=$(mktemp -d)

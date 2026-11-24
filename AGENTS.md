@@ -214,7 +214,7 @@ System` selects loaded `System_dev*`; `all` selects every module whose name cont
 tools/test.sh                 # all modules from tools/tests.txt
 tools/test.sh --list
 tools/test.sh System_devMain  # selected modules
-tools/test32.sh               # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
+tools/test32.sh               # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard, Cas
 tools/test-win64.sh           # Windows x64 under wine
 tools/test-resolver.sh        # resolver in unshare -rmn
 tools/test-robust.sh          # RobustParallel on 1/4/16 processes
@@ -280,6 +280,14 @@ The `Async` subsystem is built for AMD64 only, except `AsyncStm`, which is also 
 - Worker threads and computon processes must not allocate from the shared heap. A blocking OS
   call made directly from a task still freezes the framework; move it to `AsyncWork`.
 
+### Cas Store
+
+`Cas/Mod` (amd64 and i386): `CasHash` (SHA-256, `Id`), `CasStore` (abstract block store, in-memory
+`Mem`, references with compare-and-swap `CasRef`), `CasFiles` (directory store: temp file and rename,
+hash checked on read), `CasChunk` (content-defined cutting, Buzhash), `CasTree` (Merkle tree of a
+stream), `CasChange` (change sets: `Commit`, `Rebase`, `Log`). Tests — `Cas_dev`; build lists `Cas`
+before `Obx` (examples `ObxCas0..2` import it).
+
 ### GUI
 
 `LinInit` reads the external variable `BB_RUN=Модуль.Процедура` and calls the command before
@@ -318,6 +326,7 @@ code, and the checks to run before a commit.
 | `Docu/ru/Active-CP-Lang.md`, `Docu/Active-CP-Lang.md` | language report |
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | `Tasks` module |
 | `Docu/ru/Async.md`, `Docu/Async.md` | `Async` library |
+| `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | `Cas` content-addressed store |
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
@@ -325,4 +334,4 @@ code, and the checks to run before a commit.
 | `docs/adr/README.md` | decision records (Russian only): options considered and why rejected |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
 | `Demo/Docu/Sys-Map.md` | examples |
-| `Obx/Docu/Sys-Map.md`, `Obx/Docu/ru/Sys-Map.md` | Overview by Example, section Tasks, Monitors and Channels |
+| `Obx/Docu/Sys-Map.md`, `Obx/Docu/ru/Sys-Map.md` | Overview by Example, sections Tasks, Monitors and Channels; Content-Addressed Store |
