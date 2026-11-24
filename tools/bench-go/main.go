@@ -32,11 +32,40 @@ func rssKB() int {
 	return 0
 }
 
+// perfCtl — окно счётчиков perf stat --control (как test64_perf): фаза
+// phase включает или выключает счётчики, если названа в PERF_PHASE.
+func perfCtl(phase int, on bool) {
+	c, a, p := os.Getenv("PERF_CTL_FD"), os.Getenv("PERF_ACK_FD"), os.Getenv("PERF_PHASE")
+	if c == "" || p != strconv.Itoa(phase) {
+		return
+	}
+	cfd, _ := strconv.Atoi(c)
+	cmd := "disable\n"
+	if on {
+		cmd = "enable\n"
+	}
+	f := os.NewFile(uintptr(cfd), "ctl")
+	f.Write([]byte(cmd))
+	if a != "" {
+		afd, _ := strconv.Atoi(a)
+		buf := make([]byte, 8)
+		os.NewFile(uintptr(afd), "ack").Read(buf)
+	}
+}
+
 func bench(n int) {
+	benchPhase(n, 1)
+	if os.Getenv("PERF_PHASE") != "" {
+		benchPhase(n, 3) // второй прогон: стеки горутин из пула
+	}
+}
+
+func benchPhase(n, phase int) {
 	var wg sync.WaitGroup
 	counter := 0
 	wg.Add(n)
 	t0 := time.Now()
+	perfCtl(phase, true)
 	for i := 0; i < n; i++ {
 		go func() {
 			runtime.Gosched()
@@ -44,8 +73,11 @@ func bench(n int) {
 			wg.Done()
 		}()
 	}
+	perfCtl(phase, false)
 	t1 := time.Now()
+	perfCtl(phase+1, true)
 	wg.Wait()
+	perfCtl(phase+1, false)
 	t2 := time.Now()
 	fmt.Printf("BENCH go tasks=%d counter=%d setupNs=%d stepNs=%d nsPerTask=%d rssKB=%d\n",
 		n, counter, t1.Sub(t0).Nanoseconds(), t2.Sub(t1).Nanoseconds(),
