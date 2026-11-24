@@ -106,14 +106,14 @@ MODULE Services;
 	(** Снять флаг обработчика, если он остался после трапа в чужом
 		контексте (страховка к GuardCleaner). *)
 	BEGIN
-		executingAction := FALSE	(* executing оставить: Cleanup вернёт действие в очередь *)
+		executingAction := FALSE
 	END SetTrapGuardCleanup;
 
 	PROCEDURE (c: GuardCleaner) Cleanup;
 	(** Трап внутри Do: снять флаг обработчика, иначе задача навсегда
 		считает, что ждать нельзя. *)
 	BEGIN
-		executingAction := FALSE	(* executing нужен Services.Cleanup *)
+		executingAction := FALSE
 	END Cleanup;
 
 	PROCEDURE Exec (a: Action);
@@ -137,13 +137,10 @@ MODULE Services;
 			p := candidates; WHILE p.next # NIL DO p := p.next END;	(* find last element of candidates list *)
 			p.next := actions; actions := candidates; candidates := NIL	(* prepend candidates list to actions list *)
 		END;
-		IF executing # NIL THEN	(* трап внутри Exec: действие уже вынуто из candidates,
-			но DoLater ещё не вызвано — возвращаем его в очередь, а не теряем молча *)
-			IF ~In(actions, executing) & ~In(candidates, executing) THEN
-				Incl(actions, executing)
-			END;
-			executing := NIL
-		END;
+		(* Действие, трапнувшее в Do, НЕ возвращается в очередь: так было в
+		   исходном BlackBox и это единственный способ остановить сломанное
+		   действие, иначе оно трапает на каждом шаге главного цикла. *)
+		executing := NIL;
 		actionsInTheQueue := 0; p := actions;
 		WHILE p # NIL DO p := p.next; INC(actionsInTheQueue); END;
 		trapCnt := Kernel.trapCount	(* all traps are handled now *)
@@ -240,7 +237,7 @@ MODULE Services;
 				& ((0 <= p.notBefore) & (p.notBefore <= time)
 					OR (p.notBefore <= time) & (time < 0)) THEN
 				p.next := NIL;
-				executing := p;	(* если Do трапает, Cleanup вернёт p в очередь *)
+				executing := p;	(* если Do трапает, Cleanup теряет p намеренно *)
 				Exec(p);
 				executing := NIL
 			ELSE
