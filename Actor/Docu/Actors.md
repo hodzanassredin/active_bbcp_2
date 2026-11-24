@@ -440,14 +440,19 @@ handler passed (an operation number, a command number), and the author `author`,
 command, or the actor itself when there is no sender. The operation number also serves retries: if
 the operation is already in the state, the handler writes no event, and a repeated command does not
 withdraw twice. The table of done operations is part of the state; the same `Apply` restores it.
+The table remembers the last N numbers (16 in `ObxActor3`): a new number pushes out the oldest one.
+A retry usually comes soon after the first attempt, and a table without a bound would grow together
+with the snapshot. Cost: a repeat of an operation older than the last N withdraws again
+(`TestOldOperationsForgotten`); N is chosen larger than the number of operations one client can have
+"in flight".
 
-**Example.** The account from `ObxActor3` (a file journal):
+**Example.** The account from `ObxActor3` (a journal in a `Kv` base):
 
 ```
 	PROCEDURE (a: Account) Apply (e: ActorPersist.Event);
 	BEGIN
 		WITH e: Deposited DO INC(a.balance, e.sum)
-		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps] := e.op; INC(a.nOps)
+		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps MOD 16] := e.op; INC(a.nOps)
 		ELSE
 		END
 	END Apply;
@@ -466,7 +471,7 @@ withdraw twice. The table of done operations is part of the state; the same `App
 	END Handle;
 ```
 
-After a trap, after a restart and after reopening the file the balance is the same, and a repeat of
+After a trap, after a restart and after reopening the base the balance is the same, and a repeat of
 operation 1 withdraws nothing. `ObxActor4` shows snapshots and a history with author and cause;
 `ObxActor5` shows a report of account turnover that reads the same streams apart from the accounts
 (CQRS) and catches up with the journal by the number of the last event read.
@@ -504,8 +509,29 @@ store: one process per file, `Flush` without `fsync` (a power failure can take t
 open they are dropped as a torn tail), the stream index in memory, and opening reads the whole file.
 
 The journal follows the pattern of `Files.Directory`: the abstract `ActorJournal.Journal`, the
-variables `dir` and `stdDir` and `SetDir`, an implementation in memory (`NewMem`) and in a file
-(`ActorFileJournal.Open`). The codec (`ActorCodec`) is replaceable the same way.
+variables `dir` and `stdDir` and `SetDir`. The codec (`ActorCodec`) is replaceable the same way. There
+are three journal implementations:
+
+| | memory (`NewMem`) | append-only file (`ActorFileJournal`) | `Kv` base (`ActorKvJournal`) |
+|---|---|---|---|
+| survives a process crash | no | yes, except records that did not reach the medium | yes |
+| durability of a write | — | `Flush` without `fsync` | commit: pages, `Sync`, meta, `Sync` |
+| transactions | — | no; a torn tail is dropped on open | yes: `Append` is one write transaction |
+| processes | one | one per file | one per base |
+| opening | — | reads the whole file, index in memory | reads the meta; tree lookup |
+| writing an event (section 10) | 4.7–4.9 µs | 6.4–7.0 µs | 1.6–1.7 ms (two `Sync`) |
+
+The append-only file stays as a simple implementation for examples and tests without a base; where
+an event must survive a power failure, the journal is `ActorKvJournal`.
+
+The `Kv` journal keeps an event under the key `"e" + stream + 0X + number` (8 bytes, most significant
+first) and the snapshot under `"s" + stream`. A cursor finds the last number of a stream: `Seek` past
+the last possible key of the stream and a step back; a separate counter key is not needed, it would
+repeat what the keys already hold. `KvDb.Update` and `View` have no switch points inside, and `Sync`
+holds the executor until the write reaches the medium: for actors on the shared pool the whole pool
+waits. `Begin(TRUE)` of another task waits in `Tasks.Park` while a write transaction is open; as long
+as journal transactions do not switch, no other task finds one open. An actor that writes often gets
+its own task (`Props.dedicated`).
 
 ## 9. Address and Directory
 
@@ -546,7 +572,10 @@ and an address keeps two names of 128 characters.
 
 Persistence (`TestSlowPersist`, one executor, 100 000 events with 4 bytes of payload, three runs):
 `Persist` to a memory journal takes 4.7–4.9 µs per event (about 200 000 events per second), to a
-file 6.4–7.0 µs (about 150 000 per second; `Flush` after each write, no `fsync`). Recovery of
+file 6.4–7.0 µs (about 150 000 per second; `Flush` after each write, no `fsync`). The `Kv` journal in a disk file (`TestSlowPersist`, 2000 events) takes 1.6–1.7 ms per event (about
+600 per second), the cost of two `Sync` per commit; recovery of 2000 events without a snapshot takes
+7 ms. There is no group commit: a batch of events in one transaction would cost two `Sync` per batch
+but needs a new journal method. Recovery of
 100 000 events without a snapshot takes 0.38–0.51 s from memory and 0.38–0.41 s from the file; with
 a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and
 `recover-*`.
@@ -555,8 +584,8 @@ a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and
 
 - One OS thread: actors run in turn, and computation in one actor delays the others until the next
   switch point of the executor (an executor yields every 64 mailboxes).
-- Persistence only for `ActorPersist.Actor`; the disk journal is a file of one process without
-  `fsync` (section 8); there is no key-value store yet.
+- Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per event, there is no
+  group commit (section 8).
 - No transport: a `Ref` of another node can be described, but nobody delivers to it.
 - One strategy, `OneForOne`; "all for one" is not implemented.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
@@ -1122,3 +1151,25 @@ opened, the result is `NIL`. The file stays open exclusively until `Close`.
 Limits: `Flush` without `fsync`; one process per file; the stream index in memory (one entry per
 event); opening reads the whole file; the checksum catches a tear and accidental damage, not a
 deliberate change.
+
+### 12.8. ActorKvJournal
+
+```
+DEFINITION ActorKvJournal;
+
+	IMPORT KvDb, ActorJournal;
+
+	PROCEDURE New (db: KvDb.Db): ActorJournal.Journal;
+
+END ActorKvJournal.
+```
+
+A journal in a `KvDb` base: an event is the key `"e" + stream (UTF-8) + 0X + seq` (8 bytes, most
+significant first) with the value `time`, `cause`, author and frame; the snapshot is the key
+`"s" + stream` with the value `seq` and frame. `Append` is one write transaction (`KvDb.Update`)
+committed to the medium; on `conflict` nothing is written. Base errors: `KvDb.corrupt` becomes
+`ActorJournal.corrupt`, others `failed`.
+
+**PROCEDURE New (db: KvDb.Db): ActorJournal.Journal**
+Pre: `db # NIL`, trap 20.
+Post: a journal in the open base `db`; `Close` of the journal closes the base.
