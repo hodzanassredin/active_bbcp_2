@@ -18,43 +18,44 @@ MODULE AsyncChan;
 		Buffer* = POINTER TO RECORD (AsyncSelect.Core) END;
 		Mailbox* = POINTER TO RECORD (AsyncSelect.Core) END;
 
-	PROCEDURE Init (c: AsyncSelect.Core; kind, capacity: INTEGER);
-	BEGIN
-		(* NEW обнуляет запись; здесь только параметры вида *)
-		c.kind := kind; c.capacity := capacity
-	END Init;
-
 	PROCEDURE NewChan* (): Chan;
+	(** Пост: новая пустая встреча без протокола. *)
 		VAR c: Chan;
 	BEGIN
-		NEW(c); Init(c, AsyncSelect.Rendezvous, 0);
+		NEW(c); AsyncSelect.InitCore(c, AsyncSelect.Rendezvous, 0);
 		RETURN c
 	END NewChan;
 
 	PROCEDURE NewBuffer* (capacity: INTEGER): Buffer;
+	(** Пред: capacity > 0 (трап 20). Пост: новый пустой буфер на capacity
+		сообщений без протокола. *)
 		VAR c: Buffer;
 	BEGIN
 		ASSERT(capacity > 0, 20);
-		NEW(c); Init(c, AsyncSelect.Bounded, capacity);
+		NEW(c); AsyncSelect.InitCore(c, AsyncSelect.Bounded, capacity);
 		RETURN c
 	END NewBuffer;
 
 	PROCEDURE NewMailbox* (): Mailbox;
+	(** Пост: новый пустой неограниченный ящик без протокола. *)
 		VAR c: Mailbox;
 	BEGIN
-		NEW(c); Init(c, AsyncSelect.Mailbox, 0);
+		NEW(c); AsyncSelect.InitCore(c, AsyncSelect.Mailbox, 0);
 		RETURN c
 	END NewMailbox;
 
 	(* --- встреча ---------------------------------------------------------- *)
 
 	PROCEDURE (c: Chan) Send* (m: AsyncSelect.Msg), NEW;
-	(** Отправка завершается, когда получатель забрал сообщение. *)
+	(** Пред: ждать можно только из задачи. Пост: получатель забрал m;
+		нарушение протокола — трап 21, m не отправлено. *)
 	BEGIN
 		AsyncSelect.QueueSend(c, m)
 	END Send;
 
 	PROCEDURE (c: Chan) Recv* (OUT m: AsyncSelect.Msg), NEW;
+	(** Пред: ждать можно только из задачи. Пост: m — сообщение первого
+		ждущего отправителя. *)
 	BEGIN
 		AsyncSelect.QueueRecv(c, m)
 	END Recv;
@@ -62,13 +63,17 @@ MODULE AsyncChan;
 	(* --- ограниченный канал ----------------------------------------------- *)
 
 	PROCEDURE (c: Buffer) Send* (m: AsyncSelect.Msg), NEW;
-	(** Монитор берётся на время операции; ждущий отправитель — предложение
-		в очереди канала, монитор во время ожидания свободен. *)
+	(** Пред: ждать можно только из задачи. Пост: m — последнее в буфере;
+		полный буфер — ждать места; нарушение протокола — трап 21. Ждущий
+		отправитель — предложение в очереди канала, монитор во время
+		ожидания свободен. *)
 	BEGIN
 		AsyncSelect.QueueSend(c, m)
 	END Send;
 
 	PROCEDURE (c: Buffer) Recv* (OUT m: AsyncSelect.Msg), NEW;
+	(** Пред: ждать можно только из задачи. Пост: m — первое сообщение
+		буфера; пустой буфер — ждать отправителя. *)
 	BEGIN
 		AsyncSelect.QueueRecv(c, m)
 	END Recv;
@@ -76,11 +81,15 @@ MODULE AsyncChan;
 	(* --- почтовый ящик ---------------------------------------------------- *)
 
 	PROCEDURE (c: Mailbox) Send* (m: AsyncSelect.Msg), NEW;
+	(** Пост: m — последнее в ящике, ожидания нет; нарушение протокола —
+		трап 21, m не отправлено. *)
 	BEGIN
 		AsyncSelect.QueueSend(c, m)
 	END Send;
 
 	PROCEDURE (c: Mailbox) Recv* (OUT m: AsyncSelect.Msg), NEW;
+	(** Пред: ждать можно только из задачи. Пост: m — первое сообщение
+		ящика; пустой ящик — ждать отправителя. *)
 	BEGIN
 		AsyncSelect.QueueRecv(c, m)
 	END Recv;
@@ -88,10 +97,10 @@ MODULE AsyncChan;
 	(* --- протокол -------------------------------------------------------- *)
 
 	PROCEDURE SetProtocol* (c: AsyncSelect.Core; p: AsyncProto.Protocol);
-	(** Проверять прямые Send по протоколу диалога (отладочный режим).
-		NIL снимает проверку; без протокола накладных расходов нет.
-		Отправки через Select проверяются в момент, когда предложение
-		действительно исполняется. *)
+	(** Пред: c # NIL. Пост: каждая отправка в c — прямая и через Select —
+		проверяется протоколом p в момент, когда совершается (отладочный
+		режим); состояние — начальное. p = NIL снимает проверку; без
+		протокола накладных расходов нет. *)
 	BEGIN
 		AsyncSelect.SetProtocol(c, p)
 	END SetProtocol;
@@ -99,21 +108,25 @@ MODULE AsyncChan;
 	(* --- альтернативы ----------------------------------------------------- *)
 
 	PROCEDURE SendAlt* (c: AsyncSelect.Core; m: AsyncSelect.Msg; OUT op: AsyncSelect.Op);
+	(** Пред: c # NIL (иначе трап 23 в Select). Пост: op — отправка m в c. *)
 	BEGIN
 		AsyncSelect.AltSend(c, m, op)
 	END SendAlt;
 
 	PROCEDURE RecvAlt* (c: AsyncSelect.Core; OUT op: AsyncSelect.Op);
+	(** Пред: c # NIL (иначе трап 23 в Select). Пост: op — приём из c. *)
 	BEGIN
 		AsyncSelect.AltRecv(c, op)
 	END RecvAlt;
 
 	PROCEDURE TimeoutAlt* (ms: LONGINT; OUT op: AsyncSelect.Op);
+	(** Пост: op — тайм-аут ms мс; ms <= 0 срабатывает сразу. *)
 	BEGIN
 		AsyncSelect.AltTimeout(ms, op)
 	END TimeoutAlt;
 
 	PROCEDURE Select* (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER;
+	(** То же, что AsyncSelect.Select: пред- и постусловия там. *)
 	BEGIN
 		RETURN AsyncSelect.Select(ops)
 	END Select;

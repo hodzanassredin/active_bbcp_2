@@ -433,7 +433,8 @@ MODULE AsyncComputon;
 
 	PROCEDURE (s: PullSignal) Disarm;
 	BEGIN
-		IF (s.req # NIL) & (s.req.wctx = s.ctx) THEN s.req.wctx := NIL END
+		IF (s.req # NIL) & (s.req.wctx = s.ctx) THEN s.req.wctx := NIL END;
+		s.ctx := NIL	(* контракт Disarm: ctx больше не используется *)
 	END Disarm;
 
 	PROCEDURE AltPull* (rank, tag: INTEGER): AsyncSelect.Signal;

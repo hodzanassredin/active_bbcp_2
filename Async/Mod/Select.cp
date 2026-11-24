@@ -21,9 +21,9 @@ MODULE AsyncSelect;
 	CONST
 		maxAlt = 32;
 
-		(** вид операции **)
-		SendKind* = 0; RecvKind* = 1; TimeoutKind* = 2; SignalKind* = 3;
-		(** вид ядра **)
+		(* вид альтернативы *)
+		SendKind = 0; RecvKind = 1; TimeoutKind = 2; SignalKind = 3;
+		(** вид ядра канала, параметр InitCore **)
 		Rendezvous* = 0; Bounded* = 1; Mailbox* = 2;
 
 	TYPE
@@ -32,6 +32,8 @@ MODULE AsyncSelect;
 			владения, но не общий изменяемый объект. *)
 		Msg* = POINTER TO ABSTRACT RECORD END;
 
+		(** Решение одного Select или одного ожидания; сигнал получает его в
+			Arm и передаёт в SignalReady. *)
 		Ctx* = POINTER TO RECORD
 			task: Tasks.Task;
 			nextFree: Ctx;	(* связь свободного списка *)
@@ -40,7 +42,7 @@ MODULE AsyncSelect;
 			winner: INTEGER	(* индекс альтернативы; -1 — ещё нет *)
 		END;
 
-		Offer* = POINTER TO RECORD
+		Offer = POINTER TO RECORD
 			next: Offer;
 			ctx: Ctx;
 			idx: INTEGER;
@@ -49,30 +51,33 @@ MODULE AsyncSelect;
 			msg, got: Msg
 		END;
 
+		(** Ядро канала. count — сообщений в кольце, protoState — состояние
+			протокола диалога (без протокола 0). *)
 		Core* = POINTER TO EXTENSIBLE RECORD
-			kind*: INTEGER;
-			capacity*: INTEGER;
-			count*: INTEGER;		(* сообщений в кольце *)
-			waitS*, waitR*: Offer;	(* головы очередей ожидающих *)
+			kind: INTEGER;
+			capacity: INTEGER;
+			count-: INTEGER;
+			waitS, waitR: Offer;	(* головы очередей ожидающих *)
 			waitST, waitRT: Offer;
 			ring: POINTER TO ARRAY OF Msg;	(* очередь Bounded/Mailbox — кольцо *)
 			rh: INTEGER;			(* индекс головы кольца *)
-			proto*: AsyncProto.Protocol;	(* необязательный протокол диалога *)
-			protoState*: INTEGER
+			proto: AsyncProto.Protocol;	(* необязательный протокол диалога *)
+			protoState-: INTEGER
 		END;
 
 		(** Внешний сигнал: Alt, который будит не канал, а владелец
 			(например, готовность Pull компутона). *)
 		Signal* = POINTER TO ABSTRACT RECORD END;
 
-		(** Альтернатива Select. *)
+		(** Альтернатива Select; заполняется AltSend/AltRecv/AltTimeout/
+			AltSignal. got — результат победившего приёма. *)
 		Op* = RECORD
-			kind*: INTEGER;
-			core*: Core;
-			msg*: Msg;		(* для отправки *)
-			got*: Msg;		(* результат приёма *)
-			sig*: Signal;
-			ms*: LONGINT	(* для тайм-аута *)
+			kind: INTEGER;
+			core: Core;
+			msg: Msg;		(* для отправки *)
+			got-: Msg;
+			sig: Signal;
+			ms: LONGINT	(* для тайм-аута *)
 		END;
 
 		Timer = POINTER TO RECORD (Services.Action) ctx: Ctx; idx: INTEGER END;
@@ -92,9 +97,14 @@ MODULE AsyncSelect;
 		freeOffers: Offer;
 
 	PROCEDURE (s: Signal) Arm* (ctx: Ctx; idx: INTEGER): BOOLEAN, NEW, ABSTRACT;
-	(** TRUE — сигнал уже готов; иначе владелец позовёт SignalReady. *)
+	(** Пред: вызывает Select текущей задачи при регистрации. Пост: TRUE —
+		сигнал уже готов; FALSE — владелец позже позовёт SignalReady(ctx,
+		idx) не более одного раза, если до того не вызван Disarm. *)
 
 	PROCEDURE (s: Signal) Disarm*, NEW, ABSTRACT;
+	(** Пред: Arm этого Select вызван. Пост: владелец сигнала ctx из Arm
+		больше не использует и SignalReady с ним не зовёт; после Disarm
+		Select возвращает ctx в свободный список. *)
 
 	(* --- вспомогательное -------------------------------------------------- *)
 
@@ -109,7 +119,7 @@ MODULE AsyncSelect;
 	END OfferAlive;
 
 	PROCEDURE Wake (ctx: Ctx);
-	(** Будить, только когда регистрация альтернатив окончена и задача
+	(* Будить, только когда регистрация альтернатив окончена и задача
 		действительно спит в Tasks.Park. Пока идёт регистрация, задача
 		может стоять в Kernel.Lock на мониторе другого канала; Tasks.Unpark
 		перевёл бы её в Ready без монитора, и Lock трапнул бы «woken
@@ -128,28 +138,26 @@ MODULE AsyncSelect;
 	END Decide;
 
 	PROCEDURE SignalReady* (ctx: Ctx; idx: INTEGER);
-	(** Владелец сигнала: альтернатива готова. *)
+	(** Пред: владелец сигнала, ctx и idx — из Arm, Disarm ещё не вызван.
+		Пост: решение принято (idx победил, если решения ещё не было),
+		ждущая задача разбужена. *)
 	BEGIN
 		Decide(ctx, idx)
 	END SignalReady;
 
-	PROCEDURE CtxTask* (ctx: Ctx): Tasks.Task;
-	BEGIN
-		RETURN ctx.task
-	END CtxTask;
-
 	(* --- протокол диалога ------------------------------------------------- *)
 
 	PROCEDURE SetProtocol* (c: Core; p: AsyncProto.Protocol);
-	(** Прикрепить протокол диалога: каждая прямая отправка проверяется
-		(отладочный режим). NIL снимает протокол. *)
+	(** Пред: c # NIL. Пост: каждая отправка в c проверяется протоколом p в
+		момент, когда совершается; protoState — начальное состояние p.
+		p = NIL снимает протокол, protoState = 0. *)
 	BEGIN
 		c.proto := p;
 		IF p # NIL THEN c.protoState := AsyncProto.Start(p) ELSE c.protoState := 0 END
 	END SetProtocol;
 
 	PROCEDURE MessageLabel (m: Msg; OUT label: Kernel.Name);
-	(** Вид сообщения — имя его динамического типа записи. В описании
+	(* Вид сообщения — имя его динамического типа записи. В описании
 		протокола — имя без служебного суффикса "^" (так записан тип
 		указателя в метаданных BlackBox). *)
 		VAR t: Kernel.Type; i: INTEGER;
@@ -308,7 +316,7 @@ MODULE AsyncSelect;
 		IF ~ready & (c.kind # Mailbox) & (c.count >= c.capacity) THEN RETURN FALSE END;
 		IF ~SendAllowed(c, m) THEN refused := TRUE; RETURN FALSE END;
 		IF ready THEN
-			r := PopLive(c.waitR, c.waitRT, except);
+			r := PopLive(c.waitR, c.waitRT, except); ASSERT(r # NIL, 100);
 			r.got := m; Decide(r.ctx, r.idx)
 		ELSE
 			AppendItem(c, m)
@@ -369,33 +377,46 @@ MODULE AsyncSelect;
 
 	PROCEDURE (a: Timer) Do;
 	BEGIN
-		IF ~a.ctx.decided THEN
-			a.ctx.decided := TRUE; a.ctx.winner := a.idx;
-			Wake(a.ctx)
-		END
+		Decide(a.ctx, a.idx)
 	END Do;
+
+	(* --- ядро канала ------------------------------------------------------ *)
+
+	PROCEDURE InitCore* (c: Core; kind, capacity: INTEGER);
+	(** Пред: c только что создано NEW; kind IN {Rendezvous, Bounded,
+		Mailbox} (трап 20); capacity > 0 для Bounded, иначе 0 (трап 21).
+		Пост: c — пустой канал вида kind без протокола. *)
+	BEGIN
+		ASSERT((kind = Rendezvous) OR (kind = Bounded) OR (kind = Mailbox), 20);
+		ASSERT((kind = Bounded) = (capacity > 0), 21);
+		c.kind := kind; c.capacity := capacity
+	END InitCore;
 
 	(* --- альтернативы ----------------------------------------------------- *)
 
 	PROCEDURE AltSend* (core: Core; msg: Msg; OUT op: Op);
+	(** Пред: core # NIL (иначе трап 23 в Select). Пост: op — отправка msg в core. *)
 	BEGIN
 		op.kind := SendKind; op.core := core; op.msg := msg; op.got := NIL;
 		op.sig := NIL; op.ms := 0
 	END AltSend;
 
 	PROCEDURE AltRecv* (core: Core; OUT op: Op);
+	(** Пред: core # NIL (иначе трап 23 в Select). Пост: op — приём из core. *)
 	BEGIN
 		op.kind := RecvKind; op.core := core; op.msg := NIL; op.got := NIL;
 		op.sig := NIL; op.ms := 0
 	END AltRecv;
 
 	PROCEDURE AltTimeout* (ms: LONGINT; OUT op: Op);
+	(** Пост: op — тайм-аут ms мс от начала ожидания; ms <= 0 — сразу. *)
 	BEGIN
 		op.kind := TimeoutKind; op.core := NIL; op.msg := NIL; op.got := NIL;
 		op.sig := NIL; op.ms := ms
 	END AltTimeout;
 
 	PROCEDURE AltSignal* (sig: Signal; OUT op: Op);
+	(** Пред: sig # NIL (иначе трап 24 в Select). Пост: op — ожидание сигнала sig. *)
 	BEGIN
 		op.kind := SignalKind; op.core := NIL; op.msg := NIL; op.got := NIL;
 		op.sig := sig; op.ms := 0
@@ -465,11 +486,12 @@ MODULE AsyncSelect;
 	END WaitOne;
 
 	PROCEDURE QueueSend* (c: Core; m: Msg);
-	(** Отправить: ждущему получателю или в кольцо; иначе ждать получателя
-		или места. Ждущий отправитель — предложение в очереди waitS:
-		получатель забирает его сообщение и будит задачу без передачи
-		монитора, поэтому отправитель не стоит на входе в монитор, пока
-		получатель работает. Нарушение протокола — трап 21. *)
+	(** Пред: c # NIL; ждать можно только из задачи. Пост: m отдано
+		получателю (встреча) или лежит в кольце; нарушение протокола — трап
+		21, m не отправлено.
+		Ждущий отправитель — предложение в очереди waitS: получатель
+		забирает его сообщение и будит задачу без передачи монитора, поэтому
+		отправитель не стоит на входе в монитор, пока получатель работает. *)
 		VAR ctx: Ctx; o: Offer; locked, refused: BOOLEAN;
 	BEGIN
 		locked := Enter(c);
@@ -485,7 +507,8 @@ MODULE AsyncSelect;
 	END QueueSend;
 
 	PROCEDURE QueueRecv* (c: Core; OUT m: Msg);
-	(** Принять; нет отправителя или данных — ждать. Данные или ждущий
+	(** Пред: c # NIL; ждать можно только из задачи. Пост: m — первое
+		сообщение кольца или ждущего отправителя. Данные или ждущий
 		отправитель уже есть — ожидания нет, годится и главный стек. *)
 		VAR ctx: Ctx; o: Offer; locked: BOOLEAN;
 	BEGIN
@@ -502,76 +525,106 @@ MODULE AsyncSelect;
 
 	(* --- Select ----------------------------------------------------------- *)
 
-	PROCEDURE Select* (VAR ops: ARRAY OF Op): INTEGER;
-	(** Дождаться ровно одной альтернативы; вернуть её индекс.
-		Результат приёма — ops[i].got. Только из задачи. *)
-		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer;
-			i, n, tIdx, winner: INTEGER; tMs: LONGINT; timer: Timer;
-			done, signals, locked, refused: BOOLEAN;
+	PROCEDURE RegisterAll (VAR ops: ARRAY OF Op; ctx: Ctx; VAR offers: ARRAY OF Offer;
+		OUT last, tIdx: INTEGER; OUT tMs: LONGINT);
+	(* Пред: альтернативы проверены Select. Пост: альтернативы 0..last-1
+	   зарегистрированы — предложения offers[i] исполнены или стоят в
+	   очередях (NIL у тайм-аута и сигнала), сигналы вооружены; ctx.decided
+	   или last = LEN(ops). tIdx — первый наименьший тайм-аут из 0..last-1
+	   (-1 — нет), tMs — его срок.
+	   Инвариант цикла: альтернативы 0..last-1 зарегистрированы. *)
+		VAR locked: BOOLEAN;
 	BEGIN
-		ASSERT(Tasks.InTask(), 20);
-		n := LEN(ops); ASSERT(n <= maxAlt, 21);
-		tIdx := -1; tMs := -1;
-		ctx := TakeCtx(); signals := FALSE; timer := NIL;
-		FOR i := 0 TO n - 1 DO offers[i] := NIL END;
-		i := 0;
-		WHILE (i < n) & ~ctx.decided DO
-			IF ops[i].kind = TimeoutKind THEN
-				IF (tIdx < 0) OR (ops[i].ms < tMs) THEN tIdx := i; tMs := ops[i].ms END
-			ELSIF ops[i].kind = SignalKind THEN
-				signals := TRUE;
-				IF ops[i].sig # NIL THEN
-					IF ops[i].sig.Arm(ctx, i) THEN ctx.decided := TRUE; ctx.winner := i END
-				END
-			ELSE
-				offers[i] := TakeOffer(ctx, i, ops[i].kind, ops[i].msg);
-				locked := Enter(ops[i].core);
-				(* решение могло быть принято, пока мы ждали монитор
-				   другого канала: второй альтернативы не исполняем *)
-				IF ~ctx.decided THEN
-					IF Register(ops[i].core, offers[i]) THEN
-						ctx.decided := TRUE; ctx.winner := i
-					END
+		tIdx := -1; tMs := -1; last := 0;
+		WHILE (last < LEN(ops)) & ~ctx.decided DO
+			offers[last] := NIL;
+			CASE ops[last].kind OF
+			| TimeoutKind:
+				IF (tIdx < 0) OR (ops[last].ms < tMs) THEN tIdx := last; tMs := ops[last].ms END
+			| SignalKind:
+				IF ops[last].sig.Arm(ctx, last) THEN Decide(ctx, last) END
+			| SendKind, RecvKind:
+				offers[last] := TakeOffer(ctx, last, ops[last].kind, ops[last].msg);
+				locked := Enter(ops[last].core);
+				(* решение могло быть принято, пока задача ждала монитор
+				   канала: второй альтернативы не исполняем *)
+				IF ~ctx.decided & Register(ops[last].core, offers[last]) THEN
+					Decide(ctx, last)
 				END;
-				Leave(ops[i].core, locked)
+				Leave(ops[last].core, locked)
 			END;
-			INC(i)
-		END;
-		IF ~ctx.decided & (tIdx >= 0) & (tMs <= 0) THEN
-			ctx.decided := TRUE; ctx.winner := tIdx
-		END;
+			INC(last)
+		END
+	END RegisterAll;
+
+	PROCEDURE AwaitDecision (ctx: Ctx; tIdx: INTEGER; tMs: LONGINT);
+	(* Пред: регистрация окончена. Пост: ctx.decided; таймер, если был,
+	   снят с Services и на ctx не ссылается. *)
+		VAR timer: Timer;
+	BEGIN
+		IF ~ctx.decided & (tIdx >= 0) & (tMs <= 0) THEN Decide(ctx, tIdx) END;
 		IF ~ctx.decided THEN
+			timer := NIL;
 			IF tIdx >= 0 THEN
 				NEW(timer); timer.ctx := ctx; timer.idx := tIdx;
 				Services.DoLater(timer, Services.Ticks() + tMs)
 			END;
 			ctx.ready := TRUE;
 			WHILE ~ctx.decided DO Tasks.Park END;
-			IF timer # NIL THEN Services.RemoveAction(timer) END
-		END;
-		(* снять проигравшие (и победителя — Withdraw идемпотентен) *)
-		FOR i := 0 TO n - 1 DO
+			(* RemoveAction убирает действие из обоих списков Services:
+			   отложенный Do после него не вызывается *)
+			IF timer # NIL THEN Services.RemoveAction(timer); timer.ctx := NIL END
+		END
+	END AwaitDecision;
+
+	PROCEDURE WithdrawAll (VAR ops: ARRAY OF Op; VAR offers: ARRAY OF Offer; last: INTEGER);
+	(* Пост: предложений offers[0..last-1] нет ни в одной очереди, они
+	   возвращены в свободный список; сигналы 0..last-1 разоружены. *)
+		VAR i: INTEGER; locked: BOOLEAN;
+	BEGIN
+		FOR i := 0 TO last - 1 DO
 			IF offers[i] # NIL THEN
 				locked := Enter(ops[i].core);
-				Withdraw(ops[i].core, offers[i]);
+				Withdraw(ops[i].core, offers[i]);	(* и победителя: снятие идемпотентно *)
 				Leave(ops[i].core, locked)
-			ELSIF (ops[i].kind = SignalKind) & (ops[i].sig # NIL) THEN
+			ELSIF ops[i].kind = SignalKind THEN
 				ops[i].sig.Disarm
 			END
+		END
+	END WithdrawAll;
+
+	PROCEDURE Select* (VAR ops: ARRAY OF Op): INTEGER;
+	(** Пред: вызов из задачи (трап 20); LEN(ops) <= 32 (трап 21); каждая
+		альтернатива заполнена AltSend/AltRecv/AltTimeout/AltSignal (трап
+		22), у отправки и приёма канал не NIL (трап 23), у сигнала сигнал
+		не NIL (трап 24).
+		Пост: исполнена ровно одна альтернатива, результат — её индекс;
+		у победившего приёма ops[i].got — сообщение. Проигравшие предложения
+		сняты, сигналы разоружены. Протокол отверг отправку этой задачи —
+		трап 21 после снятия всех предложений. *)
+		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer; i, last, tIdx, winner: INTEGER;
+			tMs: LONGINT; refused: BOOLEAN;
+	BEGIN
+		ASSERT(Tasks.InTask(), 20);
+		ASSERT(LEN(ops) <= maxAlt, 21);
+		FOR i := 0 TO LEN(ops) - 1 DO
+			ASSERT((ops[i].kind >= SendKind) & (ops[i].kind <= SignalKind), 22);
+			ASSERT((ops[i].kind > RecvKind) OR (ops[i].core # NIL), 23);
+			ASSERT((ops[i].kind # SignalKind) OR (ops[i].sig # NIL), 24)
 		END;
+		ctx := TakeCtx();
+		RegisterAll(ops, ctx, offers, last, tIdx, tMs);
+		AwaitDecision(ctx, tIdx, tMs);
+		WithdrawAll(ops, offers, last);
 		winner := ctx.winner;
-		done := (0 <= winner) & (winner < n);
-		refused := done & (offers[winner] # NIL) & offers[winner].refused;
-		IF done THEN
-			IF (ops[winner].kind = RecvKind) & (offers[winner] # NIL) THEN
-				ops[winner].got := offers[winner].got
-			END
-		END;
-		FOR i := 0 TO n - 1 DO
+		ASSERT((0 <= winner) & (winner < last), 100);
+		refused := (offers[winner] # NIL) & offers[winner].refused;
+		IF (ops[winner].kind = RecvKind) & ~refused THEN ops[winner].got := offers[winner].got END;
+		FOR i := 0 TO last - 1 DO
 			IF offers[i] # NIL THEN FreeOffer(offers[i]) END
 		END;
-		IF ~signals & (timer = NIL) THEN FreeCtx(ctx) END;	(* сигнал может помнить ctx *)
-		ASSERT(~refused, 21);	(* протокол отверг отложенную отправку этой задачи *)
+		FreeCtx(ctx);	(* таймер снят, сигналы разоружены: на ctx никто не ссылается *)
+		ASSERT(~refused, 21);
 		RETURN winner
 	END Select;
 

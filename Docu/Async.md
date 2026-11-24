@@ -216,7 +216,10 @@ m := ops[i].got;                   (* result of a receive *)
 Rules:
 
 1. `Select` is called only from a task; otherwise trap 20.
-2. The number of alternatives is at most 32; otherwise trap 21.
+2. The number of alternatives is at most 32; otherwise trap 21. Every alternative is filled by
+   `AltSend`/`AltRecv`/`AltTimeout`/`AltSignal` (otherwise trap 22); a send or a receive has a channel
+   (otherwise trap 23), a signal alternative has a signal (otherwise trap 24). Preconditions are
+   checked before any registration.
 3. Alternatives are checked in index order. The first one that can be performed immediately wins.
 4. Of several timeouts the smallest `ms` is used; on a tie, the first by index. A timeout with
    `ms <= 0` fires immediately if no alternative is ready.
