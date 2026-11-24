@@ -10,7 +10,7 @@
 менялась: объект `RECORD next: Node; val: INTEGER`, 32 байта; корень —
 глобальная переменная; `Kernel.blockCollect := TRUE` на время
 накопления; время — `clock_gettime(CLOCK_MONOTONIC)` из `libtest64.so`;
-куча — `Kernel.Allocated()` и `Kernel.Clusters()`; RSS — `/usr/bin/time -v`.
+куча — `Kernel.Allocated()`; RSS — `/usr/bin/time -v`.
 
 ## Результаты (исходный снимок, до шага 2а)
 
@@ -50,8 +50,9 @@
    Ёмкость — 16 384 записи (128 КБ статических данных); при
    переполнении `InHeap` возвращается к линейному обходу `root`, так
    что корректность не зависит от размера кучи. Для тестов и
-   диагностики экспортированы `InHeapAddr`, `ClusterBounds`,
-   `ClusterIndexSize`, `ClusterIndexCheck`.
+   диагностики экспортировались `InHeapAddr`, `ClusterBounds`,
+   `ClusterIndexSize`, `ClusterIndexCheck`; после ревью 24.11.2026
+   оставлена одна `ClusterIndexCheck`, остальные убраны из ядра.
 2. **Сборка без выделений.** `Kernel.NewBlock` инкрементирует
    монотонный `allocCount` (`Kernel.AllocCount`). `System/Loop`
    запоминает его после каждой сборки и пропускает

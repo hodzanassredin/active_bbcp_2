@@ -15,9 +15,9 @@ UTF-8 `.cp`, сборка — `dev0Linux`, консоль — `blackbox-console`
 | Сборка x64 из `.cp` | `tools/build64.sh` | работает; первый `--clean` с нуля, в т.ч. после залежей `/tmp/odcNNNNN` |
 | Консольный запуск | `echo 'Команда' \| tools/run64.sh` | работает |
 | Быстрый цикл | `tools/go64.sh`, `tools/go32.sh` | работает (`CompileThis`) |
-| Тесты без окон | `tools/test.sh` (Unit) | 19 этапов, 86 проверок, все зелёные |
+| Тесты без окон | `tools/test.sh` (Unit) | 19 этапов, 87 проверок, все зелёные |
 | Временные файлы `LinFiles` | `Test64Files` (заняты все `odcNNNNN`) | 3 теста, зелёные; имена «odc» + 9 цифр |
-| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: UnitTests 4/4, Files 3/3, Tasks 13/13, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
+| i386: сборка и тесты | `tools/build32.sh`, `tools/test32.sh` | 8 этапов: UnitTests 4/4, Files 3/3, Tasks 14/14, Monitors 9/9, Active 6/6, Yield 3/3, CoTests 2/2, UnloadGuard 2/2 |
 | i386: C-тулчейн | `tools/i386-toolchain.sh` | без sudo; libtest32.so, ucontext |
 | Бутстрап i386 | `tools/bootstrap.sh` | три прохода, 98 файлов, B и C — 0 различий |
 | Этап 1: очередь и цикл | `Test64Tests.TestProcActionTrap` | зелёный |
@@ -188,7 +188,7 @@ tools/test.sh CheckTests   # выборочно
 TestProc-сценарии (ядро, сборщик, стеки, сигналы) помечены `proc` и
 потому не уносят остальные модули.
 
-Результат: **19 этапов, 86 проверок, 0 провалов** (манифест — 15
+Результат: **19 этапов, 87 проверок, 0 провалов** (манифест — 15
 модулей, 81 тест; остальные — отдельные сценарии) —
 - `Test64Files` (marks=proc slow): заняты все имена `odc00000`…`odc99999`;
   временный файл создаётся (красный на старом коде), после
@@ -197,10 +197,11 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
 - `Test64Tests` (marks=proc): Basic, Heap, Trap, ActionTrap, GcStack,
   TrapStack, InHeap (сценарии `Test64*`, точки входа в
   `Test64/Mod/Tests.cp`);
-- `Test64Tasks` (marks=proc slow): 13 тестов задач — Yield,
+- `Test64Tasks` (marks=proc slow): 14 тестов задач — Yield,
   производитель-потребитель, философы, отмена, изоляция трапа,
   проверки ожидания, группа, действие планировщика, нагрузка
-  1 тыс. и 10 тыс. задач (`Test64/Mod/Tasks.cp`, см. `docs/tasks.md`);
+  1 тыс. и 10 тыс. задач, уборка списка `all` в Reap после 10 тыс.
+  коротких задач (`Test64/Mod/Tasks.cp`, см. `docs/tasks.md`);
 - `UnitTests`: самопроверка Unit, включая вложенный прогон
   `UnitTestsProbe` (PASS/FAIL/EMPTY/SKIP);
 - `Test64Active` (marks=proc): 6 тестов этапа 6 — AWAIT в методе,
@@ -220,7 +221,7 @@ TestProc-сценарии (ядро, сборщик, стеки, сигналы)
   1000 одновременных соединений, при простое — 7–50 мс CPU за 1 с;
 - `Test64Workers` (marks=proc): медленный вызов в рабочей нити не
   замораживает цикл (300 мс, 285 шагов), `getaddrinfo`, файловый
-  обмен, счётчик `Kernel.WorkerAllocs`;
+  обмен;
 - `Test64Computons` (marks=proc): 12 квадратов на 1, 4 и 16 локальных
   процессах, повтор после `SIGKILL` исполнителя (414 мс), ошибка `Do`, альтернатива `AltPull` в `Select`;
 - `Test64Protocol` (marks=proc): 6 тестов этапа 10 — корректный диалог,
@@ -301,8 +302,9 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
 ## 6. Этапы 1–6 на `.cp`
 
 - `System/Mod/Services.cp`: `Work`, `Post`, `Wake`, `NextDeadline`,
-  `SetWakeHook`; `executing` возвращает действие в очередь, если `Do`
-  трапнуло без `DoLater`.
+  `SetWakeHook`; действие, трапнувшее в `Do`, в очередь не
+  возвращается (как в исходном BlackBox — это способ остановить
+  сломанное действие); флаг `executingAction` снимает trap-cleaner.
 - `System/Mod/Console.cp` + `Lin/Mod/Console.cp`: `WaitInput(timeout)`;
   `LinConsole` использует `poll` на stdin и `setvbuf(_IONBF)`.
 - `Cons/Mod/Interp.cp`: между командами и во время ожидания ввода
@@ -323,8 +325,8 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
   `currentTryContext`, `InActivationStack` учитывает зарегистрированные
   стеки, сигнальный стек регистрируется после `Kernel.SetPlatform`.
 - Шаг 2а: `System/Mod64/Kernel.cp` — индекс кластеров для `InHeap`
-  (`IndexInsert/IndexRemove`, отладочные `InHeapAddr`, `ClusterBounds`,
-  `ClusterIndexCheck`), счётчик `AllocCount`; `System/Mod/Loop.cp` —
+  (`IndexInsert/IndexRemove`); наружу из диагностики оставлена одна
+  `ClusterIndexCheck`, счётчик `AllocCount`; `System/Mod/Loop.cp` —
   пропуск периодической сборки без выделений, диагностика `Loop.Stats`.
 - Этап 3: `System/Mod64/Tasks.cp` — задачи и [code]-переключатель;
   `Kernel.AllocStack/FreeStack` и `Platform.AllocateStackMem`
@@ -420,8 +422,9 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
   роль играют `Tasks.Task` и `Select`).
 - Windows x64: стеки задач (`VirtualAlloc` + `PAGE_NOACCESS`), контекст
   `Try` на стеке, переключение и рабочие нити этапа 8 сделаны. Фасад
-  `AsyncWork` с делегатами `AsyncWorkLin`/`AsyncWorkWin`; регистрация —
-  из `LinIntInit`, `WinIntInit` и `WinInit`. `AsyncWorkWin` держит
+  `AsyncWork` с делегатами `AsyncWorkLin`/`AsyncWorkWin`; делегат
+  ставится лениво, при первом `AsyncWork.Execute` (`Dialog.Call` из
+  `AsyncWork.Ensure`), базовые init пул не заводят. `AsyncWorkWin` держит
   очередь под `CRITICAL_SECTION`, готовность забирает действие
   `Services` (окна не блокируются), файлы и `getaddrinfo` — через
   `CreateFileA`/WS2_32. Под wine идут UnitTests 4/4, Test64WinTasks 5/5
@@ -476,7 +479,7 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
 | Новые POSIX-вызовы | `LinNative`, а не `LinLibc`: символы хоста не обновить | пересобрать хост-мир |
 | TCP-готовность | `poll` вместо `select` (fd_set < 1024) и очередь accept 128 | вернуть select с ограничением |
 | Сигналы в нитях | блокируются в теле рабочей нити | блокировать в главной до создания |
-| Проверка кучи из нити | глобальный флаг `Kernel.EnterWorker` и счётчик (не TLS) | TLS через `pthread_getspecific` |
+| Проверка кучи из нити | отладочный флаг/счётчик удалён из ядра: задания не выделяют память, тест оставляет медленный вызов, файл и `getaddrinfo` | вернуть TLS-счётчик через `pthread_getspecific` |
 | Остановка исполнителей | SIGKILL и закрытие pipe, без `waitpid` (SIGCHLD игнорируется) | мягкая остановка с ожиданием |
 | Ожидание `Pull` | `Sleep(10)` с дедлайном | таймер `Services` |
 | Сборка `Async` | отдельный `CompileSubs @Lin Async` в `build64.sh` | починить `CompileSubs`/`ACTIVE` |
@@ -487,4 +490,33 @@ tools/test32.sh Test64Tasks   # только указанные модули (б
 | Фасад `RobustParallel` | тонкий модуль `Robust/Mod64/Parallel.cp`; `Computon`/`Hook` — синонимы `AsyncComputon`, ранги MPI: 0 — управляющий, 1..size-1 — исполнители (`Push`/`Pull` сдвигают на −1); размер мира — `ROBUST_SIZE` | собственный тип с копированием методов |
 | Запуск GUI-команды | внешняя переменная `BB_RUN=Модуль.Процедура` в `LinInit`, вызов до `Loop.Start` | отдельный модуль-автозапуск |
 | Стеки задач на Windows | `VirtualAlloc` + `PAGE_NOACCESS`; `Get/SetTryContext` = голова цепочки `current` | `PAGE_GUARD` и `_resetstkoflw` |
-| Рабочие нити Windows | фасад `AsyncWork` (`Async/Mod64/Work.cp`) с делегатами `AsyncWorkLin`/`AsyncWorkWin`; Win64: `CreateThread`, `CRITICAL_SECTION`/события в куче, готовность — действие `Services`, файлы и `getaddrinfo` через WinApi/`AsyncWinSock`; `Install` зовут `LinIntInit`/`WinIntInit`/`WinInit` | отдельная подсистема `AsyncWin` |
+| Рабочие нити Windows | фасад `AsyncWork` (`Async/Mod64/Work.cp`) с делегатами `AsyncWorkLin`/`AsyncWorkWin`; Win64: `CreateThread`, `CRITICAL_SECTION`/события в куче, готовность — действие `Services`, файлы и `getaddrinfo` через WinApi/`AsyncWinSock`; `Install` ставится лениво из `AsyncWork.Ensure` при первом `Execute` | отдельная подсистема `AsyncWin` |
+
+## 11. Откат ядра
+
+Опыт (24.11.2026): отдельный `git worktree add --detach .work/rollback HEAD`.
+В нём сначала `tools/bootstrap.sh` — новый компилятор (B), затем
+`git checkout f03eaab7 -- <файлы>` и удаление надстроек.
+
+Откатывать вместе (проверено сборкой; список шире, чем «Kernel,
+LinKernel, Loop, Services, Console, Init/IntInit», потому что `Cons/Interp`
+зовёт `Console.WaitInput`):
+
+- `System/Mod64/Kernel.cp`, `System/Mod/Kernel.cp`
+- `Lin/Mod64/Kernel.cp`, `Lin/Mod/Kernel.cp`
+- `System/Mod/Loop.cp`
+- `System/Mod/Services.cp`
+- `System/Mod/Console.cp`, `Lin/Mod/Console.cp`
+- `Cons/Mod/Interp.cp` (иначе `Console.WaitInput` не найден)
+- `Lin/Mod/Init.cp`, `Lin/Mod/IntInit.cp`
+- `Win/Mod/Init.cp`, `Win/Mod/IntInit.cp`
+
+Убрать `Async/`, `Robust/`, `Test64/`, `System/Mod/Tasks.cp`,
+`System/Mod64/Tasks.cp`. `Unit` в снимке отсутствует и зовёт
+`Kernel.GetTrapViewer` — в базовый мир не входит.
+
+Результат: новый компилятор собрал базовый мир `@Lin`
+(`Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket`),
+линковка `blackbox-console` прошла, `StdLog.String` отработал; бутстрап
+в этом дереве — 98 файлов, B и C совпали. Формат `.ocf`/`.osf` и
+структур ядра не менялся.

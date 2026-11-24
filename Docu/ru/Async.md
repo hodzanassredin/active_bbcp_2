@@ -414,11 +414,10 @@ id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* из задачи *
 status := AsyncWork.Result(id);
 ```
 
-Делегата регистрируют `LinIntInit`, `WinIntInit` и `WinInit` вызовом
-`Dialog.Call("<Модуль>.Install", ...)` до главного цикла. Есть задания
-`ReadFileJob`, `WriteFileJob`, `ResolveJob` (`getaddrinfo`).
-`Kernel.EnterWorker`/`WorkerAllocs()` — отладочный счётчик обращений к
-куче из рабочей нити. Блокирующий вызов прямо из задачи по-прежнему
+Делегат ставится лениво: первый `AsyncWork.Execute` зовёт
+`Dialog.Call("<Модуль>.Install", ...)` из `AsyncWork.Ensure`, поэтому
+базовый init пул не заводит. Есть задания `ReadFileJob`, `WriteFileJob`,
+`ResolveJob` (`getaddrinfo`). Блокирующий вызов прямо из задачи по-прежнему
 замораживает каркас — его нужно уводить в рабочую нить.
 
 Худший случай проверяет `tools/test-resolver.sh`: в `unshare -rmn` с
@@ -592,7 +591,7 @@ nack и тайм-аутом), `Poller` и `AsyncIO`.
 (пул pthread, pipe результатов, `Poller`) и `AsyncWorkWin`
 (`CreateThread`, критическая секция, события, действие `Services`,
 `CreateFile`/`ReadFile`/`WriteFile`, `getaddrinfo` через WS2_32),
-`LinThreads`, `LinNative`, счётчик `Kernel.WorkerAllocs`.
+`LinThreads`, `LinNative`.
 
 Реализовано (этап 9): `AsyncComputon` (локальные процессы BlackBox
 через pipe и TCP, `Push`/`Pull`/`Try`, повтор после гибели

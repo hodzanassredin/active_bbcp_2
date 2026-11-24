@@ -155,8 +155,9 @@ AsyncWork.Release(id);
   `WSAStartup(2.2)`; динамическая загрузка WS2_32 идёт через
   `LoadLibraryW` в `WinKernel.WkResolve`.
 
-Регистрация делегата — платформенный init: `LinIntInit`, `WinIntInit` и
-`WinInit` зовут `Dialog.Call("<Модуль>.Install", ...)` до главного цикла.
+Регистрация делегата ленивая: первый `AsyncWork.Execute` зовёт
+`Dialog.Call("<Модуль>.Install", ...)` из `AsyncWork.Ensure`; базовые
+init (`LinIntInit`, `WinIntInit`, `WinInit`) пул не заводят.
 Клиентский код (`Execute`, `ReadFileJob`, `WriteFileJob`, `ResolveJob`)
 не меняется.
 
@@ -169,10 +170,10 @@ AsyncWork.Release(id);
 только в свою сборку.
 
 Готовые задания: `ReadFileJob`, `WriteFileJob`, `ResolveJob`
-(`getaddrinfo`). `Kernel.EnterWorker/LeaveWorker` и
-`Kernel.WorkerAllocs()` — отладочный счётчик: `NEW` из рабочей нити
-увеличивает его. Это именно счётчик (не запрет): `NEW` по-прежнему
-выделяет, поэтому тест дисциплины гоняют при почти пустом главном цикле.
+(`getaddrinfo`). Тела заданий не выделяют память из кучи. Отладочный
+счётчик `Kernel.WorkerAllocs`/`EnterWorker` удалён: он был общим флагом
+без атомарности и проверял дисциплину только косвенно; тест
+`Test64Workers` оставляет медленный вызов, файл и `getaddrinfo`.
 
 Замер (Linux): `SlowJob` (usleep 300 мс) в рабочей нити; задача ждёт
 `Execute`, главный цикл за это время сделал 285 шагов, тест занял
@@ -407,7 +408,7 @@ wait: EndMsg > done; done:
 
 - Windows x64: пул рабочих нитей `CreateThread` и опрос готовности
   сделаны — фасад `AsyncWork` с делегатами `AsyncWorkLin`/`AsyncWorkWin`,
-  регистрация из `LinIntInit`/`WinIntInit`/`WinInit`; под wine идут
+  регистрация ленивая из `AsyncWork.Ensure`; под wine идут
   `Test64WinWorkers` 4/4. GUI-прогон Windows (`WinInit`) собирается, но
   отдельного теста под wine нет.
 - MPI: нет повтора при гибели ранга и `Unload` (mpiexec гасит мир).

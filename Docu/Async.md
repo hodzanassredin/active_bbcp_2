@@ -420,12 +420,11 @@ id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* from a task *)
 status := AsyncWork.Result(id);
 ```
 
-`LinIntInit`, `WinIntInit` and `WinInit` register the delegate by
-calling `Dialog.Call("<Module>.Install", ...)` before the main loop.
-`ReadFileJob`, `WriteFileJob` and `ResolveJob` (`getaddrinfo`) are
-provided. `Kernel.EnterWorker`/`WorkerAllocs()` is a debug counter for
-heap accesses from workers. A blocking call made directly from a task
-still freezes the framework — move it to a worker.
+The delegate is installed lazily: the first `AsyncWork.Execute` calls
+`Dialog.Call("<Module>.Install", ...)` from `AsyncWork.Ensure`, so the
+platform init does not start the pool. `ReadFileJob`, `WriteFileJob`
+and `ResolveJob` (`getaddrinfo`) are provided. A blocking call made
+directly from a task still freezes the framework — move it to a worker.
 
 The worst case is covered by `tools/test-resolver.sh`: inside
 `unshare -rmn` with a dummy interface and a private resolv.conf whose
