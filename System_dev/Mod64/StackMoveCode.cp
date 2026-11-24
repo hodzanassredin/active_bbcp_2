@@ -5,7 +5,7 @@ MODULE System_devStackMoveCode;
 	верхнего кадра, статическую связь вложенной процедуры, открытый массив, получателя-запись,
 	временный адрес посреди выражения. Результат — поле ok. *)
 
-	IMPORT Kernel, Tasks;
+	IMPORT ACTIVE, Kernel, Tasks;
 
 	CONST depth* = 300;
 
@@ -19,6 +19,7 @@ MODULE System_devStackMoveCode;
 		VarT* = POINTER TO RECORD (Probe) END;
 		NestT* = POINTER TO RECORD (Probe) END;
 		Nest2T* = POINTER TO RECORD (Probe) END;
+		CallSlotT* = POINTER TO RECORD (Probe) END;
 		ArrT* = POINTER TO RECORD (Probe) END;
 		ValArrT* = POINTER TO RECORD (Probe) END;
 		RecvT* = POINTER TO RECORD (Probe) END;
@@ -27,9 +28,13 @@ MODULE System_devStackMoveCode;
 		GcT* = POINTER TO RECORD (Probe) END;
 		TrapT* = POINTER TO RECORD (Probe) END;
 		SleepT* = POINTER TO RECORD (Probe) END;
+		WaitT* = POINTER TO RECORD (Probe) END;	(** ждёт в AWAIT условие на свою локальную *)
+		SetT* = POINTER TO RECORD (Probe) END;	(** растёт, затем ставит флаг *)
+		AwaitDeepT* = POINTER TO RECORD (Probe) END;	(** перенос в условии AWAIT, затем ожидание *)
+		YieldT* = POINTER TO RECORD (Probe) END;	(** перенос, затем точка ожидания (канарейка) *)
 		Box = POINTER TO RECORD v: INTEGER; next: Box END;
 
-	VAR stop*: BOOLEAN;
+	VAR stop*: BOOLEAN; flag*: INTEGER;
 
 	(* VAR-параметр: адрес x в кадре верхней процедуры передаётся вниз через все кадры *)
 	PROCEDURE DeepVar (VAR x: INTEGER; n: INTEGER);
@@ -88,6 +93,42 @@ MODULE System_devStackMoveCode;
 		t.got := NestDeep(depth); t.want := 2 * (depth + 1); t.ok := t.got = t.want
 	END Run;
 
+	(* Статическая связь у точки вызова: Inner (уровень 2) зовёт Help (уровень 1). RBX (кадр Mid)
+	   на время вызова Help без ключа "%" лежит пушем над аргументами (PrepCall) — карте на
+	   процедуру он не известен; с ключом — в слоте [FP-8] Inner. Help уходит в рекурсию и
+	   переносит стек посреди вызова; после возврата Inner пишет в m по RBX. *)
+	PROCEDURE Lvl (n: INTEGER): INTEGER;
+		VAR acc: INTEGER;
+
+		PROCEDURE Help (k: INTEGER): INTEGER;
+			VAR pad: ARRAY 8 OF INTEGER;
+		BEGIN
+			pad[k MOD 8] := k; INC(acc);
+			IF k = 0 THEN RETURN 1 END;
+			RETURN Help(k - 1) + pad[k MOD 8] - k + 1
+		END Help;
+
+		PROCEDURE Mid (k: INTEGER);
+			VAR m: INTEGER;
+
+			PROCEDURE Inner (j: INTEGER);
+			BEGIN
+				INC(m); m := m + Help(j); INC(m)
+			END Inner;
+
+		BEGIN
+			m := 0; Inner(k); acc := acc + m
+		END Mid;
+
+	BEGIN
+		acc := 0; Mid(n); RETURN acc
+	END Lvl;
+
+	PROCEDURE (t: CallSlotT) Run*;
+	BEGIN
+		t.got := Lvl(depth); t.want := 2 * depth + 4; t.ok := t.got = t.want
+	END Run;
+
 	(* Открытый массив по ссылке: адрес локального массива верхнего кадра *)
 	PROCEDURE SumIn (IN a: ARRAY OF INTEGER; n: INTEGER): INTEGER;
 		VAR pad: ARRAY 8 OF INTEGER;
@@ -137,7 +178,7 @@ MODULE System_devStackMoveCode;
 	END Run;
 
 	(* Перенос посреди выражения: левая часть уже вычислена, вызов справа растит стек *)
-	PROCEDURE Deep (n: INTEGER): INTEGER;
+	PROCEDURE Deep* (n: INTEGER): INTEGER;
 		VAR pad: ARRAY 8 OF INTEGER;
 	BEGIN
 		pad[n MOD 8] := 1;
@@ -211,6 +252,57 @@ MODULE System_devStackMoveCode;
 		VAR x: INTEGER;
 	BEGIN
 		x := 41; Hold(x, 3); t.got := x; t.want := 42; t.ok := t.got = t.want
+	END Run;
+
+	(* AWAIT: кадр ждущего лежит в записи ожидания Monitors, условие вычисляет чужая задача *)
+	PROCEDURE [exclusive] WaitFlag (want: INTEGER): INTEGER;
+		VAR mine: INTEGER;
+	BEGIN
+		mine := want;
+		ACTIVE.AWAIT(flag = mine);
+		RETURN mine + flag
+	END WaitFlag;
+
+	PROCEDURE [exclusive] WaitDeep (want: INTEGER): INTEGER;
+	(* перенос внутри процедуры монитора до AWAIT (вызов в условии AWAIT компилятор не
+	   допускает): в запись ожидания уходит уже новый кадр *)
+		VAR mine, d: INTEGER;
+	BEGIN
+		d := Deep(depth); mine := want + d - depth - 1;
+		ACTIVE.AWAIT(flag = mine);
+		RETURN mine + flag
+	END WaitDeep;
+
+	PROCEDURE [exclusive] SetFlag (v: INTEGER);
+	BEGIN
+		flag := v
+	END SetFlag;
+
+	PROCEDURE Set* (v: INTEGER);
+	BEGIN
+		SetFlag(v)
+	END Set;
+
+	PROCEDURE (t: WaitT) Run*;
+	BEGIN
+		t.got := WaitFlag(5); t.want := 10; t.ok := t.got = t.want
+	END Run;
+
+	PROCEDURE (t: SetT) Run*;
+		VAR x: INTEGER;
+	BEGIN
+		x := Deep(depth); Tasks.Yield; SetFlag(5); t.got := x; t.want := depth + 1; t.ok := t.got = t.want
+	END Run;
+
+	PROCEDURE (t: AwaitDeepT) Run*;
+	BEGIN
+		t.got := WaitDeep(7); t.want := 14; t.ok := t.got = t.want
+	END Run;
+
+	PROCEDURE (t: YieldT) Run*;
+		VAR x: INTEGER;
+	BEGIN
+		x := Deep(depth); Tasks.Yield; Tasks.Sleep(1); t.got := x; t.want := depth + 1; t.ok := t.got = t.want
 	END Run;
 
 END System_devStackMoveCode.

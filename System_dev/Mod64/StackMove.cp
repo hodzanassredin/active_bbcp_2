@@ -9,7 +9,7 @@ MODULE System_devStackMove;
 
 	CONST
 		small = 4096;
-		nScen = 10;
+		nScen = 11;
 
 	VAR
 		lastFp: S.ADDRESS;
@@ -35,7 +35,7 @@ MODULE System_devStackMove;
 
 	PROCEDURE New (i: INTEGER; OUT name: ARRAY OF CHAR): C.Probe;
 		VAR v: C.VarT; n: C.NestT; a: C.ArrT; va: C.ValArrT; r: C.RecvT; e: C.ExprT; g: C.ArgT;
-			gc: C.GcT; tr: C.TrapT; n2: C.Nest2T;
+			gc: C.GcT; tr: C.TrapT; n2: C.Nest2T; cs: C.CallSlotT;
 	BEGIN
 		CASE i OF
 		| 0: NEW(v); name := "var-param"; RETURN v
@@ -48,6 +48,7 @@ MODULE System_devStackMove;
 		| 7: NEW(gc); name := "gc-after"; RETURN gc
 		| 8: NEW(tr); name := "trap-after"; RETURN tr
 		| 9: NEW(n2); name := "nested-slot"; RETURN n2
+		| 10: NEW(cs); name := "call-slot"; RETURN cs
 		END
 	END New;
 
@@ -152,6 +153,10 @@ MODULE System_devStackMove;
 	PROCEDURE TestProcNestedSlot*;
 	BEGIN Check(9, Stackmove.exact, "nested slot exact"); Check(9, Stackmove.loose, "nested slot loose") END TestProcNestedSlot;
 
+	PROCEDURE TestProcCallSlot*;
+	(* RBX вокруг вызова процедуры внешнего уровня (слот № 9 docs/stack-copy-study.md). *)
+	BEGIN Check(10, Stackmove.exact, "call slot exact"); Check(10, Stackmove.loose, "call slot loose") END TestProcCallSlot;
+
 	PROCEDURE TestProcGcAfterMove*;
 	BEGIN Check(7, Stackmove.exact, "gc exact"); Check(7, Stackmove.loose, "gc loose") END TestProcGcAfterMove;
 
@@ -181,6 +186,96 @@ MODULE System_devStackMove;
 		UnitAssert.True(v.ok & ~Tasks.Failed(v), "mover result");
 		UnitAssert.True(s.ok & ~Tasks.Failed(s), "sleeper result")
 	END TestProcSleeperUntouched;
+
+	PROCEDURE Start (t: Tasks.Task);
+	BEGIN
+		Tasks.SetStackSize(t, small); Tasks.Start(t)
+	END Start;
+
+	PROCEDURE TestProcAwaitWaiterUntouched*;
+	(* Задача ждёт в AWAIT (её кадр — в записи ожидания Monitors), другая переносит стек,
+	   ставит флаг и на выходе из монитора вычисляет условие ждущей в её кадре. *)
+		VAR w: C.WaitT; m: C.SetT;
+	BEGIN
+		C.flag := 0; Stackmove.Reset; Stackmove.poison := TRUE; Stackmove.SetMode(Stackmove.exact);
+		NEW(w); Start(w); NEW(m); Start(m);
+		Pump; Stackmove.Off;
+		UnitAssert.True(Stackmove.moves > 0, "mover moved");
+		UnitAssert.True(m.ok & ~Tasks.Failed(m), "mover result");
+		UnitAssert.True(w.ok & ~Tasks.Failed(w), "waiter result")
+	END TestProcAwaitWaiterUntouched;
+
+	PROCEDURE TestProcAwaitAfterMove*;
+	(* Условие AWAIT ссылается на локальные; перенос — посреди вычисления условия в своей
+	   процедуре, затем задача ждёт, и условие вычисляет другая задача по новому кадру. *)
+		VAR w: C.AwaitDeepT; t0: LONGINT;
+	BEGIN
+		C.flag := 0; Stackmove.Reset; Stackmove.poison := TRUE; Stackmove.SetMode(Stackmove.exact);
+		NEW(w); Start(w);
+		t0 := Kernel.Time();
+		WHILE (Tasks.State(w) # Tasks.Waiting) & (Tasks.State(w) # Tasks.Parked) & (Kernel.Time() - t0 < 5000)
+			& (Tasks.Count() > 0) DO Tasks.Step END;
+		C.Set(7);
+		Pump; Stackmove.Off;
+		UnitAssert.True(Stackmove.moves > 0, "moved in condition");
+		UnitAssert.True(w.ok & ~Tasks.Failed(w), "waiter result")
+	END TestProcAwaitAfterMove;
+
+	PROCEDURE TestProcCanaryOnNewStack*;
+	(* После переноса у дна нового стека канарейка: точки ожидания её проверяют (иначе трап 126). *)
+		VAR y: C.YieldT;
+	BEGIN
+		Stackmove.Reset; Stackmove.SetMode(Stackmove.exact);
+		NEW(y); Start(y); Pump; Stackmove.Off;
+		UnitAssert.True(Stackmove.moves > 0, "moved");
+		UnitAssert.True(y.ok & ~Tasks.Failed(y), "yield after move")
+	END TestProcCanaryOnNewStack;
+
+	PROCEDURE RunTry (mask: SET): Sys.TryT;
+		VAR t: Sys.TryT;
+	BEGIN
+		Stackmove.Reset; Stackmove.poison := TRUE; Stackmove.testTrusted := "System_devStackMoveSys ";
+		Stackmove.mask := mask; Stackmove.SetMode(Stackmove.exact);
+		NEW(t); Start(t); Pump; Stackmove.Off; Stackmove.testTrusted := ""; Stackmove.mask := {};
+		RETURN t
+	END RunTry;
+
+	PROCEDURE MutTry*;
+	(** Мутация: точный способ не правит контексты Try — трап после переноса уходит в старый стек. *)
+		VAR t: Sys.TryT;
+	BEGIN
+		t := RunTry({Stackmove.kTry});
+		W("SCEN try-in-task mut ok="); IF (t.stage = 2) & ~Tasks.Failed(t) THEN W("1") ELSE W("0") END; Console.WriteLn
+	END MutTry;
+
+	PROCEDURE TestProcTryInTask*;
+	(* Kernel.Try внутри задачи: перенос внутри Try, трап после переноса ловит этот Try,
+	   задача продолжается на новом стеке. *)
+		VAR t: Sys.TryT;
+	BEGIN
+		t := RunTry({});
+		UnitAssert.True(Stackmove.moves > 0, "moved");
+		UnitAssert.EqualInt(2, t.stage, "trap caught after move");
+		UnitAssert.EqualInt(C.depth DIV 2 + 1, t.after, "continues after Try");
+		UnitAssert.True(~Tasks.Failed(t), "task ok")
+	END TestProcTryInTask;
+
+	PROCEDURE TestProcTrustedList*;
+	(* Список доверенных: ядро (Tasks, Kernel) под каждой задачей; без списка задача закреплена
+	   кадрами Tasks. Модуль вне списка с SYSTEM закрепляет и со списком (TestProcSystemModulePinned). *)
+		VAR v: C.VarT; s: ARRAY 256 OF CHAR;
+	BEGIN
+		UnitAssert.True(Stackmove.Trusted("Tasks") & Stackmove.Trusted("Kernel") & Stackmove.Trusted("LinKernel")
+			& Stackmove.Trusted("Taskarch"), "kernel trusted");
+		UnitAssert.True(~Stackmove.Trusted("System_devStackMoveSys") & ~Stackmove.Trusted("Task")
+			& ~Stackmove.Trusted("Kern"), "others not trusted");
+		Stackmove.Reset; Stackmove.SetMode(Stackmove.exact); Stackmove.trustRule := FALSE;
+		NEW(v); Start(v); Pump; Stackmove.Off; Stackmove.trustRule := TRUE;
+		Stackmove.PinReport(s);
+		UnitAssert.EqualInt(0, Stackmove.moves, "no move without the list");
+		UnitAssert.True(Tasks.Failed(v) & (Kernel.err = 137), "trap 137");
+		UnitAssert.True(Stackmove.pins > 0, "pinned")
+	END TestProcTrustedList;
 
 	PROCEDURE TestProcSystemModulePinned*;
 	(* Рекурсия через модуль с SYSTEM: стек закреплён, трап 137, переноса нет. *)

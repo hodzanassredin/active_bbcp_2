@@ -459,6 +459,12 @@ MODULE Kernel;
 	PROCEDURE (s: Scheduler) name* (task: S.ADDRESS; OUT name: ARRAY OF CHAR), NEW, ABSTRACT;
 	PROCEDURE (s: Scheduler) poll* (): BOOLEAN, NEW, ABSTRACT;
 
+	PROCEDURE (s: Scheduler) grow* (regs: S.ADDRESS): BOOLEAN, NEW, EXTENSIBLE;
+	(** Трап 137 проверки границы стека в прологе. На i386 проверки в прологе нет: не зовётся. *)
+	BEGIN
+		RETURN FALSE
+	END grow;
+
 	PROCEDURE (VAR p: Platform) PageSize* (): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) ProtectMemRead* (addr: S.ADDRESS; size: INTEGER): BOOLEAN, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) ProtectMemExec* (addr: S.ADDRESS; size: INTEGER): BOOLEAN, NEW, ABSTRACT;

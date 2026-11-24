@@ -25,9 +25,6 @@ done
 [ -n "$MOD" ] || { echo "unit: укажите модуль тестов" >&2; exit 2; }
 [ -x "$INTERP" ] || { echo "unit: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
-# Проба переноса стека: трап проверки в прологе — на сигнальном стеке (LinKernel).
-case "$MOD" in System_devStackMove) export BB_STACKMOVE=1;; esac
-
 # libtest64.so нужен System_devCo (GcStack/TrapStack) и замеру.
 if command -v cc >/dev/null 2>&1; then
 	cc -shared -fPIC -O2 -o "$INSTALL/libtest64.so" "$BB/tools/test64.c" 2>/dev/null || true
@@ -53,10 +50,10 @@ while [ $pass -lt 3 ]; do
 done
 
 out="${TMPDIR:-/tmp}/unit-$$.out"
-# Проба переноса стека на всём наборе: STACKMOVE_PROBE=Loose|Exact, STACKMOVE_STACK — стартовый стек.
+# Растущие стеки на всём наборе: STACKMOVE_PROBE=Exact|Loose|NoTrust (Stackmove.Probe…),
+# STACKMOVE_STACK — стартовый стек.
 pre=""
 if [ -n "${STACKMOVE_PROBE:-}" ]; then
-	export BB_STACKMOVE=1
 	pre="Stackmove.Probe$STACKMOVE_PROBE
 Tasks.SetDefaultStackSize(${STACKMOVE_STACK:-4096})
 "

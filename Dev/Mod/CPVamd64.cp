@@ -479,7 +479,7 @@ MODULE DevCPVamd64;
 								   InterfaceTrapHandler на Linux — assert-stub. fail-fast *)
 			ELSE
 				vadr := 0;
-				IF imVar IN proc.conval.setval THEN DEC(vadr, 8) END;
+				IF DevCPCamd64.SlSlot(proc) THEN DEC(vadr, 8) END;
 				IF isCallback IN proc.conval.setval THEN DEC(vadr, 16) END
 			END;
 			proc.conval.intval := padr; proc.conval.intval2 := vadr;

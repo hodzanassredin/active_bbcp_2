@@ -527,10 +527,11 @@ MODULE LinKernel;
 			pc := context.uc_mcontext.gregs[Libc.REG_EIP];
 			val := siginfo._sifields._sigfault.si_addr;
 
-		(* Проба переноса стека: трап 137 проверки в прологе (lea esi,eax с номером 89H) *)
-		IF (sig = Libc.SIGILL) & (Kernel.stackGrow # NIL) & IsGrowTrap(pc) THEN
+		(* Рост стека задачи: трап 137 проверки в прологе (lea esi,eax с номером 89H) отдаётся
+		   планировщику (Kernel.Scheduler.grow); обработчик уже на сигнальном стеке. *)
+		IF (sig = Libc.SIGILL) & (Kernel.sched # NIL) & IsGrowTrap(pc) THEN
 			(* gregs — с байта 40 ucontext_t x86-64: uc_flags, uc_link, uc_stack (24) *)
-			IF Kernel.stackGrow(S.VAL(S.ADDRESS, context) + 40) THEN
+			IF Kernel.sched.grow(S.VAL(S.ADDRESS, context) + 40) THEN
 				S.PUT(S.VAL(S.ADDRESS, context) + 40 + 8 * Libc.REG_EIP, pc + 3);
 				pc := oldpc;
 				RETURN

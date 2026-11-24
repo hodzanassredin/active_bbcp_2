@@ -119,6 +119,7 @@ MODULE DevCPCamd64;
 		uwBegin, uwProlog, uwFrame: INTEGER; uwEnabled: BOOLEAN;
 		uwCodes: ARRAY 8 OF BYTE; uwLength: INTEGER;
 		curCCall: BOOLEAN;	(* SysV: текущий вызов - внешний [ccall] (для Param) *)
+		curProc: DevCPT.Object;	(* процедура, чьё тело генерируется (Enter); NIL — тело модуля *)
 		(* Проба переноса стека: карты кадров (ключ "%"), копятся по процедурам и пишутся в конец кода *)
 		frameMap: POINTER TO ARRAY OF BYTE; frameMapLen: INTEGER;
 
@@ -1842,10 +1843,22 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 	BEGIN
 		curCCall := (proc.sysflag = ccall) OR (proc.sysflag = -14); (* external ABI: 8-byte argument slots *)
 		lev := proc.mnolev;
-		IF (slNeeded IN proc.conval.setval) & (imLevel[lev] > 0) & (imLevel[DevCPLamd64.level] > imLevel[lev]) THEN
+		IF (slNeeded IN proc.conval.setval) & (imLevel[lev] > 0) & (imLevel[DevCPLamd64.level] > imLevel[lev])
+			& ~(DevCPM.stackChk IN DevCPM.options) THEN	(* с ключом "%" RBX восстанавливает Call из кадра *)
 			DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPush(r)
 		END
 	END PrepCall;
+
+	PROCEDURE SlSlot* (proc: DevCPT.Object): BOOLEAN;
+	(** У процедуры есть слот [FP-8] с RBX на входе. Без ключа "%" — только у imVar (RBX вызывающего,
+		RBX := FP). С ключом "%" — ещё у каждой вложенной: там лежит её статическая связь, и после
+		вызова процедуры внешнего уровня RBX берётся из слота, а не со стека над аргументами
+		(PrepCall), — карта кадра на процедуру знает этот слот (перенос стека, Stackmove). *)
+	BEGIN
+		RETURN (imVar IN proc.conval.setval)
+			OR (DevCPM.stackChk IN DevCPM.options) & (proc.mnolev > 0) & ~(isGuarded IN proc.conval.setval)
+			& ~(isCallback IN proc.conval.setval)
+	END SlSlot;
 	
 	(* ccall16:  Prologue / epilogue *)
 	PROCEDURE PreCcall16* (val: INTEGER); 
@@ -2094,7 +2107,17 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 					PostCcall16(n)
 				END;
 			END;
-			IF saved THEN DevCPLamd64.GenPop(r) END;
+			IF saved & (DevCPM.stackChk IN DevCPM.options) THEN
+				(* RBX своего уровня: у imVar — свой FP, у прочих вложенных — слот [FP-8] (SlSlot) *)
+				IF (curProc # NIL) & (imVar IN curProc.conval.setval) THEN
+					DevCPLamd64.MakeReg(y, BP, Pointer); DevCPLamd64.GenMove(y, r)
+				ELSE
+					ASSERT((curProc # NIL) & SlSlot(curProc), 100);
+					y.mode := Ind; y.scale := 0; y.form := Pointer; y.reg := BP; y.offset := -8;
+					DevCPLamd64.GenMove(y, r)
+				END
+			ELSIF saved THEN DevCPLamd64.GenPop(r)
+			END;
 		ELSIF x.mode = TProc THEN
 			IF x.scale = 1 THEN (* super *)
 				DevCPLamd64.MakeConst(tag, 0, Pointer); tag.obj := DevCPE.TypeObj(tag.typ.BaseTyp)
@@ -2682,7 +2705,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				END;
 				par := par.link
 			END;
-			IF imVar IN proc.conval.setval THEN slots[n] := -8 + 2; INC(n) END
+			IF SlSlot(proc) THEN slots[n] := -8 + 2; INC(n) END
 		END;
 		MapB(entry); MapB(entry DIV 100H); MapB(entry DIV 10000H); MapB(entry DIV 1000000H);
 		MapB(n); MapB(n DIV 100H);
@@ -2721,6 +2744,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		uwEnabled := (proc = NIL) OR ((proc.sysflag # ccall) & (proc.sysflag # noframe));
 		SetReg({AX, CX, DX, SI, DI});
 		DevCPLamd64.MakeReg(fp, BP, Pointer); DevCPLamd64.MakeReg(sp, SP, Pointer);
+		curProc := proc;
 		IF proc # NIL THEN (* enter proc *)
 			DevCPLamd64.SetLabel(proc.adr);
 			IF DevCPM.stackChk IN DevCPM.options THEN MapEntry(proc, DevCPE.pc) END;
@@ -2766,7 +2790,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 					DevCPLamd64.GenCode(64H); DevCPLamd64.GenMove(sp, r1);
 					DEC(size, 48)
 				ELSE
-					IF imVar IN proc.conval.setval THEN	(* set down pointer *)
+					IF SlSlot(proc) THEN	(* set down pointer; с "%" у вложенной — своя статическая связь *)
 						DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPush(r); DEC(size, 8)
 					END;
 					IF isCallback IN proc.conval.setval THEN
@@ -2825,7 +2849,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 						size := 48
 					ELSE
 						size := 0;
-						IF imVar IN proc.conval.setval THEN INC(size, 8) END;
+						IF SlSlot(proc) THEN INC(size, 8) END;
 						IF isCallback IN proc.conval.setval THEN INC(size, 16) END
 					END;
 					IF size > 0 THEN
@@ -2835,7 +2859,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 							DevCPLamd64.MakeReg(r, SI, Pointer); DevCPLamd64.GenPop(r);
 							DevCPLamd64.MakeReg(r, DI, Pointer); DevCPLamd64.GenPop(r)
 						END;
-						IF imVar IN proc.conval.setval THEN
+						IF SlSlot(proc) THEN
 							DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPop(r)
 						END
 					ELSE

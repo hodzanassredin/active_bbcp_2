@@ -446,10 +446,6 @@ MODULE Kernel;
 		   SP - stkLo < запас + кадр как беззнаковое: на чужой нити и
 		   сигнальном стеке SP вне [stkLo, stkLo + запас), и проверка молчит. *)
 		stkLo*: S.ADDRESS;
-		(* Проба переноса стека (Stackmove): обработчик трапа 137 проверки в прологе
-		   зовёт stackGrow с адресом регистров прерванного кода (gregs ucontext);
-		   TRUE — стек перенесён, регистры поправлены, исполнение продолжается. *)
-		stackGrow*: PROCEDURE (regs: S.ADDRESS): BOOLEAN;
 		monStk: ARRAY monStkLen OF MonEntry;
 		sched-: Scheduler;	(* read-only: Monitors читает токен/park/unpark/name *)
 		pollWanted: BOOLEAN;	(* главный цикл просит уступить в Kernel.Poll *)
@@ -498,6 +494,15 @@ MODULE Kernel;
 	PROCEDURE (s: Scheduler) unpark* (task: S.ADDRESS), NEW, ABSTRACT;
 	PROCEDURE (s: Scheduler) name* (task: S.ADDRESS; OUT name: ARRAY OF CHAR), NEW, ABSTRACT;
 	PROCEDURE (s: Scheduler) poll* (): BOOLEAN, NEW, ABSTRACT;
+
+	PROCEDURE (s: Scheduler) grow* (regs: S.ADDRESS): BOOLEAN, NEW, EXTENSIBLE;
+	(** Трап 137 проверки границы стека в прологе (ключ "%"). regs — регистры прерванного кода
+		(gregs ucontext на Linux amd64). TRUE — стек текущей задачи заменён большим, регистры
+		поправлены, исполнение продолжается за трапом; FALSE — обычный трап 137. Зовёт обработчик
+		трапа платформы; реализация — Tasks (поставщик стеков, Tasks.StackDir.Grow). *)
+	BEGIN
+		RETURN FALSE
+	END grow;
 
 	PROCEDURE (VAR p: Platform) PageSize* (): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) ProtectMemRead* (addr: S.ADDRESS; size: INTEGER): BOOLEAN, NEW, ABSTRACT;
