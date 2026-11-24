@@ -1039,6 +1039,19 @@ MODULE ActorCore;
 		r.node := nd$; r.name := name$
 	END InitRef;
 
+	PROCEDURE Terminate* (w, who: Ref);
+	(** Для модулей транспорта: адрес who, не локальный ящик, кончился
+		(остановлен на своём узле или узел потерян).
+		Пред: w # NIL (трап 20), who # NIL (21).
+		Пост: w получил Terminated с этим who, как от остановки локального
+		актора; обработчик w получит его, только если наблюдает who. *)
+		VAR t: Terminated;
+	BEGIN
+		ASSERT(w # NIL, 20); ASSERT(who # NIL, 21);
+		NEW(t); t.who := who;
+		IF w IS Context THEN PostSys(w(Context), t) ELSE w.Post(t, NIL) END
+	END Terminate;
+
 	PROCEDURE SetDispatcher* (d: Dispatcher);
 	(** Для модулей исполнителей. Пред: d # NIL (трап 20).
 		Пост: dispatcher = d; методы Dispatcher, кроме Schedule, работают
