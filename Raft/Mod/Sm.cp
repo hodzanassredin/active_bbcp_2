@@ -1,0 +1,107 @@
+MODULE RaftSm;
+(** Автомат состояний над журналом Raft и сеансы клиентов.
+
+	Каждый узел применяет зафиксированные записи журнала к своей копии
+	автомата по порядку индексов; одинаковые команды в одном порядке дают
+	одинаковое состояние на всех узлах.
+
+	Клиент, не дождавшись ответа (лидер упал, письмо потерялось),
+	повторяет команду — возможно, у другого лидера. Первая попытка могла
+	уже попасть в журнал, и без защиты команда применилась бы дважды.
+	Защита — сеанс (§6.3 диссертации Raft): команда несёт номер клиента и
+	номер операции, Sessions помнит для каждого клиента последний
+	применённый номер и его результат и на повтор отдаёт результат, не
+	трогая автомат. Клиент шлёт операции по одной (следующую — после
+	ответа на предыдущую), поэтому достаточно одного номера на клиента.
+
+	Сеансы живут вечно: вытеснения старых клиентов нет (граница этапа). *)
+
+	IMPORT Core := RaftCore;
+
+	CONST
+		head = 8;	(* номер клиента и номер операции, по 4 байта *)
+
+	TYPE
+		Bytes* = Core.Bytes;
+
+		StateMachine* = POINTER TO ABSTRACT RECORD END;
+
+		Session = POINTER TO RECORD
+			client, seq: INTEGER;
+			res: Bytes;
+			next: Session
+		END;
+
+		Sessions* = POINTER TO RECORD
+			sm-: StateMachine;
+			list: Session;
+			dups-: INTEGER	(** повторов, отвеченных из памяти сеанса *)
+		END;
+
+	PROCEDURE (sm: StateMachine) Apply* (index: INTEGER; IN cmd: ARRAY OF BYTE; beg, len: INTEGER): Bytes,
+		NEW, ABSTRACT;
+	(** Применить команду cmd[beg .. beg+len-1] записи index. Пост: результат (может быть NIL). *)
+
+	PROCEDURE (sm: StateMachine) Snapshot* (): Bytes, NEW, ABSTRACT;
+	(** Пост: состояние целиком; Restore(Snapshot()) его восстанавливает. *)
+
+	PROCEDURE (sm: StateMachine) Restore* (b: Bytes), NEW, ABSTRACT;
+
+	PROCEDURE PutInt (VAR b: ARRAY OF BYTE; i, x: INTEGER);
+	BEGIN
+		b[i] := SHORT(SHORT(x MOD 256)); b[i + 1] := SHORT(SHORT(x DIV 256 MOD 256));
+		b[i + 2] := SHORT(SHORT(x DIV 10000H MOD 256)); b[i + 3] := SHORT(SHORT(ASH(x, -24) MOD 256))
+	END PutInt;
+
+	PROCEDURE Int (IN b: ARRAY OF BYTE; i: INTEGER): INTEGER;
+	BEGIN
+		RETURN b[i] MOD 256 + b[i + 1] MOD 256 * 100H + b[i + 2] MOD 256 * 10000H + ASH(LONG(b[i + 3]), 24)
+	END Int;
+
+	PROCEDURE Encode* (client, seq: INTEGER; IN body: ARRAY OF BYTE; len: INTEGER): Bytes;
+	(** Пред: client > 0 — 20; seq > 0 — 21. Пост: команда журнала с сеансом. *)
+		VAR b: Bytes; k: INTEGER;
+	BEGIN
+		ASSERT(client > 0, 20); ASSERT(seq > 0, 21);
+		NEW(b, head + len); PutInt(b, 0, client); PutInt(b, 4, seq);
+		FOR k := 0 TO len - 1 DO b[head + k] := body[k] END;
+		RETURN b
+	END Encode;
+
+	PROCEDURE Decode* (b: Bytes; OUT client, seq: INTEGER);
+	(** Пост: client = 0 — пустая запись или команда без сеанса. *)
+	BEGIN
+		IF (b = NIL) OR (LEN(b^) < head) THEN client := 0; seq := 0
+		ELSE client := Int(b, 0); seq := Int(b, 4)
+		END
+	END Decode;
+
+	PROCEDURE New* (sm: StateMachine): Sessions;
+	(** Пред: sm # NIL — 20. *)
+		VAR s: Sessions;
+	BEGIN
+		ASSERT(sm # NIL, 20);
+		NEW(s); s.sm := sm; RETURN s
+	END New;
+
+	PROCEDURE (s: Sessions) Apply* (index: INTEGER; data: Bytes; OUT res: Bytes; OUT dup: BOOLEAN), NEW;
+	(** Применить запись журнала index. Пост: dup — повтор уже применённой
+		операции, res — её прежний результат; пустая запись не меняет ничего. *)
+		VAR c, q: INTEGER; p: Session;
+	BEGIN
+		res := NIL; dup := FALSE;
+		Decode(data, c, q);
+		IF c # 0 THEN
+			p := s.list; WHILE (p # NIL) & (p.client # c) DO p := p.next END;
+			IF p = NIL THEN NEW(p); p.client := c; p.next := s.list; s.list := p END;
+			IF (q <= p.seq) & ~(Core.mutNoDedup IN Core.mutations) THEN
+				dup := TRUE; INC(s.dups);
+				IF q = p.seq THEN res := p.res END	(* старше последней — клиент ответа уже не ждёт *)
+			ELSE
+				res := s.sm.Apply(index, data, head, LEN(data^) - head);
+				p.seq := q; p.res := res
+			END
+		END
+	END Apply;
+
+END RaftSm.

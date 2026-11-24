@@ -37,7 +37,7 @@ Actor_devNet|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorP
 Actor_devGrain|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorGrain
 Actor_devBench|proc slow|900|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal System_devCRaw System_devClock
 # Согласованный журнал Raft: симуляция ядра по зёрнам, инварианты, мутации.
-Raft_devSim||300|RaftCore
+Raft_devSim||300|RaftCore RaftSm
 # Хранилище Kv: страницы, дерево против эталона, обрыв питания в каждой точке фиксации.
 Kv_devBasic|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel

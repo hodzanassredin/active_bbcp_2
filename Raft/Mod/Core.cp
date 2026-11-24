@@ -29,6 +29,9 @@ MODULE RaftCore;
 		mutNoTruncate* = 3;	(** не откатывать конфликтующий хвост *)
 		mutDoubleVote* = 4;	(** два голоса в одном сроке *)
 		mutApplyUncommitted* = 5;	(** применять незафиксированное *)
+		mutStaleRead* = 6;	(** чтение без подтверждения лидерства большинством *)
+		mutNoDedup* = 7;	(** повтор команды клиента применяется заново (RaftSm) *)
+		maxReads = 64;
 
 	TYPE
 		Bytes* = POINTER TO ARRAY OF BYTE;
@@ -47,8 +50,12 @@ MODULE RaftCore;
 			ents*: Entries; n*: INTEGER;	(** appendReq: записи ents[0 .. n-1] *)
 			ok*: BOOLEAN;	(** voteResp: голос дан; appendResp: принято *)
 			match*: INTEGER;	(** appendResp: при ok — последний совпавший индекс, иначе подсказка *)
+			ctx*: INTEGER;	(** appendReq: номер пульса лидера; appendResp — его эхо *)
 			next*: Msg
 		END;
+
+		(** Подтверждённое чтение: читать можно, когда applied >= index. *)
+		Read* = RECORD ctx*, index*: INTEGER END;
 
 		Ready* = RECORD
 			hard*: BOOLEAN;	(** срок или голос изменились *)
@@ -57,8 +64,11 @@ MODULE RaftCore;
 			last*: INTEGER;
 			syncFirst*: BOOLEAN;	(** TRUE — сохранить до отправки писем *)
 			msgs*: Msg;
-			applyLo*, applyHi*: INTEGER	(** применить записи applyLo .. applyHi *)
+			applyLo*, applyHi*: INTEGER;	(** применить записи applyLo .. applyHi *)
+			reads*: ARRAY maxReads OF Read; nreads*: INTEGER	(** подтверждённые чтения ReadIndex *)
 		END;
+
+		Pending = RECORD ctx, index, seq: INTEGER END;
 
 		Node* = POINTER TO RECORD
 			id-, n-: INTEGER;
@@ -73,7 +83,10 @@ MODULE RaftCore;
 			next, match: ARRAY maxNodes OF INTEGER;
 			batch: INTEGER;	(* записей в одном AppendEntries *)
 			rnd: LONGINT;
-			out, outTail: Msg
+			out, outTail: Msg;
+			hb: INTEGER;	(* номер последнего пульса лидера *)
+			ack: ARRAY maxNodes OF INTEGER;	(* наибольший пульс, на который ответил узел *)
+			pend: ARRAY maxReads OF Pending; npend: INTEGER
 		END;
 
 	VAR
@@ -153,7 +166,7 @@ MODULE RaftCore;
 	PROCEDURE BecomeFollower (nd: Node; term, lead: INTEGER);
 	BEGIN
 		IF term # nd.term THEN SetTerm(nd, term) END;
-		nd.role := follower; nd.leader := lead; ResetTimeout(nd)
+		nd.role := follower; nd.leader := lead; nd.npend := 0; ResetTimeout(nd)
 	END BecomeFollower;
 
 	PROCEDURE SendAppend (nd: Node; to: INTEGER);
@@ -163,7 +176,7 @@ MODULE RaftCore;
 		cnt := nd.last - prev; IF cnt > nd.batch THEN cnt := nd.batch END;
 		NEW(m); m.kind := appendReq; m.to := to;
 		m.index := prev; m.logTerm := nd.log[prev].term; m.commit := nd.commit;
-		m.n := cnt;
+		m.n := cnt; m.ctx := nd.hb;
 		IF cnt > 0 THEN
 			NEW(m.ents, cnt); FOR k := 0 TO cnt - 1 DO m.ents[k] := nd.log[prev + 1 + k] END
 		END;
@@ -174,6 +187,7 @@ MODULE RaftCore;
 	PROCEDURE Broadcast (nd: Node);
 		VAR p: INTEGER;
 	BEGIN
+		INC(nd.hb);
 		FOR p := 0 TO nd.n - 1 DO IF p # nd.id THEN SendAppend(nd, p) END END
 	END Broadcast;
 
@@ -200,7 +214,8 @@ MODULE RaftCore;
 		VAR p: INTEGER; e: Entry;
 	BEGIN
 		nd.role := leader; nd.leader := nd.id; nd.elapsed := 0;
-		FOR p := 0 TO nd.n - 1 DO nd.next[p] := nd.last + 1; nd.match[p] := 0 END;
+		FOR p := 0 TO nd.n - 1 DO nd.next[p] := nd.last + 1; nd.match[p] := 0; nd.ack[p] := 0 END;
+		nd.hb := 0; nd.npend := 0;
 		e.term := nd.term; e.data := NIL;	(* пустая запись своего срока *)
 		INC(nd.last); Put(nd, nd.last, e);
 		Broadcast(nd)
@@ -265,9 +280,9 @@ MODULE RaftCore;
 	PROCEDURE HandleAppend (nd: Node; m: Msg);
 		VAR r: Msg; k, i, lastNew, lt: INTEGER;
 	BEGIN
-		NEW(r); r.kind := appendResp; r.to := m.from;
+		NEW(r); r.kind := appendResp; r.to := m.from; r.ctx := m.ctx;
 		IF m.term = nd.term THEN
-			IF nd.role # follower THEN nd.role := follower END;
+			IF nd.role # follower THEN nd.role := follower; nd.npend := 0 END;
 			nd.leader := m.from; ResetTimeout(nd);
 			IF (m.index > nd.last) OR (nd.log[m.index].term # m.logTerm) THEN
 				IF m.index > nd.last THEN r.match := nd.last
@@ -304,6 +319,7 @@ MODULE RaftCore;
 		VAR p: INTEGER;
 	BEGIN
 		p := m.from;
+		IF m.ctx > nd.ack[p] THEN nd.ack[p] := m.ctx END;
 		IF m.ok THEN
 			IF m.match > nd.match[p] THEN nd.match[p] := m.match END;
 			IF nd.next[p] <= nd.match[p] THEN nd.next[p] := nd.match[p] + 1 END;
@@ -341,11 +357,39 @@ MODULE RaftCore;
 		END
 	END Step;
 
+	PROCEDURE ReadIndex* (nd: Node; ctx: INTEGER): BOOLEAN;
+	(** Линеаризуемое чтение (ReadIndex, §6.4 диссертации Raft). Пост: TRUE —
+		чтение ctx принято: лидер запомнил commit и разослал пульс; когда
+		большинство ответит на этот или более поздний пульс, Ready.reads
+		отдаст (ctx, index), и читать автомат можно после applied >= index.
+		FALSE — узел не лидер, в своём сроке ещё ничего не зафиксировал или
+		очередь чтений полна; клиент повторяет у лидера. *)
+	BEGIN
+		IF (nd.role # leader) OR (nd.log[nd.commit].term # nd.term) OR (nd.npend = maxReads) THEN
+			RETURN FALSE
+		END;
+		Broadcast(nd);
+		nd.pend[nd.npend].ctx := ctx; nd.pend[nd.npend].index := nd.commit;
+		nd.pend[nd.npend].seq := nd.hb;
+		IF mutStaleRead IN mutations THEN nd.pend[nd.npend].seq := 0 END;
+		INC(nd.npend);
+		RETURN TRUE
+	END ReadIndex;
+
+	PROCEDURE Confirmed (nd: Node; seq: INTEGER): BOOLEAN;
+		VAR p, k: INTEGER;
+	BEGIN
+		k := 1;
+		FOR p := 0 TO nd.n - 1 DO IF (p # nd.id) & (nd.ack[p] >= seq) THEN INC(k) END END;
+		RETURN k >= Majority(nd)
+	END Confirmed;
+
 	(* --- выход ----------------------------------------------------------- *)
 
 	PROCEDURE HasReady* (nd: Node): BOOLEAN;
 	BEGIN
 		RETURN nd.hardDirty OR (nd.stable < nd.last) OR (nd.out # NIL) OR (nd.applied < nd.commit)
+			OR (nd.npend > 0) & Confirmed(nd, nd.pend[0].seq)
 			OR (mutApplyUncommitted IN mutations) & (nd.applied < nd.last)
 	END HasReady;
 
@@ -358,18 +402,26 @@ MODULE RaftCore;
 		r.msgs := nd.out;
 		r.applyLo := nd.applied + 1; r.applyHi := nd.commit;
 		IF mutApplyUncommitted IN mutations THEN r.applyHi := nd.last END;
-		IF r.applyHi > nd.stable THEN	(* применять только сохранённое у себя *)
-			IF r.applyHi > nd.last THEN r.applyHi := nd.last END
+		IF r.applyHi > nd.last THEN r.applyHi := nd.last END;
+		r.nreads := 0;	(* подтверждённые чтения — по порядку, с головы очереди *)
+		WHILE (r.nreads < nd.npend) & Confirmed(nd, nd.pend[r.nreads].seq) DO
+			r.reads[r.nreads].ctx := nd.pend[r.nreads].ctx; r.reads[r.nreads].index := nd.pend[r.nreads].index;
+			INC(r.nreads)
 		END
 	END GetReady;
 
 	PROCEDURE Advance* (nd: Node; IN r: Ready);
 	(** Пост: всё из r сделано. *)
+		VAR k: INTEGER;
 	BEGIN
 		nd.hardDirty := FALSE;
 		IF r.last <= nd.last THEN nd.stable := r.last END;
 		nd.out := NIL; nd.outTail := NIL;
 		IF r.applyHi > nd.applied THEN nd.applied := r.applyHi END;
+		IF (r.nreads > 0) & (r.nreads <= nd.npend) THEN
+			FOR k := r.nreads TO nd.npend - 1 DO nd.pend[k - r.nreads] := nd.pend[k] END;
+			DEC(nd.npend, r.nreads)
+		END;
 		IF nd.role = leader THEN MaybeCommit(nd) END
 	END Advance;
 

@@ -17,13 +17,16 @@ MODULE Raft_devSim;
 	  под индексом i — одна и та же запись, и она не меняется;
 	- в конце, после лечения сети, кластер снова фиксирует команды. *)
 
-	IMPORT Strings, Dialog, Log, Core := RaftCore, UnitAssert;
+	IMPORT Strings, Dialog, Log, Core := RaftCore, RaftSm, UnitAssert;
 
 	CONST
 		maxN = 5;
 		poolSize = 4000;
 		maxTerm = 100000;
 		electionTicks = 10;
+		nClients = 4;
+		clientTimeout = 300;	(* ходов до повтора *)
+		idle = 0; inc = 1; read = 2;
 
 	TYPE
 		Disk = RECORD	(* стойкое состояние узла *)
@@ -31,8 +34,20 @@ MODULE Raft_devSim;
 			log: Core.Entries
 		END;
 
+		Counter = POINTER TO RECORD (RaftSm.StateMachine) v: INTEGER END;
+
+		Client = RECORD
+			state, seq, node, index, ctx, confirmed, op, inv, deadline: INTEGER
+		END;
+
+		Op = RECORD kind, inv, resp, v: INTEGER; done: BOOLEAN END;
+
 	VAR
 		n: INTEGER;
+		sms: ARRAY maxN OF RaftSm.Sessions;
+		cl: ARRAY nClients OF Client;
+		ops: POINTER TO ARRAY OF Op; nops*: INTEGER;
+		now, nextCtx: INTEGER;
 		nodes: ARRAY maxN OF Core.Node;
 		disk: ARRAY maxN OF Disk;
 		restarts: ARRAY maxN OF INTEGER;
@@ -45,6 +60,7 @@ MODULE Raft_devSim;
 		decided: Core.Entries; dlast, maxCommit: INTEGER;
 		x, seed: LONGINT;
 		lossy: BOOLEAN;
+		crashNext: INTEGER;	(* узел, который упадёт посреди ближайшего Ready; -1 — никто *)
 		harsh: INTEGER;	(* жёсткость сбоев от зерна: 1 .. 3 *)
 		batch: INTEGER;
 		ok: BOOLEAN; why: ARRAY 256 OF CHAR;
@@ -86,6 +102,71 @@ MODULE Raft_devSim;
 		END
 	END Decide;
 
+	(* --- счётчик и клиенты ---------------------------------------------- *)
+
+	PROCEDURE (c: Counter) Apply (index: INTEGER; IN cmd: ARRAY OF BYTE; beg, len: INTEGER): Core.Bytes;
+		VAR r: Core.Bytes;
+	BEGIN
+		INC(c.v); NEW(r, 4); r[0] := SHORT(SHORT(c.v MOD 256)); r[1] := SHORT(SHORT(c.v DIV 256 MOD 256));
+		r[2] := SHORT(SHORT(c.v DIV 10000H MOD 256)); r[3] := 0;
+		RETURN r
+	END Apply;
+
+	PROCEDURE (c: Counter) Snapshot (): Core.Bytes;
+	BEGIN
+		RETURN NIL
+	END Snapshot;
+
+	PROCEDURE (c: Counter) Restore (b: Core.Bytes);
+	BEGIN
+	END Restore;
+
+	PROCEDURE Val (r: Core.Bytes): INTEGER;
+	BEGIN
+		RETURN r[0] MOD 256 + r[1] MOD 256 * 100H + r[2] MOD 256 * 10000H
+	END Val;
+
+	PROCEDURE AddOp (kind, inv: INTEGER): INTEGER;
+		VAR a: POINTER TO ARRAY OF Op; k: INTEGER;
+	BEGIN
+		IF nops = LEN(ops^) THEN NEW(a, 2 * nops); FOR k := 0 TO nops - 1 DO a[k] := ops[k] END; ops := a END;
+		ops[nops].kind := kind; ops[nops].inv := inv; ops[nops].done := FALSE; INC(nops);
+		RETURN nops - 1
+	END AddOp;
+
+	PROCEDURE Respond (c, v: INTEGER);
+		VAR k: INTEGER;
+	BEGIN
+		IF cl[c].state = read THEN k := AddOp(read, cl[c].inv) ELSE k := cl[c].op END;
+		ops[k].resp := now; ops[k].v := v; ops[k].done := TRUE;
+		cl[c].state := idle
+	END Respond;
+
+	PROCEDURE Applied (i, k: INTEGER; data, res: Core.Bytes);
+	(* узел i применил запись k: ответить клиенту, который её ждёт у этого узла *)
+		VAR c, ec, eq: INTEGER;
+	BEGIN
+		RaftSm.Decode(data, ec, eq);
+		FOR c := 0 TO nClients - 1 DO
+			IF (cl[c].state = inc) & (cl[c].node = i) & (cl[c].index = k) THEN
+				IF (ec = c + 1) & (eq = cl[c].seq) & (res # NIL) THEN Respond(c, Val(res))
+				ELSE cl[c].deadline := now	(* запись затёрта: повторить *)
+				END
+			END
+		END
+	END Applied;
+
+	PROCEDURE ServeReads (i: INTEGER);
+		VAR c: INTEGER;
+	BEGIN
+		FOR c := 0 TO nClients - 1 DO
+			IF (cl[c].state = read) & (cl[c].node = i) & (cl[c].confirmed >= 0) & (nodes[i] # NIL)
+				& (nodes[i].applied >= cl[c].confirmed) THEN
+				Respond(c, sms[i].sm(Counter).v)
+			END
+		END
+	END ServeReads;
+
 	(* --- узлы ------------------------------------------------------------ *)
 
 	PROCEDURE Persist (i: INTEGER; IN r: Core.Ready);
@@ -113,30 +194,45 @@ MODULE Raft_devSim;
 	END Post;
 
 	PROCEDURE Crash (i: INTEGER);
+		VAR c: INTEGER;
 	BEGIN
-		nodes[i] := NIL; wasLeader[i] := FALSE; checked[i] := 0
+		nodes[i] := NIL; wasLeader[i] := FALSE; checked[i] := 0;
+		FOR c := 0 TO nClients - 1 DO IF (cl[c].state # idle) & (cl[c].node = i) THEN cl[c].deadline := now END END
 	END Crash;
 
 	PROCEDURE Restart (i: INTEGER);
+		VAR cnt: Counter;
 	BEGIN
 		INC(restarts[i]);
 		nodes[i] := Core.New(i, n, seed * 7919 + restarts[i] * 31, electionTicks,
 			disk[i].term, disk[i].vote, disk[i].log, disk[i].last);
+		NEW(cnt); sms[i] := RaftSm.New(cnt);
 		Core.SetBatch(nodes[i], batch)
 	END Restart;
 
 	PROCEDURE Process (i: INTEGER);
 	(* выполнить Ready узла; между сохранением и отправкой узел может упасть *)
-		VAR r: Core.Ready; k: INTEGER; e: Core.Entry; nd: Core.Node;
+		VAR r: Core.Ready; k, c: INTEGER; e: Core.Entry; nd: Core.Node; res: Core.Bytes; dup: BOOLEAN;
 	BEGIN
 		nd := nodes[i];
 		WHILE (nd # NIL) & Core.HasReady(nd) DO
 			Core.GetReady(nd, r);
 			IF r.syncFirst THEN Persist(i, r) ELSE Post(r.msgs) END;
-			IF lossy & (Rand(1000) < 2 + 8 * (harsh - 1)) THEN Crash(i); RETURN END;
+			IF lossy & (Rand(10000) < 5 + 10 * (harsh - 1)) OR (crashNext = i) THEN crashNext := -1; Crash(i); RETURN END;
 			IF r.syncFirst THEN Post(r.msgs) ELSE Persist(i, r) END;
-			FOR k := r.applyLo TO r.applyHi DO Core.EntryAt(nd, k, e); Decide(k, e) END;
-			Core.Advance(nd, r)
+			FOR k := r.applyLo TO r.applyHi DO
+				Core.EntryAt(nd, k, e); Decide(k, e);
+				sms[i].Apply(k, e.data, res, dup); Applied(i, k, e.data, res)
+			END;
+			FOR k := 0 TO r.nreads - 1 DO
+				FOR c := 0 TO nClients - 1 DO
+					IF (cl[c].state = read) & (cl[c].node = i) & (cl[c].ctx = r.reads[k].ctx) THEN
+						cl[c].confirmed := r.reads[k].index
+					END
+				END
+			END;
+			Core.Advance(nd, r);
+			ServeReads(i)
 		END
 	END Process;
 
@@ -231,18 +327,41 @@ MODULE Raft_devSim;
 		END
 	END TickOne;
 
-	PROCEDURE ProposeOne;
-		VAR i, idx: INTEGER; d: Core.Bytes;
+	PROCEDURE Submit (c: INTEGER);
+	(* отправить операцию клиента c узлу, который считается лидером *)
+		VAR i: INTEGER; body: ARRAY 1 OF BYTE;
 	BEGIN
 		i := Rand(n);
 		IF (nodes[i] # NIL) & (nodes[i].role # Core.leader) & (nodes[i].leader # Core.none) THEN
 			i := nodes[i].leader	(* клиента перенаправили на лидера *)
 		END;
+		cl[c].node := i; cl[c].deadline := now + 20; cl[c].confirmed := -1;
 		IF nodes[i] # NIL THEN
-			NEW(d, 1); idx := Core.Propose(nodes[i], d);
-			IF idx > 0 THEN INC(proposals); Process(i) END
+			IF cl[c].state = inc THEN
+				body[0] := ORD("i");
+				cl[c].index := Core.Propose(nodes[i], RaftSm.Encode(c + 1, cl[c].seq, body, 1));
+				IF cl[c].index > 0 THEN INC(proposals); cl[c].deadline := now + clientTimeout; Process(i) END
+			ELSE
+				INC(nextCtx); cl[c].ctx := nextCtx;
+				IF Core.ReadIndex(nodes[i], nextCtx) THEN cl[c].deadline := now + clientTimeout; Process(i) END
+			END
 		END
-	END ProposeOne;
+	END Submit;
+
+	PROCEDURE ClientMove;
+		VAR c: INTEGER;
+	BEGIN
+		c := Rand(nClients);
+		IF cl[c].state = idle THEN
+			cl[c].inv := now;
+			IF Rand(10) < 6 THEN
+				cl[c].state := inc; INC(cl[c].seq); cl[c].op := AddOp(inc, now)
+			ELSE cl[c].state := read
+			END;
+			Submit(c)
+		ELSIF now >= cl[c].deadline THEN Submit(c)	(* повтор: та же операция, тот же номер *)
+		END
+	END ClientMove;
 
 	PROCEDURE Heal;
 		VAR i, j: INTEGER;
@@ -268,23 +387,55 @@ MODULE Raft_devSim;
 	PROCEDURE Move;
 		VAR k, i: INTEGER;
 	BEGIN
-		k := Rand(1000);
+		INC(now); k := Rand(1000);
 		IF (k < 700) & (np > 0) THEN	(* сеть быстрее часов: до трёх писем за ход *)
 			Deliver; IF np > 0 THEN Deliver END; IF np > 0 THEN Deliver END
 		ELSIF k < 850 THEN TickOne
-		ELSIF k < 950 THEN IF lossy OR (Rand(10) = 0) THEN ProposeOne END
+		ELSIF k < 950 THEN IF lossy OR (Rand(10) = 0) THEN ClientMove END
 		ELSIF ~lossy THEN TickOne
-		ELSIF k < 950 + 10 * harsh THEN i := Rand(n); IF nodes[i] # NIL THEN Crash(i) END
+		ELSIF k < 950 + 5 * harsh THEN i := Rand(n); IF nodes[i] # NIL THEN Crash(i) END
 		ELSIF k < 985 THEN i := Rand(n); IF nodes[i] = NIL THEN Restart(i) END
 		ELSE Partition
 		END
 	END Move;
+
+	PROCEDURE CheckHistory;
+	(* Линеаризуемость истории счётчика: приращение возвращает новое
+	   значение, чтение — текущее. Значения задают порядок операций; история
+	   линеаризуема, если он не спорит с реальным временем (a кончилась до
+	   начала b) и чтение не видит больше приращений, чем начато до его конца. *)
+		VAR a, b, k, cnt: INTEGER;
+	BEGIN
+		FOR a := 0 TO nops - 1 DO
+			IF ops[a].done THEN
+				IF ops[a].kind = read THEN
+					cnt := 0;
+					FOR k := 0 TO nops - 1 DO IF (ops[k].kind = inc) & (ops[k].inv <= ops[a].resp) THEN INC(cnt) END END;
+					IF ops[a].v > cnt THEN Violation("чтение видит приращений больше, чем начато", a) END
+				END;
+				FOR b := 0 TO nops - 1 DO
+					IF (b # a) & ops[b].done THEN
+						IF (ops[a].kind = inc) & (ops[b].kind = inc) & (ops[a].v = ops[b].v) THEN
+							Violation("два приращения вернули одно значение", a)
+						END;
+						IF ops[a].resp < ops[b].inv THEN
+							IF (ops[b].kind = inc) & (ops[a].v >= ops[b].v) OR (ops[b].kind = read) & (ops[a].v > ops[b].v) THEN
+								Violation("порядок значений спорит с реальным временем", a)
+							END
+						END
+					END
+				END
+			END
+		END
+	END CheckHistory;
 
 	PROCEDURE Init (size: INTEGER; s: LONGINT);
 		VAR i: INTEGER;
 	BEGIN
 		n := size; seed := s; x := s * 2654435761 + 88172645463325252;
 		ok := TRUE; why := ""; np := 0; dlast := 0; maxCommit := 0; proposals := 0; commits := 0;
+		now := 0; nextCtx := 0; crashNext := -1; nops := 0; NEW(ops, 256);
+		FOR i := 0 TO nClients - 1 DO cl[i].state := idle; cl[i].seq := 0 END;
 		NEW(decided, 64); decided[0].term := 0;
 		NEW(leaderOf, maxTerm); FOR i := 0 TO maxTerm - 1 DO leaderOf[i] := Core.none END;
 		harsh := 1 + Rand(3); batch := 1 + Rand(4); IF batch = 4 THEN batch := 64 END;
@@ -312,6 +463,7 @@ MODULE Raft_devSim;
 			WHILE ok & (k < 20000) & (maxCommit <= before + 2) DO Move; CheckAll; INC(k) END;
 			IF ok & (maxCommit <= before + 2) THEN Violation("кластер не фиксирует после лечения", 0) END
 		END;
+		IF ok THEN CheckHistory END;
 		res := ok; msg := why$
 	END Run;
 
@@ -494,6 +646,36 @@ MODULE Raft_devSim;
 		Log.String("хвост: " + msg); Log.Ln
 	END TestMutStaleTail;
 
+	PROCEDURE LostVote (mut: SET; OUT violated: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(* B голосует за A и падает посреди Ready; после перезапуска B просят о
+	   голосе в том же сроке от C. Голос, отправленный до сохранения,
+	   забывается, и у срока 1 два лидера. *)
+		VAR t: INTEGER;
+	BEGIN
+		Core.mutations := mut;
+		Init(3, 10); lossy := FALSE;
+		t := 0; WHILE (nodes[0].role # Core.candidate) & (t < 1000) DO Core.Tick(nodes[0]); Process(0); INC(t) END;
+		crashNext := 1; DeliverOne(0, 1); Restart(1); DeliverOne(1, 0); DropAll;
+		t := 0; WHILE (nodes[2].role # Core.candidate) & (t < 1000) DO Core.Tick(nodes[2]); Process(2); INC(t) END;
+		DeliverOne(2, 1); DeliverOne(1, 2); DropAll;
+		Core.mutations := {};
+		violated := ~ok; msg := why$
+	END LostVote;
+
+	PROCEDURE TestLostVoteSafe*;
+		VAR v: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		LostVote({}, v, msg); UnitAssert.True(~v, msg)
+	END TestLostVoteSafe;
+
+	PROCEDURE TestMutLostVote*;
+		VAR v: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		LostVote({Core.mutSendBeforeSync}, v, msg);
+		UnitAssert.True(v, "голос, отправленный до сохранения, не пойман");
+		Log.String("голос: " + msg); Log.Ln
+	END TestMutLostVote;
+
 	PROCEDURE TestFigure8Safe*;
 		VAR v: BOOLEAN; msg: ARRAY 256 OF CHAR;
 	BEGIN
@@ -510,8 +692,21 @@ MODULE Raft_devSim;
 		Log.String("рисунок 8: " + msg); Log.Ln
 	END TestMutFigure8;
 
+	PROCEDURE TestMutStaleRead*; BEGIN Caught(Core.mutStaleRead, 3, 300) END TestMutStaleRead;
+	PROCEDURE TestMutNoDedup*; BEGIN Caught(Core.mutNoDedup, 3, 300) END TestMutNoDedup;
+
+	PROCEDURE TestClientsComplete*;
+		VAR r: BOOLEAN; msg: ARRAY 256 OF CHAR; k, done, reads: INTEGER;
+	BEGIN
+		Run(3, 5, 2000, r, msg); UnitAssert.True(r, msg);
+		done := 0; reads := 0;
+		FOR k := 0 TO nops - 1 DO IF ops[k].done THEN INC(done); IF ops[k].kind = read THEN INC(reads) END END END;
+		UnitAssert.True(done > 20, "клиенты получают ответы");
+		UnitAssert.True(reads > 5, "и на чтения")
+	END TestClientsComplete;
+
 	PROCEDURE TestMutNoUpToDate*; BEGIN Caught(Core.mutNoUpToDate, 3, 300) END TestMutNoUpToDate;
-	PROCEDURE TestMutSendBeforeSync*; BEGIN Caught(Core.mutSendBeforeSync, 3, 300) END TestMutSendBeforeSync;
+	PROCEDURE TestMutSendBeforeSync*; BEGIN Caught(Core.mutSendBeforeSync, 3, 1000) END TestMutSendBeforeSync;
 	PROCEDURE TestMutNoTruncate*; BEGIN Caught(Core.mutNoTruncate, 5, 300) END TestMutNoTruncate;
 	PROCEDURE TestMutDoubleVote*; BEGIN Caught(Core.mutDoubleVote, 3, 300) END TestMutDoubleVote;
 	PROCEDURE TestMutApplyUncommitted*; BEGIN Caught(Core.mutApplyUncommitted, 3, 300) END TestMutApplyUncommitted;
@@ -539,6 +734,8 @@ MODULE Raft_devSim;
 		IF res THEN Log.String("ok") ELSE Log.String(msg) END;
 		Log.String(" предложений "); Log.Int(proposals); Log.String(", зафиксировано "); Log.Int(commits);
 		Log.String(", писем в пуле "); Log.Int(np); Log.Ln;
+		r := 0; FOR v := 0 TO nops - 1 DO IF ops[v].done THEN INC(r) END END;
+		Log.String("операций клиентов с ответом "); Log.Int(r); Log.Ln;
 		FOR v := 0 TO sz - 1 DO
 			IF nodes[v] # NIL THEN
 				Log.Int(v); Log.String(": роль"); Log.Int(nodes[v].role); Log.String(" срок"); Log.Int(nodes[v].term);
