@@ -40,6 +40,14 @@ MODULE System_devTasks;
 		Phil = POINTER TO RECORD (Tasks.Task) id: INTEGER END;
 		LongSleeper = POINTER TO RECORD (Tasks.Task) ms: INTEGER END;
 		Resleeper = POINTER TO RECORD (Tasks.Task) wakes: INTEGER END;
+		Churner = POINTER TO RECORD (Tasks.Task) wakes: INTEGER END;
+		YieldLocker = POINTER TO RECORD (Tasks.Task) mon: ProbeBox; got, parkedBack: BOOLEAN END;
+		Joiner = POINTER TO RECORD (Tasks.Task) target: Tasks.Task; done: BOOLEAN END;
+		SelfJoiner = POINTER TO RECORD (Tasks.Task) target: Tasks.Task END;
+		Unparker = POINTER TO RECORD (Tasks.Task) target: Tasks.Task; sawReady: BOOLEAN END;
+		FlagSleeper = POINTER TO RECORD (Tasks.Task) flag: BOOLEAN END;
+		TrapParent = POINTER TO RECORD (Tasks.Task) child: LongSleeper END;
+		TwoGroups = POINTER TO RECORD (Tasks.Task) long: LongSleeper; same: BOOLEAN END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -507,5 +515,179 @@ MODULE System_devTasks;
 		UnitAssert.EqualInt(4, t.wakes, "one wake per sleep");
 		UnitAssert.EqualInt(-1, SHORT(Tasks.NextDeadline()), "no stale deadlines")
 	END TestProcResleepAfterUnpark;
+
+	(* --- найденные ревью дефекты ------------------------------------------ *)
+
+	PROCEDURE (t: Churner) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO 200 DO Tasks.Sleep(200000); INC(t.wakes) END
+	END Run;
+
+	PROCEDURE TestProcCompactWhileSleeping*;
+	(** Уплотнение кучи внутри Sleep: запись засыпающей задачи ещё не в куче,
+		но nSleeping её уже учитывает — инвариант уплотнения не должен ломаться. *)
+		VAR a: LongSleeper; b: Churner; i: INTEGER;
+	BEGIN
+		NEW(a); a.ms := 100000; Tasks.Start(a);
+		NEW(b); Tasks.Start(b);
+		Tasks.Step;
+		i := 0;
+		WHILE (i < 200) & (Tasks.State(b) = Tasks.Sleeping) DO
+			Tasks.Unpark(b); Tasks.Step; INC(i)
+		END;
+		UnitAssert.True(~Tasks.Failed(b), "sleeper survived heap compaction");
+		UnitAssert.EqualInt(200, b.wakes, "every early wake returned from Sleep");
+		Tasks.Cancel(a);
+		UnitAssert.True(Pump(2000), "tasks finished")
+	END TestProcCompactWhileSleeping;
+
+	PROCEDURE (t: YieldLocker) Run;
+	BEGIN
+		Tasks.Yield;	(* пока готова, главный стек зовёт Unpark *)
+		Kernel.Lock(t.mon);	(* монитор держит LockHolder *)
+		t.got := TRUE;
+		Kernel.Unlock(t.mon);
+		Tasks.Park;	(* пробуждение, пришедшее до ожидания монитора, не теряется *)
+		t.parkedBack := TRUE
+	END Run;
+
+	PROCEDURE (t: Unparker) Run;
+	BEGIN
+		t.sawReady := Tasks.State(t.target) = Tasks.Ready;
+		Tasks.Unpark(t.target)
+	END Run;
+
+	PROCEDURE TestProcUnparkReadyThenLock*;
+	(** Unpark готовой задачи не делает ожидание монитора холостым, а сам
+		остаётся пользователю: следующий Park возвращается сразу.
+		Очередь: b уступает, u будит готовую b, b входит в занятый монитор. *)
+		VAR mon: ProbeBox; h: LockHolder; b: YieldLocker; u: Unparker;
+	BEGIN
+		NEW(mon); NEW(h); h.mon := mon; Tasks.Start(h);
+		WHILE ~Monitors.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
+		NEW(b); b.mon := mon; Tasks.Start(b);
+		NEW(u); u.target := b; Tasks.Start(u);
+		UnitAssert.True(Pump(3000), "tasks finished");
+		UnitAssert.True(u.sawReady, "locker was ready when woken");
+		UnitAssert.True(~Tasks.Failed(b), "monitor wait survived the early Unpark");
+		UnitAssert.True(b.got, "locker acquired the monitor");
+		UnitAssert.True(b.parkedBack, "user wake was kept for Park")
+	END TestProcUnparkReadyThenLock;
+
+	PROCEDURE TestProcUnparkInEnterQueue*;
+	(** Unpark задачи из очереди входа монитора — ложное пробуждение:
+		задача ждёт дальше и получает монитор от владельца. *)
+		VAR mon: ProbeBox; h: LockHolder; b: YieldLocker;
+	BEGIN
+		NEW(mon); NEW(h); h.mon := mon; Tasks.Start(h);
+		WHILE ~Monitors.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
+		NEW(b); b.mon := mon; Tasks.Start(b);
+		Tasks.Step; Tasks.Step;	(* Yield, затем Lock: b в очереди входа *)
+		UnitAssert.True(Tasks.State(b) = Tasks.Parked, "locker waits for the monitor");
+		Tasks.Unpark(b);
+		UnitAssert.True(Pump(3000), "tasks finished");
+		UnitAssert.True(~Tasks.Failed(b), "spurious wake is not an error");
+		UnitAssert.True(b.got, "locker acquired the monitor");
+		UnitAssert.True(b.parkedBack, "user wake was kept for Park")
+	END TestProcUnparkInEnterQueue;
+
+	PROCEDURE (t: Joiner) Run;
+	BEGIN
+		Tasks.Join(t.target); t.done := TRUE
+	END Run;
+
+	PROCEDURE TestProcJoinForeignUnpark*;
+	(** Посторонний Unpark одного ждущего Join не теряет остальных ждущих. *)
+		VAR tt: LongSleeper; x, w: Joiner;
+	BEGIN
+		NEW(tt); tt.ms := 30; Tasks.Start(tt);
+		NEW(x); x.target := tt; Tasks.Start(x);
+		NEW(w); w.target := tt; Tasks.Start(w);
+		Tasks.Step;
+		UnitAssert.True(Tasks.State(w) = Tasks.Waiting, "joiner waits");
+		Tasks.Unpark(w); Tasks.Step;
+		UnitAssert.True(Pump(2000), "all joiners woke");
+		UnitAssert.True(x.done & w.done, "both joiners returned");
+		Tasks.Cancel(x); Tasks.Cancel(w); IF Pump(2000) THEN END	(* уборка после провала *)
+	END TestProcJoinForeignUnpark;
+
+	PROCEDURE (t: SelfJoiner) Run;
+	BEGIN
+		Tasks.Join(t.target)
+	END Run;
+
+	PROCEDURE TestProcJoinPreconditions*;
+	(** Join себя — трап 23, Join незапущенной задачи — трап 24. *)
+		VAR s: SelfJoiner; n: SelfJoiner; fresh: Lazy;
+	BEGIN
+		NEW(s); s.target := s; Tasks.Start(s);
+		IF ~Pump(1000) THEN Tasks.Cancel(s); IF Pump(1000) THEN END; UnitAssert.Fail("self join waits forever") END;
+		UnitAssert.True(Tasks.Failed(s), "self join traps");
+		UnitAssert.EqualInt(23, Kernel.err, "self join is trap 23");
+		NEW(fresh); NEW(n); n.target := fresh; Tasks.Start(n);
+		IF ~Pump(1000) THEN Tasks.Cancel(n); IF Pump(1000) THEN END; UnitAssert.Fail("join of a new task waits forever") END;
+		UnitAssert.True(Tasks.Failed(n), "join of a new task traps");
+		UnitAssert.EqualInt(24, Kernel.err, "join of a new task is trap 24")
+	END TestProcJoinPreconditions;
+
+	PROCEDURE (t: FlagSleeper) Run;
+	BEGIN
+		Tasks.Sleep(10000); t.flag := TRUE
+	END Run;
+
+	PROCEDURE TestProcCancelSleeping*;
+	(** Отмена спящей задачи прерывает её в Sleep трапом 127. *)
+		VAR t: FlagSleeper;
+	BEGIN
+		NEW(t); Tasks.Start(t); Tasks.Step;
+		Tasks.Cancel(t);
+		UnitAssert.True(Pump(2000), "cancelled sleeper finished");
+		UnitAssert.True(~t.flag, "Sleep did not return normally");
+		UnitAssert.EqualInt(Tasks.Cancelled, Tasks.State(t), "state cancelled")
+	END TestProcCancelSleeping;
+
+	PROCEDURE (t: TrapParent) Run;
+		VAR g: Tasks.Group;
+	BEGIN
+		g := Tasks.NewGroup();
+		NEW(t.child); t.child.ms := 100000; Tasks.StartIn(t.child, g);
+		HALT(1)
+	END Run;
+
+	PROCEDURE TestProcTrapCancelsOwnGroup*;
+	(** Трап родителя отменяет его собственную группу: дети не живут сиротами. *)
+		VAR p: TrapParent;
+	BEGIN
+		NEW(p); Tasks.Start(p);
+		UnitAssert.True(Pump(2000), "parent and child finished");
+		UnitAssert.EqualInt(0, Tasks.Count(), "no orphans");
+		UnitAssert.EqualInt(Tasks.Cancelled, Tasks.State(p.child), "child cancelled");
+		Tasks.Cancel(p.child); IF Pump(2000) THEN END	(* уборка после провала *)
+	END TestProcTrapCancelsOwnGroup;
+
+	PROCEDURE (t: TwoGroups) Run;
+		VAR g1, g2: Tasks.Group; c: GroupChild;
+	BEGIN
+		g1 := Tasks.NewGroup();
+		NEW(t.long); t.long.ms := 50; Tasks.StartIn(t.long, g1);
+		g2 := Tasks.NewGroup();
+		NEW(c); Tasks.StartIn(c, g2);
+		t.same := g1 = g2
+	END Run;
+
+	PROCEDURE TestProcNewGroupTwice*;
+	(** У задачи одна собственная группа: второй NewGroup возвращает её же,
+		и родитель ждёт всех детей. *)
+		VAR p: TwoGroups; t0: LONGINT;
+	BEGIN
+		NEW(p); Tasks.Start(p);
+		t0 := Kernel.Time();
+		WHILE ~((Tasks.State(p) = Tasks.Finished) OR (Tasks.State(p) = Tasks.Cancelled))
+				& (Kernel.Time() - t0 < 2000) DO Tasks.Step END;
+		UnitAssert.True(p.same, "second NewGroup returns the own group");
+		UnitAssert.EqualInt(Tasks.Finished, Tasks.State(p.long), "parent waited for the first child");
+		UnitAssert.True(Pump(2000), "tasks finished")
+	END TestProcNewGroupTwice;
 
 END System_devTasks.

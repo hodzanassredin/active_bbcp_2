@@ -121,10 +121,9 @@ MODULE AsyncSelect;
 	PROCEDURE Wake (ctx: Ctx);
 	(* Будить, только когда регистрация альтернатив окончена и задача
 		действительно спит в Tasks.Park. Пока идёт регистрация, задача
-		может стоять в Kernel.Lock на мониторе другого канала; Tasks.Unpark
-		перевёл бы её в Ready без монитора, и Lock трапнул бы «woken
-		without the monitor». Такая задача сама увидит ctx.decided,
-		получив монитор. *)
+		может стоять в Kernel.Lock на мониторе другого канала: Tasks.Unpark
+		разбудил бы её ложно, и флаг пробуждения остался бы её следующему
+		Park. Такая задача сама увидит ctx.decided, получив монитор. *)
 	BEGIN
 		IF (ctx # NIL) & ctx.ready THEN Tasks.Unpark(ctx.task) END
 	END Wake;
@@ -136,6 +135,21 @@ MODULE AsyncSelect;
 			Wake(ctx)
 		END
 	END Decide;
+
+	PROCEDURE ParkUntilDecided (ctx: Ctx);
+	(* Пред: ctx.ready. Пост: ctx.decided. Пробуждение без решения —
+	   посторонний Tasks.Unpark: Select ждёт дальше, а пробуждение
+	   возвращается задаче (Unpark себе), чтобы её следующий Park его
+	   не потерял. *)
+		VAR foreign: BOOLEAN;
+	BEGIN
+		foreign := FALSE;
+		WHILE ~ctx.decided DO
+			Tasks.Park;
+			IF ~ctx.decided THEN foreign := TRUE END
+		END;
+		IF foreign THEN Tasks.Unpark(Tasks.Current()) END
+	END ParkUntilDecided;
 
 	PROCEDURE SignalReady* (ctx: Ctx; idx: INTEGER);
 	(** Пред: владелец сигнала, ctx и idx — из Arm, Disarm ещё не вызван.
@@ -482,7 +496,7 @@ MODULE AsyncSelect;
 		IF o.kind = SendKind THEN Enqueue(c.waitS, c.waitST, o) ELSE Enqueue(c.waitR, c.waitRT, o) END;
 		Leave(c, locked);
 		o.ctx.ready := TRUE;
-		WHILE ~o.ctx.decided DO Tasks.Park END
+		ParkUntilDecided(o.ctx)
 	END WaitOne;
 
 	PROCEDURE QueueSend* (c: Core; m: Msg);
@@ -570,7 +584,7 @@ MODULE AsyncSelect;
 				Services.DoLater(timer, Services.Ticks() + tMs)
 			END;
 			ctx.ready := TRUE;
-			WHILE ~ctx.decided DO Tasks.Park END;
+			ParkUntilDecided(ctx);
 			(* RemoveAction убирает действие из обоих списков Services:
 			   отложенный Do после него не вызывается *)
 			IF timer # NIL THEN Services.RemoveAction(timer); timer.ctx := NIL END

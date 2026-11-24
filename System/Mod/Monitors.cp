@@ -31,7 +31,9 @@ MODULE Monitors;
 		25	Await: условие NIL
 		60	Await: постусловие не достигнуто — условие трапнуло при
 			вычислении другой задачей; исходный номер — в консоли
-		100	Lock, Wait, Await: задача разбужена без монитора *)
+
+	Ожидание монитора — цикл «пока не владелец»: пробуждение без
+	монитора (посторонний Tasks.Unpark) ложное и не ошибка. *)
 
 	IMPORT S := SYSTEM, Kernel;
 
@@ -596,8 +598,8 @@ MODULE Monitors;
 			m.owner := me; m.count := 1; ChainPush(m)
 		ELSIF me # mainToken THEN
 			q := TakeTaskRef(me); AppendEnter(m, q);
-			ParkNow;
-			IF m.owner # me THEN MonErr("Lock: woken without the monitor"); HALT(100) END;
+			(* Пробуждение без монитора (посторонний Unpark) — ложное: ждём дальше. *)
+			REPEAT ParkNow UNTIL m.owner = me;
 			FreeTaskRef(q)	(* HandOff снял её с очереди входа *)
 			(* запись о взятии уже добавлена PushTo при передаче *)
 		ELSE
@@ -645,8 +647,7 @@ MODULE Monitors;
 		m.count := 0;
 		m.owner := 0;
 		HandOff(m, me);
-		ParkNow;
-		IF m.owner # me THEN MonErr("Wait: woken without the monitor"); HALT(100) END;
+		REPEAT ParkNow UNTIL m.owner = me;	(* ложное пробуждение — ждём дальше *)
 		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
 		m.count := saved
 	END DoWait;
@@ -673,7 +674,9 @@ MODULE Monitors;
 		m.count := 0;
 		m.owner := 0;
 		HandOff(m, me);
-		ParkNow;
+		(* Монитор передаётся вместе с исходом условия (и трапом в нём);
+		   пробуждение без монитора — ложное, ждём дальше. *)
+		REPEAT ParkNow UNTIL m.owner = me;
 		IF w.trap # 0 THEN
 			(* Трап случился в чужом условии; переадресуем его этой задаче.
 			   HALT требует константу, поэтому исходный код — в журнал. *)
@@ -681,7 +684,6 @@ MODULE Monitors;
 			MonStr(" in the condition"); MonLn;
 			HALT(60)
 		END;
-		IF m.owner # me THEN MonErr("Await: woken without the monitor"); HALT(100) END;
 		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
 		m.count := saved
 	END DoAwait;

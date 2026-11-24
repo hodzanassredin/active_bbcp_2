@@ -97,7 +97,6 @@ DEFINITION Tasks;
 	PROCEDURE ResetStats;
 	PROCEDURE SetName (t: Task; IN s: ARRAY OF CHAR);
 	PROCEDURE SetStackSize (t: Task; size: INTEGER);
-	PROCEDURE SetTimeSlice (t: Task; ms: LONGINT);
 	PROCEDURE Sleep (ms: LONGINT);
 	PROCEDURE Start (t: Task);
 	PROCEDURE StartIn (t: Task; g: Group);
@@ -157,16 +156,18 @@ Post: the task runs again; the tasks that were ready earlier ran before it.
 **PROCEDURE Sleep (ms: LONGINT)**
 Suspends the task for at least `ms` milliseconds. With `ms <= 0` it is equivalent to `Yield`.
 
-Pre: the wait check.
-Post: the deadline expired, or `Unpark` or `Cancel` woke the task. `Sleep` does not check
-cancellation after waking: the next switch point detects it.
+Pre: the wait check; after waking the check is repeated (cancelling a sleeping task — trap 127).
+Post: the deadline expired, or `Unpark` woke the task; the `Unpark` wake-up is consumed.
 
 **PROCEDURE Join (t: Task)**
 Waits until `t` finishes or is cancelled. If `t` has already finished, it returns at once.
 
-Pre: the wait check (traps 20, 127, 21).
+Pre: the wait check (traps 20, 127, 21); after waking the check is repeated.
 Pre: `t # NIL` — trap 22.
-Post: `State(t) IN {Finished, Cancelled}`.
+Pre: `t # Current()` — trap 23.
+Pre: `State(t) # New` — trap 24.
+Post: `State(t) IN {Finished, Cancelled}`. `Unpark` of the waiting task does not end the wait and
+stays for its next `Park`.
 
 **PROCEDURE Park**
 Suspends the task until `Unpark`. A wake-up that arrived before the call is not lost: `Park` returns
@@ -176,8 +177,10 @@ Pre: the wait check; after waking the check is repeated.
 Post: the wake-up is consumed.
 
 **PROCEDURE Unpark (t: Task)**
-Wakes `t` if it sleeps, waits in `Join` or is suspended in `Park`. Otherwise it records the wake-up
-for the next `Park` of task `t`.
+Records the wake-up for the next `Park` of task `t` and wakes `t` if it sleeps, waits in `Join`, is
+suspended in `Park` or waits for a monitor. `Sleep` and `Park` consume the wake-up. `Join`, a monitor
+wait and `AsyncSelect.Select` do not consume it: they keep waiting, and the wake-up goes to the next
+`Park`.
 
 Pre: `t # NIL` — trap 20.
 Post: `t` is ready, or its next `Park` returns at once.
@@ -190,8 +193,8 @@ Pre: `t # NIL` — trap 20.
 Post: `t` is marked cancelled; the state of `t` does not change until its switch point.
 
 **PROCEDURE NewGroup (): Group**
-Creates an empty group. The owner of the group is the current task; outside a task there is no
-owner.
+In a task returns its own group: the first call creates an empty group owned by the current task,
+a repeated call returns the same group. Outside a task creates a new group without an owner.
 
 **PROCEDURE GroupCount (g: Group): INTEGER**
 The number of live members of the group; `0` for `g = NIL`.
@@ -200,7 +203,7 @@ The number of live members of the group; `0` for `g = NIL`.
 `TRUE` if at least one member trapped; `FALSE` for `g = NIL`.
 
 **PROCEDURE OwnGroup (t: Task): Group**
-The last group that task `t` created with `NewGroup`; `NIL` for `t = NIL`.
+The own group of task `t` (`NewGroup` in `t`); `NIL` if `t` has not created it, and for `t = NIL`.
 
 **PROCEDURE Step**
 Runs ready tasks until the 5 ms quantum expires or the queue is empty (section 5).
@@ -238,14 +241,6 @@ Pre: `State(t) = New` — trap 21.
 Pre: `size >= 0` — trap 22. The upper limit is not checked here; `StartIn` rejects a size above
 64 MB (trap 22).
 
-**PROCEDURE SetTimeSlice (t: Task; ms: LONGINT)**
-Stores the quantum of the task. The scheduler does not read it: all tasks run with the common
-quantum of 5 ms.
-
-Pre: `t # NIL` — trap 20.
-Pre: `State(t) = New` — trap 21.
-Pre: `ms >= 0` — trap 22.
-
 **PROCEDURE Count (): INTEGER**
 The number of tasks started and not yet removed in `Reap`.
 
@@ -279,8 +274,9 @@ Group rules:
    cancellation takes effect at its nearest switch point.
 4. Cancellation of the owner while it waits for the group cancels all members; the owner gets the
    state `Cancelled`.
-5. A task owns one group: a second `NewGroup` replaces the previous one, and the owner waits only for
-   the last one (`OwnGroup`).
+5. A trap or cancellation of the owner in `Run` cancels all members of its group: members do not
+   outlive the owner. The owner does not wait for them; each finishes at its nearest switch point.
+6. A task owns one group: a repeated `NewGroup` returns the same group (`OwnGroup`).
 
 `Cancel(t)` cancels one task. Group cancellation is performed by the internal `CancelGroup`; it is
 not exported.

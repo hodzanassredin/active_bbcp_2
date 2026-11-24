@@ -44,6 +44,7 @@ MODULE Async_devChannels;
 		EchoBack = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 		SelfSelect = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
 		AltSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; n: INTEGER END;
+		WakeKeeper = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; idx: INTEGER; parkedBack: BOOLEAN END;
 
 	VAR
 		onceDone: BOOLEAN;
@@ -565,5 +566,31 @@ MODULE Async_devChannels;
 		UnitAssert.EqualInt(3, NextNum(c), "third sender third");
 		UnitAssert.True(Pump(3000), "senders finish")
 	END TestRendezvousSendersFifo;
+
+	PROCEDURE (t: WakeKeeper) Run;
+		VAR ops: ARRAY 1 OF AsyncSelect.Op;
+	BEGIN
+		AsyncChan.RecvAlt(t.c, ops[0]);
+		t.idx := AsyncChan.Select(ops);
+		Tasks.Park;	(* посторонний Unpark во время Select не потерян *)
+		t.parkedBack := TRUE
+	END Run;
+
+	PROCEDURE TestProcSelectKeepsForeignUnpark*;
+	(** Unpark задачи, ждущей в Select, будит её ложно: Select ждёт дальше,
+		а пробуждение остаётся следующему Park. *)
+		VAR k: WakeKeeper; s: Sender;
+	BEGIN
+		NEW(k); k.c := AsyncChan.NewChan(); k.idx := -1; Tasks.Start(k);
+		Tasks.Step;
+		UnitAssert.True(Tasks.State(k) = Tasks.Parked, "select waits");
+		Tasks.Unpark(k); Tasks.Step;
+		UnitAssert.True(Tasks.State(k) = Tasks.Parked, "select still waits after a foreign wake");
+		NEW(s); s.c := k.c; s.delay := 10; s.n := 1; Tasks.Start(s);
+		UnitAssert.True(Pump(2000), "tasks finished");
+		UnitAssert.EqualInt(0, k.idx, "select received");
+		UnitAssert.True(k.parkedBack, "foreign wake was kept for Park");
+		Tasks.Cancel(k); IF Pump(1000) THEN END	(* уборка после провала *)
+	END TestProcSelectKeepsForeignUnpark;
 
 END Async_devChannels.

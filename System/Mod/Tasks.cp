@@ -3,8 +3,8 @@ MODULE Tasks;
 
 	Задача — расширяемая запись с методом Run. Start кладёт её в очередь
 	готовых; планировщик — действие Services.Action: исполняет готовые
-	задачи не дольше timeSlice миллисекунд и возвращает управление
-	главному циклу. Спящие ждут срока через Kernel.Time.
+	задачи не дольше общего кванта (defaultSlice мс) и возвращает
+	управление главному циклу. Спящие ждут срока через Kernel.Time.
 
 	Память под стек выделяет ядро: Kernel.AllocStack (mmap + сторожевая
 	страница в LinKernel, ленивые страницы). Переключатель — [code]
@@ -19,13 +19,18 @@ MODULE Tasks;
 	переключения. Трап в задаче ловится своим Kernel.Try в TaskBoot,
 	задача завершается, остальные живут.
 
-	Отмена — флаг; каждая точка ожидания проверяет его и прерывает
-	задачу трапом 127. Нарушение предусловия — трап 20–22 с текстом в
-	Console (номер — по порядку проверок в процедуре); 100 — нарушен
-	инвариант планировщика.
+	Отмена — флаг; каждая точка ожидания проверяет его до и после
+	ожидания и прерывает задачу трапом 127. Нарушение предусловия — трап
+	20–24 с текстом в Console (номер — по порядку проверок в процедуре);
+	100 — нарушен инвариант планировщика.
 
-	Ограничения (см. docs/stand.md, «Решения без владельца», §9):
-	- одна нить ОС; мониторов нет, философы используют Park/Unpark;
+	Мониторы ([exclusive], ACTIVE.AWAIT) реализует модуль Monitors; ему
+	этот модуль отдаёт крючок Kernel.Scheduler: токен задачи, ожидание
+	монитора и пробуждение передачей монитора. Ожидание монитора не
+	трогает пользовательский флаг пробуждения Park/Unpark.
+
+	Ограничения:
+	- одна нить ОС;
 	- вытеснения нет: отмена и Yield работают только в точках ожидания;
 	- API с Run без параметров, поэтому проверка ABB «VAR-параметры не
 	  ссылаются в чужой стек» сводится к проверке, что сам объект задачи
@@ -43,6 +48,7 @@ MODULE Tasks;
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
 		heapArity = 4;		(* детей у узла кучи спящих *)
 		heapMin = 64;		(* начальная длина кучи и запас перед уплотнением *)
+		closeDrain = 1000;	(* мс: сколько CLOSE доводит отменённые задачи до конца *)
 
 		(** состояния задачи **)
 		New* = 0; Ready* = 1; Running* = 2; Sleeping* = 3;
@@ -65,7 +71,6 @@ MODULE Tasks;
 			stackRec: Kernel.Stack;
 			state: INTEGER;
 			deadline: LONGINT;	(* до какого Kernel.Time спать *)
-			timeSlice: LONGINT;
 			stackSize: INTEGER;
 			cancel, wake, failed, bodyOk: BOOLEAN;
 			group: Group;
@@ -95,8 +100,12 @@ MODULE Tasks;
 		all, readyHead, readyTail: Task;
 		(* Куча спящих: четверичная, по возрастанию deadline, в heap[0 .. heapN).
 		   Инвариант: heap[(i - 1) DIV heapArity].deadline <= heap[i].deadline;
-		   у каждой спящей задачи ровно одна действительная запись; nSleeping —
-		   число спящих задач, heapN - nSleeping — устаревших записей. *)
+		   число действительных записей кучи = nSleeping, у каждой из этих задач
+		   ровно одна действительная запись; heapN - nSleeping — устаревших.
+		   Инвариант верен вне PushSleeper: задача, которая засыпает, входит в
+		   nSleeping вместе со своей записью (PushSleeper); MakeReady и
+		   WakeSleepers уменьшают nSleeping вместе с тем, что запись устаревает
+		   или снимается. *)
 		heap: POINTER TO ARRAY OF SleepEntry;
 		heapN, nSleeping: INTEGER;
 		current: Task;
@@ -117,6 +126,7 @@ MODULE Tasks;
 		   Стек в пуле не зарегистрирован в реестре ядра и не сканируется. *)
 		poolHead: S.ADDRESS;
 		poolCount: INTEGER;
+		closeT: Task; closeT0: LONGINT;	(* для CLOSE *)
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
 
@@ -297,14 +307,16 @@ MODULE Tasks;
 	END ReserveHeap;
 
 	PROCEDURE PushSleeper (t: Task);
-	(* Пред: t.state = Sleeping, t.deadline и t.sleepSeq — этого сна, nSleeping
-	   уже учитывает t. Пост: в куче действительная запись t. *)
+	(* Пред: t.state = Sleeping, t.deadline и t.sleepSeq — этого сна, записи
+	   этого сна в куче нет, nSleeping t не учитывает.
+	   Пост: в куче действительная запись t, nSleeping учитывает t. *)
 	BEGIN
 		ASSERT(t.state = Sleeping, 20);
 		IF heapN >= 2 * nSleeping + heapMin THEN Compact END;
 		ReserveHeap(heapN + 1);
 		heap[heapN].t := t; heap[heapN].deadline := t.deadline; heap[heapN].seq := t.sleepSeq;
-		INC(heapN); SiftUp(heapN - 1)
+		INC(heapN); SiftUp(heapN - 1);
+		INC(nSleeping)
 	END PushSleeper;
 
 	PROCEDURE WakeSleepers (now: LONGINT);
@@ -321,6 +333,19 @@ MODULE Tasks;
 			END
 		END
 	END WakeSleepers;
+
+	PROCEDURE RemoveWaiter (t, w: Task);
+	(* Пост: w нет в очереди ждущих t. *)
+		VAR p: Task;
+	BEGIN
+		IF t.waiters = w THEN t.waiters := w.wnext
+		ELSE
+			p := t.waiters;
+			WHILE (p # NIL) & (p.wnext # w) DO p := p.wnext END;
+			IF p # NIL THEN p.wnext := w.wnext END
+		END;
+		w.wnext := NIL
+	END RemoveWaiter;
 
 	PROCEDURE WakeWaiters (t: Task);
 		VAR w: Task;
@@ -393,9 +418,13 @@ MODULE Tasks;
 		ELSE
 			t.bodyOk := FALSE;
 			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TaskBody)), 0, 0, 0);
+			(* Отменённая или трапнувшая задача отменяет свою группу: дети не
+			   переживают родителя (структурная конкуренция). *)
 			IF t.cancel THEN
+				IF t.own # NIL THEN CancelGroup(t.own) END;
 				t.state := Cancelled
 			ELSIF ~t.bodyOk THEN
+				IF t.own # NIL THEN CancelGroup(t.own) END;
 				t.failed := TRUE;
 				t.state := Finished;
 				IF t.group # NIL THEN
@@ -502,7 +531,6 @@ MODULE Tasks;
 	BEGIN
 		CheckTask(t);
 		IF ~InitStack(t) THEN Msg("no stack memory (platform does not support it)"); HALT(22) END;
-		IF t.timeSlice <= 0 THEN t.timeSlice := defaultSlice END;
 		ReserveHeap(2 * (alive + 1) + heapMin);	(* PushSleeper не выделяет: heapN < 2 * nSleeping + heapMin *)
 		IF g # NIL THEN t.group := g; INC(g.alive) END;
 		t.state := Ready; Enqueue(t); deadlocked := FALSE;
@@ -553,25 +581,36 @@ MODULE Tasks;
 		CheckWait("Sleep");
 		IF ms <= 0 THEN Yield; RETURN END;
 		current.deadline := Kernel.Time() + ms;
-		current.state := Sleeping; INC(current.sleepSeq); INC(nSleeping);
+		current.state := Sleeping; INC(current.sleepSeq);
 		PushSleeper(current);
 		SwitchTo(current.sp, schedSP, current.stackRec);
-		current.wake := FALSE	(* Unpark разбудил сон, а не будущий Park *)
+		current.wake := FALSE;	(* Unpark разбудил сон, а не будущий Park *)
+		CheckWait("Sleep")
 	END Sleep;
 
 	PROCEDURE Join* (t: Task);
-	(** Пред: точка ожидания (трапы 20, 21, отмена — 127); t # NIL (22).
-		Пост: t завершена или отменена. *)
+	(** Пред: точка ожидания (трапы 20, 21, отмена — 127); t # NIL (22);
+		t не текущая задача (23); t запущена (24).
+		Пост: t завершена или отменена. Посторонний Unpark не прерывает
+		ожидание и остаётся следующему Park. *)
 	BEGIN
 		CheckWait("Join");
 		IF t = NIL THEN Msg("Join: NIL task") END;
 		ASSERT(t # NIL, 22);
-		WHILE ~IsDone(t) DO
+		IF t = current THEN Msg("Join: the current task") END;
+		ASSERT(t # current, 23);
+		IF t.state = New THEN Msg("Join: task not started") END;
+		ASSERT(t.state # New, 24);
+		IF ~IsDone(t) THEN
+			(* Инвариант: пока t не завершена, current в очереди t.waiters ровно
+			   один раз; WakeWaiters снимает всю очередь при Reap(t). *)
 			current.wnext := t.waiters; t.waiters := current;
-			current.state := Waiting;
-			SwitchTo(current.sp, schedSP, current.stackRec);
-			current.wake := FALSE;	(* Unpark разбудил ожидание Join *)
-			CheckWait("Join")
+			REPEAT
+				current.state := Waiting;
+				SwitchTo(current.sp, schedSP, current.stackRec);
+				IF current.cancel & ~IsDone(t) THEN RemoveWaiter(t, current) END;
+				CheckWait("Join")
+			UNTIL IsDone(t)
 		END
 	END Join;
 
@@ -582,12 +621,21 @@ MODULE Tasks;
 		IF current.wake THEN current.wake := FALSE; RETURN END;
 		current.state := Parked;
 		SwitchTo(current.sp, schedSP, current.stackRec);
-		(* Unpark выставил wake и разбудил нас: флаг съеден этим
-		   пробуждением. Иначе следующий Park (например, внутри
-		   Kernel.Lock) вернулся бы сразу без монитора. *)
-		current.wake := FALSE;
+		current.wake := FALSE;	(* пробуждение потреблено этим Park *)
 		CheckWait("Park")
 	END Park;
+
+	PROCEDURE ParkMonitor;
+	(** Ожидание монитора (крючок Kernel.Scheduler.park): до пробуждения
+		передачей монитора, отмены или постороннего Unpark. Флаг wake не
+		читается и не сбрасывается: пользовательское пробуждение остаётся
+		следующему Park. Monitors ждёт в цикле «пока не владелец». *)
+	BEGIN
+		CheckWait("monitor wait");
+		current.state := Parked;
+		SwitchTo(current.sp, schedSP, current.stackRec);
+		CheckWait("monitor wait")
+	END ParkMonitor;
 
 	PROCEDURE Unpark* (t: Task);
 	(** Пред: t # NIL (трап 20). Пост: t разбужена, если ждёт; иначе
@@ -614,8 +662,12 @@ MODULE Tasks;
 	(* --- группа ----------------------------------------------------------- *)
 
 	PROCEDURE NewGroup* (): Group;
+	(** Пост: в задаче — собственная группа текущей задачи (одна на задачу:
+		повторный вызов возвращает ту же); вне задачи — новая группа без
+		владельца. *)
 		VAR g: Group;
 	BEGIN
+		IF (current # NIL) & (current.own # NIL) THEN RETURN current.own END;
 		NEW(g); g.alive := 0; g.failed := FALSE; g.owner := current;
 		IF current # NIL THEN current.own := g END;
 		RETURN g
@@ -773,14 +825,6 @@ MODULE Tasks;
 		t.stackSize := size
 	END SetStackSize;
 
-	PROCEDURE SetTimeSlice* (t: Task; ms: LONGINT);
-	(** Пред: t # NIL (трап 20), t ещё не запущена (21), ms >= 0 (22).
-		Пост: квант t — ms мс; 0 — квант по умолчанию. *)
-	BEGIN
-		ASSERT(t # NIL, 20); ASSERT(t.state = New, 21); ASSERT(ms >= 0, 22);
-		t.timeSlice := ms
-	END SetTimeSlice;
-
 	PROCEDURE Count* (): INTEGER;
 	BEGIN
 		RETURN alive
@@ -842,7 +886,7 @@ MODULE Tasks;
 
 	PROCEDURE (s: Sched) park;
 	BEGIN
-		Park
+		ParkMonitor
 	END park;
 
 	PROCEDURE (s: Sched) unpark (a: S.ADDRESS);
@@ -886,7 +930,17 @@ BEGIN
 	Kernel.SetScheduler(schedHook)
 CLOSE
 	(* Выгрузка/завершение мира: в ядре не должно остаться указателей на
-	   процедуры этого модуля, а стеки живых задач надо вернуть платформе. *)
+	   процедуры этого модуля, а стеки живых задач надо вернуть платформе.
+	   Сначала живые задачи отменяются и доводятся до конца: трап 127 в
+	   точке ожидания снимает их мониторы (Kernel.Try в TaskBoot, endTry) и
+	   записи в очередях Monitors (purge), пока их кадры ещё на живых стеках.
+	   Задача, которая не дошла до конца за closeDrain мс (поймала 127 и
+	   ждёт дальше), остаётся, её стек освобождается как есть. *)
+	IF (current = NIL) & ~inStep THEN
+		closeT := all; WHILE closeT # NIL DO Cancel(closeT); closeT := closeT.next END;
+		closeT0 := Kernel.Time();
+		WHILE (alive > 0) & (Kernel.Time() - closeT0 < closeDrain) DO Step END
+	END;
 	Services.RemoveAction(sched);
 	Kernel.SetScheduler(NIL);
 	WHILE all # NIL DO
