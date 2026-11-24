@@ -21,7 +21,6 @@ A="$BB/.work/bootA"
 B="$BB/.work/bootB"
 C="$BB/.work/bootC"
 save="$BB/.work/devsave.$$"
-tests="$BB/.work/devtests.$$"
 # Фиксированная метка времени компиляции для детерминированных .ocf.
 FIXED_TIME="2000-01-01 00:00:00"
 
@@ -52,21 +51,9 @@ install_dev () {
 	mkdir -p "$BB/Dev/Code" "$BB/Dev/Sym"
 	cp "$BASE"/Dev/Code/*.ocf "$BB/Dev/Code/"
 	cp "$BASE"/Dev/Sym/*.osf "$BB/Dev/Sym/"
-	# Dev/Mod/Tests*.cp — тесты (DevTestsActive, DevTestsYield), их собирает
-	# tools/unit.sh, а не компилятор. На время проходов исходники убраны из
-	# Dev/Mod (см. ниже); на случай остатков в .work/i386 чистим и Code/Sym.
-	rm -f "$BB"/Dev/Code/Tests*.ocf "$BB"/Dev/Sym/Tests*.osf
-}
-
-restore_tests () {
-	for f in "$tests"/*.cp; do
-		[ -e "$f" ] && mv "$f" "$BB/Dev/Mod/"
-	done
-	rm -rf "$tests"
 }
 
 restore () {
-	restore_tests
 	if [ -d "$save/Code" ]; then
 		mkdir -p "$BB/Dev/Code" "$BB/Dev/Sym"
 		cp "$save"/Code/*.ocf "$BB/Dev/Code/" 2>/dev/null || true
@@ -75,14 +62,6 @@ restore () {
 	rm -rf "$save"
 }
 trap restore EXIT INT TERM
-
-# CompileSubs @Lin Dev видит только Dev/Mod и не тянет Unit (его нет в
-# списке подсистем): тестовые модули убираем на время проходов.
-mkdir -p "$tests" || exit 1
-for f in "$BB"/Dev/Mod/Tests*.cp; do
-	[ -e "$f" ] || continue
-	mv "$f" "$tests/" || exit 1
-done
 
 mkdir -p "$save/Code" "$save/Sym"
 cp "$BB"/Dev/Code/*.ocf "$save/Code/" 2>/dev/null || true
@@ -107,7 +86,6 @@ mkdir -p "$C"; cp -a "$BASE/Dev" "$C/"
 python3 -I "$BB/tools/bootstrap-compare.py" "$B/Dev" "$C/Dev"
 
 install_dev
-restore_tests
 trap - EXIT INT TERM
 rm -rf "$save"
 echo "bootstrap: готово; B и C совпали побайтно, установлен результат B"

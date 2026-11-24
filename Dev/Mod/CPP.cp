@@ -1674,23 +1674,6 @@ MODULE DevCPP;
 		RETURN IsSystemModule(name)
 	END FrameworkModule;
 
-	PROCEDURE TestModule (IN name: ARRAY OF SHORTCHAR): BOOLEAN;
-	(** Тестовый модуль подсистемы: <Имя>Tests или <Имя>Tests<Тема>.
-		Тестам каркасных подсистем ключ точек уступки нужен по существу
-		(DevTestsYield проверяет сам механизм уступок). *)
-		VAR i: INTEGER;
-	BEGIN
-		i := 0;
-		WHILE name[i] # 0X DO
-			IF (name[i] = "T") & (name[i + 1] = "e") & (name[i + 2] = "s")
-					& (name[i + 3] = "t") & (name[i + 4] = "s") THEN
-				RETURN TRUE
-			END;
-			INC(i)
-		END;
-		RETURN FALSE
-	END TestModule;
-
 	PROCEDURE Module*(VAR prog: DevCPT.Node);
 		VAR impName, aliasName: DevCPT.Name;
 				procdec, statseq: DevCPT.Node;
@@ -1700,8 +1683,7 @@ MODULE DevCPP;
 		IF sym = module THEN DevCPS.Get(sym) ELSE err(16) END ;
 		IF sym = ident THEN
 			DevCPT.Open(DevCPS.name); DevCPS.Get(sym);
-			IF (DevCPM.yieldPts IN DevCPM.options) & FrameworkModule(DevCPT.SelfName)
-				& ~TestModule(DevCPT.SelfName) THEN
+			IF (DevCPM.yieldPts IN DevCPM.options) & FrameworkModule(DevCPT.SelfName) THEN
 				DevCPM.err(225)	(* ключ точек уступки запрещён модулям каркаса *)
 			END;
 			DevCPT.libName := "";

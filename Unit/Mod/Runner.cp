@@ -87,16 +87,6 @@ MODULE UnitRunner;
 		dst[i] := 0X
 	END StrCopy;
 
-	PROCEDURE EndsWith (IN s, suffix: ARRAY OF CHAR): BOOLEAN;
-		VAR i, j, k: INTEGER;
-	BEGIN
-		i := StrLen(s); j := StrLen(suffix);
-		IF i < j THEN RETURN FALSE END;
-		i := i - j; k := 0;
-		WHILE (k < j) & (s[i + k] = suffix[k]) DO INC(k) END;
-		RETURN k = j
-	END EndsWith;
-
 	PROCEDURE Contains (IN s, sub: ARRAY OF CHAR): BOOLEAN;
 		VAR i, j: INTEGER; found: BOOLEAN;
 	BEGIN
@@ -306,20 +296,20 @@ MODULE UnitRunner;
 	END RunModule;
 
 	PROCEDURE IsTestModule (IN nm, prefix: ARRAY OF CHAR): BOOLEAN;
-	(* Модуль тестов подсистемы: <prefix>Tests или <prefix>Tests<Тема>.
-	   Для prefix = "" (all) — прежнее правило: имя оканчивается на Tests. *)
+	(* Модуль тестов подсистемы <prefix>_tests: <prefix>_tests<Тема>.
+	   Для prefix = "" (all) — любой модуль, содержащий "_tests". *)
 		VAR i: INTEGER;
 	BEGIN
-		IF prefix = "" THEN RETURN EndsWith(nm, "Tests") END;
+		IF prefix = "" THEN RETURN Contains(nm, "_tests") END;
 		IF ~StartsWith(nm, prefix) THEN RETURN FALSE END;
 		i := StrLen(prefix);
-		RETURN (nm[i] = "T") & (nm[i + 1] = "e") & (nm[i + 2] = "s")
-			& (nm[i + 3] = "t") & (nm[i + 4] = "s")
+		RETURN (nm[i] = "_") & (nm[i + 1] = "t") & (nm[i + 2] = "e")
+			& (nm[i + 3] = "s") & (nm[i + 4] = "t") & (nm[i + 5] = "s")
 	END IsTestModule;
 
 	PROCEDURE RunMatching (IN prefix, marks: ARRAY OF CHAR; VAR total: Counts);
-	(* Модули уже загруженного мира: Run('all') — имена, оканчивающиеся
-	   на Tests; Run('System') — SystemTests и SystemTests<Тема>. *)
+	(* Модули уже загруженного мира: Run('all') — все *_tests*;
+	   Run('System') — System_tests*; prefix = "" — все *_tests*. *)
 		VAR s: Meta.Scanner; nm: Meta.Name; c: Counts; any: BOOLEAN;
 	BEGIN
 		any := FALSE;
@@ -334,7 +324,7 @@ MODULE UnitRunner;
 			s.Scan
 		END;
 		IF ~any THEN
-			W("UnitRunner: no *Tests module for '"); W(prefix); W("'"); Ln
+			W("UnitRunner: no *_tests module for '"); W(prefix); W("'"); Ln
 		END
 	END RunMatching;
 
