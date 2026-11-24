@@ -36,7 +36,9 @@ fi
 # Unit — первым: от него зависят адаптеры System_devSupport и тесты.
 # Тестируемый модуль компилируется отдельно: у него могут быть свои опции
 # (например, ^ — ключ точек уступки).
-mods="UnitAssert UnitRunner Unit_devProbe Unit_devMain $DEPS"
+# Unit_devBadSetup — до Unit_devMain, который его импортирует: на свежей установке
+# без него Unit_devMain не собирался, и первые модули tools/test.sh падали.
+mods="UnitAssert UnitRunner Unit_devProbe Unit_devBadSetup Unit_devMain $DEPS"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))
