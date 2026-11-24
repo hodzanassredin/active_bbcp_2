@@ -898,6 +898,18 @@ MODULE Actor_devNet;
 		IF ok THEN UnitAssert.True(crashes >= quickSeeds DIV 2, "crashes happened") END
 	END TestSagaSeeds;
 
+	PROCEDURE TestSagaRunsFreeMemory*;
+	(* Прогоны саги не копят память: узлы и сети прошлых прогонов собираются
+		сборщиком (раньше их держал список узлов ActorNet, и время на зерно росло). *)
+		VAR crashes: INTEGER; u0, u1: LONGINT;
+	BEGIN
+		IF Seeds(1, 20, FALSE, crashes) THEN END;
+		Kernel.Collect; u0 := Kernel.Used();
+		UnitAssert.True(Seeds(21, 220, FALSE, crashes), sagaMsg);
+		Kernel.Collect; u1 := Kernel.Used();
+		UnitAssert.True(u1 - u0 < 1000000, "memory does not grow with runs")
+	END TestSagaRunsFreeMemory;
+
 	PROCEDURE Long*;
 	(** Долгий прогон саги на longSeeds зёрнах (вне обычного test.sh). *)
 		VAR crashes: INTEGER; d: ARRAY 32 OF CHAR;

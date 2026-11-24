@@ -671,8 +671,9 @@ a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and `recove
 Nodes (`Actor_devNet`, network in memory, `ActorSim`): a saga run of 8 transfers with 10 % loss,
 10 % duplicates, delays of up to 3 steps, reordering and node crashes takes about 3.5 ms per seed
 (`TestSagaSeeds`: 200 seeds, each twice, 1.4 s). The long run `Actor_devNet.Long` on 3000 seeds takes
-83 s (about 28 ms per seed): the time per seed grows with the number of runs in one process,
-probably because of node and name lists the runs do not free; the cause is not analysed.
+4.5 s (1.5 ms per seed). It used to take 83 s: `ActorNet` kept every node created in a list, and with
+it the node's network and frames; the heap grew and the collector worked longer and longer. The list
+is gone (`TestSagaRunsFreeMemory`).
 
 ## 12. Limitations
 

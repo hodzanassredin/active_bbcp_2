@@ -85,7 +85,6 @@ MODULE ActorNet;
 
 	VAR
 		cur: Node;	(* узел, чей кадр кодируется или раскодируется сейчас *)
-		nodes: Node;
 
 	(* --- письмо -------------------------------------------------------------- *)
 
@@ -486,7 +485,6 @@ MODULE ActorNet;
 		i := 0; WHILE name[i] # 0X DO ASSERT(name[i] # "/", 20); INC(i) END;
 		NEW(n); n.name := name$; n.t := t; n.up := TRUE; n.incarnation := 1;
 		FOR i := 0 TO 7 DO n.secret[i] := SHORT(SHORT(SHORT(secret MOD 256))); secret := secret DIV 256 END;
-		n.next := nodes; nodes := n;
 		RETURN n
 	END New;
 
