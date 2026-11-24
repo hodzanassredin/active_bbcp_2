@@ -424,8 +424,6 @@ MODULE Kernel;
 		root: Cluster;	(* cluster list *)
 		modList-: Module;	(* root of module list *)
 		trapCount-: INTEGER;
-		inWorker-: BOOLEAN;	(* отладка этапа 8: сейчас исполняет рабочая нить *)
-		workerAllocs-: INTEGER;	(* обращений к куче из рабочих нитей *)
 		err-: INTEGER;
 		pc-, sp-, fp-, val-: S.ADDRESS;	(* 64-бит: адреса ловушки не влезают в INTEGER (стек 0x7FFF...) *)
 		
@@ -440,6 +438,7 @@ MODULE Kernel;
 		sentinel: FreeBlock;
 		candidates: ARRAY 1024 OF LONGINT;
 		nofcand: INTEGER;
+		heapMin, heapMax: LONGINT;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
 		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock: нужен Loop,
 					   чтобы не собирать мусор без выделений с прошлой сборки *)
@@ -467,6 +466,8 @@ MODULE Kernel;
 		(* Мониторы (этап 4). *)
 		monBuckets: ARRAY monHash OF Monitor;
 		nofMonitors: INTEGER;	(* записей в таблице, диагностика *)
+		freeMonitors: Monitor;	(* свободные записи: Lock без соперников не выделяет *)
+		freeLocks: LockRec;	(* свободные записи цепочки взятий *)
 
 		(* Планировщик: ставится Tasks.SetScheduler. *)
 		schedCurrent: SchedCurrent;
@@ -1258,7 +1259,6 @@ MODULE Kernel;
 	PROCEDURE NewRec* (typ: S.ADDRESS): S.ADDRESS;	(* implementation of NEW(ptr) *)
 		VAR size: INTEGER; b: Block; tag: Type; l: FList;
 	BEGIN
-		IF inWorker THEN INC(workerAllocs) END;	(* отладка этапа 8 *)
 		IF ODD(typ) THEN	(* record contains interface pointers *)
 			tag := S.VAL(Type, typ - 1);
 			b := NewBlock(tag.size);
@@ -1285,7 +1285,6 @@ MODULE Kernel;
 	PROCEDURE NewArr* (eltyp, nofelem, nofdim: INTEGER): S.ADDRESS;	(* impl. of NEW(ptr, dim0, dim1, ...) *)
 		VAR b: Block; size, headSize: INTEGER; t: Type; fin: BOOLEAN; l: FList;
 	BEGIN
-		IF inWorker THEN INC(workerAllocs) END;	(* отладка этапа 8 *)
 		IF (nofdim < 0) OR (nofdim > (MAX(INTEGER) - 24) DIV 4) THEN RETURN 0 END;
 		headSize := 4 * nofdim + 24;	(* len[0] по +0x18 от b.last, данные по +0x18+4*nofdim (4-полевой Block: tag,last,actual,first) *)
 		fin := FALSE;
@@ -1359,23 +1358,6 @@ MODULE Kernel;
 	BEGIN
 		RETURN trapViewer
 	END GetTrapViewer;
-
-	PROCEDURE EnterWorker*;
-	(** Отладка этапа 8: рабочая нить вошла в исполнение тела. *)
-	BEGIN
-		inWorker := TRUE
-	END EnterWorker;
-
-	PROCEDURE LeaveWorker*;
-	BEGIN
-		inWorker := FALSE
-	END LeaveWorker;
-
-	PROCEDURE WorkerAllocs* (): INTEGER;
-	(** Сколько раз NEW был вызван из рабочей нити (отладочный счётчик). *)
-	BEGIN
-		RETURN workerAllocs
-	END WorkerAllocs;
 
 	PROCEDURE InstallTrapChecker* (h: Handler);
 	BEGIN
@@ -1849,6 +1831,8 @@ MODULE Kernel;
 		END
 	END UpdateMainStack;
 
+	PROCEDURE^ WordsInModule (s: Stack; from, modLo, modHi: S.ADDRESS): BOOLEAN;
+
 	PROCEDURE FrameInModule (s: Stack; modLo, modHi: S.ADDRESS): BOOLEAN;
 	(* Есть ли в цепочке кадров стека s адрес возврата из кода [modLo, modHi)?
 	   Текущий стек идёт от FP, спящий — от FP, сохранённого SwitchSave.
@@ -1856,7 +1840,7 @@ MODULE Kernel;
 	   поля; FP бывает ≡4 mod 8) — прежняя проверка mod 8 сразу
 	   возвращала FALSE, и выгрузка «успешно» ломала возврат. *)
 		VAR fpp, newfp, p: S.ADDRESS; ar: AdrRef; guard: INTEGER; sp0: S.ADDRESS;
-			cur, interrupted: Stack;
+			cur, interrupted: Stack; broken: BOOLEAN;
 	BEGIN
 		S.GETREG(SP, sp0);
 		cur := StackOf(sp0);
@@ -1870,17 +1854,48 @@ MODULE Kernel;
 			fpp := s.fp
 		END;
 		IF fpp = 0 THEN RETURN FALSE END;
-		guard := 0;
-		WHILE (s.lo <= fpp) & (fpp < s.hi) & (guard < 4096) DO
-			IF (fpp MOD 4 # 0) OR ~IsReadable(fpp, fpp + 2 * SIZE(S.ADDRESS)) THEN RETURN FALSE END;
-			ar := S.VAL(AdrRef, fpp + SIZE(S.ADDRESS)); p := ar.a;
-			ar := S.VAL(AdrRef, fpp); newfp := ar.a;
-			IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
-			IF newfp <= fpp THEN RETURN FALSE END;
-			fpp := newfp; INC(guard)
+		guard := 0; broken := FALSE;
+		WHILE ~broken & (s.lo <= fpp) & (fpp < s.hi) & (guard < 4096) DO
+			IF (fpp MOD 4 # 0) OR ~IsReadable(fpp, fpp + 2 * SIZE(S.ADDRESS)) THEN
+				broken := TRUE
+			ELSE
+				ar := S.VAL(AdrRef, fpp + SIZE(S.ADDRESS)); p := ar.a;
+				ar := S.VAL(AdrRef, fpp); newfp := ar.a;
+				IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
+				IF newfp <= fpp THEN
+					(* нормальный конец цепочки — сохранённый FP = 0; иначе
+					   кадр C (обратный вызов GTK) или мусор: цепочка выше
+					   оборвана, и её надо просмотреть словами *)
+					IF newfp # 0 THEN broken := TRUE END;
+					fpp := s.hi	(* конец цепочки: выйти из цикла *)
+				ELSE
+					fpp := newfp; INC(guard)
+				END
+			END
 		END;
+		IF guard >= 4096 THEN broken := TRUE END;
+		IF broken THEN RETURN WordsInModule(s, fpp, modLo, modHi) END;
 		RETURN FALSE
 	END FrameInModule;
+
+	PROCEDURE WordsInModule (s: Stack; from, modLo, modHi: S.ADDRESS): BOOLEAN;
+	(* Консервативный скан слов [from, hi) на адрес из кода модуля. Нужен
+	   только выше обрыва цепочки FP: обычный стек не сканируется, иначе
+	   старые адреса возврата в живых регистровых слотах навсегда мешают
+	   выгрузке. *)
+		VAR w, p: S.ADDRESS; ar: AdrRef;
+	BEGIN
+		w := from;
+		IF w < s.lo THEN w := s.lo END;
+		w := (w + 3) DIV 4 * 4;
+		WHILE w < s.hi - (SIZE(S.ADDRESS) - 1) DO
+			IF ~IsReadable(w, w + SIZE(S.ADDRESS)) THEN RETURN FALSE END;
+			ar := S.VAL(AdrRef, w); p := ar.a;
+			IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
+			INC(w, 4)
+		END;
+		RETURN FALSE
+	END WordsInModule;
 
 	PROCEDURE StackUsesModule (mod: Module): BOOLEAN;
 		VAR s: Stack;
@@ -2304,12 +2319,6 @@ MODULE Kernel;
 		END
 	END InHeap;
 
-	(* Диагностика/тесты шага 2а: InHeap и состояние индекса кластеров. *)
-	PROCEDURE InHeapAddr* (p: LONGINT): BOOLEAN;
-	BEGIN
-		RETURN InHeap(p)
-	END InHeapAddr;
-
 	PROCEDURE ^ Try* (h: TryHandler; a, b, c: S.ADDRESS);
 
 	(* -------------------- мониторы (этап 4) ------------------------------- *)
@@ -2409,11 +2418,24 @@ MODULE Kernel;
 		RETURN m
 	END FindMon;
 
+	PROCEDURE TakeMon (): Monitor;
+	(** Свободный список записей мониторов: в цикле Lock/Unlock одного
+		объекта память больше не выделяется. *)
+		VAR m: Monitor;
+	BEGIN
+		IF freeMonitors # NIL THEN
+			m := freeMonitors; freeMonitors := m.next; m.next := NIL
+		ELSE
+			NEW(m)
+		END;
+		RETURN m
+	END TakeMon;
+
 	PROCEDURE NewMon (obj: S.ADDRESS): Monitor;
 		VAR m: Monitor; i: INTEGER;
 	BEGIN
 		i := MonIndex(obj);
-		NEW(m);
+		m := TakeMon();
 		m.next := monBuckets[i]; monBuckets[i] := m;
 		m.obj := obj; m.owner := 0; m.count := 0;
 		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
@@ -2440,7 +2462,9 @@ MODULE Kernel;
 			WHILE (p # NIL) & (p.next # m) DO p := p.next END;
 			IF p # NIL THEN p.next := m.next END
 		END;
-		m.next := NIL; m.obj := 0; m.owner := 0; m.count := 0;
+		m.obj := 0; m.owner := 0; m.count := 0;
+		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
+		m.next := freeMonitors; freeMonitors := m;
 		DEC(nofMonitors)
 	END DropMon;
 
@@ -2497,10 +2521,27 @@ MODULE Kernel;
 		q.next := NIL
 	END RemoveEnter;
 
+	PROCEDURE TakeLock (): LockRec;
+		VAR r: LockRec;
+	BEGIN
+		IF freeLocks # NIL THEN
+			r := freeLocks; freeLocks := r.next
+		ELSE
+			NEW(r)
+		END;
+		r.mon := NIL; r.next := NIL;
+		RETURN r
+	END TakeLock;
+
+	PROCEDURE FreeLock (r: LockRec);
+	BEGIN
+		r.mon := NIL; r.next := freeLocks; freeLocks := r
+	END FreeLock;
+
 	PROCEDURE ChainPush (m: Monitor);
 		VAR r: LockRec;
 	BEGIN
-		NEW(r); r.mon := m; r.next := lockChain; lockChain := r; INC(lockDepth)
+		r := TakeLock(); r.mon := m; r.next := lockChain; lockChain := r; INC(lockDepth)
 	END ChainPush;
 
 	PROCEDURE PushTo (t: S.ADDRESS; m: Monitor);
@@ -2512,7 +2553,7 @@ MODULE Kernel;
 		s := NIL;
 		IF schedInstalled & (schedStack # NIL) THEN s := schedStack(t) END;
 		IF s # NIL THEN
-			NEW(r); r.mon := m; r.next := s.lockChain; s.lockChain := r; INC(s.lockDepth)
+			r := TakeLock(); r.mon := m; r.next := s.lockChain; s.lockChain := r; INC(s.lockDepth)
 		END
 	END PushTo;
 
@@ -2613,7 +2654,7 @@ MODULE Kernel;
 			r := lockChain;
 			IF r = NIL THEN lockDepth := depth; RETURN END;
 			lockChain := r.next; DEC(lockDepth);
-			m := r.mon;
+			m := r.mon; FreeLock(r);
 			(* Монитор, которым владеет другая задача (мы ждём в Await),
 			   только снимаем из цепочки — его счётчик не наш. *)
 			IF m.owner = me THEN
@@ -2765,7 +2806,7 @@ MODULE Kernel;
 		IF (r = NIL) OR (r.mon # m) THEN
 			MonFail("Unlock: monitors must be released in LIFO order")
 		END;
-		lockChain := r.next; DEC(lockDepth);
+		lockChain := r.next; DEC(lockDepth); FreeLock(r);
 		DEC(m.count);
 		IF m.count = 0 THEN
 			m.owner := 0;
@@ -2896,23 +2937,9 @@ MODULE Kernel;
 		IF n = 0 THEN MonStr("  (no monitors)"); MonLn END
 	END DumpMonitors;
 
-	PROCEDURE ClusterBounds* (i: INTEGER; OUT base, size: LONGINT): BOOLEAN;
-	(** Границы i-го кластера в индексе (по возрастанию адреса). *)
-	BEGIN
-		IF (i >= 0) & (i < nofClusterIndex) THEN
-			base := S.VAL(LONGINT, clusterIndex[i]); size := clusterIndex[i].size;
-			RETURN TRUE
-		END;
-		RETURN FALSE
-	END ClusterBounds;
-
-	PROCEDURE ClusterIndexSize* (): INTEGER;
-	BEGIN
-		RETURN nofClusterIndex
-	END ClusterIndexSize;
-
 	PROCEDURE ClusterIndexCheck* (): BOOLEAN;
-	(** Инвариант индекса: строго возрастает и совпадает по составу с root. *)
+	(** Единственная наружу проверка шага 2а: индекс строго возрастает и
+		совпадает по составу с цепочкой root. *)
 		VAR i, n: INTEGER; c: Cluster; ok: BOOLEAN;
 	BEGIN
 		IF clusterIndexFull THEN RETURN FALSE END;
@@ -3036,9 +3063,29 @@ MODULE Kernel;
 		END
 	END CheckCandidates;
 
+	PROCEDURE UpdateHeapBounds;
+	(* Границы кучи берутся один раз на сборку: прежний обход цепочки
+	   кластеров на каждый стек стоил N_стеков × N_кластеров. *)
+		VAR c: Cluster;
+	BEGIN
+		IF root = NIL THEN
+			heapMin := 0; heapMax := 0; RETURN
+		END;
+		IF ~clusterIndexFull & (nofClusterIndex > 0) THEN
+			(* индекс отсортирован по адресу: крайние записи и дают границы *)
+			heapMin := S.VAL(LONGINT, clusterIndex[0]);
+			c := clusterIndex[nofClusterIndex - 1];
+			heapMax := S.VAL(LONGINT, c) + c.size
+		ELSE
+			heapMin := S.VAL(LONGINT, root); c := root;
+			WHILE c.next # NIL DO c := c.next END;
+			heapMax := S.VAL(LONGINT, c) + c.size
+		END
+	END UpdateHeapBounds;
+
 	PROCEDURE ScanStack (lo, hi: S.ADDRESS);
 	(* Консервативный скан диапазона стека [lo, hi) с шагом 4. *)
-		VAR stk, p, min, max: LONGINT; c: Cluster; ar: AdrRef;
+		VAR stk, p: LONGINT; ar: AdrRef;
 	BEGIN
 		IF (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN END;
 		(* 64-бит: шаг 4, а не 8! Компилятор ПАКУЕТ 8-байтные поля
@@ -3046,19 +3093,17 @@ MODULE Kernel;
 		   локалов, напр. Stores.Reader) бывают на адресах ≡ 4 (mod 8). Скан с шагом 8
 		   (любой фазы) пропускал половину слотов → живые объекты собирались Sweep
 		   (use-after-free в StdConfig.Setup: модель жила только в слоте ≡4 (mod 8)). *)
-		nofcand := 0; c := root;
-		WHILE c.next # NIL DO c := c.next END;
-		min := S.VAL(LONGINT, root); max := S.VAL(LONGINT, c) + c.size;
+		nofcand := 0;
 		stk := lo; INC(stk, 3); stk := stk DIV 4 * 4;
 		WHILE stk < hi - 7 DO	(* ar.a читает 8 байт: не заходить за верх *)
 			ar := S.VAL(AdrRef, stk); p := ar.a;
-			IF (p > min) & (p < max) & (~strictStackSweep OR (p MOD 16 = 0)) THEN
+			IF (p > heapMin) & (p < heapMax) & (~strictStackSweep OR (p MOD 16 = 0)) THEN
 				candidates[nofcand] := p; INC(nofcand);
 				IF nofcand = LEN(candidates) - 1 THEN CheckCandidates; nofcand := 0 END
 			END;
 			INC(stk, 4)
 		END;
-		candidates[nofcand] := max; INC(nofcand);	(* ensure complete scan for interface mark*)
+		candidates[nofcand] := heapMax; INC(nofcand);	(* ensure complete scan for interface mark*)
 		IF nofcand > 0 THEN CheckCandidates END
 	END ScanStack;
 
@@ -3068,6 +3113,7 @@ MODULE Kernel;
 	   трап, а не молчаливый пропуск (прежнее поведение теряло объекты). *)
 		VAR s, cur, interrupted: Stack; fp: S.ADDRESS;
 	BEGIN
+		UpdateHeapBounds;
 		S.GETREG(FP, fp);
 		cur := StackOf(fp);
 		IF cur = NIL THEN HALT(126) END;
@@ -3465,14 +3511,6 @@ MODULE Kernel;
 	BEGIN
 		RETURN S.VAL(LONGINT, root)
 	END Root;
-
-	PROCEDURE Clusters* (): INTEGER;	(* число кластеров кучи (замер, диагностика) *)
-		VAR c: Cluster; n: INTEGER;
-	BEGIN
-		n := 0; c := root;
-		WHILE c # NIL DO INC(n); c := c.next END;
-		RETURN n
-	END Clusters;
 
 
 	(* -------------------- Trap Handling --------------------- *)

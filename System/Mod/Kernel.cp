@@ -396,6 +396,7 @@ MODULE Kernel;
 		sentinel: FreeBlock;
 		candidates: ARRAY 1024 OF INTEGER;
 		nofcand: INTEGER;
+		heapMin, heapMax: INTEGER;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
 		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock (Loop, этап 2а) *)
 		ttotal: INTEGER;	(* current total size of BlackBox heap *)	(* committed heap size *)
@@ -416,6 +417,8 @@ MODULE Kernel;
 		(* Мониторы (этап 4). *)
 		monBuckets: ARRAY monHash OF Monitor;
 		nofMonitors: INTEGER;	(* записей в таблице, диагностика *)
+		freeMonitors: Monitor;	(* свободные записи: Lock без соперников не выделяет *)
+		freeLocks: LockRec;	(* свободные записи цепочки взятий *)
 
 		(* Планировщик: ставится Tasks.SetScheduler. *)
 		schedCurrent: SchedCurrent;
@@ -2062,10 +2065,12 @@ MODULE Kernel;
 		END
 	END UpdateMainStack;
 
+	PROCEDURE^ WordsInModule (s: Stack; from, modLo, modHi: S.ADDRESS): BOOLEAN;
+
 	PROCEDURE FrameInModule (s: Stack; modLo, modHi: S.ADDRESS): BOOLEAN;
 	(* Есть ли в цепочке кадров стека s адрес возврата из кода модуля? *)
 		VAR fpp, newfp, p: S.ADDRESS; ar: AdrRef; guard: INTEGER; sp0: S.ADDRESS;
-			cur, interrupted: Stack;
+			cur, interrupted: Stack; broken: BOOLEAN;
 	BEGIN
 		S.GETREG(SP, sp0);
 		cur := StackOf(sp0);
@@ -2078,17 +2083,42 @@ MODULE Kernel;
 			fpp := s.fp
 		END;
 		IF fpp = 0 THEN RETURN FALSE END;
-		guard := 0;
-		WHILE (s.lo <= fpp) & (fpp < s.hi) & (guard < 4096) DO
-			IF (fpp MOD 4 # 0) OR ~IsReadable(fpp, fpp + 2 * SIZE(S.ADDRESS)) THEN RETURN FALSE END;
-			ar := S.VAL(AdrRef, fpp + SIZE(S.ADDRESS)); p := ar.a;
-			ar := S.VAL(AdrRef, fpp); newfp := ar.a;
-			IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
-			IF newfp <= fpp THEN RETURN FALSE END;
-			fpp := newfp; INC(guard)
+		guard := 0; broken := FALSE;
+		WHILE ~broken & (s.lo <= fpp) & (fpp < s.hi) & (guard < 4096) DO
+			IF (fpp MOD 4 # 0) OR ~IsReadable(fpp, fpp + 2 * SIZE(S.ADDRESS)) THEN
+				broken := TRUE
+			ELSE
+				ar := S.VAL(AdrRef, fpp + SIZE(S.ADDRESS)); p := ar.a;
+				ar := S.VAL(AdrRef, fpp); newfp := ar.a;
+				IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
+				IF newfp <= fpp THEN
+					IF newfp # 0 THEN broken := TRUE END;
+					fpp := s.hi	(* конец цепочки *)
+				ELSE
+					fpp := newfp; INC(guard)
+				END
+			END
 		END;
+		IF guard >= 4096 THEN broken := TRUE END;
+		IF broken THEN RETURN WordsInModule(s, fpp, modLo, modHi) END;
 		RETURN FALSE
 	END FrameInModule;
+
+	PROCEDURE WordsInModule (s: Stack; from, modLo, modHi: S.ADDRESS): BOOLEAN;
+	(* Консервативный скан слов [from, hi): только выше обрыва цепочки FP
+	   (кадр C между кадрами CP). *)
+		VAR w, p: S.ADDRESS; ar: AdrRef;
+	BEGIN
+		w := from;
+		IF w < s.lo THEN w := s.lo END;
+		WHILE w < s.hi - (SIZE(S.ADDRESS) - 1) DO
+			IF ~IsReadable(w, w + SIZE(S.ADDRESS)) THEN RETURN FALSE END;
+			ar := S.VAL(AdrRef, w); p := ar.a;
+			IF (modLo <= p) & (p < modHi) THEN RETURN TRUE END;
+			INC(w, 4)
+		END;
+		RETURN FALSE
+	END WordsInModule;
 
 	PROCEDURE StackUsesModule (mod: Module): BOOLEAN;
 		VAR s: Stack;
@@ -2101,22 +2131,32 @@ MODULE Kernel;
 		RETURN FALSE
 	END StackUsesModule;
 
-	PROCEDURE ScanStack (lo, hi: S.ADDRESS);
-		VAR sp, p, min, max: INTEGER; c: Cluster;
+	PROCEDURE UpdateHeapBounds;
+	(* Границы кучи один раз на сборку, а не на каждый стек. *)
+		VAR c: Cluster;
 	BEGIN
-		nofcand := 0; c := root;
+		IF root = NIL THEN
+			heapMin := 0; heapMax := 0; RETURN
+		END;
+		heapMin := S.VAL(INTEGER, root); c := root;
 		WHILE c.next # NIL DO c := c.next END;
-		min := S.VAL(INTEGER, root); max := S.VAL(INTEGER, c) + c.size;
+		heapMax := S.VAL(INTEGER, c) + c.size
+	END UpdateHeapBounds;
+
+	PROCEDURE ScanStack (lo, hi: S.ADDRESS);
+		VAR sp, p: INTEGER;
+	BEGIN
+		nofcand := 0;
 		sp := lo;
 		WHILE sp < hi - (SIZE(INTEGER) - 1) DO
 			S.GET(sp, p);
-			IF (p > min) & (p < max) & (~strictStackSweep OR (p MOD 16 = 0)) THEN
+			IF (p > heapMin) & (p < heapMax) & (~strictStackSweep OR (p MOD 16 = 0)) THEN
 				candidates[nofcand] := p; INC(nofcand);
 				IF nofcand = LEN(candidates) - 1 THEN CheckCandidates; nofcand := 0 END
 			END;
 			INC(sp, 4)
 		END;
-		candidates[nofcand] := max; INC(nofcand);	(* ensure complete scan for interface mark*)
+		candidates[nofcand] := heapMax; INC(nofcand);	(* ensure complete scan for interface mark*)
 		IF nofcand > 0 THEN CheckCandidates END
 	END ScanStack;
 
@@ -2125,6 +2165,7 @@ MODULE Kernel;
 	   спящих — от сохранённого указателя стека до верха. *)
 		VAR s, cur, interrupted: Stack; fp: S.ADDRESS;
 	BEGIN
+		UpdateHeapBounds;
 		S.GETREG(FP, fp);
 		cur := StackOf(fp);
 		IF cur = NIL THEN HALT(126) END;
@@ -2254,11 +2295,22 @@ MODULE Kernel;
 		RETURN m
 	END FindMon;
 
+	PROCEDURE TakeMon (): Monitor;
+		VAR m: Monitor;
+	BEGIN
+		IF freeMonitors # NIL THEN
+			m := freeMonitors; freeMonitors := m.next; m.next := NIL
+		ELSE
+			m := S.VAL(Monitor, NewRec(S.TYP(Monitor)))
+		END;
+		RETURN m
+	END TakeMon;
+
 	PROCEDURE NewMon (obj: S.ADDRESS): Monitor;
 		VAR m: Monitor; i: INTEGER;
 	BEGIN
 		i := MonIndex(obj);
-		m := S.VAL(Monitor, NewRec(S.TYP(Monitor)));
+		m := TakeMon();
 		m.next := monBuckets[i]; monBuckets[i] := m;
 		m.obj := obj; m.owner := 0; m.count := 0;
 		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
@@ -2285,7 +2337,9 @@ MODULE Kernel;
 			WHILE (p # NIL) & (p.next # m) DO p := p.next END;
 			IF p # NIL THEN p.next := m.next END
 		END;
-		m.next := NIL; m.obj := 0; m.owner := 0; m.count := 0;
+		m.obj := 0; m.owner := 0; m.count := 0;
+		m.enter := NIL; m.enterTail := NIL; m.wait := NIL; m.waitTail := NIL;
+		m.next := freeMonitors; freeMonitors := m;
 		DEC(nofMonitors)
 	END DropMon;
 
@@ -2342,10 +2396,27 @@ MODULE Kernel;
 		q.next := NIL
 	END RemoveEnter;
 
+	PROCEDURE TakeLock (): LockRec;
+		VAR r: LockRec;
+	BEGIN
+		IF freeLocks # NIL THEN
+			r := freeLocks; freeLocks := r.next
+		ELSE
+			r := S.VAL(LockRec, NewRec(S.TYP(LockRec)))
+		END;
+		r.mon := NIL; r.next := NIL;
+		RETURN r
+	END TakeLock;
+
+	PROCEDURE FreeLock (r: LockRec);
+	BEGIN
+		r.mon := NIL; r.next := freeLocks; freeLocks := r
+	END FreeLock;
+
 	PROCEDURE ChainPush (m: Monitor);
 		VAR r: LockRec;
 	BEGIN
-		r := S.VAL(LockRec, NewRec(S.TYP(LockRec)));
+		r := TakeLock();
 		r.mon := m; r.next := lockChain; lockChain := r; INC(lockDepth)
 	END ChainPush;
 
@@ -2356,7 +2427,7 @@ MODULE Kernel;
 		s := NIL;
 		IF schedInstalled & (schedStack # NIL) THEN s := schedStack(t) END;
 		IF s # NIL THEN
-			r := S.VAL(LockRec, NewRec(S.TYP(LockRec)));
+			r := TakeLock();
 			r.mon := m; r.next := s.lockChain; s.lockChain := r; INC(s.lockDepth)
 		END
 	END PushTo;
@@ -2440,7 +2511,7 @@ MODULE Kernel;
 			r := lockChain;
 			IF r = NIL THEN lockDepth := depth; RETURN END;
 			lockChain := r.next; DEC(lockDepth);
-			m := r.mon;
+			m := r.mon; FreeLock(r);
 			IF m.owner = me THEN
 				DEC(m.count);
 				IF m.count <= 0 THEN
@@ -2579,7 +2650,7 @@ MODULE Kernel;
 		IF (r = NIL) OR (r.mon # m) THEN
 			MonFail("Unlock: monitors must be released in LIFO order")
 		END;
-		lockChain := r.next; DEC(lockDepth);
+		lockChain := r.next; DEC(lockDepth); FreeLock(r);
 		DEC(m.count);
 		IF m.count = 0 THEN
 			m.owner := 0;

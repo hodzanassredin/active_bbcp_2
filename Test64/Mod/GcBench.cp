@@ -5,7 +5,7 @@ MODULE Test64GcBench;
 	  - время NEW на 1 и 10 млн;
 	  - время полного Kernel.Collect при 1, 10 и 50 млн ЖИВЫХ объектов;
 	  - время Collect при 1 и 10 млн МЁРТВЫХ объектов;
-	  - размер кучи (Kernel.Allocated) и число кластеров (Kernel.Clusters);
+	  - размер кучи (Kernel.Allocated);
 	  - периодическую сборку из главного цикла (System/Mod/Loop: gcCycle = 100)
 	    при большой живой куче в покое и на пустой куче.
 
@@ -53,14 +53,13 @@ MODULE Test64GcBench;
 		Console.WriteStr(s)
 	END N;
 
-	PROCEDURE Rec (IN tag: ARRAY OF CHAR; n, ns, alloc: LONGINT; cl: INTEGER);
+	PROCEDURE Rec (IN tag: ARRAY OF CHAR; n, ns, alloc: LONGINT);
 	BEGIN
 		W("BENCH "); W(tag);
 		W(" n="); N(n);
 		W(" ns="); N(ns);
 		W(" us="); N(ns DIV 1000);
 		W(" alloc="); N(alloc);
-		W(" clusters="); N(cl);
 		Console.WriteLn
 	END Rec;
 
@@ -102,7 +101,7 @@ MODULE Test64GcBench;
 		SetBlock(FALSE);
 		t0 := Now(); Kernel.Collect; t1 := Now();
 		ns := t1 - t0;
-		Rec(tag, live, ns, Kernel.Allocated(), Kernel.Clusters())
+		Rec(tag, live, ns, Kernel.Allocated())
 	END TimeCollect;
 
 	(* --- главный цикл ----------------------------------------------------- *)
@@ -157,19 +156,18 @@ MODULE Test64GcBench;
 		VAR t0, t1, ns: LONGINT;
 	BEGIN
 		Test64Support.Begin("GcBench");
-		W("BENCH heap-start alloc="); N(Kernel.Allocated());
-		W(" clusters="); N(Kernel.Clusters()); Console.WriteLn;
+		W("BENCH heap-start alloc="); N(Kernel.Allocated()); Console.WriteLn;
 
 		head := NIL; live := 0;
 
 		(* 1 млн живых *)
 		SetBlock(TRUE); t0 := Now(); Build(m1); t1 := Now();
-		Rec("new1m", m1, t1 - t0, Kernel.Allocated(), Kernel.Clusters());
+		Rec("new1m", m1, t1 - t0, Kernel.Allocated());
 		TimeCollect("live1m");
 
 		(* +9 млн => NEW на 10 млн *)
 		SetBlock(TRUE); t0 := Now(); Build(m10 - m1); t1 := Now();
-		Rec("new9m", m10 - m1, t1 - t0, Kernel.Allocated(), Kernel.Clusters());
+		Rec("new9m", m10 - m1, t1 - t0, Kernel.Allocated());
 		TimeCollect("live10m");
 
 		(* периодическая сборка главного цикла при 10 млн живых *)
@@ -177,7 +175,7 @@ MODULE Test64GcBench;
 
 		(* +40 млн => 50 млн живых *)
 		SetBlock(TRUE); t0 := Now(); Build(m50 - m10); t1 := Now();
-		Rec("new40m", m50 - m10, t1 - t0, Kernel.Allocated(), Kernel.Clusters());
+		Rec("new40m", m50 - m10, t1 - t0, Kernel.Allocated());
 		TimeCollect("live50m");
 
 		(* освободить всё *)
@@ -194,8 +192,7 @@ MODULE Test64GcBench;
 		SetBlock(TRUE); Build(m10); Drop;
 		TimeCollect("dead10m");
 
-		W("BENCH heap-end alloc="); N(Kernel.Allocated());
-		W(" clusters="); N(Kernel.Clusters()); Console.WriteLn;
+		W("BENCH heap-end alloc="); N(Kernel.Allocated()); Console.WriteLn;
 
 		Test64Support.End
 	END Do;
@@ -205,23 +202,21 @@ MODULE Test64GcBench;
 		VAR t0, t1: LONGINT;
 	BEGIN
 		Test64Support.Begin("GcBenchSmall");
-		W("BENCH heap-start alloc="); N(Kernel.Allocated());
-		W(" clusters="); N(Kernel.Clusters()); Console.WriteLn;
+		W("BENCH heap-start alloc="); N(Kernel.Allocated()); Console.WriteLn;
 
 		head := NIL; live := 0;
 		SetBlock(TRUE); t0 := Now(); Build(m1); t1 := Now();
-		Rec("new1m", m1, t1 - t0, Kernel.Allocated(), Kernel.Clusters());
+		Rec("new1m", m1, t1 - t0, Kernel.Allocated());
 		TimeCollect("live1m");
 		SetBlock(TRUE); t0 := Now(); Build(m10 - m1); t1 := Now();
-		Rec("new9m", m10 - m1, t1 - t0, Kernel.Allocated(), Kernel.Clusters());
+		Rec("new9m", m10 - m1, t1 - t0, Kernel.Allocated());
 		TimeCollect("live10m");
 		LoopBench("loop10m");
 		Drop; TimeCollect("drop10m");
 		LoopBench("loopEmpty");
 		SetBlock(TRUE); Build(m1); Drop; TimeCollect("dead1m");
 		SetBlock(TRUE); Build(m10); Drop; TimeCollect("dead10m");
-		W("BENCH heap-end alloc="); N(Kernel.Allocated());
-		W(" clusters="); N(Kernel.Clusters()); Console.WriteLn;
+		W("BENCH heap-end alloc="); N(Kernel.Allocated()); Console.WriteLn;
 		Test64Support.End
 	END DoSmall;
 
