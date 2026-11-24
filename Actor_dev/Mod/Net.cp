@@ -10,8 +10,8 @@ MODULE Actor_devNet;
 	тику; счёт отвечает на повтор операции тем же итогом. Прогон саги —
 	функция зерна: провал печатает зерно, Rerun повторяет последнее. *)
 
-	IMPORT Services, Tasks, Strings, Stores, Log := StdLog,
-		ActorCore, ActorRun, ActorJournal, ActorPersist, ActorNet, ActorNetMem, ActorSim, UnitAssert;
+	IMPORT Services, Tasks, Strings, Stores, Log := StdLog, CommStreams, AsyncIO,
+		ActorCore, ActorRun, ActorJournal, ActorPersist, ActorNet, ActorNetMem, ActorNetTcp, ActorSim, UnitAssert;
 
 	CONST
 		initial = 1000;	(* начальный остаток счетов *)
@@ -84,7 +84,7 @@ MODULE Actor_devNet;
 		VAR t: LONGINT;
 	BEGIN
 		t := Services.Ticks();
-		WHILE ~flag & (Services.Ticks() - t <= ms) DO Services.actionHook.Step END;
+		WHILE ~flag & (Services.Ticks() - t <= ms) DO Services.actionHook.Step; AsyncIO.Poll(0) END;
 		RETURN flag
 	END Until;
 
@@ -92,7 +92,7 @@ MODULE Actor_devNet;
 		VAR t: LONGINT;
 	BEGIN
 		t := Services.Ticks();
-		WHILE (x < want) & (Services.Ticks() - t <= ms) DO Services.actionHook.Step END;
+		WHILE (x < want) & (Services.Ticks() - t <= ms) DO Services.actionHook.Step; AsyncIO.Poll(0) END;
 		RETURN x >= want
 	END UntilInt;
 
@@ -435,7 +435,7 @@ MODULE Actor_devNet;
 		VAR t: LONGINT;
 	BEGIN
 		t := Services.Ticks();
-		WHILE (target = NIL) & (Services.Ticks() - t <= 2000) DO Services.actionHook.Step END
+		WHILE (target = NIL) & (Services.Ticks() - t <= 2000) DO Services.actionHook.Step; AsyncIO.Poll(0) END
 	END WaitTarget;
 
 	(* --- Ask через узел ------------------------------------------------------- *)
@@ -539,6 +539,46 @@ MODULE Actor_devNet;
 		UnitAssert.EqualInt(5, net.duplicated, "network duplicated each");
 		UnitAssert.True(nb.duplicates >= 5, "duplicates dropped")
 	END TestDuplicatesExecuteOnce;
+
+	(* --- TCP ------------------------------------------------------------------- *)
+
+	PROCEDURE TcpPair (OUT ta, tb: ActorNetTcp.Net);
+	(* Узлы na и nb на TCP localhost; на nb эхо, пропуск — capB. *)
+		VAR s: Name; adr: ARRAY 64 OF CHAR; res: INTEGER;
+	BEGIN
+		ActorRun.Start(2);
+		ActorNetTcp.New("127.0.0.1:0", ta, res); UnitAssert.EqualInt(CommStreams.done, res, "listen a");
+		ActorNetTcp.New("127.0.0.1:0", tb, res); UnitAssert.EqualInt(CommStreams.done, res, "listen b");
+		NodeName("A", s); na := ActorNet.New(s, ta, 11); ActorNetTcp.Attach(ta, na);
+		NodeName("B", s); nb := ActorNet.New(s, tb, 22); ActorNetTcp.Attach(tb, nb);
+		ActorNetTcp.Address(tb, adr); ActorNetTcp.Peer(ta, nb.name, adr);
+		ActorNetTcp.Address(ta, adr); ActorNetTcp.Peer(tb, na.name, adr);
+		StartRoot(3, nb.name); WaitTarget; ActorNet.Export(nb, target, capB)
+	END TcpPair;
+
+	PROCEDURE TestTcpAsk*;
+	(* Ask через настоящий сокет: кадр и ответ проходят TCP. *)
+		VAR ta, tb: ActorNetTcp.Net;
+	BEGIN
+		TcpPair(ta, tb); askMs := 3000;
+		UnitAssert.True(Drive(AskBody, 4000), "ask finished");
+		UnitAssert.EqualInt(ActorCore.ok, askRes, "ask ok");
+		UnitAssert.EqualInt(42, lastPong, "reply decoded");
+		UnitAssert.True((ta.sentFrames >= 1) & (tb.readFrames >= 1), "frames over tcp");
+		ActorNetTcp.Close(ta); ActorNetTcp.Close(tb)
+	END TestTcpAsk;
+
+	PROCEDURE TestTcpLost*;
+	(* Сеть узла B закрыта: наблюдатель на A получает Terminated (обрыв = потеря узла). *)
+		VAR ta, tb: ActorNetTcp.Net;
+	BEGIN
+		TcpPair(ta, tb);
+		WatchFromA; Idle(100);
+		UnitAssert.EqualInt(0, terms, "alive");
+		ActorNetTcp.Close(tb);
+		UnitAssert.True(UntilInt(terms, 1, 3000), "connection loss gives Terminated");
+		ActorNetTcp.Close(ta)
+	END TestTcpLost;
 
 	(* --- повтор после потерянного ответа (детерминированно) ------------------------ *)
 
