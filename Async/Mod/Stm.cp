@@ -241,7 +241,7 @@ MODULE AsyncStm;
 		Пред: в t.Do нет точек переключения — 25 (Tasks).
 		Пост: записи t.Do видны все; при трапе в t.Do записи откатаны, трап
 		передан с тем же номером (номер больше 128 — как 128). *)
-		VAR ok: BOOLEAN; code: INTEGER;
+		VAR ok, retried: BOOLEAN; code: INTEGER;
 	BEGIN
 		ASSERT(t # NIL, 20);
 		IF active THEN t.Do
@@ -252,13 +252,14 @@ MODULE AsyncStm;
 				active := TRUE; Tasks.BeginAtomic;
 				ok := Run(t);
 				Tasks.EndAtomic; active := FALSE;
+				retried := retrying;	(* Retry узнаётся по признаку, а не по номеру трапа *)
 				IF retrying THEN Kernel.SetQuiet(FALSE); retrying := FALSE END;
 				IF ok THEN
 					FOR code := 0 TO nLog - 1 DO Wake(log[code].v) END;
 					Clear; EXIT
 				END;
 				Undo(0);
-				IF Kernel.err # retryTrap THEN code := Kernel.err; Clear; Pass(code) END;
+				IF ~retried THEN code := Kernel.err; Clear; Pass(code) END;
 				Await
 			END
 		END
@@ -293,7 +294,7 @@ MODULE AsyncStm;
 		ELSE
 			mark := nLog; INC(serial); wser := serial;
 			IF ~Run(a) THEN
-				IF Kernel.err # retryTrap THEN Pass(Kernel.err) END;
+				IF ~retrying THEN Pass(Kernel.err) END;
 				Kernel.SetQuiet(FALSE); retrying := FALSE;
 				Undo(mark); INC(serial); wser := serial;
 				b.Do

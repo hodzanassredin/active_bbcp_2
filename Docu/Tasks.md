@@ -709,7 +709,8 @@ The upper limit is not checked here; a stack above 64 MB is rejected by `StartIn
 The number of tasks started and not yet removed.
 
 **PROCEDURE BeginAtomic**
-Opens an atomic section; sections nest.
+Opens an atomic section; sections nest. A section inside which the task ended with a trap ends
+together with the task.
 
 ```
 Post: until the matching EndAtomic the wait check traps 25, Step traps 22, a yield point does not switch

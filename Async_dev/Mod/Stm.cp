@@ -183,6 +183,7 @@ MODULE Async_devStm;
 		| 2: t.c.Recv(m)
 		| 3: t.box.Inc
 		| 4: Tasks.Step
+		| 5: HALT(126)
 		END
 	END Do;
 
@@ -394,14 +395,19 @@ MODULE Async_devStm;
 		RETURN t
 	END NewViolate;
 
-	PROCEDURE CheckViolation (what: INTEGER; IN m: ARRAY OF CHAR);
+	PROCEDURE CheckViolationCode (what, code: INTEGER; IN m: ARRAY OF CHAR);
 		VAR v: AsyncStm.IntVar; r: Runner;
 	BEGIN
 		v := AsyncStm.NewInt(0);
 		r := Start(NewViolate(v, what), 0);
 		UnitAssert.True(Pump(1000), m);
-		UnitAssert.EqualInt(25, r.err, m);
+		UnitAssert.EqualInt(code, r.err, m);
 		UnitAssert.EqualInt(0, v.Get(), m)
+	END CheckViolationCode;
+
+	PROCEDURE CheckViolation (what: INTEGER; IN m: ARRAY OF CHAR);
+	BEGIN
+		CheckViolationCode(what, 25, m)
 	END CheckViolation;
 
 	PROCEDURE TestNoYieldInside*;
@@ -457,6 +463,13 @@ MODULE Async_devStm;
 	END TestNoStepInside;
 
 	(* --- 8. своя запись ---------------------------------------------------- *)
+
+	PROCEDURE TestUserHalt126IsNotRetry*;
+	(** HALT с номером тихого трапа Retry — обычный трап: откат и передача,
+		а не ожидание. *)
+	BEGIN
+		CheckViolationCode(5, 126, "HALT(126) in a transaction: rollback, trap passes")
+	END TestUserHalt126IsNotRetry;
 
 	PROCEDURE TestReadOwnWrite*;
 		VAR t: ReadOwn; err: INTEGER;

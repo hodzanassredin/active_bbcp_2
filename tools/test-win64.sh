@@ -94,5 +94,5 @@ run() {
 run Unit_devMain "" "passed 7"
 run System_devWinTasks proc "passed 5"
 run Async_devWinWorkers proc "passed 4"
-run Async_devStm proc "passed 20"
+run Async_devStm proc "passed 21"
 exit 0

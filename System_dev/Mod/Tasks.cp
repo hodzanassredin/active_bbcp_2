@@ -52,6 +52,7 @@ MODULE System_devTasks;
 		TwoGroups = POINTER TO RECORD (Tasks.Task) long: LongSleeper; same: BOOLEAN END;
 		Parker = POINTER TO RECORD (Tasks.Task) done: BOOLEAN END;
 		ExtParker = POINTER TO RECORD (Tasks.Task) done: BOOLEAN END;
+		AtomicLeaker = POINTER TO RECORD (Tasks.Task) END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -627,6 +628,23 @@ MODULE System_devTasks;
 		Tasks.Unpark(p);
 		UnitAssert.True(Pump(1000), "tasks finished")
 	END TestProcParkExternalIsNotDeadlock;
+
+	PROCEDURE (t: AtomicLeaker) Run;
+	BEGIN
+		Tasks.BeginAtomic; HALT(50)
+	END Run;
+
+	PROCEDURE TestProcAtomicSectionEndsWithTask*;
+	(** Задача трапнула внутри неделимого участка: участок кончается вместе
+		с задачей, остальные задачи ждут как обычно. *)
+		VAR a: AtomicLeaker; s: LongSleeper;
+	BEGIN
+		NEW(a); Tasks.Start(a);
+		NEW(s); s.ms := 1; Tasks.Start(s);
+		UnitAssert.True(Pump(2000), "tasks finished");
+		UnitAssert.True(Tasks.Failed(a), "the task trapped");
+		UnitAssert.True(~Tasks.Failed(s), "another task waits after the section was abandoned")
+	END TestProcAtomicSectionEndsWithTask;
 
 	PROCEDURE TestProcUnparkOutsideTaskReschedules*;
 	(** Планировщик назначил свой шаг на срок спящей задачи. Unpark с

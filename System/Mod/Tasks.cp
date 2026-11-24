@@ -760,6 +760,7 @@ MODULE Tasks;
 			current := t; t.state := Running;
 			SwitchTo(schedSP, t.sp, schedStack);
 			current := NIL;
+			atomic := 0;	(* вернуться из участка можно, только кончив задачу трапом: участок брошен *)
 			IF IsDone(t) THEN Reap(t) END;
 			now := Kernel.Time();
 			IF now - t0 >= slice THEN EXIT END
@@ -822,7 +823,8 @@ MODULE Tasks;
 	END Count;
 
 	PROCEDURE BeginAtomic*;
-	(** Начать неделимый участок; участки вкладываются.
+	(** Начать неделимый участок; участки вкладываются. Участок, внутри
+		которого задача кончилась трапом, кончается вместе с ней.
 		Пост: до парного EndAtomic ожидание (Yield, Sleep, Join, Park, вход в
 		занятый монитор, AWAIT) — трап 25, Step — трап 22, точка уступки не
 		переключает. *)
