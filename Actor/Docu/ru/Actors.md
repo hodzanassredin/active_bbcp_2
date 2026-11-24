@@ -1,8 +1,8 @@
 # Акторы
 
 Подсистема `Actor` строит программу из объектов, которые обмениваются сообщениями и не делят
-состояние. Глава описывает первый этап: акторы одного процесса, их исполнение общим пулом задач и
-надзор родителя за детьми. Задачи, мониторы и точки переключения определены в
+состояние. Глава описывает акторы одного процесса, их исполнение общим пулом задач и надзор родителя за
+детьми. Задачи, мониторы и точки переключения определены в
 `Docu/ru/Active-CP-Lang.md` и `Docu/ru/Tasks.md`, сообщения и каналы — в `Docu/ru/Async.md`.
 Подсистема собирается только для AMD64, как и `Async`.
 
@@ -22,16 +22,18 @@
 отказавшим: продолжить, перезапустить с чистым состоянием или остановить.
 
 Отправитель знает получателя по *адресу* — значению типа `ActorCore.Ref`. Адрес состоит из имени
-узла и имени актора. На первом этапе узел всегда свой, но отправка уже идёт через абстрактный
-метод адреса, и адрес другого процесса встанет на то же место (раздел 9).
+узла и имени актора. Узел всегда свой: транспорта между процессами нет. Отправка, наблюдение и
+остановка идут через абстрактные методы адреса, поэтому адрес другого процесса займёт то же место
+(раздел 9).
 
 ## 2. Первый актор
 
-Счётчик принимает `Inc` и отвечает на `Get` текущим значением. Модуль ниже создаёт его, посылает
-тысячу `Inc` из задачи-клиента и спрашивает итог.
+Счётчик принимает `Inc` и отвечает на `Get` текущим значением. Модуль ниже (пример `ObxActor0`,
+страница `Obx/Docu/ru/Actor0.md`) создаёт его, посылает тысячу `Inc` из задачи-клиента, спрашивает
+итог и останавливает всё.
 
 ```
-MODULE ActorDocCounter;
+MODULE ObxActor0;
 	IMPORT Services, Tasks, Console, Strings, ActorCore, ActorRun;
 
 	TYPE
@@ -41,7 +43,7 @@ MODULE ActorDocCounter;
 		Counter = POINTER TO RECORD (ActorCore.Actor) n: INTEGER END;
 		Client = POINTER TO RECORD (Tasks.Task) END;
 
-	VAR counter: ActorCore.Ref; answer: INTEGER; done: BOOLEAN;
+	VAR counter: ActorCore.Ref;
 
 	PROCEDURE (a: Counter) Receive (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR r: Num;
@@ -59,46 +61,50 @@ MODULE ActorDocCounter;
 	END New;
 
 	PROCEDURE (t: Client) Run;
-		VAR i: INTEGER; inc: Inc; get: Get; r: ActorCore.Msg;
+		VAR i: INTEGER; inc: Inc; get: Get; r: ActorCore.Msg; s: ARRAY 16 OF CHAR;
 	BEGIN
 		NEW(inc); NEW(get);
 		FOR i := 1 TO 1000 DO ActorCore.Tell(counter, inc) END;
-		IF ActorCore.Ask(counter, get, 1000, r) = ActorCore.ok THEN answer := r(Num).n ELSE answer := -1 END;
-		done := TRUE
+		IF ActorCore.Ask(counter, get, 1000, r) = ActorCore.ok THEN
+			Strings.IntToString(r(Num).n, s); Console.WriteStr("counter: "); Console.WriteStr(s)
+		ELSE Console.WriteStr("counter: no answer")
+		END;
+		Console.WriteLn;
+		ActorRun.Shutdown
 	END Run;
 
-	PROCEDURE Run*;
-		VAR t: Client; s: ARRAY 16 OF CHAR;
+	PROCEDURE Do*;
+		VAR t: Client;
 	BEGIN
 		IF ActorRun.n = 0 THEN ActorRun.Start(4) END;
 		counter := ActorCore.Spawn(NIL, ActorCore.NewProps(New), "counter");
-		done := FALSE; NEW(t); Tasks.Start(t);
-		WHILE ~done DO Services.actionHook.Step END;
-		Strings.IntToString(answer, s);
-		Console.WriteStr("ActorDocCounter: "); Console.WriteStr(s); Console.WriteLn;
-		ActorCore.StopActor(counter)
-	END Run;
+		NEW(t); Tasks.Start(t);
+		WHILE Tasks.Count() > 0 DO Services.actionHook.Step END
+	END Do;
 
-END ActorDocCounter.
+END ObxActor0.
 ```
 
-Команда `ActorDocCounter.Run` печатает `ActorDocCounter: 1000`. Актор описывается записью `Props`:
-фабрика экземпляров, предел ящика, признак собственной задачи и стратегия надзора за детьми.
-`Spawn` создаёт экземпляр фабрикой, заводит ящик и возвращает адрес; первым сообщением обработчик
-получает `Started`. `Tell` кладёт сообщение в ящик и возвращается сразу. `Ask` посылает сообщение
-с временным адресом ответа и ждёт первого письма на этот адрес не дольше заданного числа
-миллисекунд; обработчик отвечает через `c.Respond`, который адресует письмо отправителю текущего
-сообщения. `Ask` ждёт, поэтому клиент — задача: на главном стеке `Ask` трапует с кодом 20.
+Команда `ObxActor0.Do` печатает `counter: 1000`. Актор описывается записью `Props`: фабрика
+экземпляров, предел ящика, признак собственной задачи и стратегия надзора за детьми. `Spawn`
+создаёт экземпляр фабрикой, заводит ящик и возвращает адрес; первым сообщением обработчик получает
+`Started`. `Tell` кладёт сообщение в ящик и возвращается сразу. `Ask` посылает сообщение с временным
+адресом ответа и ждёт первого письма на этот адрес не дольше заданного числа миллисекунд;
+обработчик отвечает через `c.Respond`, который адресует письмо отправителю текущего сообщения.
+`Ask` ждёт, поэтому клиент — задача: на главном стеке `Ask` трапует с кодом 20.
 
 Сообщение — расширение `AsyncSelect.Msg` (в подсистеме оно называется `ActorCore.Msg`) и после
 отправки не меняется. Счётчик выше посылает тысячу раз один и тот же объект `inc`: это допустимо
 именно потому, что объект неизменяем. Если бы клиент менял поле отправленного сообщения, обработчик
 увидел бы значение на момент обработки, и порядок отправок перестал бы что-либо значить.
 
+Последним клиент зовёт `ActorRun.Shutdown` (раздел 3), а команда крутит главный цикл, пока есть
+задачи. Без общей остановки исполнители ждали бы работы вечно, и цикл команды не кончился бы.
+
 ## 3. Исполнители
 
 У актора нет своей задачи. Ящики с работой обслуживает *исполнитель* — задача пула `ActorRun`,
-которая берёт ящик из общей очереди, вызывает `ActorCore.Process` и возвращает ящик в очередь,
+которая берёт ящик из общей очереди, вызывает `Dispatcher.Process` и возвращает ящик в очередь,
 если в нём остались письма. `ActorRun.Start(n)` заводит n исполнителей; за один вызов `Process`
 актор обрабатывает все системные сообщения и до ста пользовательских. Тысяча акторов поэтому
 занимает тысячу ящиков и столько стеков, сколько исполнителей в пуле.
@@ -117,14 +123,28 @@ END ActorDocCounter.
 `TestDedicatedLeavesPoolFree` пул из одного исполнителя отвечает другому актору, пока актор со своей
 задачей спит.
 
-Свободный исполнитель ждёт в `Tasks.Park`, и `Tell` будит его через `Tasks.Unpark`. Если `Tell`
-сделан вне задачи — из команды или из действия `Services`, — планировщик задач может быть уже
-назначен на срок самой ранней спящей задачи, и разбуженный исполнитель ждал бы этого срока. Поэтому
-первый исполнитель пула вместо `Park` спит по 10 мс: письмо, посланное с главного стека,
-начинает обрабатываться не позже чем через 10 мс. Письмо, посланное из задачи, задержки не имеет.
+Свободный исполнитель ждёт в `Tasks.Park`, и `Tell` будит его через `Tasks.Unpark`. `Unpark` вне
+задачи — из команды или из действия `Services` — сам переносит срок шага планировщика на ближайший,
+поэтому письмо с главного стека начинает обрабатываться в следующем шаге главного цикла. У этого
+ожидания есть следствие: когда все исполнители свободны и других задач нет, планировщик видит
+только ждущие задачи без сроков и печатает в `Console` строку `Tasks: deadlock: no ready tasks and no
+wake-up deadlines`. Это сообщение, а не трап: первое же письмо будит исполнителя, и работа идёт
+дальше.
 
-Спросить самого себя через `Ask` нельзя: вопрос ляжет в собственный ящик, а ящик занят ждущим
-обработчиком. `Ask` вернёт `timedOut` по истечении срока, и ни одного ответа не будет.
+Спросить самого себя через `Ask` нельзя: вопрос лёг бы в собственный ящик, а ящик занят ждущим
+обработчиком, и ответа не было бы никогда. Поэтому `Ask` из обработчика актора к этому же актору
+трапует с кодом 23, и отказ уходит супервизору. Тест `TestAskSelfTraps` проверяет, что корень
+останавливает такой актор сразу, не дожидаясь срока вопроса.
+
+Общая остановка — `ActorRun.Shutdown`. Она посылает `Stop` каждому актору без родителя, ждёт, пока
+остановятся все акторы (дети раньше родителей, раздел 5), затем завершает задачи пула: каждый
+исполнитель выходит из своего цикла сам, без отмены, поэтому в журнале нет ни `Tasks: cancelled`, ни
+`Tasks: deadlock`. Собственные задачи акторов кончаются вместе со своими акторами. Если актор не
+остановился за 5 с (его обработчик ждёт без конца), `Shutdown` отменяет задачи пула, как `Stop`, а
+такой актор остаётся. `Shutdown` ждёт в задаче через `Tasks.Sleep`, на главном стеке — крутя
+главный цикл; из задачи исполнителя она трапует с кодом 20: исполнитель ждал бы сам себя. Тест
+`TestShutdownLeavesNoTasks` проверяет, что после неё не остаётся ни одной задачи и планировщик не
+видел взаимной блокировки; примеры `ObxActor0`–`ObxActor2` проверяют чистый журнал.
 
 ## 4. Доставка
 
@@ -149,10 +169,13 @@ END ActorDocCounter.
 |---|---|
 | `ok` | на адрес ответа пришло письмо, оно в `reply` |
 | `timedOut` | за отведённое время ответа нет |
-| `dead` | вопрос стал мёртвым письмом |
+| `dead` | вопрос стал мёртвым письмом или адресат остановился, не ответив |
 
 Ответ `dead` приходит без ожидания срока: в тесте `TestStoppedActorGivesDeadLetters` вопрос
-остановленному актору со сроком 1000 мс возвращается быстрее 500 мс. Ответ,
+остановленному актору со сроком 1000 мс возвращается быстрее 500 мс. На время вопроса адрес ответа
+наблюдает адресата, как `Watch`; адресат, который принял вопрос и остановился без `Respond`,
+поэтому тоже даёт `dead` сразу (`TestAskDeadWhenTargetStopsWithoutReply`: актор, молчащий на вопрос
+со сроком 2000 мс, останавливают через 50 мс, и `Ask` возвращается быстрее 1000 мс). Ответ,
 пришедший после тайм-аута, теряется.
 
 ## 5. Жизненный цикл
@@ -181,7 +204,12 @@ END ActorDocCounter.
 что `Stopping` и `Stopped` обоих детей записаны раньше `Stopped` родителя.
 
 `c.Watch(r)` подписывает актор `c` на остановку `r`: когда `r` остановлен, обработчик `c` получает
-`Terminated` с полем `who = r`. Подписка на уже остановленный актор отвечает `Terminated` сразу.
+`Terminated` с полем `who = r` один раз. Повторный `Watch` того же `r` подписки не добавляет: два
+вызова дают одно `Terminated` (`TestWatchTwiceGivesOneTerminated`). Подписка на уже остановленный
+актор отвечает `Terminated` сразу (`TestWatchStoppedGetsTerminatedAtOnce`). `c.Unwatch(r)` снимает
+подписку; `Terminated`, посланное до `Unwatch`, но ещё не обработанное, обработчик тоже не получит
+(`TestUnwatchGivesNoTerminated`). Остановка наблюдателя снимает все его подписки, и список
+наблюдателей у `r` не растёт от ушедших.
 
 `c.SetReceiveTimeout(ms)` просит сообщить о простое. После `ms` миллисекунд без пользовательских
 писем обработчик получает `ReceiveTimeout` один раз; следующий отсчёт начинает следующее письмо.
@@ -189,8 +217,17 @@ END ActorDocCounter.
 одного `ReceiveTimeout`, затем 250 мс тишины дают ровно один, и ещё 250 мс тишины — ни одного.
 Сообщения жизненного цикла и сам `ReceiveTimeout` отсчёт не сбрасывают.
 
+Тайм-аут простоя не обгоняет письма и не теряется. Пока обработчик идёт или в ящике ждут письма,
+актор не простаивает, и `ReceiveTimeout` не выдаётся: срок проверяется снова позже
+(`TestTimeoutDoesNotOvertakeMail`: письмо, ждавшее за долгим обработчиком, обработано раньше
+тайм-аута). Приостановленный актор (раздел 6) тайм-аута не получает, а после `Resume` отсчёт
+начинается заново (`TestTimeoutNotLostWhileSuspended`).
+
 `c.Become(b)` подменяет обработчик: следующие письма получает `b.Receive(a, c, m)`, где `a` —
-экземпляр актора. `Become(NIL)` возвращает `Receive` экземпляра, перезапуск — тоже.
+экземпляр актора. `Become(NIL)` возвращает `Receive` экземпляра, перезапуск — тоже
+(`TestRestartDropsBecome`). `Become` и `SetReceiveTimeout` меняют обработку писем своего актора,
+поэтому их зовут только из его обработчика; вызов из другого места трапует с кодом 20
+(`TestHandlerOnlyCallsTrapOutside`). Перезапуск снимает и тайм-аут (`TestRestartDropsReceiveTimeout`).
 
 ## 6. Надзор
 
@@ -215,18 +252,19 @@ END ActorDocCounter.
 трапующих письма: ребёнок получает `Started` три раза, затем останавливается, и наблюдатель
 получает `Terminated`.
 
-Перезапуск без журнала теряет состояние. Модуль ниже считает письма, трапует на третьем и
-перезапускается: после перезапуска счёт начинается заново.
+Перезапуск без журнала теряет состояние. Модуль ниже (пример `ObxActor1`) считает письма, трапует
+на третьем и перезапускается: после перезапуска счёт начинается заново.
 
 ```
-MODULE ActorDocRestart;
-	IMPORT Kernel, Services, Console, Strings, ActorCore, ActorSup, ActorRun;
+MODULE ObxActor1;
+	IMPORT Services, Tasks, Console, Strings, ActorCore, ActorSup, ActorRun;
 
 	TYPE
 		Inc = POINTER TO RECORD (ActorCore.Msg) END;
 		Boom = POINTER TO RECORD (ActorCore.Msg) END;
 		Worker = POINTER TO RECORD (ActorCore.Actor) n: INTEGER END;
 		Parent = POINTER TO RECORD (ActorCore.Actor) END;
+		Client = POINTER TO RECORD (Tasks.Task) END;
 
 	VAR worker: ActorCore.Ref; starts, last: INTEGER;
 
@@ -258,38 +296,53 @@ MODULE ActorDocRestart;
 		NEW(a); RETURN a
 	END NewParent;
 
-	PROCEDURE Run*;
-		VAR p: ActorCore.Props; parent: ActorCore.Ref; inc: Inc; boom: Boom; t0: LONGINT;
-			s: ARRAY 16 OF CHAR;
+	PROCEDURE (t: Client) Run;
+		VAR inc: Inc; boom: Boom; s: ARRAY 16 OF CHAR;
+	BEGIN
+		WHILE worker = NIL DO Tasks.Sleep(1) END;
+		NEW(inc); NEW(boom);
+		ActorCore.Tell(worker, inc); ActorCore.Tell(worker, inc);
+		ActorCore.Tell(worker, boom);
+		ActorCore.Tell(worker, inc);
+		Tasks.Sleep(100);
+		Strings.IntToString(starts, s); Console.WriteStr("worker: Started "); Console.WriteStr(s);
+		Strings.IntToString(last, s); Console.WriteStr(", count after restart "); Console.WriteStr(s);
+		Console.WriteLn;
+		ActorRun.Shutdown
+	END Run;
+
+	PROCEDURE Do*;
+		VAR p: ActorCore.Props; t: Client;
 	BEGIN
 		IF ActorRun.n = 0 THEN ActorRun.Start(4) END;
 		starts := 0; last := 0; worker := NIL;
 		p := ActorCore.NewProps(NewParent);
 		p.strategy := ActorSup.NewOneForOne(ActorCore.Restart, 3, 1000);
-		parent := ActorCore.Spawn(NIL, p, "parent");
-		WHILE worker = NIL DO Services.actionHook.Step END;
-		NEW(inc); NEW(boom);
-		ActorCore.Tell(worker, inc); ActorCore.Tell(worker, inc);
-		ActorCore.Tell(worker, boom);
-		ActorCore.Tell(worker, inc);
-		t0 := Kernel.Time();
-		WHILE Kernel.Time() - t0 < 100 DO Services.actionHook.Step END;
-		Strings.IntToString(starts, s); Console.WriteStr("ActorDocRestart: Started "); Console.WriteStr(s);
-		Strings.IntToString(last, s); Console.WriteStr(", счёт после перезапуска "); Console.WriteStr(s);
-		Console.WriteLn;
-		ActorCore.StopActor(parent)
-	END Run;
+		IF ActorCore.Spawn(NIL, p, "parent") = NIL THEN END;
+		NEW(t); Tasks.Start(t);
+		WHILE Tasks.Count() > 0 DO Services.actionHook.Step END
+	END Do;
 
-END ActorDocRestart.
+END ObxActor1.
 ```
 
-Команда `ActorDocRestart.Run` печатает `ActorDocRestart: Started 2, счёт после перезапуска 1`: два
-письма `Inc` до трапа пропали вместе со старым экземпляром. Пример `ActorDemoBank` (команда
-`ActorDemoBank.Run`) показывает, почему для счетов выбран `Resume`. Банк — супервизор счетов и
+Команда `ObxActor1.Do` печатает `worker: Started 2, count after restart 1`: два письма `Inc` до
+трапа пропали вместе со старым экземпляром. Перезапуск сначала останавливает детей ребёнка и только
+потом создаёт новый экземпляр (`TestRestartStopsGrandchildrenFirst`: `Stopped` внука записан раньше
+`Started` нового экземпляра). Окно перезапусков `OneForOne` сдвигается: отказ после конца окна
+снова даёт `Restart`, а не `Stop` (`TestRestartWindowResets`).
+
+Пример `ObxActor2` показывает, почему для счетов выбран `Resume`. Банк — супервизор счетов и
 переводов; каждый сотый перевод несёт нулевую сумму, и счёт трапует на предусловии. При `Resume`
 остаток счёта сохраняется, перевод не получает ответа и по `ReceiveTimeout` считается отказанным, а
 в конце сумма остатков равна начальной. При `Restart` новый экземпляр счёта начал бы с начального
 остатка, и сумма денег изменилась бы на величину всех операций, прошедших через этот счёт.
+
+Фабрика может упасть и при перезапуске. Тогда у ребёнка нет экземпляра, и его ящик снова
+приостановлен с отказом перед родителем. `Resume` такому ребёнку означал бы обработку писем
+экземпляром `NIL`: каждое письмо трапует, и круг отказов не кончается. Поэтому `Resume` ребёнку без
+экземпляра исполняется как `Stop` (`TestFactoryFailAfterRestartStopsOnResume`). Фабрика, которая
+вернула `NIL`, отказывает с номером 26.
 
 `Escalate` передаёт отказ вверх: родитель приостанавливается и отказывает перед своим родителем.
 Если затем родителя возобновят, вместе с ним возобновятся и его приостановленные дети; если
@@ -301,9 +354,17 @@ END ActorDocRestart.
 прервать. Тест `TestEscalateReachesRootWhichStops` проверяет, что наблюдатель актора верхнего
 уровня со стратегией `Escalate` получает `Terminated`, а ребёнок получает `Stopped`.
 
+Приостановленный родитель о детях не решает. Пока его судьбу решает его собственный родитель,
+отказ другого ребёнка откладывается и решается после возобновления; если родителя перезапустят или
+остановят, дети остановятся вместе с ним, и отложенное решение не понадобится. Иначе стратегия
+перезапускала бы детей родителя, которого через миг остановят. Тест
+`TestSuspendedParentDefersDecisions` проверяет, что за 100 мс, пока решается судьба родителя,
+второй отказавший ребёнок не перезапущен, а после возобновления — перезапущен.
+
 Трап в обработчике `Restarting`, `Stopping` или `Stopped` отказом не считается: актор уже уходит, и
 надзор ничего не может к этому добавить. Такой трап отмечается строкой
-`Actor: trap in lifecycle of <имя>`. Трап внутри `Strategy.Decide` считается отказом родителя.
+`Actor: trap in lifecycle of <имя>`. Трап внутри `Strategy.Decide` считается отказом родителя;
+решение о ребёнке откладывается, пока родитель не возобновлён.
 
 ## 7. Отмена исполнителя
 
@@ -320,32 +381,46 @@ END ActorDocRestart.
 Если бы трап 127 считался отказом, остановка пула при завершении программы превращалась бы в
 лавину отказов, перезапусков и сообщений супервизорам, которые к тому же некому исполнять.
 
+Отмена прерывает только пользовательский обработчик. Шаг жизненного цикла и надзора доводится до
+конца, иначе актор застрял бы на полпути: остановка без `Stopped` и без ухода из каталога, родитель
+без известия об уходе ребёнка, ребёнок, навсегда приостановленный без решения. Прерванный
+обработчик `Started`, `Stopping`, `Stopped` или `Restarting` считается выполненным, и переход идёт
+дальше в той же задаче (`TestCancelInStoppingFinishesStop`). Прерванные фабрика и `Decide`
+повторяются: их системное письмо возвращается в начало очереди, и следующий исполнитель зовёт их
+снова (`TestCancelInFactoryRetries`, `TestCancelInDecideKeepsFailure`). Затем задача прерывается
+трапом 127.
+
+Для актора со своей задачей правило то же: отмена этой задачи — не отказ и не остановка. Ящик
+снимается с задачи, и при следующей работе `ActorRun` заводит актору новую задачу
+(`TestCancelledDedicatedTaskStillAnswers`: после отмены задачи, ждавшей внутри `Receive`, актор
+отвечает на следующий вопрос). Остановить актор можно только остановкой (`StopActor`): отмена
+задачи — средство исполнителя, а не владельца актора.
+
 ## 8. Актор и хранилище
 
-`ActorCore.Actor` расширяет `Stores.Store`. Состояние экземпляра поэтому можно выносить и вносить
-методами `Externalize` и `Internalize`, как состояние любой модели BlackBox; второму этапу
-(журнал событий и снимки) не придётся менять базовый тип. Помех расширение не создаёт: у
-`Stores.Store` нет абстрактных методов, поля `dlink`, `era`, `id` скрыты, а домен (`Domain`)
-у экземпляра актора пуст, пока сам актор его не заведёт. Фабрика создаёт экземпляр обычным `NEW`.
+`ActorCore.Actor` расширяет `Stores.Store`. Подсистема методов хранилища не вызывает: письма не
+сериализуются, экземпляр не сохраняется, `Restart` создаёт его фабрикой заново. Фабрика создаёт
+экземпляр обычным `NEW`.
 
 ## 9. Адрес и каталог
 
-Адрес — абстрактная запись `Ref` с полями `node` и `name` и одним методом `Post(m, sender)`.
-Локальный адрес — сам ящик (`Context` расширяет `Ref`). `Tell` зовёт `Post` и не знает, где
-получатель. Модуль транспорта будущего этапа расширит `Ref` своим типом, чей `Post` упаковывает
-письмо и отправляет его в другой процесс, а `ActorCore.InitRef` заполнит узел и имя.
+Адрес — абстрактная запись `Ref` с полями `node` и `name` и четырьмя абстрактными методами:
+`Post(m, sender)` доставляет письмо, `AddWatcher(w)` и `RemoveWatcher(w)` подписывают и отписывают
+наблюдателя, `Stop` останавливает адресата. Локальный адрес — сам ящик (`Context` расширяет `Ref`).
+`Tell` зовёт `Post`, `c.Watch` и `c.Unwatch` — `AddWatcher` и `RemoveWatcher`, `StopActor` —
+`Stop`; ни одна из них не знает, где получатель. Транспорт между процессами расширил бы `Ref` своим
+типом, а `ActorCore.InitRef` заполняет его узел и имя.
+
+Адрес ответа `Ask` — тоже `Ref`. Пока `Ask` ждёт, адрес стоит в реестре под именем `"$ask/номер"`, и
+каталог находит его по этому имени, как актор; после возврата `Ask` имя из каталога уходит.
 
 Адрес по имени ищет каталог `ActorCore.dir` — по образцу `Files.dir`: абстрактный тип
 `Directory` с методом `Lookup(node, name)`, переменные `dir` и `stdDir` и процедура `SetDir`.
 Стандартный каталог знает только свой узел (`ActorCore.node = "local"`) и отвечает `NIL` на чужой.
-Транспорт установит свой каталог, который чужой узел обслужит сам, а свой передаст `stdDir`.
 
 Имя актора — строка из `Spawn`: `"counter"` у актора верхнего уровня, `"parent/worker"` у ребёнка,
 `"$7"` у актора без имени. Два актора с одним именем трапуют в `Spawn` с кодом 24. Остановленный
 актор уходит из каталога, и имя освобождается.
-
-`Watch` и `StopActor` на первом этапе принимают только локальный адрес (трап 20): наблюдение и
-остановку через сеть добавит транспорт.
 
 ## 10. Замеры
 
@@ -369,13 +444,13 @@ END ActorDocRestart.
 - Нет персистентности: `Restart` создаёт экземпляр с начальным состоянием.
 - Нет транспорта: `Ref` другого узла можно описать, но доставлять ему некому.
 - Стратегия одна — `OneForOne`; «все за одного» не реализована.
-- Письмо с главного стека ждёт исполнителя до 10 мс (раздел 3).
-- Отправка письма самому себе через `Ask` всегда кончается `timedOut`.
+- Когда пул свободен и других задач нет, планировщик печатает `Tasks: deadlock` (раздел 3).
+- `Ask` к самому себе из обработчика трапует с кодом 23.
 
 ## 12. Интерфейс
 
-Номера трапов: 20–25 — нарушение предусловия (номер указан у процедуры), 60 — фабрика вернула
-`NIL`, 100 — нарушен инвариант модуля, 127 — задача отменена.
+Номера трапов: 20–26 — нарушение предусловия (номер указан у процедуры), 100 — нарушен инвариант
+модуля, 127 — задача отменена.
 
 ### 12.1. ActorCore
 
@@ -395,7 +470,10 @@ DEFINITION ActorCore;
 
 		Ref = POINTER TO ABSTRACT RECORD
 			node-, name-: Name;
-			(r: Ref) Post (m: Msg; sender: Ref), NEW, ABSTRACT
+			(r: Ref) Post (m: Msg; sender: Ref), NEW, ABSTRACT;
+			(r: Ref) AddWatcher (w: Ref), NEW, ABSTRACT;
+			(r: Ref) RemoveWatcher (w: Ref), NEW, ABSTRACT;
+			(r: Ref) Stop, NEW, ABSTRACT
 		END;
 
 		Actor = POINTER TO ABSTRACT RECORD (Stores.Store)
@@ -425,7 +503,14 @@ DEFINITION ActorCore;
 		END;
 
 		Dispatcher = POINTER TO ABSTRACT RECORD
-			(d: Dispatcher) Schedule (c: Context), NEW, ABSTRACT
+			(d: Dispatcher) Schedule (c: Context), NEW, ABSTRACT;
+			(d: Dispatcher) Process (c: Context; max: INTEGER): BOOLEAN, NEW;
+			(d: Dispatcher) Pending (c: Context): BOOLEAN, NEW;
+			(d: Dispatcher) Stopped (c: Context): BOOLEAN, NEW;
+			(d: Dispatcher) Host (c: Context): ANYPTR, NEW;
+			(d: Dispatcher) SetHost (c: Context; h: ANYPTR), NEW;
+			(d: Dispatcher) Live (): INTEGER, NEW;
+			(d: Dispatcher) StopRoots, NEW
 		END;
 
 		Directory = POINTER TO ABSTRACT RECORD
@@ -442,18 +527,19 @@ DEFINITION ActorCore;
 		END;
 
 		Context = POINTER TO LIMITED RECORD (Ref)
-			host: ANYPTR;
 			dedicated-: BOOLEAN;
 			(c: Context) Post (m: Msg; sender: Ref);
+			(c: Context) AddWatcher (w: Ref);
+			(c: Context) RemoveWatcher (w: Ref);
+			(c: Context) Stop;
 			(c: Context) Tell (to: Ref; m: Msg), NEW;
 			(c: Context) Sender (): Ref, NEW;
 			(c: Context) Respond (m: Msg), NEW;
 			(c: Context) Parent (): Ref, NEW;
 			(c: Context) Watch (r: Ref), NEW;
+			(c: Context) Unwatch (r: Ref), NEW;
 			(c: Context) SetReceiveTimeout (ms: LONGINT), NEW;
-			(c: Context) Become (b: Behavior), NEW;
-			(c: Context) Pending (): BOOLEAN, NEW;
-			(c: Context) IsStopped (): BOOLEAN, NEW
+			(c: Context) Become (b: Behavior), NEW
 		END;
 
 	VAR
@@ -462,7 +548,6 @@ DEFINITION ActorCore;
 		node-: Name;
 		deadLetters-: LONGINT;
 
-	PROCEDURE Process (c: Context; max: INTEGER): BOOLEAN;
 	PROCEDURE NewProps (f: Factory): Props;
 	PROCEDURE Spawn (parent: Context; p: Props; IN name: ARRAY OF CHAR): Ref;
 	PROCEDURE Tell (to: Ref; m: Msg);
@@ -475,13 +560,29 @@ DEFINITION ActorCore;
 END ActorCore.
 ```
 
-`Context` — ящик актора, контекст его обработчика и локальный адрес. Поле `host` принадлежит
-исполнителю (`ActorRun` хранит в нём собственную задачу актора). Модуль мониторов не берёт:
-операции над ящиком между двумя точками переключения неделимы.
+`Context` — ящик актора, контекст его обработчика и локальный адрес. Модуль мониторов не берёт:
+операции над ящиком между двумя точками переключения неделимы. Методы `Dispatcher`, кроме
+`Schedule`, служат модулю исполнителей (`ActorRun`) и работают только у исполнителя, установленного
+`SetDispatcher`: у любого другого `Dispatcher` они трапуют с кодом 20.
 
 **PROCEDURE (r: Ref) Post (m: Msg; sender: Ref)**
-Пред: `m # NIL` — трап 20 у `Context`.
+Пред: `m # NIL` — трап 20.
 Пост: `m` в ящике адресата или учтено как мёртвое письмо; отправитель не ждёт.
+
+**PROCEDURE (r: Ref) AddWatcher (w: Ref)**
+Зовёт `c.Watch` и `Ask`.
+Пред: `w # NIL` — трап 20.
+Пост: после остановки `r` наблюдатель `w` получит `Terminated` с `who = r` один раз; `r` уже
+остановлен — получит сразу; повторный вызов с тем же `w` ничего не добавляет.
+
+**PROCEDURE (r: Ref) RemoveWatcher (w: Ref)**
+Пред: `w # NIL` — трап 20.
+Пост: `w` не наблюдает `r`.
+
+**PROCEDURE (r: Ref) Stop**
+Пост: `r` получит остановку раньше своих пользовательских писем; остановленный `r` не меняется.
+
+У адреса ответа `Ask` методы `AddWatcher`, `RemoveWatcher` и `Stop` ничего не делают.
 
 **PROCEDURE (a: Actor) Receive (c: Context; m: Msg)**
 Пред: зовёт только исполнитель, один вызов на актор за раз.
@@ -492,15 +593,49 @@ END ActorCore.
 
 **PROCEDURE (s: Strategy) Decide (child: Ref; reason: INTEGER; VAR st: Stats): INTEGER**
 Пред: ребёнок `child` отказал с трапом `reason`; `st` — его счёт отказов.
-Пост: директива; значение вне `Resume..Escalate` исполняется как `Stop`; трап — отказ родителя.
+Пост: директива; значение вне `Resume..Escalate` исполняется как `Stop`, `Resume` ребёнку без
+экземпляра — тоже; трап — отказ родителя, решение отложено до его возобновления.
 
 **PROCEDURE (d: Dispatcher) Schedule (c: Context)**
 Пред: у `c` есть работа, `c` не стоит у исполнителя.
-Пост: исполнитель зовёт `Process(c, ...)`, пока тот возвращает `TRUE`.
+Пост: исполнитель зовёт `d.Process(c, ...)`, пока тот возвращает `TRUE`.
+
+**PROCEDURE (d: Dispatcher) Process (c: Context; max: INTEGER): BOOLEAN**
+Пред: `d` — установленный исполнитель — трап 20; `c # NIL` — трап 21; `c` стоит у исполнителя и
+не в обработке — трап 22; `max > 0` — трап 23; вызов из задачи — трап 24.
+Пост: обработаны все системные сообщения и не более `max` пользовательских; `TRUE` — работа
+осталась, `c` по-прежнему у исполнителя; `FALSE` — работы нет, `c` снят с исполнителя. Отмена
+задачи исполнителя — трап 127 после того, как шаг жизненного цикла доведён до конца, ящик снят с
+исполнителя и, если в нём есть работа, снова отдан `Schedule` (раздел 7).
+
+**PROCEDURE (d: Dispatcher) Pending (c: Context): BOOLEAN**
+Пред: `d` — установленный исполнитель — трап 20.
+Пост: `c` стоит у исполнителя.
+
+**PROCEDURE (d: Dispatcher) Stopped (c: Context): BOOLEAN**
+Пред: `d` — установленный исполнитель — трап 20.
+Пост: `c` остановлен; письма ему — мёртвые.
+
+**PROCEDURE (d: Dispatcher) Host (c: Context): ANYPTR**
+Пред: `d` — установленный исполнитель — трап 20.
+Пост: данные исполнителя при ящике `c` (`ActorRun` хранит здесь собственную задачу актора); `NIL`
+— нет.
+
+**PROCEDURE (d: Dispatcher) SetHost (c: Context; h: ANYPTR)**
+Пред: `d` — установленный исполнитель — трап 20.
+Пост: `d.Host(c) = h`.
+
+**PROCEDURE (d: Dispatcher) Live (): INTEGER**
+Пред: `d` — установленный исполнитель — трап 20.
+Пост: число неостановленных акторов.
+
+**PROCEDURE (d: Dispatcher) StopRoots**
+Пред: `d` — установленный исполнитель — трап 20.
+Пост: каждый неостановленный актор без родителя получил остановку.
 
 **PROCEDURE (d: Directory) Lookup (IN node, name: ARRAY OF CHAR): Ref**
-Пост: адрес актора `name` на узле `node`; `NIL` — неизвестен. Стандартный каталог знает только
-`node = ActorCore.node`.
+Пост: адрес актора или ждущего адреса ответа `name` на узле `node`; `NIL` — неизвестен.
+Стандартный каталог знает только `node = ActorCore.node`.
 
 **PROCEDURE (c: Context) Tell (to: Ref; m: Msg)**
 Пред: `to # NIL` — трап 20; `m # NIL` — трап 21.
@@ -514,35 +649,27 @@ END ActorCore.
 Пост: `m` послано отправителю письма в обработке; без отправителя — мёртвое письмо.
 
 **PROCEDURE (c: Context) Parent (): Ref**
-Пост: адрес родителя; `NIL` — родитель корень.
+Пост: адрес родителя; `NIL` — у `c` нет родителя.
 
 **PROCEDURE (c: Context) Watch (r: Ref)**
-Пред: `r` — локальный адрес — трап 20.
-Пост: после остановки `r` обработчик `c` получит `Terminated` с `who = r`, один раз на вызов;
-`r` уже остановлен — получит сразу.
+Пред: `r # NIL` — трап 20.
+Пост: после остановки `r` обработчик `c` получит `Terminated` с `who = r` один раз; повторный
+`Watch` того же `r` ничего не добавляет; `r` уже остановлен — получит сразу. Остановка `c` снимает
+его подписки.
+
+**PROCEDURE (c: Context) Unwatch (r: Ref)**
+Пред: `r # NIL` — трап 20.
+Пост: `c` не получит `Terminated` от `r`, даже посланное раньше `Unwatch`.
 
 **PROCEDURE (c: Context) SetReceiveTimeout (ms: LONGINT)**
+Пред: вызов из обработчика `c` — трап 20.
 Пост: `ms > 0` — после `ms` мс без пользовательских писем обработчик получит `ReceiveTimeout`
-один раз, следующий отсчёт начнёт следующее письмо; `ms <= 0` — тайм-аута нет. Перезапуск
-снимает тайм-аут.
+один раз, следующий отсчёт начнёт следующее письмо; тайм-аут не обгоняет ждущие письма и после
+`Resume` отсчитывается заново; `ms <= 0` — тайм-аута нет. Перезапуск снимает тайм-аут.
 
 **PROCEDURE (c: Context) Become (b: Behavior)**
+Пред: вызов из обработчика `c` — трап 20.
 Пост: следующие письма обрабатывает `b.Receive`; `b = NIL` и перезапуск возвращают `Actor.Receive`.
-
-**PROCEDURE (c: Context) Pending (): BOOLEAN**
-Пост: `c` стоит у исполнителя.
-
-**PROCEDURE (c: Context) IsStopped (): BOOLEAN**
-Пост: `c` остановлен; письма ему — мёртвые.
-
-**PROCEDURE Process (c: Context; max: INTEGER): BOOLEAN**
-Зовёт исполнитель.
-Пред: `c # NIL` — трап 20; `c` стоит у исполнителя и не в обработке — трап 21; `max > 0` —
-трап 22.
-Пост: обработаны все системные сообщения и не более `max` пользовательских; `TRUE` — работа
-осталась, `c` по-прежнему у исполнителя; `FALSE` — работы нет, `c` снят с исполнителя. Отмена
-задачи исполнителя внутри обработчика — трап 127 после того, как ящик снят с исполнителя и,
-если в нём есть работа, снова отдан `Schedule`.
 
 **PROCEDURE NewProps (f: Factory): Props**
 Пред: `f # NIL` — трап 20.
@@ -551,7 +678,8 @@ END ActorCore.
 **PROCEDURE Spawn (parent: Context; p: Props; IN name: ARRAY OF CHAR): Ref**
 Пред: `p # NIL` и `p.new # NIL` — трап 20; `p.capacity >= 0` — трап 21; исполнитель установлен —
 трап 22; `parent = NIL` или `parent` работает — трап 23; имя свободно — трап 24; полное имя
-короче `nameLen` — трап 25; фабрика не трапует и не возвращает `NIL` — трап 60.
+короче `nameLen` — трап 25; фабрика не возвращает `NIL` — трап 26. Трап фабрики — трап
+вызывающего.
 Пост: новый актор, ребёнок `parent` (`NIL` — корня); имя — `name`, у ребёнка — «имя родителя/
 name», пустое `name` — `"$номер"`; первым обработчик получит `Started`.
 
@@ -560,15 +688,15 @@ name», пустое `name` — `"$номер"`; первым обработчи
 Пост: `m` послано `to` без отправителя; ожидания нет.
 
 **PROCEDURE StopActor (r: Ref)**
-Пред: `r` — локальный адрес — трап 20.
-Пост: `r` получит остановку раньше своих пользовательских писем; остановленный `r` не меняется.
+Пред: `r # NIL` — трап 20.
+Пост: `r.Stop`.
 
 **PROCEDURE Ask (to: Ref; m: Msg; ms: LONGINT; OUT reply: Msg): INTEGER**
 Ждёт ответа.
-Пред: вызов из задачи — трап 20; `to # NIL` — трап 21; `m # NIL` — трап 22; отмена задачи —
-трап 127.
+Пред: вызов из задачи — трап 20; `to # NIL` — трап 21; `m # NIL` — трап 22; вызов не из
+обработчика самого `to` — трап 23; отмена задачи — трап 127.
 Пост: `ok` — `reply` — первое письмо на адрес ответа; `timedOut` — за `ms` мс ответа нет; `dead`
-— вопрос стал мёртвым письмом. Кроме `ok`, `reply = NIL`.
+— вопрос стал мёртвым письмом или `to` остановился, не ответив. Кроме `ok`, `reply = NIL`.
 
 **PROCEDURE InitRef (r: Ref; IN node, name: ARRAY OF CHAR)**
 Для модулей транспорта.
@@ -576,8 +704,9 @@ name», пустое `name` — `"$номер"`; первым обработчи
 Пост: `r.node = node`, `r.name = name`.
 
 **PROCEDURE SetDispatcher (d: Dispatcher)**
+Для модулей исполнителей.
 Пред: `d # NIL` — трап 20.
-Пост: `dispatcher = d`.
+Пост: `dispatcher = d`; методы `Dispatcher`, кроме `Schedule`, работают только у `d`.
 
 **PROCEDURE SetDir (d: Directory)**
 Пред: `d # NIL` — трап 20.
@@ -611,6 +740,7 @@ DEFINITION ActorRun;
 
 	PROCEDURE Start (k: INTEGER);
 	PROCEDURE Stop;
+	PROCEDURE Shutdown;
 
 END ActorRun.
 ```
@@ -625,17 +755,9 @@ END ActorRun.
 Пост: задачи пула отменены (трап 127 в их точке переключения); ящики с работой ждут следующего
 `Start`. Собственные задачи акторов не затронуты.
 
-### 12.4. ActorDemoBank
-
-```
-DEFINITION ActorDemoBank;
-
-	PROCEDURE Run;
-
-END ActorDemoBank.
-```
-
-**PROCEDURE Run**
-Команда. Запускает пул из четырёх исполнителей, если он остановлен.
-Пост: тысяча переводов между десятью счетами завершена; напечатаны число выполненных и
-отказанных переводов и сверка суммы остатков с начальной.
+**PROCEDURE Shutdown**
+Общая остановка.
+Пред: вызов не из задачи исполнителя — трап 20.
+Пост: каждый актор без родителя получил остановку, все акторы остановлены (дети раньше родителей);
+задачи пула завершились сами, без отмены; собственные задачи акторов завершаются вместе с
+акторами; `n = 0`. Актор, не остановившийся за 5 с, остаётся, а задачи пула тогда отменяются.
