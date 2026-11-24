@@ -1,162 +1,78 @@
 # Async Library
 
-A guide to the optional `Async` subsystem for the Component Pascal programmer. It provides
-channels, a single-assignment variable, selection among several waits, a dialogue protocol,
-non-blocking I/O, a worker-thread pool and computons. The language part — exclusive procedures,
-`ACTIVE.AWAIT` and yield points — is defined in `Docu/Active-CP-Lang.md`; tasks are described in
-`Docu/Tasks.md`.
+This is a guide to the `Async` subsystem. It is written for a programmer who knows Component Pascal
+and has already read the guide to tasks (`Docu/Tasks.md`). The language part — exclusive procedures,
+`ACTIVE.AWAIT` and yield points — is defined in the language report (`Docu/Active-CP-Lang.md`).
 
 The library is written on the language extension and does not change the framework: framework
 modules are compiled without the yield key and do not wait. The subsystem is built for AMD64 only;
-the core extension also works on i386. Section 10 lists the exports of each module with pre- and
-postconditions.
+tasks and monitors also work on i386. Every complete example of the guide lives in `Obx/Mod64` and
+runs with the command `Do`; each has its own page in `Obx/Docu`.
 
-## 1. Message
+## 1. From Task to Channel
 
-A *message* is an object of type `AsyncSelect.Msg`:
+Two tasks share a job: one reads lines from a file, the other parses them. The first needs somewhere
+to put what it has read, the second somewhere to take it from. With monitors it is done like this:
+one declares a record with an array and a counter, makes the procedures `Put` and `Get` exclusive,
+waits `ACTIVE.AWAIT(n > 0)` in `Get` and `ACTIVE.AWAIT(n < LEN(buf))` in `Put`. That is a couple of
+dozen lines, and they are written anew for every pair of tasks that must pass something along.
 
-```
-Msg* = POINTER TO ABSTRACT RECORD END;
-```
+These lines are almost always the same. Only the type of what is passed and the size of the reserve
+change. So the library provides them ready-made under the name *channel*: an object with the methods
+`Send` and `Recv`. The sending task does not know who will receive; the receiving task does not know
+who sent. Both know only the channel. The connection between tasks thus becomes visible in one
+place — where the channel is created and handed out — instead of being spread over `AWAIT`
+conditions in different modules.
 
-An application type extends this record:
+A monitor is still needed when tasks share state that they change in place: a table, a counter, a
+tree. A channel is needed when tasks pass values to each other. The difference shows in the question
+the programmer asks. "Who may change this table now?" is a question for a monitor. "To whom do I
+give this result?" is a question for a channel.
 
-```
-TYPE NumMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
-```
-
-Rules:
-
-1. A channel passes a pointer, not a copy of a value.
-2. After sending, a message is not modified. This is a convention, not a check: the library neither
-   copies the object nor forbids writing it.
-3. The receiver distinguishes the kind of message with `WITH`; the field `n` is available only after
-   the type check.
-
-```
-VAR m: AsyncSelect.Msg;
-...
-WITH m: NumMsg DO total := total + m.n END
-```
-
-## 2. Single-Assignment Variable
-
-The *single-assignment variable* `AsyncOnce.Once` holds one value and hands it out after it has
-been filled.
-
-Operations:
+A channel carries a *message* — a pointer to a record that extends `AsyncSelect.Msg`:
 
 ```
-o := AsyncOnce.New();
-o.FillInt(x);            (* fill with an integer *)
-x := o.ReadInt();        (* wait and read the integer *)
-o.FillMsg(m);            (* fill with a message *)
-o.ReadMsg(m);            (* wait and read the message *)
+TYPE Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 ```
 
-Rules:
+The channel passes the pointer itself and does not copy the record. So after `Send` the sender no
+longer changes the record: the receiver sees the same object, and a change made after sending reaches
+it at an unpredictable moment. The compiler does not check this, nor does the library. The receiver
+learns the kind of a message with the type guard `WITH m: Num DO … END`; the field `n` is available
+only inside the guard.
 
-1. Filling happens exactly once. A second `FillInt` traps with code 21, a second `FillMsg` with
-   code 22.
-2. The variable has one flag `done` for both kinds of value. Therefore `FillInt` after `FillMsg` and
-   the reverse are also a repeated fill and trap. The kind of fill and the kind of read must match.
-3. `ReadInt` and `ReadMsg` wait for the fill; there is no timeout. A read before the fill suspends
-   the task in `ACTIVE.AWAIT(done)`.
-4. There is no kind check on reading: `ReadInt` after `FillMsg` returns 0, `ReadMsg` after `FillInt`
-   returns `NIL`.
-5. The object is a monitor: the methods are `[exclusive]`. `Fill` does not wait and may run outside
-   a task if the monitor is free; `Read` waits, so it is called only from a task.
+Channels come in three kinds. They differ in how many messages the channel holds, and therefore in
+when the sender waits:
 
-```
-MODULE ObxOnce;
-	IMPORT AsyncOnce, Tasks, Console, Strings;
-
-	VAR o: AsyncOnce.Once; got: INTEGER; done: BOOLEAN; s: ARRAY 16 OF CHAR;
-
-	TYPE Reader = POINTER TO RECORD (Tasks.Task) END;
-
-	PROCEDURE (r: Reader) Run;
-	BEGIN got := o.ReadInt(); done := TRUE END Run;
-
-	PROCEDURE Run*;
-		VAR r: Reader;
-	BEGIN
-		o := AsyncOnce.New();
-		o.FillInt(42);		(* outside a task: the monitor is free, Fill does not wait *)
-		NEW(r); done := FALSE; Tasks.Start(r);
-		WHILE ~done DO Tasks.Step END;
-		Strings.IntToString(got, s);
-		Console.WriteStr("ObxOnce: "); Console.WriteStr(s); Console.WriteLn
-	END Run;
-
-END ObxOnce.
-```
-
-`Fill` runs outside a task, `ReadInt` inside one: the read waits for the fill, and the fill has
-already happened.
-
-Limits: one value per object; there is no value kind; the wait is indefinite; a repeated fill traps.
-
-## 3. Channels
-
-A *channel* is an object with the methods `Send` and `Recv`. The library provides three kinds:
-
-| Kind | Constructor | Capacity | `Send` waits |
+| Kind | Constructor | Holds | `Send` waits |
 |---|---|---|---|
-| rendezvous, `Chan` | `AsyncChan.NewChan()` | 0 | until the receiver takes the message |
-| bounded buffer, `Buffer` | `AsyncChan.NewBuffer(capacity)` | `capacity` | while there is room |
-| mailbox, `Mailbox` | `AsyncChan.NewMailbox()` | unbounded | never |
+| rendezvous `Chan` | `AsyncChan.NewChan()` | nothing | until a receiver takes the message |
+| buffer `Buffer` | `AsyncChan.NewBuffer(n)` | up to `n` | while the buffer is full |
+| mailbox `Mailbox` | `AsyncChan.NewMailbox()` | any number | never |
 
-All three are extensions of one record `AsyncSelect.Core`; the fields `kind` and `capacity`
-distinguish them. A channel is an object with a monitor: if a task holds the monitor
-(`Kernel.Lock`), `Send` and `Recv` wait for its release. A waiting sender or receiver does not hold
-the monitor.
+The next three sections take them in turn.
 
-### 3.1. Rendezvous
+## 2. Rendezvous
 
-`Chan` stores no messages: it is a bounded channel of capacity 0. `Send` without a waiting receiver
-joins the sender queue and waits until a receiver takes the message; `Recv` without a waiting sender
-joins the receiver queue. A send completes only after the receive; senders are served in arrival
-order.
+A producer task computes numbers, a consumer task adds them up. If the consumer lags, the producer
+should not run ahead and pile numbers up in memory: let it wait. If the producer lags, the consumer
+waits. Each number passes from hand to hand at the moment both tasks are ready. Such a transfer is
+called a *rendezvous*.
 
-```
-c := AsyncChan.NewChan();
-c.Send(m);        (* returns after Recv *)
-c.Recv(m);        (* waits for a sender *)
-```
-
-The side that arrives second performs the offer of the first and wakes it. A send and a receive of
-one `Select` on one channel do not perform each other.
-
-### 3.2. Bounded Buffer
-
-`Buffer` stores up to `capacity` messages in sending order. `Recv` waits on an empty buffer; `Send`
-waits on a full one. The capacity must be positive: `NewBuffer(0)` traps with code 20. There is no
-upper bound on the capacity.
-
-### 3.3. Mailbox
-
-`Mailbox` is unbounded: `Send` never waits, `Recv` waits while the mailbox is empty. The message
-order is the sending order.
-
-### 3.4. Common Rules
-
-1. A message is an `AsyncSelect.Msg` pointer; after sending it is not modified.
-2. Direct `Send` and `Recv` also serve `Select` offers: a send into a buffer completes a pending
-   receive, and a receive from a buffer makes room for a pending send. A channel can therefore be
-   mixed with selection.
-3. `Recv` of all kinds and `Send` of a rendezvous and a buffer are switch points. `Send` into a
-   mailbox waits only if another task holds the channel monitor. A cancelled task traps in the wait
-   with code 127.
-4. A channel may carry an optional dialogue protocol (section 5).
+A rendezvous is the channel `AsyncChan.Chan`. It holds no message at all. The task that comes to the
+channel first waits for the second: `Send` waits for a receiver, `Recv` for a sender. The second task
+takes the message from the first (or gives it its own) and wakes it. So after returning from `Send`
+the sender knows more than "the message lies somewhere": it knows that the receiver has already taken
+it. Several waiting senders are served in order of arrival.
 
 ```
-MODULE ObxChan;
+MODULE ObxChan0;
 	IMPORT AsyncChan, AsyncSelect, Tasks, Console, Strings;
 
-	TYPE Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
-	     Sender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
-	     Receiver = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; sum: INTEGER END;
+	TYPE
+		Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
+		Sender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
+		Receiver = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; sum: INTEGER END;
 
 	VAR done: BOOLEAN;
 
@@ -178,292 +94,561 @@ MODULE ObxChan;
 		done := TRUE
 	END Run;
 
-	PROCEDURE Run*;
+	PROCEDURE Do*;
 		VAR c: AsyncChan.Chan; s: Sender; r: Receiver; d: ARRAY 16 OF CHAR;
 	BEGIN
-		c := AsyncChan.NewChan(); NEW(s); s.c := c; NEW(r); r.c := c; done := FALSE;
+		c := AsyncChan.NewChan();
+		NEW(s); s.c := c; NEW(r); r.c := c; done := FALSE;
 		Tasks.Start(s); Tasks.Start(r);
 		WHILE ~done DO Tasks.Step END;
 		Strings.IntToString(r.sum, d);
-		Console.WriteStr("ObxChan: sum="); Console.WriteStr(d); Console.WriteLn
+		Console.WriteStr("ObxChan0: sum="); Console.WriteStr(d); Console.WriteLn
+	END Do;
+
+END ObxChan0.
+```
+
+The command `ObxChan0.Do` prints `ObxChan0: sum=15`. The sender ends the stream with the message
+`NIL`, and the receiver leaves its loop on it. The command itself runs on the main stack and cannot
+wait; it spins `Tasks.Step` until the receiver sets `done`. In windowed BlackBox the same loop is
+spun by the framework's main loop, and the command returns right after `Tasks.Start`.
+
+Only a task may wait. If the command itself calls `c.Recv(m)` and the channel has no sender, `Recv`
+reaches `Tasks.Park` and traps with code 20: on the main stack there is nobody to yield to. A
+framework action handler (`Services.Action`) and a view message broadcast cannot wait either; there
+the same `Recv` traps with code 21. If, however, a sender is already waiting at the channel, `Recv`
+from the main stack takes its message without waiting, and there is no trap.
+
+The second violation is a lost partner. If the sending of `NIL` is removed from the example, the
+receiver stays in `Recv` forever. There are no other tasks and no wake-up deadlines, and the scheduler
+prints `Tasks: deadlock: no ready tasks and no wake-up deadlines` to the console together with a list
+of monitors. The command `Do` then never returns, because nobody sets `done`.
+
+A rendezvous costs two stack switches per message: the task goes to the scheduler, the scheduler
+goes on to the other task. The measurement `pingpong` (`docs/measurements.md`, section 2.2) — a
+round trip through two rendezvous channels — gives 389–483 ns per exchange with a machine load of
+about 15, twice as slow as single-threaded Go. A rendezvous allocates no memory: the waiting side
+takes its wait record from a free list.
+
+## 3. Buffer
+
+A rendezvous makes the producer wait for each number, even when the consumer lags only for a moment.
+If the speeds of the tasks fluctuate, it is better to give them a small reserve: the producer runs a
+few messages ahead, the consumer catches up later. The reserve is bounded so that a fast producer
+does not take all the memory.
+
+The buffer `AsyncChan.Buffer` holds up to `capacity` messages in sending order. `Send` into a buffer
+that is not full puts the message and returns at once; `Send` into a full one waits until the
+consumer frees a place. `Recv` from a non-empty buffer takes the first message; from an empty one it
+waits. The field `count` shows how many messages lie in the buffer now.
+
+```
+MODULE ObxChan1;
+	IMPORT AsyncChan, AsyncSelect, Tasks, Console, Strings;
+
+	TYPE
+		Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
+		Producer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; max: INTEGER END;
+		Consumer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; sum: INTEGER END;
+
+	VAR done: BOOLEAN;
+
+	PROCEDURE (p: Producer) Run;
+		VAR m: Num; i: INTEGER;
+	BEGIN
+		FOR i := 1 TO 10 DO
+			NEW(m); m.n := i; p.c.Send(m);
+			IF p.c.count > p.max THEN p.max := p.c.count END
+		END;
+		p.c.Send(NIL)
 	END Run;
 
-END ObxChan.
+	PROCEDURE (k: Consumer) Run;
+		VAR m: AsyncSelect.Msg;
+	BEGIN
+		LOOP
+			k.c.Recv(m);
+			IF m = NIL THEN EXIT END;
+			WITH m: Num DO k.sum := k.sum + m.n END;
+			Tasks.Sleep(1)	(* потребитель медленнее производителя *)
+		END;
+		done := TRUE
+	END Run;
+
+	PROCEDURE Do*;
+		VAR c: AsyncChan.Buffer; p: Producer; k: Consumer; s: ARRAY 16 OF CHAR;
+	BEGIN
+		c := AsyncChan.NewBuffer(4);
+		NEW(p); p.c := c; NEW(k); k.c := c; done := FALSE;
+		Tasks.Start(p); Tasks.Start(k);
+		WHILE ~done DO Tasks.Step END;
+		Console.WriteStr("ObxChan1: sum="); Strings.IntToString(k.sum, s); Console.WriteStr(s);
+		Console.WriteStr(" max="); Strings.IntToString(p.max, s); Console.WriteStr(s); Console.WriteLn
+	END Do;
+
+END ObxChan1.
 ```
 
-Limits: the rendezvous buffers nothing; a buffer requires a positive capacity; the mailbox is
-unbounded; a message is not copied; a channel lives in one OS thread.
+The command prints `ObxChan1: sum=55 max=4`. The consumer sleeps a millisecond after each message,
+the producer is faster, and the buffer fills up to its capacity. It never holds more than four
+messages: the fifth `Send` waits.
 
-## 4. Selection
+The capacity must be positive. `NewBuffer(0)` traps with code 20: a buffer without room would be a
+rendezvous, and the rendezvous is a separate kind of channel. The library sets no upper bound on the
+capacity.
 
-An *alternative* describes one operation that may be performed, or a wait for a signal. *Selection*
-(`Select`) waits until exactly one alternative can be performed and returns its index.
+A buffer is cheaper than a rendezvous when it is neither empty nor full: sending and receiving then
+do without a switch. In the measurement `buffer64` (a buffer of 64 messages) there are 0.06 switches
+per message and 117–186 ns per message; almost half of this time is the `NEW` of the message in the
+measurement itself.
 
-The alternative type is `AsyncSelect.Op`. Alternatives are built by:
+## 4. Mailbox
 
-```
-AsyncChan.RecvAlt(c, op);          (* receive from a channel *)
-AsyncChan.SendAlt(c, m, op);       (* send into a channel *)
-AsyncChan.TimeoutAlt(ms, op);      (* expiration of a delay *)
-AsyncSelect.AltSignal(sig, op);    (* external signal *)
-```
+Some senders may not wait at all. A framework action handler, a menu command, a procedure called from
+a message broadcast run on the main stack, and any wait there is a trap. Such a sender needs a
+channel whose `Send` never waits.
 
-`AsyncChan` wraps the first three; `Select` is the same operation:
-
-```
-i := AsyncChan.Select(ops);        (* index of the alternative that fired *)
-m := ops[i].got;                   (* result of a receive *)
-```
-
-Rules:
-
-1. `Select` is called only from a task; otherwise trap 20.
-2. The number of alternatives is at most 32; otherwise trap 21. Every alternative is filled by
-   `AltSend`/`AltRecv`/`AltTimeout`/`AltSignal` (otherwise trap 22); a send or a receive has a channel
-   (otherwise trap 23), a signal alternative has a signal (otherwise trap 24). Preconditions are
-   checked before any registration. Trap 22 occurs only if the alternative kind is out of the
-   allowed range. An unfilled alternative with kind zero counts as a send and gives trap 23.
-3. Alternatives are checked in index order. The first one that can be performed immediately wins.
-4. Of several timeouts the smallest `ms` is used; on a tie, the first by index. A timeout with
-   `ms <= 0` fires immediately if no alternative is ready.
-5. An external signal ready during registration (`Arm` returned `TRUE`) wins immediately. Otherwise
-   the signal owner later calls `SignalReady`.
-6. After waking, the task withdraws the losing offers. An offer is not performed against an offer
-   of the same `Select`. The field `got` is filled only for the winning receive.
-7. Cancellation while waiting traps the task in `Tasks.Park` with code 127. Offers remain in the
-   channels and are removed lazily: a channel considers an offer dead when the task has reached
-   `Finished` or `Cancelled`.
-8. If the protocol rejected a send of this task, `Select` withdraws all offers and then traps with
-   code 21.
+The mailbox `AsyncChan.Mailbox` is unbounded: it holds any number of messages, and `Send` into it
+returns at once. `Recv` waits while the mailbox is empty. Messages come out in sending order.
 
 ```
-VAR ops: ARRAY 3 OF AsyncSelect.Op;
-AsyncChan.RecvAlt(a, ops[0]);
-AsyncChan.RecvAlt(b, ops[1]);
-AsyncChan.TimeoutAlt(100, ops[2]);
-i := AsyncChan.Select(ops);
-IF i = 0 THEN ... ELSIF i = 1 THEN ... ELSE ... END
+MODULE ObxChan2;
+	IMPORT AsyncChan, AsyncSelect, Tasks, Console, Strings;
+
+	TYPE
+		Event = POINTER TO RECORD (AsyncSelect.Msg) code: INTEGER END;
+		Handler = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+
+	VAR box: AsyncChan.Mailbox; done: BOOLEAN;
+
+	PROCEDURE Post (code: INTEGER);
+	(* Вызывается с главного стека: ящик не заставляет ждать. *)
+		VAR e: Event;
+	BEGIN
+		NEW(e); e.code := code; box.Send(e)
+	END Post;
+
+	PROCEDURE (h: Handler) Run;
+		VAR m: AsyncSelect.Msg;
+	BEGIN
+		LOOP
+			box.Recv(m);
+			WITH m: Event DO
+				IF m.code = 0 THEN EXIT END;
+				INC(h.n)
+			END
+		END;
+		done := TRUE
+	END Run;
+
+	PROCEDURE Do*;
+		VAR h: Handler; s: ARRAY 16 OF CHAR;
+	BEGIN
+		box := AsyncChan.NewMailbox();
+		Post(1); Post(2); Post(3); Post(0);
+		NEW(h); done := FALSE; Tasks.Start(h);
+		WHILE ~done DO Tasks.Step END;
+		Strings.IntToString(h.n, s);
+		Console.WriteStr("ObxChan2: events="); Console.WriteStr(s); Console.WriteLn
+	END Do;
+
+END ObxChan2.
 ```
 
-Limits: at most 32 alternatives; only from a task; when several are ready, the index order decides;
-cancellation does not remove offers immediately.
+The command prints `ObxChan2: events=3`. The procedure `Post` is called from the main stack before
+the handler task has started: the mailbox accepts all four messages and waits for nothing. The task
+then takes them out one by one and leaves on the event with code 0.
 
-## 5. Channel Protocol
+There is one exception to the rule "`Send` into a mailbox does not wait". If a task has taken the
+monitor of the channel itself (`Kernel.Lock(box)` or an exclusive procedure of a channel extension),
+operations on the channel wait until it releases it. From the main stack such a wait is monitor
+trap 21.
 
-A *protocol* is a deterministic state machine built from a textual description. A channel may carry
-it as an optional check of the message sequence.
+The price of being unbounded is memory. If the consumer lags forever, the mailbox grows without
+limit: the message ring doubles when full and never shrinks back. A mailbox suits event streams that
+have a natural limit — key presses, replies to one's own requests — and not pumping data between
+tasks of different speed. That is what the buffer is for.
 
-The description consists of clauses:
+## 5. Selection
 
-```
-start: RequestMsg > wait; wait: ResponseMsg > wait;
-wait: EndMsg > done; done:
-```
+A client task sends a request to a server and waits for the reply. The server may hang, and the
+client does not want to wait forever: after 50 ms it gives up and does something else. Neither
+`Recv` nor `Sleep` fits here: `Recv` waits without a deadline, and `Sleep` does not notice the reply.
+One has to wait for two events at once and learn which happened first.
 
-Description rules:
-
-1. A clause is `state: Message > state`.
-2. The arrow is written `>` or `->`; clauses are separated by `;` or a newline.
-3. `state:` without an arrow declares a state with no outgoing transition. Finiteness is computed:
-   a state is final while it has no outgoing transition.
-4. The first mentioned state is the start state.
-5. Two transitions from one state by the same label are a description error.
-6. The message label is the dynamic type name of the `AsyncSelect.Msg` record; the suffix `^` is
-   stripped. `NIL` gives the label `NIL`, an unknown type gives `?`.
-
-The operations of `AsyncProto` and `AsyncChan.SetProtocol` are listed in section 10.
-
-Checks:
-
-1. The protocol checks a message at the moment the send takes place. This holds both for a direct
-   `Send` and for `SendAlt`.
-2. A send takes place in one of three places: at entry, if a receiver waits or there is room; when
-   a receiver takes a waiting offer; when room appears in a buffer.
-3. A losing `Select` offer does not change the protocol state.
-4. A violation prints `AsyncChan protocol: <text>` to the console. The sender traps with code 21,
-   and the message is not delivered. If the sender was waiting, it gets the trap, not the receiving
-   task.
-5. A rejected send does not change the protocol state. The violation text remains in
-   `LastViolation` and lists the expected messages.
-6. Without a protocol the check returns after one `NIL` test.
-7. Attaching a protocol resets the state to the start state.
-
-Limits: at most 32 states and 128 transitions; a state name and a label are at most 31 characters, a
-longer name is the parse error `name too long`; an item without `:` is a parse error;
-a violation text is at most 255 characters. The machine is deterministic; there are no `*`, `+`,
-`?` or `|` operators.
-
-## 6. I/O
-
-*Readiness waiting* is built on the `Poller` registry and non-blocking `CommStreams` streams.
+This is done by *selection* — the procedure `AsyncChan.Select`. It takes an array of *alternatives*
+of type `AsyncSelect.Op`, waits until exactly one of them executes, and returns its index. An
+alternative is built by the procedures:
 
 ```
-AsyncIO.WaitFd(fd, events);       (* wait for descriptor readiness *)
-AsyncIO.Read(s, buf, beg, len, read);      (* read at least one byte *)
-AsyncIO.Write(s, buf, beg, len, written);  (* write at least one byte *)
-AsyncIO.Accept(l, s, timeout);    (* accept a connection *)
-AsyncIO.Poll(timeout);            (* run the waits, for a test pump *)
+AsyncChan.RecvAlt(c, op)        (* receive from channel c *)
+AsyncChan.SendAlt(c, m, op)     (* send m to channel c *)
+AsyncChan.TimeoutAlt(ms, op)    (* expire after ms ms *)
+AsyncSelect.AltSignal(sig, op)  (* wait for an external signal *)
 ```
 
-Rules:
-
-1. `Read` returns `read > 0` as soon as at least one byte has been read; `read = 0` means end or
-   disconnection. `Write` returns `written > 0` as soon as at least one byte has been written;
-   `written = 0` means disconnection.
-2. While there is no data or no room, the task registers the descriptor in `Poller` and sleeps in
-   `Tasks.Park`. Registration is one-shot: when readiness arrives the entry is removed, and the
-   waiter registers again if readiness was not enough.
-3. `Accept` with `timeout < 0` waits indefinitely; with a non-negative timeout it returns `FALSE`
-   when the time expires: the task waits for the descriptor in `Tasks.Sleep` for the rest of the
-   timeout.
-4. If a stream has no descriptor (`Handle() = -1`), waiting degenerates to `Tasks.Sleep(1)`. This is
-   slow but does not block the main loop.
-5. `WaitFd` is called only from a task; otherwise trap 20.
-6. The main loop (`LinConsole.WaitInput`) polls stdin and the registered descriptors in one `poll`.
-
-`CommStreams.Stream` and `CommStreams.Listener` have a `Handle()` method that returns −1 by default.
-Only `CommTCP__Lin` overrides it: there `Handle` returns the socket. On other platforms `AsyncIO`
-works through `Sleep(1)`.
-
-Limits: at most 4096 simultaneous waits (`LinConsole`); on overflow the waiter immediately receives
-`Ready` and retries. `CommTCP__Lin` works over IPv4, the accept backlog is 128. The registry uses
-`poll`, not `select`: `fd_set` is limited to 1024 descriptors.
-
-## 7. Worker Threads
-
-A *worker thread* is an operating-system thread that performs a blocking call outside the main loop.
-The `AsyncWork` pool moves such a call out of a task, so that the main loop and the other tasks keep
-running.
+A receive alternative that wins leaves the message in the field `got`; the other alternatives are
+not executed at all. A send that lost the selection has not sent its message.
 
 ```
-status := AsyncWork.Execute(S.ADR(SomeJob), S.VAL(S.ADDRESS, arg));  (* from a task; waits *)
+MODULE ObxSelect0;
+	IMPORT AsyncChan, AsyncSelect, Tasks, Services, AsyncIO, Console;
 
-id := AsyncWork.Submit(S.ADR(SomeJob), S.VAL(S.ADDRESS, arg));   (* does not wait *)
-IF AsyncWork.Done(id) THEN status := AsyncWork.Result(id); AsyncWork.Release(id) END;
+	TYPE
+		Reply = POINTER TO RECORD (AsyncSelect.Msg) END;
+		Server = POINTER TO RECORD (Tasks.Task) delay: INTEGER; out: AsyncChan.Mailbox END;
+		Client = POINTER TO RECORD (Tasks.Task) END;
+
+	VAR fast, slow: ARRAY 16 OF CHAR; done: BOOLEAN;
+
+	PROCEDURE (s: Server) Run;
+		VAR r: Reply;
+	BEGIN
+		Tasks.Sleep(s.delay); NEW(r); s.out.Send(r)
+	END Run;
+
+	PROCEDURE Ask (delay: INTEGER; OUT res: ARRAY OF CHAR);
+		VAR s: Server; ops: ARRAY 2 OF AsyncSelect.Op;
+	BEGIN
+		NEW(s); s.delay := delay; s.out := AsyncChan.NewMailbox(); Tasks.Start(s);
+		AsyncChan.RecvAlt(s.out, ops[0]);
+		AsyncChan.TimeoutAlt(50, ops[1]);
+		IF AsyncChan.Select(ops) = 0 THEN res := "reply" ELSE res := "timeout" END
+	END Ask;
+
+	PROCEDURE (c: Client) Run;
+	BEGIN
+		Ask(10, fast); Ask(200, slow); done := TRUE
+	END Run;
+
+	PROCEDURE Do*;
+		VAR c: Client;
+	BEGIN
+		NEW(c); done := FALSE; Tasks.Start(c);
+		WHILE ~done DO Services.actionHook.Step; AsyncIO.Poll(1) END;
+		Console.WriteStr("ObxSelect0: fast="); Console.WriteStr(fast);
+		Console.WriteStr(" slow="); Console.WriteStr(slow); Console.WriteLn
+	END Do;
+
+END ObxSelect0.
 ```
 
-`Execute` frees the slot itself and returns the job status. The operations are listed in section 10.
+The command prints `ObxSelect0: fast=reply slow=timeout`. The first server replies after 10 ms, and
+the receive wins. The second replies after 200 ms, and the timeout expires first. The server replies
+into a mailbox rather than a rendezvous, and there is a reason for it: a late reply lands in the
+mailbox, and the server finishes. Had it replied into a rendezvous, it would have stayed forever
+waiting for a receiver that is gone.
 
-Provided jobs: `ReadFileJob`, `WriteFileJob`, `ResolveJob`. The `FileReq` and `AddrReq` records are
-declared in the facade; the caller allocates them in advance, and the worker thread receives only
-their address.
+In this example the command spins not `Tasks.Step` but `Services.actionHook.Step` and
+`AsyncIO.Poll(1)`. The timeout of a selection is a `Services` action, and `Tasks.Step` does not
+execute it; without the action step the deadline would pass unnoticed, and the second selection would
+also wait for the reply. BlackBox's main loop does both steps itself; commands with timeouts, worker
+threads and I/O have to repeat it.
 
-Rules:
+The order decides when several alternatives are ready at once. `Select` checks them in ascending
+index order, and the first that can execute immediately wins. A timeout is ready only when nothing
+else is: a timeout with `ms <= 0` turns the selection into a poll without waiting. Of several
+timeouts the smallest acts; among equal ones, the first by index.
 
-1. The delegate is installed lazily on the first `Execute` or `Submit`: `AsyncWork.Ensure` tries
-   `Dialog.Call("AsyncWorkLin.Install")`, then `AsyncWorkWin.Install`. The base init does not start
-   a pool.
-2. The pool has up to four threads. On Linux readiness arrives as a byte in a pipe; `Poller` wakes
-   the main loop, and `Scan` wakes the task with `Tasks.Unpark`. On Windows readiness is collected
-   by a `Services` action that polls the `done` counter every 5 ms while slots are busy.
-3. A worker thread must not touch the heap, call `NEW`, `Kernel.Try`, the journal or the framework.
-   This is a rule of discipline, not a barrier.
-4. `Execute` is a switch point of the task; outside a task it traps with code 21. `Submit`, `Done`,
-   `Result` and `Release` do not wait.
-5. After `Submit` a call of `Release` is mandatory: otherwise the slot stays busy until the end of
-   the process.
-6. On Windows the pool works while the `Services` loop runs; blocking console input stops the
-   delivery of readiness.
+Violations of selection are caught before it does anything. A call outside a task traps with code
+20; more than 32 alternatives, with code 21; an alternative of an invalid kind, with code 22; a
+receive or send without a channel, with code 23; a `NIL` signal, with code 24. An unfilled
+alternative with a zero kind field looks like a send without a channel and gives trap 23.
 
-Job codes: `ReadFileJob` returns −30 if the read produced no bytes; `WriteFileJob` returns −20 on a
-short write; `ResolveJob` returns −1 on error. `Submit` and `Execute` return −1 if there is no free
-slot.
+Cancelling a task that waits in a selection traps it with code 127 in `Tasks.Park`. Its offers stay
+in the channels until the next access to them: a channel considers an offer dead when its task has
+reached `Finished` or `Cancelled`, and skips it.
 
-Measurement (Linux, worker thread, a job that calls `usleep` for 300 ms): the task waits in
-`Execute`, the main loop makes 286 steps, the test takes about 301 ms. The command is
-`tools/test.sh Async_devWorkers`.
+Selection among two rendezvous channels costs 315–400 ns per operation, among eight 568–653 ns
+(`select2`, `select8`, `docs/measurements.md`, section 2.2). Selection without a timeout allocates no
+memory.
 
-Limits: the pool exists only on Linux AMD64 and Windows x64; a path is at most 255 bytes, a file
-buffer is 4096 bytes, a host name is at most 127 bytes; a job performs one read or write system
-call; `ResolveJob` only counts addresses and does not store them.
+## 6. Dialogue Protocol
 
-## 8. Computons
+A client and a server talk over a channel: the client says hello, sends data, says goodbye. If the
+client by mistake sends data before the greeting, the server gets what it does not expect, and the
+error shows far from where it was made. It is better to stop a wrong message at the moment it is
+sent.
 
-A *computon* is a serializable `Stores.Store` object with a `Do` method that runs in a separate
-BlackBox process with its own heap and collector. `Do` may therefore call `NEW`.
-
-```
-TYPE Computon* = POINTER TO ABSTRACT RECORD (Stores.Store) END;
-     PROCEDURE (c: Computon) Do*, NEW, ABSTRACT;
-```
-
-A computon type must implement `Externalize` and `Internalize`: the object is passed through
-`Stores`.
-
-### 8.1. Operations
-
-The operations of `AsyncComputon` are listed in section 10. Rules:
-
-1. `Start(n)` starts `n` executors; `n` is from 1 to 16, otherwise trap 20. `Rank()` of the
-   controller is 0.
-2. `Push` serializes the computon and sends it to executor `rank`; errors are visible through
-   `LastError` or `Hook.Failed`.
-3. `Pull` waits for the result for at most 10,000 ms; the wait is `Tasks.Sleep(10)`, a switch
-   point. Outside a task `Pull` traps with code 21. On timeout `Pull` returns `NIL` and
-   `LastError = -4`.
-4. `Try` does not wait: it returns `TRUE` if the request is done, and the result or `NIL` with a code
-   in `LastError`.
-5. A request is matched **by `tag` only**; `rank` in `Pull` is used only for `Hook`, in `Try` and
-   `AltPull` it is not used. Equal `tag` values of simultaneous requests conflict.
-6. When an executor dies, the request is retried on a live one. A retry is possible after each
-   further death; there is no attempt counter. The semantics is at-least-once: if an executor died
-   after computing but before answering, `Do` runs again.
-7. `AltPull` gives a signal for `Select`: a selection can wait for a computon result together with
-   channels and a timeout. `AltPull` does not consume the request; after the selection, `Pull` or
-   `Try` is needed.
-8. `Unload(module)` asks the executors to drop the module code; the next `Push` loads the new
-   `.ocf`. It returns `FALSE` and `LastError = 20` if the module is busy. An unloaded module is a
-   success. Over MPI unloading is not supported: `FALSE`, `LastError = -1`.
-9. `Stop` kills the executors (`SIGKILL`) and closes the channels; `waitpid` is not called. `Stop`
-   fails unfinished requests with code `-2`: `Pull`, `Try` and `Select` see them finished.
-10. A reply is matched to its request by a frame number of its own for every `Push`: a late reply to
-    a request abandoned by a `PullTimeout` timeout does not go to a new request with the same `tag`.
-
-Error codes: `-1` — no request, empty serialization or no slot; `-2` — no live executors left;
-`-3` — sending failed; `-4` — timeout; `-5` — response could not be parsed; `-6` — result does not
-serialize; `20` — module busy on unload; `1` — a trap in `Do`.
-
-### 8.2. Transports
+For this a *protocol* is attached to the channel — a state machine written as text:
 
 ```
-ok := AsyncComputon.SetTransport("pipe");   (* default *)
-ok := AsyncComputon.SetTransport("tcp");
-ok := AsyncComputon.SetTransport("mpi");
+start: Hello > talk; talk: Data > talk; talk: Bye > done; done:
 ```
 
-The transport is chosen before `Start`; the external variable `ASYNC_TRANSPORT` sets the same
-value.
+The item `state: Message > state` permits sending the message from the state and names the next
+state. The arrow may be written `>` or `->`; items are separated by `;` or a line break. The first
+state mentioned is the initial one. The item `done:` without an arrow declares a state with no
+transitions; such a state is final. A message is named by the name of its record type, as in the
+declaration `TYPE Hello = POINTER TO RECORD …`; `NIL` is named `NIL`.
 
-1. `pipe` — `fork` and `exec` of the current process (`/proc/self/exe`) with three channels per
-   executor: command on stdin, requests, responses. In a console host this is the same
-   `blackbox-console`; in a GUI process `exec` starts a different binary.
-2. `tcp` — the controller listens on `127.0.0.1:0`, the executor connects to the address from
-   `--ASYNC_TCP=...`. The frame format and retry are the same. The executor socket is blocking, the
-   controller socket is non-blocking for `Poller`.
-3. `mpi` — the external `AsyncMpi` transport; see 8.4.
+```
+MODULE ObxProto0;
+	IMPORT AsyncChan, AsyncSelect, AsyncProto, Console;
 
-A frame is a 12-byte header (length, `tag`, kind; response — length, `tag`, code) and a body. Over
-pipe and TCP the response body is bounded so that the practical result limit is about 59,988 bytes.
+	CONST desc = "start: Hello > talk; talk: Data > talk; talk: Bye > done; done:";
 
-### 8.3. Example
+	TYPE
+		Hello = POINTER TO RECORD (AsyncSelect.Msg) END;
+		Data = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
+		Bye = POINTER TO RECORD (AsyncSelect.Msg) END;
+
+	PROCEDURE Do*;
+		VAR p: AsyncProto.Protocol; box: AsyncChan.Mailbox;
+			h: Hello; d: Data; b: Bye; name: ARRAY 32 OF CHAR;
+	BEGIN
+		p := AsyncProto.New(desc);
+		box := AsyncChan.NewMailbox(); AsyncChan.SetProtocol(box, p);
+		NEW(h); box.Send(h);
+		NEW(d); d.n := 1; box.Send(d);
+		NEW(d); d.n := 2; box.Send(d);
+		NEW(b); box.Send(b);
+		AsyncProto.StateName(p, box.protoState, name);
+		Console.WriteStr("ObxProto0: state="); Console.WriteStr(name); Console.WriteLn
+	END Do;
+
+END ObxProto0.
+```
+
+The command prints `ObxProto0: state=done`: the four sends went through the machine from `start` to
+`done`. A mailbox is chosen here so that the command can send from the main stack.
+
+A violation looks like this. If `NEW(d); box.Send(d)` is inserted into the example before the
+greeting, the console shows the line `AsyncChan protocol: …` with the text of the violation and the
+expected messages, and `Send` traps with code 21. The message is not delivered, and the protocol
+state stays as it was; the violation text is kept by `AsyncProto.LastViolation`. The trap always goes
+to the sender. If the sender was waiting in a rendezvous and its message is taken by a receiver, the
+sender traps when it wakes, and the receiver goes on waiting for the next one.
+
+The protocol checks a message at the moment the send takes place: on entry to `Send` if a receiver
+waits or there is room; when a receiver takes a waiting send; when room frees in a buffer. A send that
+lost a selection does not move the protocol. `AsyncChan.SetProtocol` resets the state to the initial
+one; `SetProtocol(c, NIL)` removes the protocol. A channel without a protocol pays for the check with
+one comparison with `NIL`.
+
+The description has limits: up to 32 states and 128 transitions, a name of up to 31 characters. An
+error in the description (an item without `:`, a long name, two transitions from one state on one
+message) makes `AsyncProto.New` return `NIL`, and the error text comes from `AsyncProto.LastError`.
+The machine is deterministic; the notation has no repetitions `*`, `+` and no choice `|` — they are
+expressed with states.
+
+## 7. Single-Assignment Variable
+
+A task starts a long computation and hands several other tasks a promise of the result. Each of them
+reads the result when it needs it; if it is not ready yet, it waits. A channel does not fit here: a
+message from a channel goes to one receiver, and the result is needed by all.
+
+A *single-assignment variable* `AsyncOnce.Once` is filled once and read any number of times.
+`FillInt(x)` or `FillMsg(m)` fill it; `ReadInt()` or `ReadMsg(m)` wait until it is filled and return
+the value. The variable is built as a monitor: all four methods are exclusive procedures, and
+reading waits in `ACTIVE.AWAIT(o.done)`.
+
+```
+MODULE ObxOnce;
+	IMPORT AsyncOnce, Tasks, Console, Strings;
+
+	TYPE
+		Reader = POINTER TO RECORD (Tasks.Task) END;
+		Writer = POINTER TO RECORD (Tasks.Task) END;
+
+	VAR o: AsyncOnce.Once; got: INTEGER; done: BOOLEAN;
+
+	PROCEDURE (r: Reader) Run;
+	BEGIN
+		got := o.ReadInt(); done := TRUE	(* ждёт, пока Writer не заполнит *)
+	END Run;
+
+	PROCEDURE (w: Writer) Run;
+	BEGIN
+		Tasks.Sleep(5); o.FillInt(42)
+	END Run;
+
+	PROCEDURE Do*;
+		VAR r: Reader; w: Writer; s: ARRAY 16 OF CHAR;
+	BEGIN
+		o := AsyncOnce.New();
+		NEW(r); NEW(w); done := FALSE;
+		Tasks.Start(r); Tasks.Start(w);
+		WHILE ~done DO Tasks.Step END;
+		Strings.IntToString(got, s);
+		Console.WriteStr("ObxOnce: "); Console.WriteStr(s); Console.WriteLn
+	END Do;
+
+END ObxOnce.
+```
+
+The command prints `ObxOnce: 42`. The reader comes first and waits; after 5 ms the writer fills the
+variable, and the reader wakes up.
+
+A second fill is an error. `FillInt` on a filled variable traps with code 21, `FillMsg` with code 22.
+The variable has one fill flag for both kinds of value, so `FillMsg` after `FillInt` is a second fill
+too. The kind is not checked on reading: `ReadInt` after `FillMsg` returns 0, `ReadMsg` after
+`FillInt` returns `NIL`.
+
+Filling does not wait and can be called from the main stack while the monitor of the variable is
+free. Reading an unfilled variable from the main stack is monitor trap 24: `AWAIT` outside a task.
+Reading has no deadline; if a deadline is needed, the result is passed over a channel and awaited in
+a selection with a timeout.
+
+## 8. Non-Blocking I/O
+
+A server on BlackBox serves a hundred connections, one task per connection. A task reads a request
+from a socket. If it calls an ordinary blocking `read`, the whole thread stops, and with it the main
+loop and the other ninety-nine tasks. What is needed is a read that waits for data the way `Recv`
+waits for a message: giving the processor to others.
+
+The module `AsyncIO` provides such operations on top of the non-blocking streams of `CommStreams`:
+
+```
+AsyncIO.Read(s, buf, beg, len, read)      (* read at least a byte *)
+AsyncIO.Write(s, buf, beg, len, written)  (* write at least a byte *)
+AsyncIO.Accept(l, s, timeout)             (* accept a connection *)
+AsyncIO.WaitFd(fd, events)                (* wait until a descriptor is ready *)
+```
+
+`Read` tries to read. If there is no data, the task records the descriptor of the stream in the
+registry `Poller` and falls asleep in `Tasks.Park`. The main loop checks standard input and all
+recorded descriptors with one call of `poll`; readiness wakes the task, and it tries again. `Read`
+returns as soon as at least a byte has been read (`read > 0`); `read = 0` means end of stream or a
+broken connection. `Write` works the same way. A registration is one-shot: after readiness the record
+is removed, and if one byte was not enough, the task registers again.
+
+`Accept` with a negative `timeout` waits for a connection without a deadline. With a non-negative one
+it waits no longer than `timeout` ms and returns `FALSE` if no connection came; the task waits for
+readiness in `Tasks.Sleep` for the rest of the term.
+
+Readiness for reading is learned from a descriptor, and the descriptor is given by the stream method
+`Handle`. By default it returns −1, and only `CommTCP` for Linux overrides it. Without a descriptor
+the wait degenerates into `Tasks.Sleep(1)` between attempts: the main loop does not stop, but the
+task polls the stream every millisecond. So on other platforms `AsyncIO` works but wastes processor
+time.
+
+`WaitFd` from the main stack traps with code 20. The registry holds up to 4096 waits; on overflow the
+waiter gets readiness at once and repeats its attempt. The registry is built on `poll` rather than
+`select`, because `fd_set` is limited to 1024 descriptors. `CommTCP` for Linux works over IPv4 with
+an accept queue of 128 connections.
+
+## 9. Worker Threads
+
+Not every system call can avoid blocking. Resolving a host name (`getaddrinfo`), reading a file from a
+slow disk, calling an external library stop the thread, and they have no non-blocking variant. Such a
+call is moved to a separate OS thread — a *worker thread* — and its completion is awaited the way a
+message is awaited.
+
+The pool `AsyncWork` keeps up to four worker threads. `Execute(proc, arg)` gives the procedure `proc`
+with the argument `arg` to a free thread, puts the task to sleep, and returns the status when the
+thread finishes. The task waits; the other tasks and the main loop work. The ready-made jobs are
+`ReadFileJob`, `WriteFileJob` and `ResolveJob`; their argument is the address of a `FileReq` or
+`AddrReq` record.
+
+```
+MODULE ObxWork0;
+	IMPORT S := SYSTEM, AsyncWork, Tasks, Services, AsyncIO, Console, Strings;
+
+	TYPE Asker = POINTER TO RECORD (Tasks.Task) END;
+
+	VAR req: AsyncWork.AddrReq; status: INTEGER; done: BOOLEAN;
+
+	PROCEDURE (a: Asker) Run;
+	BEGIN
+		req.host := "localhost"; req.count := 0; req.status := -1;
+		status := AsyncWork.Execute(S.ADR(AsyncWork.ResolveJob), S.ADR(req));
+		done := TRUE
+	END Run;
+
+	PROCEDURE Do*;
+		VAR a: Asker; s: ARRAY 16 OF CHAR;
+	BEGIN
+		NEW(a); done := FALSE; Tasks.Start(a);
+		WHILE ~done DO Services.actionHook.Step; AsyncIO.Poll(1) END;
+		Console.WriteStr("ObxWork0: status="); Strings.IntToString(req.status, s); Console.WriteStr(s);
+		Console.WriteLn
+	END Do;
+
+END ObxWork0.
+```
+
+The command prints:
+
+```
+Tasks: deadlock: no ready tasks and no wake-up deadlines
+Kernel: monitor dump
+  (no monitors)
+ObxWork0: status=0
+```
+
+The first three lines are a false alarm. While the worker thread resolves the name, the task sleeps in
+`Tasks.Park` without a deadline, there are no other tasks, and the scheduler takes this for a
+deadlock. It does not know that the wake-up will come from the worker thread through `Poller`. The
+deadlock report is printed once and does not interrupt the work. A program bothered by this line only
+needs to keep a task with a deadline alongside.
+
+The record `req` is a global variable of the module, not a heap object, and this is mandatory. A
+worker thread runs code outside the scheduler and outside the garbage collector. It must not touch the
+heap: call `NEW`, `Kernel.Try`, the log, framework procedures. The heap is not protected by a lock:
+allocation in a worker thread corrupts the free-block lists, and the collector may free an object the
+thread is still writing to. The compiler does not check this, nor does the library; a violation shows
+up as memory corruption at a random moment.
+
+`Execute` is a switch point; outside a task it traps with code 21. For jobs whose result is not needed
+at once there are `Submit`, `Done`, `Result` and `Release`: they do not wait, but after `Submit` the
+slot stays busy until `Release` frees it. There are 64 slots; without `Release` they run out, and
+later `Submit` and `Execute` return −1.
+
+The pool is installed on the first `Execute` or `Submit`: `AsyncWork` looks for the module
+`AsyncWorkLin`, then `AsyncWorkWin`. The pool exists on Linux AMD64 and Windows x64. On Linux
+readiness arrives as a byte in an OS pipe, which `Poller` sees. On Windows readiness is picked up by a
+`Services` action that polls a counter every 5 ms; blocking console input stops such an action, and
+with it the delivery of readiness.
+
+Job statuses: `ReadFileJob` returns −30 if the read gave no byte; `WriteFileJob` −20 on a short
+write; `ResolveJob` −1 on an error. A path is up to 255 bytes, a file buffer 4096 bytes, a host name
+up to 127 bytes. A job makes one read or write call. `ResolveJob` counts the addresses but does not
+return them. The test `Async_devWorkers` (`tools/test.sh Async_devWorkers`) gives a worker thread a
+300 ms job; the task waits for it about 301 ms, and the main loop manages 286 steps meanwhile.
+
+## 10. Computons
+
+A computation splits into independent pieces, and the machine has many cores. BlackBox tasks run on
+one thread, and worker threads must not touch the heap. To compute Component Pascal code with `NEW`
+on several cores, it is run in separate BlackBox processes — each with its own heap and its own
+collector.
+
+A *computon* is an object that is sent to such a *worker* process, executed there and returned. Its
+type extends `AsyncComputon.Computon` — a `Stores.Store` record with the abstract method `Do`. The
+type implements `Externalize` and `Internalize`, because the object travels in serialized form.
+
+### 10.1. Request and Reply
+
+`AsyncComputon.Start(n)` starts `n` workers, from 1 to 16. `Push(c, rank, tag)` serializes the
+computon `c` and sends it to the worker number `rank`; `tag` is the request number by which the reply
+is later collected. `Pull(rank, tag)` waits for the reply and returns the computon after `Do`. `Stop`
+shuts the workers down.
 
 ```
 MODULE ObxComputon;
-	IMPORT AsyncComputon, Stores, Tasks, Console, Strings;
+	IMPORT AsyncComputon, Stores, Tasks, Services, AsyncIO, Console, Strings;
 
-	TYPE Square = POINTER TO RECORD (AsyncComputon.Computon) x, y: INTEGER END;
-	     Client = POINTER TO RECORD (Tasks.Task) END;
+	TYPE
+		Square = POINTER TO RECORD (AsyncComputon.Computon) x, y: INTEGER END;
+		Client = POINTER TO RECORD (Tasks.Task) END;
 
 	VAR done: BOOLEAN; d: ARRAY 16 OF CHAR;
 
 	PROCEDURE (c: Square) Do*;
-	BEGIN c.y := c.x * c.x END Do;
+	BEGIN
+		c.y := c.x * c.x
+	END Do;
 
 	PROCEDURE (c: Square) Externalize (VAR wr: Stores.Writer);
-	BEGIN wr.WriteInt(c.x); wr.WriteInt(c.y) END Externalize;
+	BEGIN
+		wr.WriteInt(c.x); wr.WriteInt(c.y)
+	END Externalize;
 
 	PROCEDURE (c: Square) Internalize (VAR rd: Stores.Reader);
-	BEGIN rd.ReadInt(c.x); rd.ReadInt(c.y) END Internalize;
+	BEGIN
+		rd.ReadInt(c.x); rd.ReadInt(c.y)
+	END Internalize;
 
 	PROCEDURE (cl: Client) Run;
 		VAR c: Square; r: AsyncComputon.Computon;
@@ -471,47 +656,101 @@ MODULE ObxComputon;
 		NEW(c); c.x := 12; c.y := 0;
 		AsyncComputon.Push(c, 0, 1);
 		r := AsyncComputon.Pull(0, 1);
-		WITH r: Square DO Strings.IntToString(r.y, d) END;
+		IF r # NIL THEN
+			WITH r: Square DO Strings.IntToString(r.y, d) END
+		ELSE
+			Strings.IntToString(AsyncComputon.LastError(), d)
+		END;
 		done := TRUE
 	END Run;
 
-	PROCEDURE Run*;
+	PROCEDURE Do*;
 		VAR cl: Client;
 	BEGIN
 		AsyncComputon.Start(1);
 		NEW(cl); done := FALSE; Tasks.Start(cl);
-		WHILE ~done DO Tasks.Step END;
+		WHILE ~done DO Services.actionHook.Step; AsyncIO.Poll(1) END;
 		Console.WriteStr("ObxComputon: "); Console.WriteStr(d); Console.WriteLn;
 		AsyncComputon.Stop
-	END Run;
+	END Do;
 
 END ObxComputon.
 ```
 
-`Do` runs in a separate process, so `NEW` inside it is allowed. `Pull` is a switch point and is called
-from a task; the `Run` command drives `Tasks.Step` until the client gets the result.
+The command prints `ObxComputon: 144`. The worker received the computon with `x = 12`, called `Do`
+and returned it with `y = 144`.
 
-### 8.4. MPI
+A reply is matched to a request by `tag` only. `rank` in `Pull` serves only the message to the error
+handler; two simultaneous requests with the same `tag` get mixed up. Each `Push` also gets its own
+frame number on the wire. So a late reply to a request abandoned on timeout does not go to a new
+request with the same `tag`.
 
-`AsyncMpi` provides an external transport over MPICH. The order is:
+`Pull` waits no longer than 10 s (`PullTimeout` takes its own term) and waits in `Tasks.Sleep(10)`,
+so the task sleeps with a deadline and the deadlock report does not fire falsely. Outside a task
+`Pull` traps with code 21. On timeout it returns `NIL`, and `LastError()` returns −4. `Try` does not
+wait: it returns `TRUE` if the reply is there, together with the reply itself or `NIL` with an error
+code.
 
-```
-ok := AsyncMpi.Install();                 (* load libbbmpi.so, install the transport *)
-ok := AsyncComputon.SetTransport("mpi");
-AsyncComputon.Start(n);                   (* a world of n+1 ranks *)
-```
+`AltPull(rank, tag)` gives a signal for selection. With it a task waits for a computon reply together
+with channel messages and a timeout. The selection does not take the reply itself: after `AltPull`
+wins, `Pull` or `Try` collects it.
 
-World layout: rank 0 is the BlackBox controller, ranks 1..n run `AsyncMpi.WorkerLoop`. The frames are
-the same; the header and body use MPI tags 1000 and 1001, responses use 2000. The world must be
-exactly `n+1`; otherwise `Start` gives size 0.
+`LastError` codes: −1 — no such request, empty serialization or no free request slot (there are
+128); −2 — no live workers left; −3 — sending failed; −4 — the term expired; −5 — the reply could not
+be parsed; −6 — the result does not serialize; 1 — a trap in `Do`; 20 — the module is busy on
+unloading. `Push` with a negative `tag` traps with code 20 (negative numbers are reserved), with
+`rank` outside `0 .. Size() - 1` with code 21.
 
-Limits: a rank death is not detected and not retried (mpiexec usually kills the world); `Unload` is
-not supported; `WorkerPid` returns 0 and `WorkerDead` returns `TRUE`; a second `Start` after `Stop`
-calls `MPI_Init` again after `MPI_Finalize`.
+### 10.2. Death of a Worker
 
-### 8.5. RobustParallel Facade
+A worker is a separate process, and it may die: a trap in kernel code, lack of memory, `kill`. The
+controller sees the death as end of file in the reply pipe. It repeats all unfinished requests of the
+dead worker on the next live worker. A repeat is possible after every further death; there is no
+attempt counter. If no live workers remain, the request completes with code −2, and the handler
+`Hook.Failed`, if installed, learns of it.
 
-`RobustParallel` reproduces the published definition from I. Denisov's talk (2017, p. 19):
+This gives "at least once" semantics. A worker may have computed `Do` and died before replying; then
+`Do` runs once more on another. So `Do` must have no effects outside its object — writing files,
+sending messages over the network — or those effects must survive a repeat.
+
+A trap in `Do` itself does not kill the worker: the worker catches it and replies with code 1. `Stop`
+kills the workers with `SIGKILL` and closes the pipes; it completes hanging requests with code −2,
+and the `Pull`, `Try` and selection waiting for them see them completed. A repeat after a death in the
+test `Async_devComputons` takes 415 ms against 11 ms for the computation without a death
+(`docs/measurements.md`, section 5).
+
+`Unload(module)` asks the workers to unload a module's code so that the next `Push` loads the new
+one. A module that is imported or has a frame on the stack cannot be unloaded: `Unload` returns
+`FALSE`, and `LastError()` returns 20.
+
+### 10.3. Transports
+
+The transport is chosen before `Start` by `SetTransport` or the external variable `ASYNC_TRANSPORT`:
+
+- `pipe` (the default) — a worker is started as a copy of the current process (`/proc/self/exe`)
+  with three OS pipes: commands, requests, replies. In the console host it is the same
+  `blackbox-console`.
+- `tcp` — the controller listens on `127.0.0.1` on a free port, the worker connects to the address
+  from the parameter `--ASYNC_TCP=…`.
+- `mpi` — the external transport `AsyncMpi` (section 10.4).
+
+A frame consists of a 12-byte header (length, frame number, kind or code) and a body. The reply body
+over `pipe` and `tcp` is limited so that a result cannot exceed about 59,988 bytes.
+
+### 10.4. MPI
+
+`AsyncMpi.Install()` loads the wrapper `libbbmpi.so` over MPICH and installs the transport. After
+`SetTransport("mpi")` the call `Start(n)` expects a world of exactly `n+1` ranks: rank 0 is the
+controller, ranks 1..n run `AsyncMpi.WorkerLoop`. A world of another size gives `Size() = 0`.
+
+MPI does not report the death of a rank (mpiexec usually kills the whole world), so there is no
+repeat here. `Unload` over MPI is not supported and returns `FALSE` with code −1; `WorkerPid` returns
+0, `WorkerDead` returns `TRUE`.
+
+### 10.5. The RobustParallel Facade
+
+The module `RobustParallel` of the subsystem `Robust` repeats the definition from the report by
+I. Denisov (2017, p. 19), so that programs written for that definition run on top of `AsyncComputon`:
 
 ```
 CONST tag* = 1;
@@ -528,41 +767,125 @@ PROCEDURE Stop*;
 PROCEDURE Unload* (module: ARRAY OF CHAR);
 ```
 
-Rules:
+Ranks here are as in MPI: 0 is the controller, 1..size−1 are workers; the facade shifts the rank by
+−1 before calling `AsyncComputon`. A rank outside `1 .. size - 1` traps with code 20. The number of
+workers is set by the external variable `ROBUST_SIZE`: with `n > 1` the facade starts `n − 1` workers
+on the `pipe` transport (or the one set by `ASYNC_TRANSPORT`); the MPI world has nothing to do with
+it. In a worker process (`ASYNC_IN`, `ASYNC_OUT` or `ASYNC_TCP` is set) the facade does not start a
+pool. `Wait` does nothing: waiting is expressed in `Pull` and `Try`. `Unload` returns no result and
+prints a refusal to the console.
 
-1. Ranks as in MPI: 0 is the controller, 1..size−1 are executors; `Push`, `Pull` and `Try` shift
-   the rank by −1.
-2. The number of executors is set by the external variable `ROBUST_SIZE`: `n > 1` starts `n−1`
-   local `AsyncComputon` executors; with `n = 1` no pool starts.
-3. `ROBUST_SIZE` is not connected to MPI: the transport is local `pipe` (or the one set by
-   `ASYNC_TRANSPORT`), not an MPI world.
-4. In an executor process (any of `ASYNC_IN`, `ASYNC_OUT`, `ASYNC_TCP` is set) the facade does not
-   start its own pool.
-5. `Unload` returns no result: a refusal is printed to the console.
-6. `Wait` is an empty procedure; all waits are expressed by `Pull` and `Try`.
-7. `Push`, `Pull` and `Try` with a rank outside `1..size−1` trap with code 20.
+## 11. Cost and Limits
 
-## 9. General Limits
+The library is built for AMD64 only. Component Pascal code is run by one OS thread; worker threads
+and computon processes do not touch the shared heap. So an operation on a channel between two switch
+points is indivisible without any lock: a channel takes its monitor only if some task already holds
+it.
 
-1. The library is built for AMD64 only. The language core (tasks, monitors, `ACTIVE.AWAIT`, the `^`
-   key) also works on i386.
-2. One operating-system thread executes Component Pascal code. Worker threads and computon
-   processes do not execute common code on the common heap.
-3. `Select`, `AsyncIO` and `Pull` are called only from a task. `Send` into a mailbox, `Fill`,
-   `Push`, `Try` and `Unload` do not require a task.
-4. `Once` is a monitor: the methods are `[exclusive]`, waiting uses `ACTIVE.AWAIT`. Channels wait in
-   `Tasks.Park` and respect the monitor of the channel object when a task holds it.
-5. Cancellation of a task during a wait traps it with code 127; `Select` offers are removed lazily, and unfinished
-   computon requests remain busy until `Pull`, `Try` or `Stop`.
+Only tasks wait. From the main stack one may send to a mailbox, fill a single-assignment variable,
+call `Push`, `Try` and `Unload` of computons, and also `Recv` and `Send` if the other side is already
+ready. Everything else — selection, `AsyncIO`, `Execute`, `Pull` — requires a task and traps outside
+one.
 
-## 10. Interface
+Cancelling a task while it waits traps it with code 127. The offers of its selection are removed on
+the next access to the channel; unfinished computon requests stay occupied until `Pull`, `Try` or
+`Stop`.
+
+A blocking channel operation and a selection allocate no memory: wait records are taken from free
+lists. The measured numbers and their conditions are collected in `docs/measurements.md`, sections 2
+and 5.
+
+## 12. Implementation
+
+This section describes how the behaviour of the previous sections is obtained; it does not define
+behaviour.
+
+This section does not define behaviour; it describes how the behaviour is obtained.
+
+### 12.1. Channel and Selection
+
+`AsyncSelect.Core` is an extensible record with a kind, a capacity, a message queue and the heads of
+two offer queues (`waitS`, `waitR`). An offer (`Offer`) stores a common context `Ctx`, the index of
+the alternative, the operation kind and the message.
+
+Offers and contexts come from the free lists `freeOffers` and `freeCtx` and return there after the
+operation. A free-list record lies in no channel queue. Selection without a timeout does not
+allocate. The message queue of `Buffer` and `Mailbox` is a ring in an array; for `Buffer` its length
+is the capacity, for `Mailbox` the ring doubles when full.
+
+An operation on a channel between two switch points runs without switches: there is one thread and
+no preemption. So `Enter` takes the channel monitor only when someone holds it
+(`Monitors.IsLocked`). Then the operation waits for the monitor release; otherwise exclusion holds
+without the monitor.
+
+Two procedures perform an operation on a channel. `Put` gives the message to a waiting receiver or
+puts it into the ring and checks the protocol. `Take` takes a message from the ring or from a
+waiting sender. After a `Take` from the ring, `CompleteSend` performs waiting sends while there is
+room. Both procedures skip offers with the caller's decision: an offer is not performed against an
+offer with the same `Ctx`.
+
+`Select` walks alternatives in index order. For a send or a receive it takes an offer and calls
+`Register`. `Register` performs the operation through `Put` or `Take` or puts the offer into
+`waitS` or `waitR`. The timeout with the smallest `ms` schedules a `Services` action. The task
+sleeps in `Tasks.Park` until `Ctx.decided` becomes true.
+
+The decision is made by the side that performed the offer first. It writes `ctx.decided` and
+`ctx.winner`, takes or gives the message and wakes the task with `Tasks.Unpark`. The channel
+monitor is held at that moment only if someone else held it. `Wake` wakes only when
+`ctx.ready = TRUE`. During registration the task may wait for the monitor of another channel, and
+`Unpark` would move it to `Ready` without the monitor. After waking, the owner withdraws the offers
+(`Withdraw`). Withdrawal is idempotent, so the winner is withdrawn by the same call.
+
+Direct `Send` and `Recv` of all three kinds are `QueueSend` and `QueueRecv`. The operation runs at
+once through `Put` or `Take`; otherwise the offer joins `waitS` or `waitR`, and the task sleeps in
+`Tasks.Park`. The other side performs the offer and wakes the task without handing over the
+monitor. A rendezvous is a channel of capacity 0: a send without a receiver always waits in
+`waitS`. Dead offers are removed when a queue is walked. An offer is dead when its task is in
+`Finished` or `Cancelled`.
+
+### 12.2. I/O
+
+`Poller` stores only a pointer to the platform hook. The descriptor registry and `poll` live in
+`LinConsole`: an array of 4096 entries, stdin as the first element, one-shot registration. Ready
+entries are removed before `Waiter.Ready` is called, so that a repeated registration does not
+disturb the walk.
+
+### 12.3. Worker Threads
+
+`AsyncWork` is the facade; `AsyncWorkLin` and `AsyncWorkWin` are the delegates. Linux: up to four
+pthreads, a static slot array under a mutex and a condition variable, a ring queue of 256 jobs, a
+byte in a pipe as the readiness signal. Windows: up to four `CreateThread` threads, slots under a
+`CRITICAL_SECTION`, a queue event; readiness is collected by a `Services` action that polls `done`
+every 5 ms.
+
+Synchronization primitives live in the heap, not in global module records: global records do not get
+guaranteed alignment, and futex and `CRITICAL_SECTION` require it.
+
+### 12.4. Computons
+
+`AsyncComputon` keeps up to 16 executors and up to 128 requests. A request (`Req`) stores a `tag`, a
+rank, a buffer, a task and a `Select` context. `Push` serializes the object through `Stores` into a
+temporary file and sends a frame. The response is read by the main loop: on Linux through `Poller`,
+on Windows by a `Services` action; `Pull` waits in `Tasks.Sleep(10)` with a deadline.
+
+`MarkDead` closes the dead executor's channel and retries its unfinished requests on a live one.
+`Resend` chooses the next live executor; if none is live, the request gets code `-2`. `Unload` sends
+kind `kindUnload` and waits for responses; the executor calls `Kernel.UnloadMod` and clears the
+pointer to the unloaded module object, so that the next collection does not dereference its method
+table.
+
+The MPI transport (`AsyncMpi`) loads `libbbmpi.so` through `LinDl` and binds seven functions. The
+controller checks response readiness with `MPI_Iprobe` from a `Services` action; the `WorkerLoop`
+executor receives frames on the stdin command and answers through MPI.
+
+## 13. Interface
 
 This section lists the module exports in the form of BlackBox documentation: a `DEFINITION` block,
 then a description of each procedure. A "Pre" line names a condition and the trap number on its
 violation. A condition marked "not checked" is not checked by the code; its violation gives an
 undefined result or a `NIL` dereference trap. A "Post" line names the state after return.
 
-### 10.1. AsyncSelect
+### 13.1. AsyncSelect
 
 ```
 DEFINITION AsyncSelect;
@@ -675,7 +998,7 @@ once, unless `Disarm` is called first.
 Abstract method; `Select` calls it after the decision.
 Post: the signal owner no longer uses `ctx` from `Arm` and does not call `SignalReady` with it.
 
-### 10.2. AsyncChan
+### 13.2. AsyncChan
 
 ```
 DEFINITION AsyncChan;
@@ -743,9 +1066,9 @@ The same as `AsyncSelect.SetProtocol`.
 **PROCEDURE RecvAlt (c: AsyncSelect.Core; OUT op: AsyncSelect.Op)**
 **PROCEDURE TimeoutAlt (ms: LONGINT; OUT op: AsyncSelect.Op)**
 **PROCEDURE Select (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER**
-The same as `AsyncSelect.AltSend`, `AltRecv`, `AltTimeout` and `Select` (section 10.1).
+The same as `AsyncSelect.AltSend`, `AltRecv`, `AltTimeout` and `Select` (section 13.1).
 
-### 10.3. AsyncOnce
+### 13.3. AsyncOnce
 
 ```
 DEFINITION AsyncOnce;
@@ -789,7 +1112,7 @@ Waits for filling in `ACTIVE.AWAIT(o.done)`.
 Pre: waiting only from a task — monitor trap 24 if the variable is not filled.
 Post: `m` is the message from `FillMsg`; after `FillInt` it is `NIL`.
 
-### 10.4. AsyncProto
+### 13.4. AsyncProto
 
 ```
 DEFINITION AsyncProto;
@@ -810,7 +1133,7 @@ END AsyncProto.
 ```
 
 **PROCEDURE New (IN desc: ARRAY OF CHAR): Protocol**
-Builds a state machine from a description (section 5).
+Builds a state machine from a description (section 6).
 Post: the machine, or `NIL` on a description error; the error text is in `LastError`.
 
 **PROCEDURE LastError (OUT msg: Message)**
@@ -834,7 +1157,7 @@ text is in `LastViolation`. With `p = NIL` — `ok`.
 **PROCEDURE LastViolation (p: Protocol; OUT msg: Message)**
 Post: `msg` is the text of the last violation; `""` when `p = NIL`.
 
-### 10.5. AsyncIO
+### 13.5. AsyncIO
 
 ```
 DEFINITION AsyncIO;
@@ -875,7 +1198,7 @@ Pre: waiting only from a task — trap 20 in `WaitFd` or `Tasks.Sleep`.
 Post: `TRUE` — `s` is the accepted connection; `FALSE` — `timeout` ms expired, `s = NIL`. With
 `timeout < 0` there is no deadline.
 
-### 10.6. AsyncWork
+### 13.6. AsyncWork
 
 ```
 DEFINITION AsyncWork;
@@ -977,9 +1300,9 @@ Post: the tasks whose jobs are done are woken.
 **PROCEDURE ResolveJob (arg: SYSTEM.ADDRESS)**
 Jobs for a worker thread; `arg` is the address of a `FileReq` or an `AddrReq`.
 Pre: a delegate is installed — trap 21.
-Post: the job status is in the record field `status` (codes in section 7).
+Post: the job status is in the record field `status` (codes in section 9).
 
-### 10.7. AsyncComputon
+### 13.7. AsyncComputon
 
 ```
 DEFINITION AsyncComputon;
@@ -1032,7 +1355,7 @@ DEFINITION AsyncComputon;
 END AsyncComputon.
 ```
 
-The `LastError` codes are listed in section 8.1. `Transport`, `SetTransportObject`, `MarkDead`,
+The `LastError` codes are listed in section 10.1. `Transport`, `SetTransportObject`, `MarkDead`,
 `DeliverFrame`, `RunDo`, `Serialize` and `Deserialize` serve the transports and the executor.
 
 **PROCEDURE Start (n: INTEGER)**
@@ -1078,7 +1401,7 @@ code of the last error.
 **PROCEDURE SetHook (h: Hook)**, **LogMsg (IN msg)**, **Wait**
 Install the error handler, write a line to the console; `Wait` does nothing.
 
-### 10.8. AsyncMpi
+### 13.8. AsyncMpi
 
 ```
 DEFINITION AsyncMpi;
@@ -1104,82 +1427,3 @@ Post: the MPI rank and world size; before initialization −1 and 0.
 **PROCEDURE WorkerLoop**
 Entry point of an executor process of rank greater than 0.
 
-## 11. Implementation Scheme
-
-This section does not define behaviour; it describes how the behaviour is obtained.
-
-### 11.1. Channel and Selection
-
-`AsyncSelect.Core` is an extensible record with a kind, a capacity, a message queue and the heads of
-two offer queues (`waitS`, `waitR`). An offer (`Offer`) stores a common context `Ctx`, the index of
-the alternative, the operation kind and the message.
-
-Offers and contexts come from the free lists `freeOffers` and `freeCtx` and return there after the
-operation. A free-list record lies in no channel queue. Selection without a timeout does not
-allocate. The message queue of `Buffer` and `Mailbox` is a ring in an array; for `Buffer` its length
-is the capacity, for `Mailbox` the ring doubles when full.
-
-An operation on a channel between two switch points runs without switches: there is one thread and
-no preemption. So `Enter` takes the channel monitor only when someone holds it
-(`Monitors.IsLocked`). Then the operation waits for the monitor release; otherwise exclusion holds
-without the monitor.
-
-Two procedures perform an operation on a channel. `Put` gives the message to a waiting receiver or
-puts it into the ring and checks the protocol. `Take` takes a message from the ring or from a
-waiting sender. After a `Take` from the ring, `CompleteSend` performs waiting sends while there is
-room. Both procedures skip offers with the caller's decision: an offer is not performed against an
-offer with the same `Ctx`.
-
-`Select` walks alternatives in index order. For a send or a receive it takes an offer and calls
-`Register`. `Register` performs the operation through `Put` or `Take` or puts the offer into
-`waitS` or `waitR`. The timeout with the smallest `ms` schedules a `Services` action. The task
-sleeps in `Tasks.Park` until `Ctx.decided` becomes true.
-
-The decision is made by the side that performed the offer first. It writes `ctx.decided` and
-`ctx.winner`, takes or gives the message and wakes the task with `Tasks.Unpark`. The channel
-monitor is held at that moment only if someone else held it. `Wake` wakes only when
-`ctx.ready = TRUE`. During registration the task may wait for the monitor of another channel, and
-`Unpark` would move it to `Ready` without the monitor. After waking, the owner withdraws the offers
-(`Withdraw`). Withdrawal is idempotent, so the winner is withdrawn by the same call.
-
-Direct `Send` and `Recv` of all three kinds are `QueueSend` and `QueueRecv`. The operation runs at
-once through `Put` or `Take`; otherwise the offer joins `waitS` or `waitR`, and the task sleeps in
-`Tasks.Park`. The other side performs the offer and wakes the task without handing over the
-monitor. A rendezvous is a channel of capacity 0: a send without a receiver always waits in
-`waitS`. Dead offers are removed when a queue is walked. An offer is dead when its task is in
-`Finished` or `Cancelled`.
-
-### 11.2. I/O
-
-`Poller` stores only a pointer to the platform hook. The descriptor registry and `poll` live in
-`LinConsole`: an array of 4096 entries, stdin as the first element, one-shot registration. Ready
-entries are removed before `Waiter.Ready` is called, so that a repeated registration does not
-disturb the walk.
-
-### 11.3. Worker Threads
-
-`AsyncWork` is the facade; `AsyncWorkLin` and `AsyncWorkWin` are the delegates. Linux: up to four
-pthreads, a static slot array under a mutex and a condition variable, a ring queue of 256 jobs, a
-byte in a pipe as the readiness signal. Windows: up to four `CreateThread` threads, slots under a
-`CRITICAL_SECTION`, a queue event; readiness is collected by a `Services` action that polls `done`
-every 5 ms.
-
-Synchronization primitives live in the heap, not in global module records: global records do not get
-guaranteed alignment, and futex and `CRITICAL_SECTION` require it.
-
-### 11.4. Computons
-
-`AsyncComputon` keeps up to 16 executors and up to 128 requests. A request (`Req`) stores a `tag`, a
-rank, a buffer, a task and a `Select` context. `Push` serializes the object through `Stores` into a
-temporary file and sends a frame. The response is read by the main loop: on Linux through `Poller`,
-on Windows by a `Services` action; `Pull` waits in `Tasks.Sleep(10)` with a deadline.
-
-`MarkDead` closes the dead executor's channel and retries its unfinished requests on a live one.
-`Resend` chooses the next live executor; if none is live, the request gets code `-2`. `Unload` sends
-kind `kindUnload` and waits for responses; the executor calls `Kernel.UnloadMod` and clears the
-pointer to the unloaded module object, so that the next collection does not dereference its method
-table.
-
-The MPI transport (`AsyncMpi`) loads `libbbmpi.so` through `LinDl` and binds seven functions. The
-controller checks response readiness with `MPI_Iprobe` from a `Services` action; the `WorkerLoop`
-executor receives frames on the stdin command and answers through MPI.
