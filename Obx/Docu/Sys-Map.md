@@ -95,3 +95,8 @@ ObxStm1  docu/sources		Retry: waiting for a condition over two variables
 ObxStm2  docu/sources		OrElse: pay with one card or the other
 ObxWork0  docu/sources		a blocking call on a worker thread
 ObxComputon  docu/sources		a computon executed in a separate process
+
+Content-Addressed Store
+ObxCas0  docu/sources		a block named by its hash: deduplication
+ObxCas1  docu/sources		cutting two nearly equal inputs by content
+ObxCas2  docu/sources		two authors publish change sets, one rebases
