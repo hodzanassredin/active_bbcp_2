@@ -391,6 +391,11 @@ child state 7
 тесты, которые хотят дождаться задач без главного цикла, вызывают `Step` в цикле, как примеры
 этого руководства.
 
+Ждать нельзя и внутри *неделимого участка* — между `BeginAtomic` и парным `EndAtomic`. Участок
+открывает транзакция `AsyncStm` (`Docu/ru/Async.md`, раздел «Транзакции»): её записи не должна
+увидеть другая задача, пока транзакция не кончилась. Ожидание на участке трапует 25 с текстом
+`Tasks: wait inside an atomic section`, `Step` — 22, точка уступки на участке не переключает.
+
 ## 6. Тупик
 
 Задачи ждут друг друга по кругу, или единственная задача ждёт `Unpark`, который никто не пошлёт.
@@ -498,10 +503,12 @@ DEFINITION Tasks;
 
 		Group = POINTER TO RECORD END;
 
+	PROCEDURE BeginAtomic;
 	PROCEDURE Cancel (t: Task);
 	PROCEDURE Count (): INTEGER;
 	PROCEDURE Current (): Task;
 	PROCEDURE Deadlocked (): BOOLEAN;
+	PROCEDURE EndAtomic;
 	PROCEDURE Failed (t: Task): BOOLEAN;
 	PROCEDURE GetName (t: Task; OUT s: ARRAY OF CHAR);
 	PROCEDURE GroupCount (g: Group): INTEGER;
@@ -538,7 +545,10 @@ END Tasks.
 Пред: вызов из задачи — 20
 Пред: задача не отменена — 127
 Пред: не идёт действие Services (кроме планировщика) и рассылка по домену — 21
+Пред: нет неделимого участка (BeginAtomic) — 25
 ```
+
+Ожидание монитора (вход в занятый монитор, `AWAIT`) проходит ту же проверку.
 
 `Sleep`, `Join` и `Park` повторяют проверку после пробуждения, поэтому отмена спящей или ждущей
 задачи прерывает её трапом 127.
@@ -649,6 +659,7 @@ NEW, ABSTRACT
 ```
 Пред: вызов вне задачи — 20
 Пред: Step сейчас не исполняется — 21
+Пред: нет неделимого участка — 22
 ```
 
 **PROCEDURE NextDeadline (): LONGINT**
@@ -686,6 +697,20 @@ NEW, ABSTRACT
 
 **PROCEDURE Count (): INTEGER**
 Число запущенных и ещё не убранных задач.
+
+**PROCEDURE BeginAtomic**
+Открывает неделимый участок; участки вкладываются.
+
+```
+Пост: до парного EndAtomic проверка ожидания трапует 25, Step — 22, точка уступки не переключает
+```
+
+**PROCEDURE EndAtomic**
+Закрывает неделимый участок.
+
+```
+Пред: участок открыт — 20
+```
 
 **PROCEDURE Deadlocked (): BOOLEAN**
 `TRUE`, если последний шаг нашёл тупик и напечатал журнал (раздел 6).

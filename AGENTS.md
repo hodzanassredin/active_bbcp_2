@@ -262,10 +262,12 @@ allowed for `Dev_dev*` modules: `FrameworkModule` compares the subsystem name ex
 
 ### Async Library
 
-The `Async` subsystem is built for AMD64 only; the core language extension works on i386.
+The `Async` subsystem is built for AMD64 only, except `AsyncStm`, which is also built for i386
+(`tools/build32.sh`); the core language extension works on i386.
 
 - `Async/Mod`: `AsyncOnce`, `AsyncChan` (`Chan`, `Buffer`, `Mailbox`), `AsyncSelect`
-  (`AltSend`/`AltRecv`/`AltTimeout`, `Select`), `AsyncProto`, `AsyncIO`.
+  (`AltSend`/`AltRecv`/`AltTimeout`, `Select`), `AsyncProto`, `AsyncIO`, `AsyncStm`
+  (transactions: `Atomically`, `Retry`, `OrElse`; it relies on `Tasks.BeginAtomic`).
 - `System/Mod/Poller.cp` is a readiness registry; `LinConsole.WaitInput` polls stdin and the
   registered descriptors with one `poll`.
 - `Async/Mod64/Work.cp` is the worker-pool facade; `AsyncWorkLin` (pthread, result pipe,
@@ -291,7 +293,7 @@ mouse is not emulated.
 `WinKernel` provides `AllocateStackMem` (`VirtualAlloc` + `PAGE_NOACCESS`), `Get/SetTryContext`
 and dynamic loading of libraries of interface modules. `tools/test-win64.sh` builds `@Win`, links
 the console PE (`WinIntInit`, with the subsystem patched to console) and runs `Unit_devMain`
-7/7, `System_devWinTasks` 5/5 and `Async_devWinWorkers` 4/4 under wine.
+7/7, `System_devWinTasks` 5/5, `Async_devWinWorkers` 4/4 and `Async_devStm` 20/20 under wine.
 
 ### Limitations
 

@@ -45,13 +45,13 @@ Pascal исполняет одна нить ОС, поэтому задача о
 выделений.
 
 Библиотека `Async` содержит канал-встречу, ограниченный буфер, почтовый ящик, однократную
-переменную, выбор `Select`, протокол диалога, ввод-вывод без блокировки, пул рабочих нитей и
+переменную, транзакции `AsyncStm`, выбор `Select`, протокол диалога, ввод-вывод без блокировки, пул рабочих нитей и
 компутоны с транспортами `pipe`, `tcp` и MPI. Тесты лежат в подсистеме `Unit` и в
 `<Подсистема>_dev`; примеры `Demo` переводят задачи Active Oberon и Go, `DemoAnts` моделирует
 муравейник.
 
-Ядро расширения работает на Linux AMD64 и i386. `Async` и примеры собираются для AMD64. Windows x64
-поддерживает задачи, мониторы и пул рабочих нитей.
+Ядро расширения работает на Linux AMD64 и i386. `Async` и примеры собираются для AMD64; транзакции
+`AsyncStm` — и для i386. Windows x64 поддерживает задачи, мониторы, транзакции и пул рабочих нитей.
 
 ## Сборка и запуск
 
@@ -82,7 +82,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `docs/adr/README.md` | записи решений: что рассматривали, что отвергли и почему |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
 | `Demo/Docu/Sys-Map.md` | карта примеров; описание каждого примера — `Demo/Docu/<Имя>.md` (`Ants`, `Barber`, `Boring`, `Buffer`, `Group`, `ModuleMonitor`, `Philo`, `PingPong`, `Pipeline`, `ReaderWriter`, `SelectTimeout`, `Sieve`, `WorkerPool`, `Support`) |
-| `Obx/Docu/ru/Sys-Map.md`, `Obx/Docu/Sys-Map.md` | раздел «Обзора на примерах» о задачах, мониторах и каналах: `ObxTasks0`–`ObxTasks4`, `ObxChan0`–`ObxChan2`, `ObxSelect0`, `ObxProto0`, `ObxOnce`, `ObxWork0`, `ObxComputon`; у каждого страница `Obx/Docu/ru/<Имя>.md` |
+| `Obx/Docu/ru/Sys-Map.md`, `Obx/Docu/Sys-Map.md` | раздел «Обзора на примерах» о задачах, мониторах и каналах: `ObxTasks0`–`ObxTasks4`, `ObxChan0`–`ObxChan2`, `ObxSelect0`, `ObxProto0`, `ObxOnce`, `ObxStm0`–`ObxStm2`, `ObxWork0`, `ObxComputon`; у каждого страница `Obx/Docu/ru/<Имя>.md` |
 | `AGENTS.md` | правила работы с репозиторием для агентов |
 
 ## Лицензия

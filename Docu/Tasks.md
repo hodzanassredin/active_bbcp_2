@@ -397,6 +397,12 @@ actions and the event loop: it did its work, posted an action, and waits again a
 and tests that want to wait for tasks without the main loop call `Step` in a loop, as the
 examples of this guide do.
 
+Waiting is also forbidden inside an *atomic section* — between `BeginAtomic` and the matching
+`EndAtomic`. The section is opened by an `AsyncStm` transaction (`Docu/Async.md`, section
+"Transactions"): no other task may see its writes until the transaction has ended. A wait inside the
+section traps 25 with the text `Tasks: wait inside an atomic section`, `Step` traps 22, and a yield
+point inside the section does not switch.
+
 ## 6. Deadlock
 
 Tasks wait for each other in a circle, or the only task waits for an `Unpark` nobody will send.
@@ -506,10 +512,12 @@ DEFINITION Tasks;
 
 		Group = POINTER TO RECORD END;
 
+	PROCEDURE BeginAtomic;
 	PROCEDURE Cancel (t: Task);
 	PROCEDURE Count (): INTEGER;
 	PROCEDURE Current (): Task;
 	PROCEDURE Deadlocked (): BOOLEAN;
+	PROCEDURE EndAtomic;
 	PROCEDURE Failed (t: Task): BOOLEAN;
 	PROCEDURE GetName (t: Task; OUT s: ARRAY OF CHAR);
 	PROCEDURE GroupCount (g: Group): INTEGER;
@@ -546,7 +554,10 @@ wait check":
 Pre: called from a task — 20
 Pre: the task is not cancelled — 127
 Pre: no Services action (other than the scheduler) and no domain broadcast is running — 21
+Pre: no atomic section (BeginAtomic) is open — 25
 ```
+
+A monitor wait (entry into a busy monitor, `AWAIT`) passes the same check.
 
 `Sleep`, `Join` and `Park` repeat the check after waking, so cancelling a sleeping or waiting task
 interrupts it with trap 127.
@@ -658,6 +669,7 @@ One scheduler step: wakes sleepers, executes ready tasks for at most 5 ms.
 ```
 Pre: called outside a task — 20
 Pre: Step is not executing now — 21
+Pre: no atomic section is open — 22
 ```
 
 **PROCEDURE NextDeadline (): LONGINT**
@@ -695,6 +707,20 @@ The upper limit is not checked here; a stack above 64 MB is rejected by `StartIn
 
 **PROCEDURE Count (): INTEGER**
 The number of tasks started and not yet removed.
+
+**PROCEDURE BeginAtomic**
+Opens an atomic section; sections nest.
+
+```
+Post: until the matching EndAtomic the wait check traps 25, Step traps 22, a yield point does not switch
+```
+
+**PROCEDURE EndAtomic**
+Closes an atomic section.
+
+```
+Pre: a section is open — 20
+```
 
 **PROCEDURE Deadlocked (): BOOLEAN**
 `TRUE` if the last step found a deadlock and printed the log (section 6).

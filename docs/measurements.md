@@ -286,7 +286,28 @@ echo 'DemoAnts.Bench' | tools/run64.sh
 tools/test-win64.sh
 ```
 
-Под wine идут `Unit_devMain` (4/4), `System_devWinTasks` (5/5) и `Async_devWinWorkers` (4/4).
+Под wine идут `Unit_devMain` (4/4), `System_devWinTasks` (5/5), `Async_devWinWorkers` (4/4) и
+`Async_devStm` (20/20).
 Тест медленного `Sleep(300)` в рабочей нити занимает 303 мс; файловый обмен — 5 мс;
 `getaddrinfo("localhost")` — 4 мс; тест `TestProcWorkers` подтверждает четыре нити пула. Нет
 wine — `SKIP`.
+
+## 11. Транзакции AsyncStm
+
+```sh
+echo 'UnitRunner.Run Async_devStm slow proc quit' | tools/run64.sh
+```
+
+`TestSlowBench` делает миллион переводов «два чтения, две записи» на главном стеке, AMD64, одна
+нить, машина на 24 ядра с загрузкой около 13; время — по `Kernel.Time`, с точностью до миллисекунды
+на миллион операций, то есть до 1 нс на операцию. Три прогона:
+
+| Строка `BENCH` | Как сделан перевод | нс на перевод |
+|---|---|---|
+| `stm-transfer` | `AsyncStm.Atomically`, две `IntVar` | 76–82 |
+| `plain-var-transfer` | те же `Get`/`Set` вне транзакции | 17–21 |
+| `monitor-transfer` | исключающая процедура над двумя полями | 62–72 |
+| `plain-transfer` | прямая запись в поля | ≤ 1 |
+
+Транзакция дороже исключающей процедуры примерно на 10 нс: `Kernel.Try` вокруг тела, две записи
+журнала и их очистка при фиксации. Чтение внутри транзакции стоит одного сравнения номера.

@@ -5,8 +5,8 @@ and has already read the guide to tasks (`Docu/Tasks.md`). The language part —
 `ACTIVE.AWAIT` and yield points — is defined in the language report (`Docu/Active-CP-Lang.md`).
 
 The library is written on the language extension and does not change the framework: framework
-modules are compiled without the yield key and do not wait. The subsystem is built for AMD64 only;
-tasks and monitors also work on i386. Every complete example of the guide lives in `Obx/Mod64` and
+modules are compiled without the yield key and do not wait. The subsystem is built for AMD64;
+tasks, monitors and `AsyncStm` transactions also work on i386. Every complete example of the guide lives in `Obx/Mod64` and
 runs with the command `Do`; each has its own page in `Obx/Docu`.
 
 ## 1. From Task to Channel
@@ -490,7 +490,222 @@ free. Reading an unfilled variable from the main stack is monitor trap 24: `AWAI
 Reading has no deadline; if a deadline is needed, the result is passed over a channel and awaited in
 a selection with a timeout.
 
-## 8. Non-Blocking I/O
+## 8. Transactions
+
+A task transfers money from account `a` to account `b`: it withdraws the sum from `a`, then
+deposits it to `b`. There is no switch point between the two actions, so other tasks do not see
+half a transfer. But a trap can happen between them — say, account `b` accepts no more than 150,
+and the limit check traps. The task dies, the sum is already withdrawn from `a` and deposited
+nowhere: the money is lost. A monitor does not help here: it excludes other tasks, and the trap
+happens in this one.
+
+A second task waits until the buyer's account holds the price and the shop opens. The account and
+the "open" flag are different objects with their own monitors. `ACTIVE.AWAIT` waits for a condition
+inside one monitor, and a condition over two objects cannot be expressed with it without merging
+both objects into one monitor.
+
+Both problems are solved by a *transaction* — the module `AsyncStm`. A transaction is an extension
+of `AsyncStm.Tx` with a method `Do`; the data of the transaction lie in the fields of the object,
+as the data of a task lie in the fields of `Tasks.Task`. `AsyncStm.Atomically(t)` executes `t.Do`
+so that the other tasks see either all of its writes or none. A transaction writes to
+*transactional variables*: `IntVar`, `BoolVar`, `RealVar`, `RefVar` (`ANYPTR`) or an own extension
+of `Var`. The first write to a variable inside a transaction puts its old value into the undo log,
+then changes the value in place. If `Do` traps, `Atomically` restores the values from the log and
+passes the trap to the caller with the same number. The transfer example:
+
+```
+MODULE ObxStm0;
+	IMPORT Tasks, AsyncStm, Console, Strings;
+
+	CONST limit = 150;	(* больше этого счёт b не принимает *)
+
+	TYPE
+		Transfer = POINTER TO RECORD (AsyncStm.Tx)
+			from, to: AsyncStm.IntVar; n: INTEGER
+		END;
+		Clerk = POINTER TO RECORD (Tasks.Task) END;
+
+	VAR a, b: AsyncStm.IntVar;
+
+	PROCEDURE (t: Transfer) Do;
+	BEGIN
+		t.from.Set(t.from.Get() - t.n);	(* снять *)
+		ASSERT(t.to.Get() + t.n <= limit, 30);	(* трап между «снять» и «зачислить» *)
+		t.to.Set(t.to.Get() + t.n)	(* зачислить *)
+	END Do;
+
+	PROCEDURE Move (n: INTEGER);
+		VAR t: Transfer;
+	BEGIN
+		NEW(t); t.from := a; t.to := b; t.n := n;
+		AsyncStm.Atomically(t)
+	END Move;
+
+	PROCEDURE (c: Clerk) Run;
+	BEGIN
+		Move(100); Move(100)
+	END Run;
+
+	PROCEDURE Show;
+		VAR s: ARRAY 16 OF CHAR;
+	BEGIN
+		Console.WriteStr("a = "); Strings.IntToString(a.Get(), s); Console.WriteStr(s);
+		Console.WriteStr(", b = "); Strings.IntToString(b.Get(), s); Console.WriteStr(s);
+		Console.WriteStr(", sum = "); Strings.IntToString(a.Get() + b.Get(), s); Console.WriteStr(s);
+		Console.WriteLn
+	END Show;
+
+	PROCEDURE Do*;
+		VAR c: Clerk;
+	BEGIN
+		a := AsyncStm.NewInt(300); b := AsyncStm.NewInt(0);
+		NEW(c); Tasks.Start(c);
+		WHILE Tasks.Count() > 0 DO Tasks.Step END;
+		IF Tasks.Failed(c) THEN Console.WriteStr("clerk trapped") ELSE Console.WriteStr("clerk done") END;
+		Console.WriteLn;
+		Show
+	END Do;
+
+END ObxStm0.
+```
+
+The command prints `clerk trapped` and `a = 200, b = 100, sum = 300`. The first transfer succeeded,
+the second trapped with code 30 after the withdrawal; `Atomically` restored 200 to `a`, and the sum
+did not change. A step-by-step walk-through is on the page `Obx/Docu/Stm0.md`.
+
+The undo log is chosen over deferred writes because of the cost of a read. With deferred writes the
+new value stays in the log until the end of the transaction, and every read first looks the variable
+up in the log, so that the transaction sees its own write. With an undo log the value is always in
+the variable itself, and a read costs one comparison. Deferred writes are needed where another
+thread may read the variable in the middle of a transaction; here nobody reads it, because there are
+no switch points inside a transaction. For the same reason transactions have nothing to collide
+on, and no version check at commit is needed.
+
+Waiting for a condition is given by `AsyncStm.Retry`. A transaction calls it when it is too early
+to go on. `Retry` rolls the transaction back, and `Atomically` puts the task to sleep until one of
+the variables the transaction has read changes; then `Do` is executed again. Every `Get` adds the
+variable to the read set, so the condition may cover any number of variables of different objects:
+
+```
+MODULE ObxStm1;
+	IMPORT Tasks, AsyncStm, Console, Strings;
+
+	CONST price = 250;
+
+	TYPE
+		Buy = POINTER TO RECORD (AsyncStm.Tx) tries: INTEGER END;
+		Buyer = POINTER TO RECORD (Tasks.Task) END;
+		Payroll = POINTER TO RECORD (Tasks.Task) END;
+		Opener = POINTER TO RECORD (Tasks.Task) END;
+
+	VAR
+		money: AsyncStm.IntVar;	(* счёт покупателя *)
+		open: AsyncStm.BoolVar;	(* магазин открыт *)
+
+	PROCEDURE Say (IN what: ARRAY OF CHAR; x: INTEGER);
+		VAR s: ARRAY 16 OF CHAR;
+	BEGIN
+		Strings.IntToString(x, s);
+		Console.WriteStr(what); Console.WriteStr(s); Console.WriteLn
+	END Say;
+
+	PROCEDURE (t: Buy) Do;
+	BEGIN
+		INC(t.tries);	(* обычное поле: откат его не трогает *)
+		IF (money.Get() < price) OR ~open.Get() THEN AsyncStm.Retry END;
+		money.Set(money.Get() - price)
+	END Do;
+
+	PROCEDURE (b: Buyer) Run;
+		VAR t: Buy;
+	BEGIN
+		NEW(t); t.tries := 0;
+		AsyncStm.Atomically(t);
+		Say("bought, money = ", money.Get());
+		Say("transaction ran times: ", t.tries)
+	END Run;
+
+	PROCEDURE (p: Payroll) Run;
+	BEGIN
+		Tasks.Sleep(10);
+		money.Set(money.Get() + 200);
+		Say("salary paid, money = ", money.Get())
+	END Run;
+
+	PROCEDURE (o: Opener) Run;
+	BEGIN
+		Tasks.Sleep(20);
+		open.Set(TRUE);
+		Console.WriteStr("shop opened"); Console.WriteLn
+	END Run;
+
+	PROCEDURE Do*;
+		VAR b: Buyer; p: Payroll; o: Opener;
+	BEGIN
+		money := AsyncStm.NewInt(100); open := AsyncStm.NewBool(FALSE);
+		NEW(b); NEW(p); NEW(o);
+		Tasks.Start(b); Tasks.Start(p); Tasks.Start(o);
+		WHILE Tasks.Count() > 0 DO Tasks.Step END
+	END Do;
+
+END ObxStm1.
+```
+
+The buyer wakes up twice: after the salary (300, the shop is closed — `Retry` again) and after the
+opening. The field `tries` shows that `Do` ran three times; it is an ordinary field, and rollback
+does not touch it. A write outside a transaction, like `money.Set` in the task `Payroll` here, is an
+ordinary write to the variable that wakes the transactions waiting for it. Forbidding it would gain
+nothing: between switch points such a write is indivisible anyway.
+
+Two ready transactions compose into one without opening them. A call of `Atomically` inside a
+transaction is part of the outer transaction: a transfer `Move(a, b)` and a transfer `Move(b, c)`
+called from one `Do` execute as one whole, and a trap in the second rolls back the first as well.
+`AsyncStm.OrElse(x, y)` executes `x`; if `x` called `Retry`, `OrElse` rolls back the writes of `x`
+and executes `y`. If both called `Retry`, the whole transaction waits — until a variable read in
+either branch changes. The example "pay with the first card, otherwise with the second" is
+`ObxStm2`, page `Obx/Docu/Stm2.md`.
+
+The first violation: a switch point inside a transaction. If `Do` calls `Tasks.Yield`,
+`Tasks.Sleep`, waits in a channel, enters a busy monitor or `AWAIT`, another task would see the
+writes of an unfinished transaction. For the time of `Do`, `Atomically` opens the atomic section
+`Tasks.BeginAtomic`; a wait inside it traps 25 with the text `Tasks: wait inside an atomic section`,
+a call of `Tasks.Step` traps 22. The writes are rolled back, trap 25 goes to the caller. A yield
+point `^` inside a transaction does not switch, as inside a monitor. Entering a free monitor is not
+a switch point, and it is allowed.
+
+The second violation: a `Retry` with nothing to wait for. A transaction that has read no variable
+would wait forever; `Atomically` traps 21 with the text `AsyncStm: Retry with nothing read`. Only a
+task can wait: `Retry` in a transaction on the main stack traps 22, `Retry` outside a transaction
+traps 20. If all tasks wait in `Retry` and there are no sleep deadlines, the scheduler detects the
+deadlock the same way as for monitors: it prints `Tasks: deadlock` and raises `Tasks.Deadlocked()`.
+
+The third violation: an action that cannot be rolled back. Rollback restores only transactional
+variables. Console output, a file write, a send to a channel or a mailbox, `Unpark`, ordinary fields
+of objects stay done, and with `Retry` they repeat on every execution of `Do`. The rule: inside a
+transaction read and write only transactional variables, and do an external action after
+`Atomically`, from the result that `Do` left in the fields of the object. The compiler does not
+check this; a waiting channel operation traps 25, a non-waiting one does not.
+
+An own variable is an extension of `AsyncStm.Var`. Its `Get` calls `AsyncStm.Read(v)` before the
+read, its `Set` calls `AsyncStm.Write(v)` before the write; the methods `Save` and `Load` copy the
+value into the record `AsyncStm.Saved` (fields `i`, `x`, `p`) and back. A record value is put into
+`p` as a copy allocated in `Save`.
+
+Cost. A transfer "two reads, two writes" as a transaction costs about 80 ns on AMD64, the same
+transfer through `IntVar` without a transaction about 20 ns, by an exclusive procedure over two
+fields about 65 ns, by direct writes to fields less than 1 ns (one thread, a million operations, a
+loaded machine; `docs/measurements.md`, section 11). A transaction is dearer than a monitor by
+`Kernel.Try` and the log; it pays off by rollback and by waiting on several objects, not by speed.
+A waiting task is registered only at the variables it has read and is removed from them on wake-up
+or cancellation; the log lives until the end of the transaction. A trap with a number greater than
+128 (a run-time error) reaches the caller as trap 128: `HALT` accepts numbers 0–128.
+
+Limits. A transaction is indivisible inside one BlackBox process, because it relies on one thread
+without preemption. Between BlackBox processes, between computons and between actors on different
+machines there is none: there a transfer is made by exchanging messages by the scheme "withdraw,
+deposit, give back on refusal", and the programmer writes the give-back.
+
+## 9. Non-Blocking I/O
 
 A server on BlackBox serves a hundred connections, one task per connection. A task reads a request
 from a socket. If it calls an ordinary blocking `read`, the whole thread stops, and with it the main
@@ -528,7 +743,7 @@ waiter gets readiness at once and repeats its attempt. The registry is built on 
 `select`, because `fd_set` is limited to 1024 descriptors. `CommTCP` for Linux works over IPv4 with
 an accept queue of 128 connections.
 
-## 9. Worker Threads
+## 10. Worker Threads
 
 Not every system call can avoid blocking. Resolving a host name (`getaddrinfo`), reading a file from a
 slow disk, calling an external library stop the thread, and they have no non-blocking variant. Such a
@@ -602,7 +817,7 @@ up to 127 bytes. A job makes one read or write call. `ResolveJob` counts the add
 return them. The test `Async_devWorkers` (`tools/test.sh Async_devWorkers`) gives a worker thread a
 300 ms job; the task waits for it about 301 ms, and the main loop manages 286 steps meanwhile.
 
-## 10. Computons
+## 11. Computons
 
 A computation splits into independent pieces, and the machine has many cores. BlackBox tasks run on
 one thread, and worker threads must not touch the heap. To compute Component Pascal code with `NEW`
@@ -613,7 +828,7 @@ A *computon* is an object that is sent to such a *worker* process, executed ther
 type extends `AsyncComputon.Computon` — a `Stores.Store` record with the abstract method `Do`. The
 type implements `Externalize` and `Internalize`, because the object travels in serialized form.
 
-### 10.1. Request and Reply
+### 11.1. Request and Reply
 
 `AsyncComputon.Start(n)` starts `n` workers, from 1 to 16. `Push(c, rank, tag)` serializes the
 computon `c` and sends it to the worker number `rank`; `tag` is the request number by which the reply
@@ -696,7 +911,7 @@ be parsed; −6 — the result does not serialize; 1 — a trap in `Do`; 20 — 
 unloading. `Push` with a negative `tag` traps with code 20 (negative numbers are reserved), with
 `rank` outside `0 .. Size() - 1` with code 21.
 
-### 10.2. Death of a Worker
+### 11.2. Death of a Worker
 
 A worker is a separate process, and it may die: a trap in kernel code, lack of memory, `kill`. The
 controller sees the death as end of file in the reply pipe. It repeats all unfinished requests of the
@@ -718,7 +933,7 @@ test `Async_devComputons` takes 415 ms against 11 ms for the computation without
 one. A module that is imported or has a frame on the stack cannot be unloaded: `Unload` returns
 `FALSE`, and `LastError()` returns 20.
 
-### 10.3. Transports
+### 11.3. Transports
 
 The transport is chosen before `Start` by `SetTransport` or the external variable `ASYNC_TRANSPORT`:
 
@@ -727,12 +942,12 @@ The transport is chosen before `Start` by `SetTransport` or the external variabl
   `blackbox-console`.
 - `tcp` — the controller listens on `127.0.0.1` on a free port, the worker connects to the address
   from the parameter `--ASYNC_TCP=…`.
-- `mpi` — the external transport `AsyncMpi` (section 10.4).
+- `mpi` — the external transport `AsyncMpi` (section 11.4).
 
 A frame consists of a 12-byte header (length, frame number, kind or code) and a body. The reply body
 over `pipe` and `tcp` is limited so that a result cannot exceed about 59,988 bytes.
 
-### 10.4. MPI
+### 11.4. MPI
 
 `AsyncMpi.Install()` loads the wrapper `libbbmpi.so` over MPICH and installs the transport. After
 `SetTransport("mpi")` the call `Start(n)` expects a world of exactly `n+1` ranks: rank 0 is the
@@ -742,7 +957,7 @@ MPI does not report the death of a rank (mpiexec usually kills the whole world),
 repeat here. `Unload` over MPI is not supported and returns `FALSE` with code −1; `WorkerPid` returns
 0, `WorkerDead` returns `TRUE`.
 
-### 10.5. The RobustParallel Facade
+### 11.5. The RobustParallel Facade
 
 The module `RobustParallel` of the subsystem `Robust` repeats the definition from the report by
 I. Denisov (2017, p. 19), so that programs written for that definition run on top of `AsyncComputon`:
@@ -770,9 +985,9 @@ it. In a worker process (`ASYNC_IN`, `ASYNC_OUT` or `ASYNC_TCP` is set) the faca
 pool. `Wait` does nothing: waiting is expressed in `Pull` and `Try`. `Unload` returns no result and
 prints a refusal to the console.
 
-## 11. Cost and Limits
+## 12. Cost and Limits
 
-The library is built for AMD64 only. Component Pascal code is run by one OS thread; worker threads
+The library is built for AMD64, the module `AsyncStm` also for i386. Component Pascal code is run by one OS thread; worker threads
 and computon processes do not touch the shared heap. So an operation on a channel between two switch
 points is indivisible without any lock: a channel takes its monitor only if some task already holds
 it.
@@ -790,14 +1005,14 @@ A blocking channel operation and a selection allocate no memory: wait records ar
 lists. The measured numbers and their conditions are collected in `docs/measurements.md`, sections 2
 and 5.
 
-## 12. Implementation
+## 13. Implementation
 
 This section describes how the behaviour of the previous sections is obtained; it does not define
 behaviour.
 
 This section does not define behaviour; it describes how the behaviour is obtained.
 
-### 12.1. Channel and Selection
+### 13.1. Channel and Selection
 
 `AsyncSelect.Core` is an extensible record with a kind, a capacity, a message queue and the heads of
 two offer queues (`waitS`, `waitR`). An offer (`Offer`) stores a common context `Ctx`, the index of
@@ -838,14 +1053,14 @@ monitor. A rendezvous is a channel of capacity 0: a send without a receiver alwa
 `waitS`. Dead offers are removed when a queue is walked. An offer is dead when its task is in
 `Finished` or `Cancelled`.
 
-### 12.2. I/O
+### 13.2. I/O
 
 `Poller` stores only a pointer to the platform hook. The descriptor registry and `poll` live in
 `LinConsole`: an array of 4096 entries, stdin as the first element, one-shot registration. Ready
 entries are removed before `Waiter.Ready` is called, so that a repeated registration does not
 disturb the walk.
 
-### 12.3. Worker Threads
+### 13.3. Worker Threads
 
 `AsyncWork` is the facade; `AsyncWorkLin` and `AsyncWorkWin` are the delegates. Linux: up to four
 pthreads, a static slot array under a mutex and a condition variable, a ring queue of 256 jobs, a
@@ -856,7 +1071,7 @@ every 5 ms.
 Synchronization primitives live in the heap, not in global module records: global records do not get
 guaranteed alignment, and futex and `CRITICAL_SECTION` require it.
 
-### 12.4. Computons
+### 13.4. Computons
 
 `AsyncComputon` keeps up to 16 executors and up to 128 requests. A request (`Req`) stores a `tag`, a
 rank, a buffer, a task and a `Select` context. `Push` serializes the object through `Stores` into a
@@ -873,14 +1088,42 @@ The MPI transport (`AsyncMpi`) loads `libbbmpi.so` through `LinDl` and binds sev
 controller checks response readiness with `MPI_Iprobe` from a `Services` action; the `WorkerLoop`
 executor receives frames on the stdin command and answers through MPI.
 
-## 13. Interface
+### 13.5. Transactions
+
+`AsyncStm` keeps the state of the current transaction in module variables: there is one
+transaction, because there are no switches inside it. The transaction number `rser` and the level
+number `wser` come from one counter. A variable remembers by which transaction it was read
+(`v.rser`) and by which level it was written (`v.wser`); a matching number spares the search in the
+read set and a second log entry.
+
+`Atomically` opens `Tasks.BeginAtomic` and executes `Do` under `Kernel.Try`. A normal end is the
+commit: the log is cleared, and the tasks waiting for the written variables are woken. A trap is
+rollback of the log from the end to the start and passing the number on through `HALT` with the
+same number (`HALT` accepts only a constant, so the number is chosen by a `CASE` statement).
+`Retry` is a trap too, but a quiet one: number 126 under `Kernel.SetQuiet`, without a kernel report;
+`Atomically` recognises it by `Kernel.err`.
+
+`OrElse` opens a new level: it remembers the log length and takes a new level number, so the first
+write in the branch puts into the log the value at the start of the branch. After a `Retry` of the
+branch the log is rolled back to the mark, and what the branch has read stays in the set — the wait
+covers both branches.
+
+A `Retry` wait is a record `Wait` (task, wake flag, array of read variables) entered into the list
+of waiters of each variable read. A write to the variable outside a transaction, or a commit, wakes
+everybody in its list and clears the list. The task sleeps in `Tasks.Park`; a wake-up without the
+flag is a foreign `Unpark`, it is given back to the task after the wait, as in `AsyncSelect`. On
+waking, the task removes itself from the lists of the other variables. `Wait` is a trap cleaner
+(`Kernel.PushTrapCleaner`), so cancellation in `Park` also removes the records, and the variable
+does not hold a cancelled task.
+
+## 14. Interface
 
 This section lists the module exports in the form of BlackBox documentation: a `DEFINITION` block,
 then a description of each procedure. A "Pre" line names a condition and the trap number on its
 violation. A condition marked "not checked" is not checked by the code; its violation gives an
 undefined result or a `NIL` dereference trap. A "Post" line names the state after return.
 
-### 13.1. AsyncSelect
+### 14.1. AsyncSelect
 
 ```
 DEFINITION AsyncSelect;
@@ -993,7 +1236,7 @@ once, unless `Disarm` is called first.
 Abstract method; `Select` calls it after the decision.
 Post: the signal owner no longer uses `ctx` from `Arm` and does not call `SignalReady` with it.
 
-### 13.2. AsyncChan
+### 14.2. AsyncChan
 
 ```
 DEFINITION AsyncChan;
@@ -1061,9 +1304,9 @@ The same as `AsyncSelect.SetProtocol`.
 **PROCEDURE RecvAlt (c: AsyncSelect.Core; OUT op: AsyncSelect.Op)**
 **PROCEDURE TimeoutAlt (ms: LONGINT; OUT op: AsyncSelect.Op)**
 **PROCEDURE Select (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER**
-The same as `AsyncSelect.AltSend`, `AltRecv`, `AltTimeout` and `Select` (section 13.1).
+The same as `AsyncSelect.AltSend`, `AltRecv`, `AltTimeout` and `Select` (section 14.1).
 
-### 13.3. AsyncOnce
+### 14.3. AsyncOnce
 
 ```
 DEFINITION AsyncOnce;
@@ -1107,7 +1350,7 @@ Waits for filling in `ACTIVE.AWAIT(o.done)`.
 Pre: waiting only from a task — monitor trap 24 if the variable is not filled.
 Post: `m` is the message from `FillMsg`; after `FillInt` it is `NIL`.
 
-### 13.4. AsyncProto
+### 14.4. AsyncProto
 
 ```
 DEFINITION AsyncProto;
@@ -1152,7 +1395,7 @@ text is in `LastViolation`. With `p = NIL` — `ok`.
 **PROCEDURE LastViolation (p: Protocol; OUT msg: Message)**
 Post: `msg` is the text of the last violation; `""` when `p = NIL`.
 
-### 13.5. AsyncIO
+### 14.5. AsyncIO
 
 ```
 DEFINITION AsyncIO;
@@ -1193,7 +1436,7 @@ Pre: waiting only from a task — trap 20 in `WaitFd` or `Tasks.Sleep`.
 Post: `TRUE` — `s` is the accepted connection; `FALSE` — `timeout` ms expired, `s = NIL`. With
 `timeout < 0` there is no deadline.
 
-### 13.6. AsyncWork
+### 14.6. AsyncWork
 
 ```
 DEFINITION AsyncWork;
@@ -1295,9 +1538,9 @@ Post: the tasks whose jobs are done are woken.
 **PROCEDURE ResolveJob (arg: SYSTEM.ADDRESS)**
 Jobs for a worker thread; `arg` is the address of a `FileReq` or an `AddrReq`.
 Pre: a delegate is installed — trap 21.
-Post: the job status is in the record field `status` (codes in section 9).
+Post: the job status is in the record field `status` (codes in section 10).
 
-### 13.7. AsyncComputon
+### 14.7. AsyncComputon
 
 ```
 DEFINITION AsyncComputon;
@@ -1350,7 +1593,7 @@ DEFINITION AsyncComputon;
 END AsyncComputon.
 ```
 
-The `LastError` codes are listed in section 10.1. `Transport`, `SetTransportObject`, `MarkDead`,
+The `LastError` codes are listed in section 11.1. `Transport`, `SetTransportObject`, `MarkDead`,
 `DeliverFrame`, `RunDo`, `Serialize` and `Deserialize` serve the transports and the executor.
 
 **PROCEDURE Start (n: INTEGER)**
@@ -1396,7 +1639,7 @@ code of the last error.
 **PROCEDURE SetHook (h: Hook)**, **LogMsg (IN msg)**, **Wait**
 Install the error handler, write a line to the console; `Wait` does nothing.
 
-### 13.8. AsyncMpi
+### 14.8. AsyncMpi
 
 ```
 DEFINITION AsyncMpi;
@@ -1422,3 +1665,126 @@ Post: the MPI rank and world size; before initialization −1 and 0.
 **PROCEDURE WorkerLoop**
 Entry point of an executor process of rank greater than 0.
 
+### 14.9. AsyncStm
+
+```
+DEFINITION AsyncStm;
+
+	TYPE
+		Saved = RECORD
+			i: LONGINT;
+			x: REAL;
+			p: ANYPTR
+		END;
+
+		Var = POINTER TO ABSTRACT RECORD
+			(v: Var) Save- (OUT s: Saved), NEW, ABSTRACT;
+			(v: Var) Load- (IN s: Saved), NEW, ABSTRACT
+		END;
+
+		IntVar = POINTER TO RECORD (Var)
+			(v: IntVar) Get (): INTEGER, NEW;
+			(v: IntVar) Set (x: INTEGER), NEW
+		END;
+
+		BoolVar = POINTER TO RECORD (Var)
+			(v: BoolVar) Get (): BOOLEAN, NEW;
+			(v: BoolVar) Set (x: BOOLEAN), NEW
+		END;
+
+		RealVar = POINTER TO RECORD (Var)
+			(v: RealVar) Get (): REAL, NEW;
+			(v: RealVar) Set (x: REAL), NEW
+		END;
+
+		RefVar = POINTER TO RECORD (Var)
+			(v: RefVar) Get (): ANYPTR, NEW;
+			(v: RefVar) Set (x: ANYPTR), NEW
+		END;
+
+		Tx = POINTER TO ABSTRACT RECORD
+			(t: Tx) Do-, NEW, ABSTRACT
+		END;
+
+	PROCEDURE Atomically (t: Tx);
+	PROCEDURE Retry;
+	PROCEDURE OrElse (a, b: Tx);
+	PROCEDURE Read (v: Var);
+	PROCEDURE Write (v: Var);
+	PROCEDURE NewInt (x: INTEGER): IntVar;
+	PROCEDURE NewBool (x: BOOLEAN): BoolVar;
+	PROCEDURE NewReal (x: REAL): RealVar;
+	PROCEDURE NewRef (x: ANYPTR): RefVar;
+
+END AsyncStm.
+```
+
+The methods `Save`, `Load` and `Do` are exported for implementation only: an extension writes them,
+`AsyncStm` itself calls them. The module is also built for i386.
+
+**TYPE Tx**
+ABSTRACT
+The body of a transaction; the data are in the fields of the extension.
+
+**PROCEDURE (t: Tx) Do**
+NEW, ABSTRACT
+The actions of the transaction. Executed from `Atomically` or `OrElse`.
+
+**PROCEDURE Atomically (t: Tx)**
+Executes `t.Do` indivisibly; inside a transaction, as its part.
+
+```
+Pre: t # NIL — 20
+Pre: Retry only after reading a variable — 21
+Pre: Retry only in a task — 22
+Pre: no switch point in t.Do — 25 (Tasks), no Tasks.Step — 22 (Tasks)
+Post: the writes of t.Do are visible; on a trap in t.Do the writes are rolled back, the trap is
+	passed on with the same number (a number greater than 128 as 128)
+```
+
+**PROCEDURE Retry**
+Rolls the transaction back; `Atomically` waits until a variable read changes and executes the
+transaction again.
+
+```
+Pre: a transaction is running — 20
+Post: does not return
+```
+
+**PROCEDURE OrElse (a, b: Tx)**
+Executes `a`; if `a` called `Retry`, rolls back its writes and executes `b`. Outside a transaction,
+as a separate transaction.
+
+```
+Pre: a # NIL — 20
+Pre: b # NIL — 21
+Post: a or b executed; a Retry in b waits until a variable read by a or b changes
+```
+
+**PROCEDURE Read (v: Var)**
+Called from `Get` of an extension of `Var` before the value is read.
+
+```
+Pre: v # NIL — 20
+Post: inside a transaction v is in the read set
+```
+
+**PROCEDURE Write (v: Var)**
+Called from `Set` of an extension of `Var` before the value is changed.
+
+```
+Pre: v # NIL — 20
+Post: inside a transaction the old value of v is in the undo log; outside a transaction the tasks
+	waiting for v in Retry are woken
+```
+
+**PROCEDURE (v: Var) Save (OUT s: Saved)**, **Load (IN s: Saved)**
+NEW, ABSTRACT
+A copy of the value into the log and back. A record value is put into `s.p` as a copy.
+
+**PROCEDURE NewInt (x: INTEGER): IntVar**, **NewBool**, **NewReal**, **NewRef**
+Post: a variable with the value `x`.
+
+**PROCEDURE (v: IntVar) Get (): INTEGER**, **Set (x: INTEGER)** and the same for `BoolVar`, `RealVar`,
+`RefVar`
+`Get` is `Read(v)` and the value; `Set` is `Write(v)` and the store of the value.
