@@ -208,11 +208,6 @@ MODULE Async_devStacks;
 		W("BENCH fib30 ms="); N((System_devClock.now() - t0) DIV 1000000); W(" x="); N(x); Console.WriteLn
 	END Calls;
 
-	PROCEDURE Mass1 (n, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
-	BEGIN
-		MassDir(Tasks.NewDenseDir(reserve), n, size, reserve, tag)
-	END Mass1;
-
 	PROCEDURE MassDir (d: Tasks.StackDir; n, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
 		VAR i: INTEGER; t: Once; old: Tasks.StackDir; t0, t1, t2, t3, r0, r1, r2, vmas: LONGINT;
 	BEGIN
@@ -234,6 +229,11 @@ MODULE Async_devStacks;
 		W(" runMs="); N((t2 - t3) DIV 1000000); W(" rssAfterMB="); N((r2 - r0) DIV (1024 * 1024)); Console.WriteLn;
 		Tasks.SetStackDir(old)
 	END MassDir;
+
+	PROCEDURE Mass1 (n, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
+	BEGIN
+		MassDir(Tasks.NewDenseDir(reserve), n, size, reserve, tag)
+	END Mass1;
 
 	PROCEDURE Mass100k4*;
 	BEGIN Mass1(100000, 4096, 2048, "mass100k-4k")

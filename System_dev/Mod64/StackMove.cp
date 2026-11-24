@@ -293,31 +293,34 @@ MODULE System_devStackMove;
 	(* --- замеры ------------------------------------------------------------ *)
 
 	PROCEDURE Cost*;
-	(** Цена переноса от глубины: задача с начальным стеком s уходит на глубину d кадров
-		по 100 байт; время задачи минус время той же задачи со стеком, где переноса нет. *)
+	(** Цена переноса от глубины: задача с начальным стеком d уходит на глубину C.depth кадров
+		по 100 байт; время задачи минус время той же задачи со стеком 1 МБ (переноса нет).
+		Поставщик всё время один (Stackmove.Dir): его пул не опустошается между задачами. *)
 		VAR d, k, rep, m: INTEGER; t0, tm, tb: LONGINT; v: C.VarT;
 	BEGIN
 		Stackmove.compare := FALSE;
 		FOR m := 1 TO 2 DO
+			Stackmove.SetMode(m);
 			d := 4096;
 			WHILE d <= 256 * 1024 DO
 				tm := 0; tb := 0; rep := 200;
+				NEW(v); Tasks.SetStackSize(v, d); Tasks.Start(v); Pump;	(* прогрев пула *)
+				Stackmove.Reset;
 				FOR k := 1 TO rep DO
-					Stackmove.SetMode(m);
 					NEW(v); Tasks.SetStackSize(v, d); Tasks.Start(v);
-					Stackmove.Reset; t0 := System_devClock.now(); Pump; tm := tm + System_devClock.now() - t0;
-					Stackmove.Off;
+					t0 := System_devClock.now(); Pump; tm := tm + System_devClock.now() - t0;
 					NEW(v); Tasks.SetStackSize(v, 1024 * 1024); Tasks.Start(v);
 					t0 := System_devClock.now(); Pump; tb := tb + System_devClock.now() - t0
 				END;
-				W("BENCH move mode="); N(m); W(" start="); N(d); W(" movesPerTask="); N(Stackmove.moves);
-				W(" bytesPerTask="); N(Stackmove.bytesCopied);
+				W("BENCH move mode="); N(m); W(" start="); N(d); W(" movesPerTask="); N(Stackmove.moves DIV rep);
+				W(" bytesPerMove="); N(Stackmove.bytesCopied DIV MAX(1, Stackmove.moves));
 				W(" cycTotalPerMove="); N(Stackmove.cycTotal DIV MAX(1, Stackmove.moves));
-				W(" cycAllocPerMove="); N(Stackmove.cycAlloc DIV MAX(1, Stackmove.moves));
+				W(" cycMapsAllocPerMove="); N(Stackmove.cycAlloc DIV MAX(1, Stackmove.moves));
 				W(" cycWalkPerMove="); N(Stackmove.cycWalk DIV MAX(1, Stackmove.moves));
 				W(" nsPerTaskExtra="); N((tm - tb) DIV rep); Console.WriteLn;
 				d := d * 4
-			END
+			END;
+			Stackmove.Off
 		END;
 		Stackmove.compare := TRUE
 	END Cost;

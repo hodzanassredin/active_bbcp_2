@@ -304,6 +304,21 @@ printf 'Async_devStacks.Mass1m4\n' | tools/run64.sh
 отображений, 2,0 с; 1 млн со стеком 8 КБ — 3,61 с, 8,2 ГБ, 1,9 с. Разбор — `docs/stacks-study.md`,
 раздел 6.5.
 
+### 2.7. Растущие стеки
+
+```sh
+tools/go64.sh 'Async_devStacks%' 'System_devStackMoveCode%' 'System_devStackMoveSys%' System_devStackMove
+printf 'System_devStackMove.Cost\n' | tools/run64.sh
+printf 'Async_devStacks.MassGrow1m\n' | tools/run64.sh    # против Async_devStacks.Mass1m8
+```
+
+Пять попеременных прогонов, load average 0,46–1,24 (25.11.2026), медиана. Перенос стека задачи
+(`Stackmove`, точный способ): старт 4 КБ, два переноса по 7,2 КБ — 13,2 мкс на задачу (было 40 мкс);
+старт 16 КБ, один перенос 13 КБ — 10,7 мкс. Растущие стеки 4 КБ против плотных 8 КБ с запасом 2 КБ и
+Go: 100 тыс. задач — создание 189 / 303 / 97 мс, память 428 / 819 / 139 МБ; 1 млн — 1,87 / 3,02 /
+0,79 с, 4,27 / 8,18 / 0,32 ГБ. Общие замеры с ключом `%` на всём дереве в разбросе; код больше на
+5,5 %. Разбор — `docs/stack-copy-study.md`, раздел 9.
+
 ## 3. Рабочие нити
 
 ```sh
