@@ -1,35 +1,32 @@
-# DemoWorkerPool — worker pool
+# DemoWorkerPool — пул рабочих
 
-## Source
-
-gobyexample "Worker Pools":
+gobyexample «Worker Pools»:
 
 <https://gobyexample.com/worker-pools>
 
-The Go version has a `jobs` channel, a `results` channel and several
-worker goroutines; each worker is stopped by a sentinel.
+В версии на Go есть канал `jobs`, канал `results` и несколько горутин-рабочих; каждый рабочий
+останавливается признаком конца.
 
-## Translation
+## Перевод
 
-The jobs channel is a bounded `AsyncChan.Buffer(3)`, the results
-channel is an unbounded `AsyncChan.Mailbox` (so workers never block on
-results). Three worker tasks square a number, a controller task sends
-nine jobs and three sentinels and then collects nine results. The
-order of the results is not fixed; their sum is.
+Канал заданий — ограниченный `AsyncChan.Buffer(3)`, канал результатов — неограниченный
+`AsyncChan.Mailbox` (рабочие никогда не ждут на результатах). Три задачи-рабочих возводят число
+в квадрат, задача-управляющий посылает девять заданий и три признака конца, затем собирает девять
+результатов. Порядок результатов не фиксирован; сумма — да.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoWorkerPool.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoWorkerPool: workers=3 count=9 sum=285
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcWorkerPool` checks three workers, nine results and
+`Demo_devExamples.TestProcWorkerPool` проверяет трех рабочих, девять результатов и
 1²+…+9² = 285.

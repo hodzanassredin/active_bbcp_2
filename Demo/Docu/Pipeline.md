@@ -1,40 +1,33 @@
-# DemoPipeline — pipeline with fan-out and fan-in
+# DemoPipeline — конвейер с fan-out и fan-in
 
-## Source
-
-Sameer Ajmani, *Go Concurrency Patterns: Pipelines and Cancellation*,
-Go Blog, 2014:
+Sameer Ajmani, *Go Concurrency Patterns: Pipelines and Cancellation*, Go Blog, 2014:
 
 <https://go.dev/blog/pipelines>
 
-and Rob Pike's fan-in slide:
+и слайд Rob Pike о fan-in:
 
 <https://go.dev/talks/2012/concurrency.slide#33>
 
-The Go version connects goroutines with channels: generator → square →
-fan-out to two workers → fan-in.
+Версия на Go соединяет горутины каналами: генератор → квадрат → fan-out на двух рабочих → fan-in.
 
-## Translation
+## Перевод
 
-Every stage is a `Tasks.Task`; channels are `AsyncChan.Chan` rendezvous
-channels. The end of a stream is an `IntMsg` with `n = -1` (there is no
-`close`). The dispatcher distributes the numbers round-robin; two
-merger tasks add the results into shared counters. The order of the
-results is not fixed, the sum is.
+Каждая стадия — `Tasks.Task`; каналы — встречи `AsyncChan.Chan`. Конец потока — `IntMsg` с
+`n = -1` (закрытия канала нет). Диспетчер раздаёт числа по кругу; две задачи-объединителя
+складывают результаты в общие счётчики. Порядок результатов не фиксирован, сумма — да.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoPipeline.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoPipeline: count=10 sum=385
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcPipeline` checks 10 results and
-1²+…+10² = 385.
+`Demo_devExamples.TestProcPipeline` проверяет 10 результатов и 1²+…+10² = 385.

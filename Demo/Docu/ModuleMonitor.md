@@ -1,9 +1,7 @@
-# DemoModuleMonitor — producer/consumer on a module monitor
+# DemoModuleMonitor — производитель-потребитель на мониторе модуля
 
-## Source
-
-The producer/consumer example with `{EXCLUSIVE}` procedures from the ETH
-*System Construction* course:
+Пример производителя и потребителя с процедурами `{EXCLUSIVE}` из курса ETH *System
+Construction*:
 
 <https://lec.inf.ethz.ch/syscon/2019/download/syscon06.pdf>
 
@@ -13,27 +11,26 @@ BEGIN {EXCLUSIVE} AWAIT(free # 0); DEC(free);
 	buf[tail] := x; tail := (tail + 1) MOD N; INC(available) END;
 ```
 
-## Translation
+## Перевод
 
-The procedures are top-level procedures of the module, marked
-`[exclusive]`. All `[exclusive]` top-level procedures of a module share
-one hidden monitor object — the **module monitor** — so `Produce` and
-`Consume` mutually exclude each other without any explicit `Lock`.
-Three producers and three consumers move 40 items each.
+Процедуры — процедуры верхнего уровня модуля, помеченные `[exclusive]`. Все исключающие
+процедуры модуля разделяют один скрытый объект — **монитор модуля**, поэтому `Produce` и
+`Consume` взаимно исключаются без явного `Lock`. Три производителя и три потребителя двигают по
+40 элементов.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoModuleMonitor.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoModuleMonitor: produced=120 consumed=120 sum=7260
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcModuleMonitor` checks 120 produced, 120 consumed,
-sum 7260 and no traps.
+`Demo_devExamples.TestProcModuleMonitor` проверяет 120 произведённых, 120 потреблённых, сумму
+7260 и отсутствие трапов.

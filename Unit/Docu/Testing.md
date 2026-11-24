@@ -68,8 +68,8 @@ subsystems; tests are built on demand by `tools/unit.sh`.
 8. **Temporary files.** `UnitRunner.TempDir` returns `UnitTmp`. The
    BlackBox process has no portable `mkdir`; the external launcher
    (`tools/unit.sh`) creates and removes the directory.
-9. **A defect test is red first.** Mention “was red” in the change
-   description.
+9. **A defect test fails first.** Make sure the test fails on the old
+   code and passes on the new one.
 10. **One behaviour — one test.** Name says what is checked:
     `TestDeleteOutOfRangeTraps`, not `Test3`.
 11. **A test requires no changes to the module under test or the

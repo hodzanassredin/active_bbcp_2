@@ -1,38 +1,33 @@
-# DemoSieve — sieve of Eratosthenes on channels
+# DemoSieve — решето Эратосфена на каналах
 
-## Source
-
-Rob Pike, *Go Concurrency Patterns* (Google, 2012), "Sieve of
-Eratosthenes": every stage receives the first number as a prime and
-passes on the numbers not divisible by it.
+Rob Pike, *Go Concurrency Patterns* (Google, 2012), «Sieve of Eratosthenes»: каждая стадия
+получает первое число как простое и передаёт дальше числа, не делящиеся на него.
 
 <https://go.dev/talks/2012/concurrency.slide#48>
 
-The same algorithm in Active Oberon is appendix C.2 of P. Reali,
-*Active Oberon Language Report* — there the stages are active objects
-connected by bounded buffers. This example follows the Go structure,
-where the stages are tasks and the channels are rendezvous.
+Тот же алгоритм в Active Oberon — приложение C.2 P. Reali, *Active Oberon Language Report*; там
+стадии — активные объекты, соединённые ограниченными буферами. Этот пример следует структуре Go:
+стадии — задачи, каналы — встречи.
 
-## Translation
+## Перевод
 
-A `Sieve` task receives its first number, records it as a prime,
-creates the next `Sieve` with a fresh channel, and forwards every
-number not divisible by its prime. The sentinel `-1` travels to the end
-of the chain and stops every stage. The generator sends 2…99.
+Задача `Sieve` получает первое число, запоминает его как простое, создаёт следующую `Sieve` со
+свежим каналом и передаёт дальше каждое число, не делящееся на её простое. Признак `-1` идёт до
+конца цепочки и останавливает каждую стадию. Генератор посылает 2…99.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoSieve.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoSieve: primes=25 sum=1060 max=97
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcSieve` checks 25 primes, sum 1060, largest 97 and
-no traps.
+`Demo_devExamples.TestProcSieve` проверяет 25 простых, сумму 1060, наибольшее 97 и отсутствие
+трапов.

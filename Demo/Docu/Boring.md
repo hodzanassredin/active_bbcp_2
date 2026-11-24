@@ -1,40 +1,33 @@
-# DemoBoring — boring generator and multiplexer
+# DemoBoring — генератор и мультиплексор
 
-## Source
-
-Rob Pike, *Go Concurrency Patterns* (Google, 2012), the "boring"
-generator and the multiplexer (fan-in):
+Rob Pike, *Go Concurrency Patterns* (Google, 2012): генератор «boring» и мультиплексор (fan-in).
 
 <https://go.dev/talks/2012/concurrency.slide#25>
 
 <https://go.dev/talks/2012/concurrency.slide#30>
 
-In Go the multiplexer is a `select` over two input channels.
+В Go мультиплексор — это `select` по двум входным каналам.
 
-## Translation
+## Перевод
 
-Two generator tasks send eight numbered messages each and then a
-sentinel. The multiplexer task rebuilds two receive alternatives on
-every iteration and calls `AsyncChan.Select`; it counts the messages
-from each generator and stops after both sentinels. This example
-exercised a defect in `AsyncSelect.Select` (a decision on the first
-channel while the selecting task waited for the monitor of the second
-channel); the fix is in `Async/Mod/Select.cp` and the regression test is
-`Async_devChannels.TestProcSelectWhileMonitorWait`.
+Две задачи-генератора посылают по восемь пронумерованных сообщений и затем признак конца.
+Задача-мультиплексор на каждой итерации строит два предложения приёма и вызывает
+`AsyncChan.Select`; она считает сообщения от каждого генератора и останавливается после двух
+признаков конца.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoBoring.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoBoring: messages=16 fromA=8 fromB=8
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcBoring` checks 16 messages, 8 from each generator
-and no traps.
+`Demo_devExamples.TestProcBoring` проверяет 16 сообщений, по 8 от каждого генератора, и
+отсутствие трапов.

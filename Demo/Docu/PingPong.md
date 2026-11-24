@@ -1,32 +1,28 @@
-# DemoPingPong — ping-pong over one channel
+# DemoPingPong — пинг-понг через один канал
 
-## Source
-
-Rob Pike, *Go Concurrency Patterns* (Google, 2012), the ping-pong
-example: two goroutines exchange a ball over a shared channel.
+Rob Pike, *Go Concurrency Patterns* (Google, 2012), пример ping-pong: две горутины обмениваются
+мячом через общий канал.
 
 <https://go.dev/talks/2012/concurrency.slide#14>
 
-## Translation
+## Перевод
 
-The two goroutines are `Tasks.Task` objects. The ball is an
-`AsyncSelect.Msg` (a pointer to an extensible record) and the table is
-an `AsyncChan.Chan` — a rendezvous, so every send waits for the receive.
-A ball with `n = -1` ends the game. A new message is allocated for each
-throw; a message is never modified after sending.
+Две горутины — объекты `Tasks.Task`. Мяч — `AsyncSelect.Msg` (указатель на расширяемую запись), а
+стол — `AsyncChan.Chan`, то есть встреча: каждая отправка ждёт приёма. Мяч с `n = -1` завершает
+игру. На каждый бросок выделяется новое сообщение; после отправки сообщение не меняется.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoPingPong.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoPingPong: hits=10 sum=45
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcPingPong` checks 10 hits and the sum 0+…+9 = 45.
+`Demo_devExamples.TestProcPingPong` проверяет 10 ударов и сумму 0+…+9 = 45.

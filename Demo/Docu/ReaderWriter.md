@@ -1,43 +1,40 @@
-# DemoReaderWriter — readers and writers
+# DemoReaderWriter — читатели и писатели
 
-## Source
-
-P. Reali, *Active Oberon Language Report*, ETH Zurich, 27 October 2004,
-appendix B.1 "Readers and Writers".
+P. Reali, *Active Oberon Language Report*, ETH Zurich, 27 октября 2004, приложение B.1 «Readers and
+Writers».
 
 <https://oberoncore.ru/_media/wiki/lang/reali_p.active_oberon_language_report.en.pdf>
 
-The original monitor state is:
+Состояние монитора в оригинале:
 
 ```
-n = 0  empty
-n < 0  n writers
-n > 0  n readers
+n = 0  пусто
+n < 0  n писателей
+n > 0  n читателей
 ```
 
-with `EnterReader` waiting for `n >= 0`, `EnterWriter` for `n = 0`.
+`EnterReader` ждёт `n >= 0`, `EnterWriter` — `n = 0`.
 
-## Translation
+## Перевод
 
-`{EXCLUSIVE}` became `[exclusive]`. The demonstration adds
-instrumentation (`readersInside`, `writersInside`, `Bad`) around the
-critical section: a reader that sees a writer inside, or a writer that
-sees a reader inside, increments `Bad`. Three readers make five passes
-and two writers make three passes.
+`{EXCLUSIVE}` стал `[exclusive]`. Демонстрация добавляет измерения (`readersInside`,
+`writersInside`, `Bad`) вокруг критической секции: читатель, увидевший внутри писателя, или
+писатель, увидевший читателя, увеличивает `Bad`. Три читателя делают по пять проходов, два
+писателя — по три.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoReaderWriter.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoReaderWriter: reads=15 writes=6 bad=0
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcReadersWriters` checks 15 reads, 6 writes, no
-overlap and no traps.
+`Demo_devExamples.TestProcReadersWriters` проверяет 15 чтений, 6 записей, отсутствие пересечения
+и трапов.

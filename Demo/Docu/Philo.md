@@ -1,41 +1,36 @@
-# DemoPhilo — dining philosophers
+# DemoPhilo — обедающие философы
 
-## Source
-
-P. Reali, *Active Oberon Language Report*, ETH Zurich, 27 October 2004,
-appendix C.1 "Dining Philosophers" and B.4 "Binary and Generic
-Semaphores".
+P. Reali, *Active Oberon Language Report*, ETH Zurich, 27 октября 2004, приложение C.1 «Dining
+Philosophers» и B.4 «Binary and Generic Semaphores».
 
 <https://oberoncore.ru/_media/wiki/lang/reali_p.active_oberon_language_report.en.pdf>
 
-The original uses an active object with a `{ACTIVE} LOOP` body and
-binary semaphores implemented with `AWAIT`:
+В оригинале активный объект с телом `{ACTIVE} LOOP` и бинарные семафоры на `AWAIT`:
 
 ```
 PROCEDURE P*; BEGIN {EXCLUSIVE} AWAIT(~taken); taken := TRUE END P;
 PROCEDURE V*; BEGIN {EXCLUSIVE} taken := FALSE END V;
 ```
 
-## Translation
+## Перевод
 
-The active body became the `Run` method of a `Tasks.Task`; `Sem` is a
-record with `[exclusive]` methods `P` and `V`. The original asymmetric
-fork order is preserved: philosopher `N-1` takes fork 0 first, so the
-circular wait is broken. `Think` and `Eat` are `Tasks.Yield` points.
+Активное тело стало методом `Run` задачи `Tasks.Task`; `Sem` — запись с исключающими методами
+`P` и `V`. Исходный асимметричный порядок вилок сохранён: философ `N-1` берёт вилку 0 первой,
+поэтому круговое ожидание разорвано. `Think` и `Eat` — точки `Tasks.Yield`.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoPhilo.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoPhilo: eaten=15
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcPhilosophers` checks five philosophers × three
-meals = 15 and no traps.
+`Demo_devExamples.TestProcPhilosophers` проверяет пять философов по три обеда = 15 и отсутствие
+трапов.

@@ -1,40 +1,37 @@
-# DemoSelectTimeout — select with a timeout
+# DemoSelectTimeout — выбор с тайм-аутом
 
-## Source
-
-*Tour of Go*, "Select" and "Default Selection":
+*Tour of Go*, «Select» и «Default Selection»:
 
 <https://go.dev/tour/concurrency/5>
 
-and gobyexample "Timeouts":
+и gobyexample «Timeouts»:
 
 <https://gobyexample.com/timeouts>
 
-In Go the timeout is `case <-time.After(d)` in a `select`.
+В Go тайм-аут — это `case <-time.After(d)` внутри `select`.
 
-## Translation
+## Перевод
 
-`AsyncChan.Select` takes an array of alternatives. A receive is
-`AsyncChan.RecvAlt`, a timeout is `AsyncChan.TimeoutAlt`; `Select`
-returns the index of the alternative that fired and the received
-message is in `ops[i].got`. The example checks both cases:
+`AsyncChan.Select` принимает массив альтернатив. Приём — `AsyncChan.RecvAlt`, тайм-аут —
+`AsyncChan.TimeoutAlt`; `Select` возвращает индекс сработавшей альтернативы, принятое сообщение
+лежит в `ops[i].got`. Пример проверяет оба случая:
 
-1. no sender — the 30 ms timeout wins (index 1);
-2. a sender after 5 ms — the receive wins (index 0, value 42).
+1. отправителя нет — побеждает тайм-аут 30 мс (индекс 1);
+2. отправитель появляется через 5 мс — побеждает приём (индекс 0, значение 42).
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoSelectTimeout.Run' | tools/run64.sh
 ```
 
-Output (times vary within a few milliseconds):
+Вывод (время меняется в пределах нескольких миллисекунд):
 
 ```
 DemoSelectTimeout: timeoutIdx=1 timeoutMs=30 gotIdx=0 gotMs=5 value=42
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcSelectTimeout` checks the indices, the value 42 and
-that the timeout waited at least 20 ms.
+`Demo_devExamples.TestProcSelectTimeout` проверяет индексы, значение 42 и то, что тайм-аут ждал
+не меньше 20 мс.

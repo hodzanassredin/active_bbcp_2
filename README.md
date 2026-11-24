@@ -1,70 +1,79 @@
 # Active BlackBox
 
-Fork of [BlackBox Cross-Platform](https://github.com/bbcb/bbcp) (Component Pascal) that adds tasks with their
-own stacks, Active Oberon style monitors and an `Async` library of channels. Based on the 64-bit GTK4 snapshot
-DIA261123 by Ivan Denisov. Documentation is mostly in Russian.
+BlackBox Component Builder 2.0 для Linux x86-64 с расширением языка Active Component Pascal:
+задачами на собственных стеках, мониторами и библиотекой `Async`. Исходники — UTF-8 `.cp`,
+документация — `.md`, окно — GTK4. Проект продолжает BlackBox Cross-Platform и сохраняет его
+каркас, компилятор и консоль.
 
-Форк [BlackBox Cross-Platform](https://github.com/bbcb/bbcp) с задачами на собственных стеках, мониторами в
-духе Active Oberon и библиотекой `Async`. Основа — 64-битный снимок DIA261123 Ивана Денисова (GTK4, исходники
-в `.cp`, документация в `.md`).
-
-## Что добавлено
-
-- **Задачи** (`Tasks`) — кооперативные, каждая на своём стеке; планировщик встроен в главный цикл BlackBox.
-  Сборщик мусора обходит стеки всех задач.
-- **Мониторы** — расширение языка без новых ключевых слов: системный флаг `[exclusive]` у процедуры и
-  псевдомодуль `ACTIVE` с процедурой `AWAIT(условие)`. Реализация — обычный модуль `Monitors`.
-- **Точки уступки** — ключ компиляции `^` вставляет уступку в конец тела каждого цикла.
-- **`Async`** — канал-встреча, ограниченный буфер, почтовый ящик, однократная переменная, выбор из
-  нескольких ожиданий (`Select`), ввод-вывод без блокировки, рабочие нити, компутоны.
-- **`Unit`** — каркас модульных тестов; тесты лежат в отдельных подсистемах `<Подсистема>_dev`
-  (`System_dev/Mod/Tasks.cp`, модуль `System_devTasks`).
-- **`Demo`** — примеры из Active Oberon и Go и модель муравейника (`DemoAnts`) на 1000 задач.
-
-Пример монитора:
+Язык не получает новых ключевых слов: исключающая процедура помечается системным флагом
+`[exclusive]`, ожидание условия — процедурой `ACTIVE.AWAIT`. Задачи создаёт библиотечный модуль
+`Tasks`; программа, не импортирующая `ACTIVE`, остаётся программой на Component Pascal.
 
 ```
-MODULE DemoBuffer;
+MODULE ObxBuffer;
 	IMPORT ACTIVE;
 
-	TYPE Buffer* = POINTER TO RECORD n: INTEGER; ... END;
+	TYPE Buffer* = POINTER TO RECORD n: INTEGER; data: ARRAY 8 OF INTEGER END;
 
 	PROCEDURE [exclusive] (b: Buffer) Put* (x: INTEGER), NEW;
 	BEGIN
 		ACTIVE.AWAIT(b.n < LEN(b.data));
-		...
+		b.data[b.n] := x; INC(b.n)
 	END Put;
-END DemoBuffer.
+
+END ObxBuffer.
 ```
+
+## Отличия от исходной системы
+
+Это единственный раздел, где перечислены отличия; остальная документация описывает систему как
+она есть.
+
+- **Задачи.** `Tasks` даёт кооперативные задачи с собственным стеком, планировщик в главном
+  цикле, отмену, группы и журнал тупика. Код Component Pascal исполняет одна нить ОС.
+- **Мониторы.** `[exclusive]` у метода или процедуры модуля, `ACTIVE.AWAIT(условие)`, монитор
+  модуля, повторный вход, снятие монитора при трапе. Реализация — обычный модуль `Monitors`;
+  ядро хранит только четыре заглушки, которые зовёт сгенерированный код.
+- **Точки уступки.** Ключ компиляции `^` вставляет `Kernel.Poll` в конец тела циклов.
+- **Сборщик и стеки.** Ядро регистрирует стеки задач, сканирует их при сборке и не выгружает
+  модуль, код которого есть в кадре. Периодическая сборка пропускается, если с прошлой не было
+  выделений.
+- **Библиотека `Async`.** Канал-встреча, ограниченный буфер, почтовый ящик, однократная
+  переменная, выбор `Select`, протокол диалога, ввод-вывод без блокировки, пул рабочих нитей,
+  компутоны с транспортами `pipe`, `tcp` и MPI.
+- **Тесты и примеры.** Подсистема `Unit` и тесты в `<Подсистема>_dev`; примеры `Demo` —
+  переводы задач Active Oberon и Go, модель муравейника `DemoAnts`.
+- **Платформы.** Ядро расширения работает на Linux AMD64 и i386; `Async` и примеры собираются
+  для AMD64; Windows x64 поддерживает задачи, мониторы и пул рабочих нитей.
 
 ## Сборка и запуск
 
-Нужен Linux x86-64; для окна — GTK4. Загрузочный компилятор `dev0Linux` лежит в корне репозитория.
+Нужен Linux x86-64; загрузочный компилятор `dev0Linux` лежит в корне репозитория. Для окна нужен
+GTK4; консоль работает без него.
 
 ```sh
-tools/build64.sh                                  # собрать всё в .work/BB64LIN
-echo 'DemoAnts.Run' | tools/run64.sh              # пример в консоли
-cd .work/BB64LIN && LD_LIBRARY_PATH=. ./blackbox --BB_RUN=DemoAnts.Open   # окно
-tools/test.sh                                     # тесты
+tools/build64.sh                                  # мир в .work/BB64LIN
+echo 'DemoBuffer.Run' | tools/run64.sh            # пример в консоли
+tools/test.sh                                     # модульные тесты
+tools/test32.sh                                   # i386: сборка и тесты
 ```
 
-32-битная сборка — `tools/build32.sh` и `tools/test32.sh`; Windows под wine — `tools/test-win64.sh`.
+Дополнительно: `tools/test-win64.sh` — Windows x64 под wine, `tools/test-gui.sh` — GUI без
+экрана под `gtk4-broadwayd`. Подробности и условия — `docs/building.md`.
 
 ## Документация
 
 | Файл | О чём |
 |---|---|
-| `Docu/ru/Async.md`, `Docu/Async.md` | библиотека и расширение языка |
-| `Unit/Docu/ru/Testing.md` | соглашение о тестах |
-| `Demo/Docu/Sys-Map.md` | список примеров |
-| `docs/stand.md` | сборка, сценарии, состояние, откат ядра |
-| `docs/tasks.md`, `docs/async-library.md` | устройство задач и библиотеки |
-| `docs/kernel-plan.md` | что ещё нужно исправить в ядре |
-
-## Состояние
-
-Экспериментальная ветка. Задачи кооперативные и исполняются в одной нити ОС; рабочие нити не должны
-обращаться к куче. Известные ограничения и план правок — в `docs/kernel-plan.md`.
+| `Docu/ru/Active-CP-Lang.md`, `Docu/Active-CP-Lang.md` | сообщение о языке: задачи, мониторы, `ACTIVE.AWAIT`, точки уступки |
+| `Docu/ru/Tasks.md`, `Docu/Tasks.md` | руководство по модулю `Tasks` |
+| `Docu/ru/Async.md`, `Docu/Async.md` | библиотека `Async` |
+| `docs/implementation.md` | устройство ядра, мониторов, планировщика и компилятора |
+| `docs/building.md` | сборка, запуск, тесты, самосборка, возврат к исходному ядру |
+| `docs/measurements.md` | замеры и команды их воспроизведения |
+| `docs/kernel-plan.md` | план будущих правок ядра |
+| `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
+| `Demo/Docu/Sys-Map.md` | карта примеров |
 
 ## Лицензия
 

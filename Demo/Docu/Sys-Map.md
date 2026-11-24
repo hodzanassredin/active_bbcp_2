@@ -1,96 +1,89 @@
-# Demo subsystem — map
+# Подсистема Demo — карта
 
-`Demo` contains small, runnable translations of well-known concurrency
-examples. Every example is a separate module with a parameterless
-command; every command has a Unit test in `Demo_dev/Mod/Examples.cp` with a
-deterministic result.
+`Demo` содержит небольшие исполняемые переводы известных примеров параллелизма. Каждый пример —
+отдельный модуль с командой без параметров; у каждой команды есть тест в
+`Demo_dev/Mod/Examples.cp` с детерминированным результатом.
 
-All examples use the extensions of this branch:
+Примеры используют расширение языка и библиотеку:
 
-- `Tasks` — cooperative tasks with their own stack;
-- `Kernel.Lock/Unlock/Wait/Await` and `[exclusive]` / `ACTIVE.AWAIT`;
-- `Async` — channels (`AsyncChan`), `Select` (`AsyncSelect`) and the
-  asynchronous `Services` timers.
+- `Tasks` — кооперативные задачи с собственным стеком (`Docu/ru/Tasks.md`);
+- `[exclusive]`, `ACTIVE.AWAIT` и мониторы (`Docu/ru/Active-CP-Lang.md`);
+- `AsyncChan`, `AsyncSelect` и действия `Services` (`Docu/ru/Async.md`).
 
-The examples are built for **AMD64** only. The channel library
-(`Async/Mod`) and therefore the Go-style examples are not built for
-i386; tasks, monitors and `ACTIVE.AWAIT` themselves also work on i386
-(see `Docu/Async.md`).
+Примеры собираются только для AMD64: библиотека каналов `Async/Mod` не собирается для i386.
+Задачи, мониторы и `ACTIVE.AWAIT` работают и на i386.
 
-## Building and running
+## Сборка и запуск
 
 ```sh
-tools/build64.sh Demo          # DemoSupport and all examples
+tools/build64.sh Demo          # DemoSupport и все примеры
 echo 'DemoBuffer.Run' | tools/run64.sh
-tools/test.sh Demo_devExamples       # Unit tests of all examples
-tools/test-demo-gui.sh         # headless window check of DemoAnts
+tools/test.sh Demo_devExamples # тесты всех примеров
+tools/test-demo-gui.sh         # окно DemoAnts без экрана
 ```
 
-`tools/build64.sh` with no arguments builds `Demo` too (`Demo` is in
-`DEFAULT_SUBSYSTEMS`). `tools/test.sh` runs `Demo_devExamples` from
-`tools/tests.txt` and the separate `DemoAntsGui` stage
-(`tools/test-demo-gui.sh`).
+`tools/build64.sh` без аргументов собирает `Demo` тоже: она входит в список подсистем по
+умолчанию. `tools/test.sh` запускает `Demo_devExamples` из `tools/tests.txt` и отдельный сценарий
+`DemoAntsGui` (`tools/test-demo-gui.sh`).
 
-## Examples
+## Примеры
 
 ### Active Oberon
 
-| Module | Command | Source |
+| Модуль | Команда | Источник |
 |---|---|---|
-| `DemoBuffer` | `DemoBuffer.Run` | Reali, *Active Oberon Language Report*, B.6 "Bounded Buffer" |
-| `DemoPhilo` | `DemoPhilo.Run` | Reali, C.1 "Dining Philosophers" and B.4 "Semaphores" |
-| `DemoReaderWriter` | `DemoReaderWriter.Run` | Reali, B.1 "Readers and Writers" |
-| `DemoBarber` | `DemoBarber.Run` | Klemm/ETH *System Construction* monitor "Barber Shop", translated to `AWAIT` |
-| `DemoModuleMonitor` | `DemoModuleMonitor.Run` | *System Construction*, producer/consumer with `{EXCLUSIVE}` |
+| `DemoBuffer` | `DemoBuffer.Run` | Reali, *Active Oberon Language Report*, B.6 «Bounded Buffer» |
+| `DemoPhilo` | `DemoPhilo.Run` | Reali, C.1 «Dining Philosophers» и B.4 «Semaphores» |
+| `DemoReaderWriter` | `DemoReaderWriter.Run` | Reali, B.1 «Readers and Writers» |
+| `DemoBarber` | `DemoBarber.Run` | Klemm/ETH *System Construction*, монитор «Barber Shop», переведён на `AWAIT` |
+| `DemoModuleMonitor` | `DemoModuleMonitor.Run` | *System Construction*, производитель-потребитель с `{EXCLUSIVE}` |
 
 ### Go
 
-| Module | Command | Source |
+| Модуль | Команда | Источник |
 |---|---|---|
 | `DemoPingPong` | `DemoPingPong.Run` | R. Pike, *Go Concurrency Patterns*, ping-pong |
-| `DemoPipeline` | `DemoPipeline.Run` | S. Ajmani, *Go Concurrency Patterns: Pipelines and Cancellation*; Pike's fan-in |
-| `DemoSieve` | `DemoSieve.Run` | Pike, *Sieve of Eratosthenes*; also Reali C.2 |
-| `DemoSelectTimeout` | `DemoSelectTimeout.Run` | *Tour of Go* "Select"; gobyexample "Timeouts" |
-| `DemoWorkerPool` | `DemoWorkerPool.Run` | gobyexample "Worker Pools" |
-| `DemoBoring` | `DemoBoring.Run` | Pike, *boring* generator and multiplexer |
-| `DemoGroup` | `DemoGroup.Run` | Ajmani, cancellation; `golang.org/x/sync/errgroup` |
+| `DemoPipeline` | `DemoPipeline.Run` | S. Ajmani, *Go Concurrency Patterns: Pipelines and Cancellation*; fan-in Пайка |
+| `DemoSieve` | `DemoSieve.Run` | Pike, *Sieve of Eratosthenes*; также Reali C.2 |
+| `DemoSelectTimeout` | `DemoSelectTimeout.Run` | *Tour of Go* «Select»; gobyexample «Timeouts» |
+| `DemoWorkerPool` | `DemoWorkerPool.Run` | gobyexample «Worker Pools» |
+| `DemoBoring` | `DemoBoring.Run` | Pike, *boring* generator и мультиплексор |
+| `DemoGroup` | `DemoGroup.Run` | Ajmani, отмена; `golang.org/x/sync/errgroup` |
 
-### Coordination with a view
+### Координация с окном
 
-| Module | Commands | Description |
+| Модуль | Команды | Описание |
 |---|---|---|
-| `DemoAnts` | `DemoAnts.Open`, `Start`, `Stop`, `Pause`, `Resume`, `Step`, `Faster`, `Slower`, `Reset`, `Run`, `Simulate`, `Bench` | 1000 ants on a 160×100 field with four walls and passages: food, nest, pheromone; model speed 1–200 steps/s (default 10) separate from redraw; field monitor, evaporator task, `Views.View` and a `Services` timer |
+| `DemoAnts` | `DemoAnts.Open`, `Start`, `Stop`, `Pause`, `Resume`, `Step`, `Faster`, `Slower`, `Reset`, `Run`, `Simulate`, `Bench` | 1000 муравьёв на поле 160×100 со стенами и проходами: еда, гнездо, феромон; скорость модели 1–200 шагов/с (по умолчанию 10) отделена от перерисовки; монитор поля, задача-испаритель, `Views.View` и таймер `Services` |
 
-`DemoSupport` is the shared helper (task pump and console output); it has
-no command of its own. `MD5` is the pre-existing hashing example and is
-not part of the concurrency set.
+`DemoSupport` — общий помощник (насос задач и вывод в консоль); своей команды у него нет. `MD5` —
+существующий пример хеширования, к параллелизму не относится.
 
-## Tests
+## Тесты
 
-| Test | Checks |
+| Тест | Что проверяет |
 |---|---|
-| `Demo_devExamples.TestProcBoundedBuffer` | 120 items, sum 2460 |
-| `Demo_devExamples.TestProcPhilosophers` | 15 meals, no traps |
-| `Demo_devExamples.TestProcReadersWriters` | 15 reads, 6 writes, no overlap |
-| `Demo_devExamples.TestProcBarber` | 3 served, 3 turned away |
-| `Demo_devExamples.TestProcModuleMonitor` | 120 items, sum 7260 |
-| `Demo_devExamples.TestProcPingPong` | 10 hits, sum 45 |
-| `Demo_devExamples.TestProcPipeline` | 10 results, sum 385 |
-| `Demo_devExamples.TestProcSieve` | 25 primes, sum 1060, max 97 |
-| `Demo_devExamples.TestProcSelectTimeout` | timeout index 1, receive index 0, value 42 |
-| `Demo_devExamples.TestProcWorkerPool` | 9 results, sum 285 |
-| `Demo_devExamples.TestProcBoring` | 16 messages, 8 from each generator |
-| `Demo_devExamples.TestProcGroupCancel` | one trapped, three cancelled, group failed and empty |
-| `Demo_devExamples.TestProcAnts` | 1000 ants × 300 steps: food > 0, count preserved, all finished |
-| `Demo_devExamples.TestProcAntsWalls` | ≥ 3 walls, no ant in a wall, walls deflect moves |
-| `Demo_devExamples.TestProcAntsReachable` | BFS from the nest reaches every food cell |
-| `Demo_devExamples.TestProcAntsSpeed` | `Faster` clamps at 200, `Slower` at 1 |
-| `Demo_devExamples.TestProcAntsFoodWalls` | 200 ants × 1200 steps: food delivered around the walls |
-| `Demo_devExamples.TestProcAntsMany` | 1000 ants finish, `Tasks.Count() = 0`, no traps |
-| `Demo_devExamples.TestProcAntsPauseStep` | `Pause` + `Step` performs exactly one round |
+| `Demo_devExamples.TestProcBoundedBuffer` | 120 элементов, сумма 2460 |
+| `Demo_devExamples.TestProcPhilosophers` | 15 обедов, без трапов |
+| `Demo_devExamples.TestProcReadersWriters` | 15 чтений, 6 записей, нет пересечения |
+| `Demo_devExamples.TestProcBarber` | 3 обслужено, 3 отказано |
+| `Demo_devExamples.TestProcModuleMonitor` | 120 элементов, сумма 7260 |
+| `Demo_devExamples.TestProcPingPong` | 10 ударов, сумма 45 |
+| `Demo_devExamples.TestProcPipeline` | 10 результатов, сумма 385 |
+| `Demo_devExamples.TestProcSieve` | 25 простых, сумма 1060, максимум 97 |
+| `Demo_devExamples.TestProcSelectTimeout` | индекс тайм-аута 1, индекс приёма 0, значение 42 |
+| `Demo_devExamples.TestProcWorkerPool` | 9 результатов, сумма 285 |
+| `Demo_devExamples.TestProcBoring` | 16 сообщений, по 8 от каждого генератора |
+| `Demo_devExamples.TestProcGroupCancel` | один трапнул, трое отменены, группа failed и пуста |
+| `Demo_devExamples.TestProcAnts` | 1000 муравьёв × 300 шагов: еда > 0, число сохранено, все завершились |
+| `Demo_devExamples.TestProcAntsWalls` | не менее 3 стен, ни один муравей не в стене, стены отклоняют ходы |
+| `Demo_devExamples.TestProcAntsReachable` | поиск в ширину от гнезда достигает каждой клетки еды |
+| `Demo_devExamples.TestProcAntsSpeed` | `Faster` останавливается на 200, `Slower` — на 1 |
+| `Demo_devExamples.TestProcAntsFoodWalls` | 200 муравьёв × 1200 шагов: еда доставлена в обход стен |
+| `Demo_devExamples.TestProcAntsMany` | 1000 муравьёв завершаются, `Tasks.Count() = 0`, без трапов |
+| `Demo_devExamples.TestProcAntsPauseStep` | `Pause` + `Step` делает ровно один круг |
 
-The headless GUI stage `tools/test-demo-gui.sh` opens the `DemoAnts`
-window under `gtk4-broadwayd`, logs an ASCII frame every 40 redraw ticks
-and requires `DemoAnts: ok=1` (ticks, food, frames, frame time, live
-ants). No mouse is emulated and no user display is used. The window is
-~1000×650 px, the cell size follows the window and is at least 3 px.
+GUI-сценарий `tools/test-demo-gui.sh` открывает окно `DemoAnts` под `gtk4-broadwayd`, печатает
+ASCII-кадр каждые 40 тиков перерисовки и требует `DemoAnts: ok=1` (тики, еда, кадры, время
+кадра, живые муравьи). Мышь не эмулируется, экран пользователя не используется. Окно — около
+1000×650 px; размер клетки следует за окном и не меньше 3 px.

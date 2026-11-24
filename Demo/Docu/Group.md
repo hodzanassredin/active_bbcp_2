@@ -1,50 +1,40 @@
-# DemoGroup — cancelling a group of tasks
+# DemoGroup — отмена группы задач
 
-## Source
-
-Sameer Ajmani, *Go Concurrency Patterns: Pipelines and Cancellation*
-(Go Blog, 2014), the `context` cancellation section:
+Sameer Ajmani, *Go Concurrency Patterns: Pipelines and Cancellation* (Go Blog, 2014), раздел об
+отмене через `context`:
 
 <https://go.dev/blog/pipelines>
 
-and the `errgroup` package:
+и пакет `errgroup`:
 
 <https://pkg.go.dev/golang.org/x/sync/errgroup>
 
-In Go the first error cancels the `context`; the parent waits for all
-members with `errgroup.Wait`.
+В Go первая ошибка отменяет `context`; родитель ждёт всех участников через `errgroup.Wait`.
 
-## Translation
+## Перевод
 
-`Tasks.Group` provides the ownership, the error propagation and the
-wait: `Tasks.NewGroup`, `Tasks.StartIn(t, g)`; the parent's `Run`
-returns while `TaskBoot` waits for the group to become empty. Worker 3
-traps after all four workers pass the `Arrive` barrier. `TaskBoot`
-marks the group failed and calls the kernel's `CancelGroup`, which
-cancels the other three at their next wait point. The parent finishes
-only when the group is empty.
+`Tasks.Group` даёт владение, распространение ошибки и ожидание: `Tasks.NewGroup`,
+`Tasks.StartIn(t, g)`; `Run` родителя возвращается, а `TaskBoot` ждёт опустошения группы. Третий
+рабочий трапает после того, как все четверо прошли барьер `Arrive`. `TaskBoot` помечает группу
+`failed` и вызывает внутреннюю `CancelGroup`, которая отменяет остальных трёх в их ближайших
+точках ожидания. Родитель завершается, только когда группа пуста.
 
-A trap in the console host would normally be fatal (there is no trap
-window), so the command installs an empty trap viewer for the duration
-of the run and restores the previous one afterwards — the same
-technique as `UnitRunner`. The trap reports in the journal are
-expected: they are the error and the three cancellations. The summary
-line follows them.
+Трап ловит `Kernel.Try` в `TaskBoot`, поэтому зритель трапов не нужен. Отчёты о трапах в журнале
+ожидаемы: это ошибка рабочего и три отмены. Итоговая строка идёт после них.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoGroup.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoGroup: entered=8 completed=0 cancelled=3 failedWorker=1 groupFailed=1 alive=0
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcGroupCancel` checks one error, one trapped member,
-three cancelled members, zero completed, an empty failed group and no
-unexpected failure of the run.
+`Demo_devExamples.TestProcGroupCancel` проверяет одну ошибку, одного трапнувшего участника, трех
+отменённых, ноль завершённых, пустую группу с `failed` и отсутствие неожиданного сбоя прогона.

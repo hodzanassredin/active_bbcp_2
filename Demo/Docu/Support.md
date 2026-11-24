@@ -1,18 +1,15 @@
-# DemoSupport — shared helper of the examples
+# DemoSupport — общий помощник примеров
 
-`DemoSupport` is not an example; it holds the two things every command
-needs in a console host:
+`DemoSupport` — не пример, а две вещи, нужные каждой команде в консольном хосте:
 
 ```
-DemoSupport.Pump(ms)         (* run the Services action hook until no tasks remain *)
+DemoSupport.Pump(ms)         (* крутить действие Services, пока задачи не завершатся *)
 DemoSupport.Log / LogInt / LogLn / LogLine
 ```
 
-`Pump` drives `Services.actionHook.Step`, the same step the main loop
-of the GUI uses. That makes `Select` timeouts and `Tasks.Sleep` work in
-a command run through `tools/run64.sh`, where no window loop exists.
-It returns `TRUE` when all tasks have finished and `FALSE` on timeout.
+`Pump` вызывает `Services.actionHook.Step` — тот же шаг, что делает главный цикл окна. Поэтому
+тайм-ауты `Select` и `Tasks.Sleep` работают в команде, запущенной через `tools/run64.sh`, где
+цикла окна нет. `Pump` возвращает `TRUE`, когда все задачи завершились, и `FALSE` по тайм-ауту.
 
-The log helpers write to `Console` (stdout). The examples use them for
-one summary line; the Unit tests inspect exported counters rather than
-the text.
+Помощники журнала пишут в `Console` (stdout). Примеры используют их для одной итоговой строки;
+тесты проверяют экспортированные счётчики, а не текст.

@@ -1,46 +1,39 @@
-# DemoBarber — sleeping barber
+# DemoBarber — спящий парикмахер
 
-## Source
-
-The classical sleeping-barber monitor (Dijkstra's problem) as presented
-in the ETH *System Construction* course, monitor "Barber Shop" with the
-conditions `barberAvailable`, `chairOccupied`, `doorOpen` and
-`clientLeft`:
+Классическая задача о мониторе (задача Дейкстры) в изложении курса ETH *System Construction*:
+монитор «Barber Shop» с условиями `barberAvailable`, `chairOccupied`, `doorOpen` и `clientLeft`.
 
 <https://lec.inf.ethz.ch/syscon/2019/download/syscon06.pdf>
 
-The Active Oberon semantics of `AWAIT` are described in P. Reali,
-*Active Oberon Language Report*, §3.3: a boolean condition replaces
-condition variables and `signal`; conditions are re-evaluated when a
-task leaves the monitor.
+Семантика `AWAIT` в Active Oberon описана в P. Reali, *Active Oberon Language Report*, §3.3:
+булево условие заменяет условные переменные и `signal`; условия перевычисляются, когда задача
+выходит из монитора.
 
-## Translation
+## Перевод
 
-Each `while cond do wait` became one `ACTIVE.AWAIT(cond)`; the monitor
-is the `Shop` object and its methods are `[exclusive]`. The state is:
+Каждый цикл `while cond do wait` стал одним `ACTIVE.AWAIT(cond)`; монитор — объект `Shop`, его
+методы исключающие. Состояние:
 
-- `barbers` — the barber is free (1) or busy (0);
-- `waiting` — customers on the waiting chairs;
-- `serving` — a customer has taken the barber;
-- `open` — the haircut is finished but the customer has not left yet.
+- `barbers` — парикмахер свободен (1) или занят (0);
+- `waiting` — клиенты на стульях ожидания;
+- `serving` — клиент занял парикмахера;
+- `open` — стрижка закончена, но клиент ещё не ушёл.
 
-The demonstration starts six customers before the barber: the first
-three take the chairs, the other three leave. The barber serves the
-three seated customers.
+Шесть клиентов приходят раньше парикмахера: первые три занимают стулья, остальные уходят.
+Парикмахер обслуживает трех сидящих.
 
-## Run
+## Запуск
 
 ```sh
 echo 'DemoBarber.Run' | tools/run64.sh
 ```
 
-Output:
+Вывод:
 
 ```
 DemoBarber: served=3 turnedAway=3
 ```
 
-## Test
+## Тест
 
-`Demo_devExamples.TestProcBarber` checks 3 served, 3 turned away, no traps
-and no deadlock.
+`Demo_devExamples.TestProcBarber` проверяет 3 обслуженных, 3 отказа, отсутствие трапов и тупика.
