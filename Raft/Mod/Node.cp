@@ -45,6 +45,7 @@ MODULE RaftNode;
 		mutSendFirst* = 0;	(** отправить письма до сохранения *)
 		mutEarlyReply* = 1;	(** ответить клиенту сразу, до фиксации *)
 		capLen* = 256;
+		maxEnts = 65536;	(* предел числа записей в кадре: память под них берётся до чтения *)
 		maxBytes = 64 * 1024 * 1024;	(* предел длины байтов в кадре *)
 
 	TYPE
@@ -83,6 +84,7 @@ MODULE RaftNode;
 			client, seq, ctx, tag: INTEGER;
 			body: Bytes;
 			to: ActorCore.Ref;
+			term: INTEGER;	(* чтение: срок лидера, принявшего его *)
 			next: Waiter
 		END;
 
@@ -165,7 +167,7 @@ MODULE RaftNode;
 		rd.ReadInt(m.index); rd.ReadInt(m.logTerm); rd.ReadInt(m.commit);
 		rd.ReadBool(m.ok); rd.ReadInt(m.match); rd.ReadInt(m.ctx);
 		rd.ReadInt(m.n);
-		IF rd.cancelled OR (m.n < 0) OR (m.n > 1000000) THEN m.n := 0; rd.TurnIntoAlien(Stores.alienComponent); RETURN END;
+		IF rd.cancelled OR (m.n < 0) OR (m.n > maxEnts) THEN m.n := 0; rd.TurnIntoAlien(Stores.alienComponent); RETURN END;
 		IF m.n > 0 THEN NEW(m.ents, m.n) END;
 		k := 0;
 		WHILE (k < m.n) & ~rd.cancelled DO rd.ReadInt(m.ents[k].term); ReadBytes(rd, m.ents[k].data); INC(k) END;
@@ -261,7 +263,7 @@ MODULE RaftNode;
 				IF (w.index >= 0) & (a.nd.applied >= w.index) THEN
 					IF w.body = NIL THEN d := a.sm.sm.Query(empty, 0) ELSE d := a.sm.sm.Query(w.body, LEN(w.body^)) END;
 					Answer(c, w.to, w.tag, ok, a.cfg.id, w.index, d); done := TRUE
-				ELSIF (w.index < 0) & (a.nd.role # Core.leader) THEN
+				ELSIF (w.index < 0) & ((a.nd.role # Core.leader) OR (a.nd.term # w.term)) THEN	(* лидерство срока w.term утрачено: ядро это чтение забыло *)
 					Answer(c, w.to, w.tag, notLeader, a.nd.leader, 0, NIL); done := TRUE
 				END
 			ELSIF w.index <= snapIndex THEN Answer(c, w.to, w.tag, lost, a.nd.leader, w.index, NIL); done := TRUE
@@ -377,7 +379,7 @@ MODULE RaftNode;
 		ELSE
 			INC(a.ctx);
 			IF Core.ReadIndex(a.nd, a.ctx) THEN
-				NEW(w); w.read := TRUE; w.index := -1; w.ctx := a.ctx; w.tag := m.tag; w.body := m.body; w.to := c.Sender(); a.Wait(w);
+				NEW(w); w.read := TRUE; w.index := -1; w.ctx := a.ctx; w.term := a.nd.term; w.tag := m.tag; w.body := m.body; w.to := c.Sender(); a.Wait(w);
 				a.Pump(c)
 			ELSE Answer(c, c.Sender(), m.tag, notLeader, a.nd.leader, 0, NIL)
 			END
