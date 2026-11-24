@@ -49,6 +49,7 @@ echo "build64: компиляция подсистем:$subs"
 	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
 	# LinThreads нужны самой подсистеме Async (AsyncSelect, AsyncComputon),
 	# поэтому идут до неё.
+	echo "DevCompiler64.CompileThis Taskarch"
 	echo "DevCompiler64.CompileThis Tasks"
 	echo "DevCompiler64.CompileThis LinThreads"
 	echo "DevCompiler64.CompileThis LinNative"

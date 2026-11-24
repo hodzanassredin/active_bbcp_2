@@ -28,8 +28,8 @@ Modules, documentation and compilation results are organized as follows:
 ## How to Find Module Sources
 
 A module name can be one word starting with an upper-case letter. In that case the sources are in
-subsystem `System`. For example, module `Tasks` is in `System/Mod/Tasks.cp` or
-`System/Mod64/Tasks.cp` (for the AMD64 target).
+subsystem `System`. For example, module `Kernel` is in `System/Mod/Kernel.cp` or
+`System/Mod64/Kernel.cp` (for the AMD64 target).
 
 A module name can also consist of several words, each starting with an upper-case letter. The first
 word is the subsystem name; the remaining words define the source file name. For example, module
@@ -235,7 +235,9 @@ allowed for `Dev_dev*` modules: `FrameworkModule` compares the subsystem name ex
   `Await` as stubs over `Kernel.MonitorHook`. The scheduler is set with
   `Kernel.SetScheduler` and is a `Kernel.Scheduler` object (`current`, `park`, `unpark`, `name`,
   `poll`).
-- `System/Mod64/Tasks.cp` implements tasks for amd64; `System/Mod/Tasks.cp` — for i386. Task
+- `System/Mod/Tasks.cp` implements tasks for both amd64 and i386; the machine part (word size,
+  frame layout, `[code] Switch`) is module `Taskarch`, one file per target in `System/Mod` and
+  `System/Mod64`; `Switch` is inlined at the call site. Task
   stacks come from `Kernel.AllocStack/FreeStack` (`mmap` with a guard page in `LinKernel` and
   `VirtualAlloc` with `PAGE_NOACCESS` in `WinKernel`). A finished task returns its stack to the
   `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool` frees stacks above `poolMax`, at most

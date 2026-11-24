@@ -61,6 +61,7 @@ echo "build32: компиляция подсистем"
 	echo 'DevCompiler.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod')"
 	echo "DevCompiler.CompileSubs @Lin $SUBS"
+	echo "DevCompiler.CompileThis Taskarch"
 	echo "DevCompiler.CompileThis Tasks"
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"

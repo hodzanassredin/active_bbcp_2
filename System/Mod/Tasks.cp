@@ -8,11 +8,10 @@ MODULE Tasks;
 
 	Память под стек выделяет ядро: Kernel.AllocStack (mmap + сторожевая
 	страница в LinKernel, ленивые страницы). Переключатель — [code]
-	последовательность в этом модуле: сохраняет edi, esi, ebp, ebx, eax
-	и esp, восстанавливает регистры другого стека. Внешней .so нет.
-
-	Это i386-вариант (System/Mod64/Tasks.cp — amd64): соглашение вызовов
-	CP x86, callee-saved — EBX/ESI/EDI/EBP; слоты сохранения по 4 байта.
+	Taskarch.Switch: сохраняет регистры и указатель стека, восстанавливает
+	регистры другого стека. Модуль один на i386 и amd64; машинная часть
+	(слово, раскладка кадра, Switch) — в Taskarch, по файлу на платформу
+	(System/Mod и System/Mod64). Внешней .so нет.
 
 	Контекст исполнения (Kernel.Try, trapStack, tryCount) уже лежит в
 	записи стека ядра: SwitchSave/SwitchRestore вокруг сырого
@@ -36,14 +35,14 @@ MODULE Tasks;
 	  ссылаются в чужой стек» сводится к проверке, что сам объект задачи
 	  не лежит на стеке. *)
 
-	IMPORT S := SYSTEM, Kernel, Monitors, Services, Models, Console, Strings;
+	IMPORT S := SYSTEM, Taskarch, Kernel, Monitors, Services, Models, Console, Strings;
 
 	CONST
 		nameLen = 64;
 		defaultStack = 256 * 1024;
 		poolMax = 1024;		(* сколько свободных стеков пул держит в покое *)
 		trimStep = 16;		(* сколько лишних стеков шаг планировщика возвращает ядру *)
-		word = 4;			(* SIZE(SYSTEM.ADDRESS) *)
+		word = Taskarch.word;
 		defaultSlice = 5;	(* мс на шаг планировщика *)
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
 		heapArity = 4;		(* детей у узла кучи спящих *)
@@ -54,9 +53,8 @@ MODULE Tasks;
 		New* = 0; Ready* = 1; Running* = 2; Sleeping* = 3;
 		Waiting* = 4; Parked* = 5; Finished* = 6; Cancelled* = 7;
 
-		savedRegs = 5;		(* edi esi ebp ebx eax *)
-		entryOff = savedRegs * 4;	(* адрес возврата после ret *)
-		stackHead = entryOff + 8;	(* запас под кадр TaskBoot *)
+		entryOff = Taskarch.entryOff;	(* адрес входа от sp нового стека *)
+		stackHead = Taskarch.stackHead;	(* запас у верха стека *)
 
 	TYPE
 		Task* = POINTER TO ABSTRACT RECORD
@@ -155,46 +153,12 @@ MODULE Tasks;
 		END
 	END StateName;
 
-	(* --- [code] переключатель --------------------------------------------- *)
-
-	PROCEDURE [code] Switch (VAR from, to: S.ADDRESS)
-	(*
-		entry: eax = &from, [esp] = &to.
-
-		mov ecx,[esp]        ; &to (esp ещё указывает на параметр)
-		add esp,4            ; параметр снят
-		call $+5             ; push адрес следующей инструкции
-		pop edx              ; edx = адрес продолжения
-		add edx,27           ; + длина хвоста switch (до после ret)
-		push edx             ; синтетический адрес возврата
-		push eax             ; сохранить &from
-		push ebx; push ebp; push esi; push edi
-		mov edx,[esp+16]     ; &from (edi esi ebp ebx лежат выше)
-		mov [edx],esp        ; from^ := esp
-		mov esp,[ecx]        ; esp := to^
-		pop edi; pop esi; pop ebp; pop ebx; pop eax
-		ret
-	*)
-		08BH, 00CH, 024H,		(* mov ecx,[esp] *)
-		083H, 0C4H, 004H,		(* add esp,4 *)
-		0E8H, 000H, 000H, 000H, 000H,	(* call $+5 *)
-		05AH,				(* pop edx — адрес продолжения *)
-		081H, 0C2H, 01BH, 000H, 000H, 000H,	(* add edx,27 — после ret *)
-		052H,				(* push edx: синтетический адрес возврата *)
-		050H,				(* push eax (&from) *)
-		053H, 055H, 056H, 057H,		(* push ebx; ebp; esi; edi *)
-		08BH, 054H, 024H, 010H,		(* mov edx,[esp+16] *)
-		089H, 022H,			(* mov [edx],esp *)
-		08BH, 021H,			(* mov esp,[ecx] *)
-		05FH, 05EH, 05DH, 05BH, 058H,	(* pop edi esi ebp ebx eax *)
-		0C3H;				(* ret *)
-
 	PROCEDURE SwitchTo (VAR from, to: S.ADDRESS; self: Kernel.Stack);
 	(** Сырое переключение с сохранением контекста ядра своего стека. *)
 	BEGIN
 		INC(switches);
 		Kernel.SwitchSave(self);
-		Switch(from, to);
+		Taskarch.Switch(from, to);
 		Kernel.SwitchRestore(self)
 	END SwitchTo;
 
@@ -362,7 +326,7 @@ MODULE Tasks;
 	(** Идёт обработчик действия (кроме нашего планировщика) или
 		рассылка по домену. Внутренняя проверка планировщика. *)
 	BEGIN
-		RETURN Services.executingAction & (Services.executing # sched)
+		RETURN Services.executingAction & (S.VAL(S.ADDRESS, Services.executing) # S.VAL(S.ADDRESS, sched))
 			OR Models.InDomainCast()
 	END InFramework;
 
@@ -881,7 +845,7 @@ MODULE Tasks;
 	PROCEDURE (s: Sched) current (): S.ADDRESS;
 	(** Токен текущей задачи для Monitors; 0 — главный стек. *)
 	BEGIN
-		IF current # NIL THEN RETURN S.ADR(current^) ELSE RETURN 0 END
+		IF current # NIL THEN RETURN S.VAL(S.ADDRESS, S.ADR(current^)) ELSE RETURN 0 END
 	END current;
 
 	PROCEDURE (s: Sched) park;

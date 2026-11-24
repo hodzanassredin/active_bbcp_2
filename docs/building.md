@@ -263,7 +263,7 @@ Lin/Mod/Init.cp             Lin/Mod/IntInit.cp
 Win/Mod/Init.cp             Win/Mod/IntInit.cp
 ```
 
-4. Удалите `Async/`, `Robust/`, `System/Mod/Tasks.cp`, `System/Mod64/Tasks.cp`,
+4. Удалите `Async/`, `Robust/`, `System/Mod/Tasks.cp`, `System/Mod/Taskarch.cp`, `System/Mod64/Taskarch.cp`,
    `System/Mod/Monitors.cp` и тестовые подсистемы `*_dev`, `Unit`.
 5. Соберите базовый мир:
 

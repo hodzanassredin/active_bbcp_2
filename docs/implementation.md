@@ -14,7 +14,7 @@
 | Что | Где |
 |---|---|
 | реестр стеков, переключение, сборщик, заглушки мониторов | `System/Mod64/Kernel.cp`, `System/Mod/Kernel.cp` |
-| задачи, планировщик, группы, отмена | `System/Mod64/Tasks.cp`, `System/Mod/Tasks.cp` |
+| задачи, планировщик, группы, отмена | `System/Mod/Tasks.cp`; машинная часть — `Taskarch` (`System/Mod`, `System/Mod64`) |
 | мониторы, цепочки взятий, условия | `System/Mod/Monitors.cp` |
 | действия и главный цикл | `System/Mod/Services.cp`, `System/Mod/Loop.cp` |
 | консольный цикл | `Cons/Mod/Interp.cp` |
@@ -87,7 +87,7 @@ SP). Он записывает в запись стека
 
 ## 3. Переключение
 
-`Tasks.Switch` — процедура `[code]`, встроенная в вызывающую. На amd64 она сохраняет 13
+`Taskarch.Switch` — процедура `[code]`, встроенная в вызывающую (модуль `Taskarch` — по файлу на платформу, `Tasks` один). На amd64 она сохраняет 13
 регистров (`rax`, `rbx`, `rbp`, `rsi`, `rdi`, `r8`–`r15`) и `rsp`; на i386 — пять (`eax`, `ebx`,
 `ebp`, `esi`, `edi`) и `esp`. Синтетический адрес возврата указывает на продолжение сразу после
 байтов `Switch`; для свежей задачи в слоте возврата лежит адрес `TaskBoot`.
@@ -349,7 +349,7 @@ IF ~cond THEN Kernel.Await(@awaitN, @frm, monitor) END
 
 ### 7.2. i386
 
-`System/Mod/Kernel.cp` и `System/Mod/Tasks.cp` повторяют устройство amd64 с 32-битными словами:
+`System/Mod/Kernel.cp` и `System/Mod/Taskarch.cp` повторяют устройство amd64 с 32-битными словами:
 пять сохраняемых регистров, `switchSaveSlack = 64`, линейный `StackOf`, нет индекса кластеров.
 Мониторы, действия, цикл и реестр дескрипторов общие. `CPC486` ставит пролог и эпилог
 `[exclusive]`, `CPT` разрешает `ACTIVE` и ключ `^` для `processor = 10`. Библиотека

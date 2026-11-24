@@ -426,7 +426,7 @@ printf 'Async_devBench.All\n' | tools/run64.sh
 This section does not define behaviour; it describes how the behaviour is obtained. Details are in
 `docs/implementation.md`, sections 2–4.
 
-`Tasks.Switch` is a `[code]` procedure inlined into the caller. On amd64 it saves 13 registers
+`Taskarch.Switch` is a `[code]` procedure inlined into the caller (module `Taskarch` has one file per target; `Tasks` is a single file). On amd64 it saves 13 registers
 (`rax`, `rbx`, `rbp`, `rsi`, `rdi`, `r8`–`r15`) and `rsp`, on i386 five (`eax`, `ebx`, `ebp`,
 `esi`, `edi`) and `esp`. The synthetic return address points to the continuation right after the
 bytes of `Switch`; for a fresh task the return slot holds the address of `TaskBoot`. Around the raw

@@ -8,10 +8,11 @@ MODULE System_devTasks;
 	tools/unit.sh гонит модуль отдельным процессом. Нагрузка на 10 тыс.
 	задач помечена TestSlow… и включается в манифесте marks=proc,slow. *)
 
-	IMPORT Kernel, Monitors, Services, Tasks, UnitAssert, System_devClock, Console, Strings;
+	IMPORT S := SYSTEM, Kernel, Monitors, Services, Tasks, UnitAssert, System_devClock, Console, Strings;
 
 	CONST
 		benchStack = 64 * 1024;
+		smallStack = 16 * 1024;
 
 	VAR
 		counter, ticks, eats, produced, consumed, buf, groupEats: INTEGER;
@@ -24,6 +25,7 @@ MODULE System_devTasks;
 		Counter = POINTER TO RECORD (Tasks.Task) END;
 		Lazy = POINTER TO RECORD (Tasks.Task) END;
 		Bad = POINTER TO RECORD (Tasks.Task) END;
+		DeepHalt = POINTER TO RECORD (Tasks.Task) END;
 		Waker = POINTER TO RECORD (Tasks.Task) END;
 		Parent = POINTER TO RECORD (Tasks.Task) END;
 		ParentTrap = POINTER TO RECORD (Tasks.Task) END;
@@ -313,6 +315,33 @@ MODULE System_devTasks;
 		Tasks.Yield;
 		waitFailed := TRUE
 	END Do;
+
+	(* --- трап у дна маленького стека ------------------------------------ *)
+
+	PROCEDURE Dive (top: LONGINT; room: INTEGER);
+	(* Спуск рекурсией, пока до дна стека не останется меньше room байт; там HALT. *)
+		VAR pad: ARRAY 64 OF BYTE; here: LONGINT;
+	BEGIN
+		pad[0] := 0; here := S.ADR(pad);
+		IF top - here < smallStack - room THEN Dive(top, room) ELSE HALT(42) END
+	END Dive;
+
+	PROCEDURE (t: DeepHalt) Run;
+		VAR x: INTEGER;
+	BEGIN
+		Dive(S.ADR(x), 200)
+	END Run;
+
+	PROCEDURE TestProcHaltNearStackBottom*;
+	(* Трап у дна стека задачи: обработчик не должен переполнить стек задачи. *)
+		VAR d: DeepHalt; g: Counter;
+	BEGIN
+		counter := 0;
+		NEW(d); Tasks.SetStackSize(d, smallStack); NEW(g); Tasks.Start(d); Tasks.Start(g);
+		UnitAssert.True(Pump(3000), "tasks finished after a trap at the stack bottom");
+		UnitAssert.True(Tasks.Failed(d), "trapping task marked failed");
+		UnitAssert.EqualInt(10, counter, "other task completed its work")
+	END TestProcHaltNearStackBottom;
 
 	PROCEDURE TestProcWaitGuards*;
 		VAR t: Probe;
