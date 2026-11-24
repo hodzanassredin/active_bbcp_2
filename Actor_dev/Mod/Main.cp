@@ -5,7 +5,7 @@ MODULE Actor_devMain;
 	Services.actionHook.Step (Until). Ask ждёт, поэтому сценарии с Ask
 	идут в задаче Driver. *)
 
-	IMPORT Kernel, Services, Tasks, ActorCore, ActorRun, UnitAssert;
+	IMPORT Kernel, Services, Tasks, ActorCore, ActorSup, ActorRun, UnitAssert;
 
 	CONST
 		evStarted = 1; evStopping = 2; evStopped = 3; evRestarting = 4;
@@ -233,6 +233,68 @@ MODULE Actor_devMain;
 		UnitAssert.EqualInt(1000, askVal, "1000 Tell counted before Ask");
 		UnitAssert.True(ordered, "FIFO from one sender")
 	END TestCounterOrderAndAsk;
+
+	(* --- 2. Restart ------------------------------------------------------- *)
+
+	PROCEDURE RestartBody;
+	BEGIN
+		ActorCore.Tell(target, NewInc(0)); ActorCore.Tell(target, NewInc(0)); ActorCore.Tell(target, NewInc(0));
+		ActorCore.Tell(target, boom);
+		ActorCore.Tell(target, NewInc(0));
+		AskInt(target, 2000)
+	END RestartBody;
+
+	PROCEDURE TestTrapRestartsWithFreshState*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewOneForOne(ActorCore.Restart, 5, 10000), 1) = NIL THEN END;
+		target := kids[0];
+		UnitAssert.True(Drive(RestartBody, 3000), "driver finished");
+		UnitAssert.EqualInt(2, starts, "Started again after trap");
+		UnitAssert.True(At(1, evRestarting) >= 0, "old instance got Restarting");
+		UnitAssert.EqualInt(1, askVal, "state reset, next message handled by new instance")
+	END TestTrapRestartsWithFreshState;
+
+	(* --- 3. предел перезапусков ------------------------------------------- *)
+
+	PROCEDURE TestTooManyRestartsStopsAndNotifiesWatcher*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewOneForOne(ActorCore.Restart, 2, 10000), 1) = NIL THEN END;
+		WatchIt(kids[0]);
+		ActorCore.Tell(kids[0], boom); ActorCore.Tell(kids[0], boom); ActorCore.Tell(kids[0], boom);
+		UnitAssert.True(Until(terminated, 2000), "watcher got Terminated");
+		UnitAssert.EqualInt(3, starts, "two restarts, then Stop");
+		UnitAssert.True(kids[0](ActorCore.Context).IsStopped(), "child stopped")
+	END TestTooManyRestartsStopsAndNotifiesWatcher;
+
+	(* --- 4. Resume и Escalate --------------------------------------------- *)
+
+	PROCEDURE ResumeBody;
+	BEGIN
+		ActorCore.Tell(target, NewInc(0)); ActorCore.Tell(target, NewInc(0));
+		ActorCore.Tell(target, boom);
+		ActorCore.Tell(target, NewInc(0));
+		AskInt(target, 2000)
+	END ResumeBody;
+
+	PROCEDURE TestResumeKeepsStateSkipsCulprit*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewOneForOne(ActorCore.Resume, 0, 1000), 1) = NIL THEN END;
+		target := kids[0];
+		UnitAssert.True(Drive(ResumeBody, 3000), "driver finished");
+		UnitAssert.EqualInt(1, starts, "no restart");
+		UnitAssert.EqualInt(3, askVal, "state kept, culprit skipped")
+	END TestResumeKeepsStateSkipsCulprit;
+
+	PROCEDURE TestEscalateReachesRootWhichStops*;
+		VAR top: ActorCore.Ref;
+	BEGIN
+		top := SpawnSup(ActorSup.NewOneForOne(ActorCore.Escalate, 0, 1000), 1);
+		WatchIt(top);
+		ActorCore.Tell(kids[0], boom);
+		UnitAssert.True(Until(terminated, 2000), "root stopped the top actor");
+		UnitAssert.True(At(1, evStopped) >= 0, "child stopped with its parent");
+		UnitAssert.EqualInt(1, starts, "nobody restarted")
+	END TestEscalateReachesRootWhichStops;
 
 	(* --- 5. остановка родителя -------------------------------------------- *)
 

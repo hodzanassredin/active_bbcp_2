@@ -31,5 +31,5 @@ Cas_devTree||300|CasHash CasStore CasChunk CasTree
 Cas_devChange||180|CasHash CasStore CasChange
 Cas_devBench|slow|300|CasHash CasChunk
 # Подсистема Actor: акторы, супервизор, исполнители (amd64).
-Actor_devMain|proc|300|ActorCore ActorRun
-Actor_devBench|proc slow|600|ActorCore ActorRun System_devCRaw System_devClock
+Actor_devMain|proc|300|ActorCore ActorSup ActorRun
+Actor_devBench|proc slow|600|ActorCore ActorSup ActorRun System_devCRaw System_devClock
