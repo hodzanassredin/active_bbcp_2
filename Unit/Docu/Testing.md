@@ -29,6 +29,9 @@ END TextTests.
 
 Place modules as `<Subsystem>Tests` in `<Subsystem>/Mod/Tests.cp`;
 several modules use `<Subsystem>Tests<Theme>` (`TextTestsWriter`).
+AMD64-only tests live in `<Subsystem>/Mod64/Tests<Theme>.cp`
+(`AsyncTestsChannels`). `CompileSubs` skips such files: tests are built
+by `tools/unit.sh`.
 
 ## Rules
 
@@ -74,14 +77,17 @@ several modules use `<Subsystem>Tests<Theme>` (`TextTestsWriter`).
 echo 'UnitRunner.Run UnitTests' | tools/run64.sh
 echo 'UnitRunner.Run TextTests slow proc' | tools/run64.sh
 
-tools/test.sh                 # modules from Test64/tests.txt
+tools/test.sh                 # modules from tools/tests.txt
 tools/test.sh --list
 tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
-`UnitRunner.Run` arguments: a module name, a subsystem name (runs loaded
-`<name>*Tests` modules) or `all`; `slow`, `gui`, `proc` enable those
-marks; `junit=FILE`, `tap`, `noquit`.
+`UnitRunner.Run` arguments: a module name, a subsystem name, or `all`;
+`slow`, `gui`, `proc` enable those marks; `junit=FILE`, `tap`, `noquit`.
+A subsystem name selects loaded modules `<Sub>Tests` and
+`<Sub>Tests<Theme>` (for example, `Async` finds `AsyncTestsChannels`);
+`all` selects only modules whose name ends in `Tests`. The modules must
+already be loaded (linked) into the world.
 
 `tools/unit.sh` compiles the module with `tools/go64.sh` (up to three
 passes), runs it in a separate `blackbox-console`, and succeeds only when

@@ -2,7 +2,7 @@
 
 `Demo` contains small, runnable translations of well-known concurrency
 examples. Every example is a separate module with a parameterless
-command; every command has a Unit test in `Test64/Mod/Demo.cp` with a
+command; every command has a Unit test in `Demo/Mod/Tests.cp` with a
 deterministic result.
 
 All examples use the extensions of this branch:
@@ -22,13 +22,14 @@ i386; tasks, monitors and `ACTIVE.AWAIT` themselves also work on i386
 ```sh
 tools/build64.sh Demo          # DemoSupport and all examples
 echo 'DemoBuffer.Run' | tools/run64.sh
-tools/test.sh Test64Demo       # Unit tests of all examples
+tools/test.sh DemoTests       # Unit tests of all examples
 tools/test-demo-gui.sh         # headless window check of DemoAnts
 ```
 
 `tools/build64.sh` with no arguments builds `Demo` too (`Demo` is in
-`DEFAULT_SUBSYSTEMS`). `tools/test.sh` runs `Test64Demo` from
-`Test64/tests.txt` and the separate `Test64DemoGui` stage.
+`DEFAULT_SUBSYSTEMS`). `tools/test.sh` runs `DemoTests` from
+`tools/tests.txt` and the separate `DemoAntsGui` stage
+(`tools/test-demo-gui.sh`).
 
 ## Examples
 
@@ -68,25 +69,25 @@ not part of the concurrency set.
 
 | Test | Checks |
 |---|---|
-| `Test64Demo.TestProcBoundedBuffer` | 120 items, sum 2460 |
-| `Test64Demo.TestProcPhilosophers` | 15 meals, no traps |
-| `Test64Demo.TestProcReadersWriters` | 15 reads, 6 writes, no overlap |
-| `Test64Demo.TestProcBarber` | 3 served, 3 turned away |
-| `Test64Demo.TestProcModuleMonitor` | 120 items, sum 7260 |
-| `Test64Demo.TestProcPingPong` | 10 hits, sum 45 |
-| `Test64Demo.TestProcPipeline` | 10 results, sum 385 |
-| `Test64Demo.TestProcSieve` | 25 primes, sum 1060, max 97 |
-| `Test64Demo.TestProcSelectTimeout` | timeout index 1, receive index 0, value 42 |
-| `Test64Demo.TestProcWorkerPool` | 9 results, sum 285 |
-| `Test64Demo.TestProcBoring` | 16 messages, 8 from each generator |
-| `Test64Demo.TestProcGroupCancel` | one trapped, three cancelled, group failed and empty |
-| `Test64Demo.TestProcAnts` | 1000 ants × 300 steps: food > 0, count preserved, all finished |
-| `Test64Demo.TestProcAntsWalls` | ≥ 3 walls, no ant in a wall, walls deflect moves |
-| `Test64Demo.TestProcAntsReachable` | BFS from the nest reaches every food cell |
-| `Test64Demo.TestProcAntsSpeed` | `Faster` clamps at 200, `Slower` at 1 |
-| `Test64Demo.TestProcAntsFoodWalls` | 200 ants × 1200 steps: food delivered around the walls |
-| `Test64Demo.TestProcAntsMany` | 1000 ants finish, `Tasks.Count() = 0`, no traps |
-| `Test64Demo.TestProcAntsPauseStep` | `Pause` + `Step` performs exactly one round |
+| `DemoTests.TestProcBoundedBuffer` | 120 items, sum 2460 |
+| `DemoTests.TestProcPhilosophers` | 15 meals, no traps |
+| `DemoTests.TestProcReadersWriters` | 15 reads, 6 writes, no overlap |
+| `DemoTests.TestProcBarber` | 3 served, 3 turned away |
+| `DemoTests.TestProcModuleMonitor` | 120 items, sum 7260 |
+| `DemoTests.TestProcPingPong` | 10 hits, sum 45 |
+| `DemoTests.TestProcPipeline` | 10 results, sum 385 |
+| `DemoTests.TestProcSieve` | 25 primes, sum 1060, max 97 |
+| `DemoTests.TestProcSelectTimeout` | timeout index 1, receive index 0, value 42 |
+| `DemoTests.TestProcWorkerPool` | 9 results, sum 285 |
+| `DemoTests.TestProcBoring` | 16 messages, 8 from each generator |
+| `DemoTests.TestProcGroupCancel` | one trapped, three cancelled, group failed and empty |
+| `DemoTests.TestProcAnts` | 1000 ants × 300 steps: food > 0, count preserved, all finished |
+| `DemoTests.TestProcAntsWalls` | ≥ 3 walls, no ant in a wall, walls deflect moves |
+| `DemoTests.TestProcAntsReachable` | BFS from the nest reaches every food cell |
+| `DemoTests.TestProcAntsSpeed` | `Faster` clamps at 200, `Slower` at 1 |
+| `DemoTests.TestProcAntsFoodWalls` | 200 ants × 1200 steps: food delivered around the walls |
+| `DemoTests.TestProcAntsMany` | 1000 ants finish, `Tasks.Count() = 0`, no traps |
+| `DemoTests.TestProcAntsPauseStep` | `Pause` + `Step` performs exactly one round |
 
 The headless GUI stage `tools/test-demo-gui.sh` opens the `DemoAnts`
 window under `gtk4-broadwayd`, logs an ASCII frame every 40 redraw ticks

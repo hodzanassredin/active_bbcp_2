@@ -36,5 +36,5 @@ DemoSelectTimeout: timeoutIdx=1 timeoutMs=30 gotIdx=0 gotMs=5 value=42
 
 ## Test
 
-`Test64Demo.TestProcSelectTimeout` checks the indices, the value 42 and
+`DemoTests.TestProcSelectTimeout` checks the indices, the value 42 and
 that the timeout waited at least 20 ms.

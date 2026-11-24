@@ -36,6 +36,15 @@
   разные. Замеры: 1,24 мкс на ход муравья (полный круг 1000 муравьёв ≈ 1,24 мс), кадр 0,76 мс, 9 шагов/с,
   1000 задач снимаются без остатка. Тесты — 19 проверок в `Test64Demo` (стены, БФС, скорости, доставка,
   1000 задач, пауза/шаг), GUI-этап `tools/test-demo-gui.sh` — `ok=1`. Документация — `Demo/Docu/Ants.md`.
+- s20 — готово: подсистема `Test64` расформирована (чистый перенос, поведение не менялось). Тесты переехали в
+  проверяемые подсистемы по соглашению `Unit/Docu/ru/Testing.md`: `SystemTests*` — в `System/Mod` (только amd64 —
+  `System/Mod64`), `DevTestsActive`/`DevTestsYield` — в `Dev/Mod`, `AsyncTests*` — в `Async/Mod64`, `DemoTests`/
+  `DemoTestsGui` — в `Demo/Mod`, `LinTestsFiles`, `CommTestsResolver`, `RobustTestsParallel`/`RobustTestsClient`;
+  фикстуры отказов — `Dev/Reject`, манифест — `tools/tests.txt`. Компилятор: `CompileSubs` пропускает
+  `<Sub>/Mod/Tests*.cp` (тесты собирает `tools/unit.sh`), ключ `^` разрешён тестовым модулям
+  `<Sub>Tests*`; `UnitRunner.Run <Подсистема>` находит `<Sub>Tests<Тема>`. `bootstrap.sh` не ставит
+  тестовые модули Dev в `Dev/Code`. Прогоны: test.sh 21/21 (107 тестов), test32 8/8 (44), wine 13/13,
+  check-reject 9/9, bootstrap 98 файлов B=C, `build64.sh --clean` с нуля. Счётчики до и после совпали.
 
 ## Не делать
 

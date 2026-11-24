@@ -35,5 +35,5 @@ DemoModuleMonitor: produced=120 consumed=120 sum=7260
 
 ## Test
 
-`Test64Demo.TestProcModuleMonitor` checks 120 produced, 120 consumed,
+`DemoTests.TestProcModuleMonitor` checks 120 produced, 120 consumed,
 sum 7260 and no traps.

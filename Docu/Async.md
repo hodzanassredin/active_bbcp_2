@@ -255,8 +255,8 @@ the back edge of `WHILE`, `REPEAT`, `LOOP` and `FOR`. The key is the
 character `^` after the module name:
 
 ```sh
-echo 'DevCompiler64.CompileThis Test64Yield ^' | ./dev0Linux   # amd64
-echo 'DevCompiler.CompileThis Test64Yield ^' | ./dev0Linux     # i386
+echo 'DevCompiler64.CompileThis DevTestsYield ^' | ./dev0Linux   # amd64
+echo 'DevCompiler.CompileThis DevTestsYield ^' | ./dev0Linux     # i386
 # or: echo "DevCompiler.CompileOpt('^')" ...
 ```
 
@@ -439,7 +439,7 @@ name server is unreachable (packets are dropped silently, default
 timeout and attempts), `ResolveJob` for a nonexistent name waits
 10,010 ms, while the main loop makes 9,449 steps. Without
 `unshare`/`ip`/`mount` the scenario prints `SKIP` with the reason.
-`tools/test.sh` runs it as a separate stage. `Test64WinWorkers` repeats
+`tools/test.sh` runs it as a separate stage. `AsyncTestsWinWorkers` repeats
 the slow-call, file and `getaddrinfo` checks under Wine (4/4).
 
 ## Computons (stage 9)

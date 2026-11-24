@@ -31,5 +31,5 @@ DemoWorkerPool: workers=3 count=9 sum=285
 
 ## Test
 
-`Test64Demo.TestProcWorkerPool` checks three workers, nine results and
+`DemoTests.TestProcWorkerPool` checks three workers, nine results and
 1²+…+9² = 285.

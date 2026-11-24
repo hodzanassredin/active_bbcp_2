@@ -190,12 +190,12 @@ tools/build64.sh                  # все подсистемы, консоль 
 tools/build64.sh --clean          # стереть .ocf/.osf установки
 tools/build64.sh --console-only   # только консоль
 echo 'Команда' | tools/run64.sh
-tools/go64.sh Test64Basic         # amd64 CompileThis
+tools/go64.sh SystemTestsBasic         # amd64 CompileThis
 tools/go32.sh DevCPE              # i386 CompileThis -> .work/i386
 tools/build32.sh                  # i386-мир + консоль в build/BB32LIN
 tools/test32.sh                   # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard
 tools/i386-toolchain.sh           # 32-битный C-тулчейн без sudo (флаги gcc)
-tools/test.sh                     # 19 этапов, 86 проверок
+tools/test.sh                     # 21 этап, 107 тестов
 tools/test-resolver.sh            # этап 8: резолвер в unshare -rmn
 tools/test-robust.sh              # RobustParallel на 1/4/16 процессах
 tools/test-mpi.sh                 # MPI-транспорт, mpiexec -n 5
@@ -205,31 +205,40 @@ tools/check-reject.sh             # 8 отказов компилятора эт
 tools/bootstrap.sh                # три прохода Dev, B и C побайтно
 tools/test.sh --list
 tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
-tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
+tools/bench-gc.sh SystemTestsGcBench.DoSmall   # 1 и 10 млн, без 50 млн
 ```
 
 - Тесты: подсистема `Unit` (`UnitAssert`, `UnitRunner`; правила —
-  `Unit/Docu/ru/Testing.md`), манифест `Test64/tests.txt` в формате
+  `Unit/Docu/ru/Testing.md`), манифест `tools/tests.txt` в формате
   `<модуль>|<marks>|<таймаут>|<доп. модули>|<опции>`. Пятое поле —
   опции модуля для `CompileThis` (например, `^` — ключ точек уступки;
   `tools/unit.sh --opts '^'`). `tools/test.sh` зовёт `tools/unit.sh`
   на каждый модуль: отдельный процесс, итог `failed 0`.
-  Test64-сценарии — `Test64Tests` с пометкой `proc`; задачи —
-  `Test64Tasks` (`proc slow`); этап 6 — `Test64Active`, `Test64Yield`.
-  Отдельные этапы `tools/test.sh`: `Test64Resolver` (резолвер в
-  `unshare -rmn`; без прав — `SKIP`), `Test64RobustParallel`
-  (1/4/16 процессов через `ROBUST_SIZE`), `Test64Mpi` (`mpiexec -n 5`,
-  без MPICH — `SKIP`), `Test64Gui` (под `gtk4-broadwayd`, без него —
-  `SKIP`). Модуль `Test64Files` (`proc slow`) занимает все 100000
+  Тесты лежат в своих подсистемах: `<Sub>Tests` и `<Sub>Tests<Тема>`
+  (`System/Mod/Tests*.cp`, `Dev/Mod/Tests*.cp`, ...; только amd64 —
+  `Mod64`, например `Async/Mod64/TestsChannels.cp`). `UnitRunner.Run
+  System` выбирает загруженные `SystemTests` и `SystemTests<Тема>`.
+  Сценарии ядра — `SystemTests` с пометкой `proc`; задачи —
+  `SystemTestsTasks` (`proc slow`); этап 6 — `DevTestsActive`, `DevTestsYield`.
+  Отдельные этапы `tools/test.sh`: `CommTestsResolver` (резолвер в
+  `unshare -rmn`; без прав — `SKIP`), `RobustTestsParallel`
+  (1/4/16 процессов через `ROBUST_SIZE`), `AsyncTestsMpi` (`mpiexec -n 5`,
+  без MPICH — `SKIP`), `DemoTestsGui` (под `gtk4-broadwayd`, без него —
+  `SKIP`). Модуль `LinTestsFiles` (`proc slow`) занимает все 100000
   имён `odcNNNNN` и проверяет уникальные временные имена `LinFiles`.
   `tools/test32.sh` гоняет Unit, Files, Tasks, Monitors, Active, Yield,
   CoTests и UnloadGuard на i386 (`tools/build32.sh`, ELF32
-  `blackbox-console`). Сопрограммы этапа 2 проверяет `Test64CoTests`
+  `blackbox-console`). Сопрограммы этапа 2 проверяет `SystemTestsCoTests`
   через `libtest32.so`: `tools/i386-toolchain.sh` без sudo готовит
   `.work/i386dev` (`apt-get download libc6-dev-i386` и
   `lib32gcc-N-dev`, `dpkg-deb -x`, правка `libc.so`) и печатает флаги
-  gcc; нет сети/пакета — SKIP, `Test64CoTests` пропускается.
-  Итог — 19 этапов, 86 проверок.
+  gcc; нет сети/пакета — SKIP, `SystemTestsCoTests` пропускается.
+  Итог — 21 этап, 107 тестов, 0 провалов.
+- `CompileSubs` пропускает `<Sub>/Mod/Tests*.cp`: тесты собирает
+  `tools/unit.sh`; `UnitTests`/`UnitTestsProbe` компилируются явно в
+  `build64.sh`, `build32.sh`, `test-win64.sh`. Ключ `^` разрешён
+  тестовым модулям (`*Tests*`) — им иначе не проверить уступки в
+  подсистеме `Dev`.
 - `UnitRunner` ставит пустой `trapViewer` на время прогона — иначе
   консольный x64 считает фатальным любой трап, даже внутри `Kernel.Try`;
   прежний viewer восстанавливается (`Kernel.GetTrapViewer`).
@@ -245,19 +254,19 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `Services.Action`, переключатель — [code] на amd64 (без .so). Стеки:
   `Kernel.AllocStack/FreeStack` (в `LinKernel` mmap + сторожевая
   страница), `Platform.AllocateStackMem` по умолчанию возвращает 0.
-  Тесты — `Test64Tasks` (`Test64/Mod/Tasks.cp`), подробности —
+  Тесты — `SystemTestsTasks` (`System/Mod/TestsTasks.cp`), подробности —
   `docs/tasks.md`.
 - Этап 4: `Kernel.Lock/Unlock/Wait/Await`, таблица мониторов по адресу
   объекта, цепочка взятий у стека, `Kernel.Try` снимает до своей
   глубины, сборщик держит объекты, журнал тупика, `Tasks.SetScheduler`.
-  Тесты — `Test64Monitors`, описание — `Docu/Async.md`.
+  Тесты — `SystemTestsMonitors`, описание — `Docu/Async.md`.
 - Этап 5: `Docu/Async.md` и `Docu/ru/Async.md`.
 - Этап 6: компилятор (`Dev/Mod`): псевдомодуль `ACTIVE` и
   `ACTIVE.AWAIT` (скрытая процедура `@awaitN`, кадр в `BX` через
   `Kernel.CallCond`), `[exclusive]` (пролог/эпилог `Kernel.Lock/
   Unlock`, монитор модуля), ключ `^` (`Kernel.Poll` на обратном
-  переходе циклов), скрытый импорт `"$$"`. Тесты — `Test64Active`,
-  `Test64Yield`; отказы — `tools/check-reject.sh`; бутстрап —
+  переходе циклов), скрытый импорт `"$$"`. Тесты — `DevTestsActive`,
+  `DevTestsYield`; отказы — `tools/check-reject.sh`; бутстрап —
   `tools/bootstrap.sh` (второй проход совпадает, кроме 12-байтовой
   метки времени в `.ocf`). На i386 то же расширение работает:
   `CPT.Import`/`Compiler` разрешают `ACTIVE` и `^` для `processor = 10`,
@@ -272,7 +281,7 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   реестр готовности дескрипторов; `LinConsole.WaitInput` опрашивает
   stdin и его одним `poll`. `CommTCP__Lin` переведён с `select` на
   `poll` (fd_set < 1024), очередь accept — 128. Тесты —
-  `Test64Channels`, `Test64IO` (эхо/HTTP, 1000 соединений, покой).
+  `AsyncTestsChannels`, `AsyncTestsIO` (эхо/HTTP, 1000 соединений, покой).
 - Этап 8: `Async/Mod64/Work.cp` — фасад `AsyncWork` с делегатом
   `AsyncWork.Impl`; `Async/Mod64/WorkLin.cp` — пул pthread (задания и
   результаты в статических слотах, готовность — байт в pipe, `Poller`
@@ -283,8 +292,8 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   `Execute` из задачи — точка ожидания. `LinThreads`/`LinNative` —
   отдельные модули объявлений (символы `LinLibc` в хосте не обновить).
   `Kernel.WorkerAllocs` — отладочный счётчик `NEW` из рабочей нити.
-  Тесты — `Test64Workers`, `Test64WinWorkers`. Худший случай
-  (недоступный сервер имён) — `Test64Resolver` в `unshare -rmn`:
+  Тесты — `AsyncTestsWorkers`, `AsyncTestsWinWorkers`. Худший случай
+  (недоступный сервер имён) — `CommTestsResolver` в `unshare -rmn`:
   10 010 мс ожидания в нити, 9 449 шагов главного цикла.
 - Этап 9: `Async/Mod64/Computon.cp` — `Computon = Stores.Store` с
   `Do`, `Push/Pull/Try/Wait/Stop/SetHook/Unload`, транспорт —
@@ -294,7 +303,7 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   исполнители, размер мира — `ROBUST_SIZE`). MPI-транспорт —
   `Async/Mod64/Mpi.cp` поверх MPICH из `.work/venv`
   (`SetTransport("mpi")`, ранг 0 — тест, ранги 1..n —
-  `AsyncMpi.WorkerLoop`). Тесты — `Test64Computons` (1/4/16 процессов,
+  `AsyncMpi.WorkerLoop`). Тесты — `AsyncTestsComputons` (1/4/16 процессов,
   убийство, `AltPull`), `tools/test-robust.sh`, `tools/test-mpi.sh`.
 - Этап 10: `Async/Mod/Proto.cp` — необязательный протокол канала по
   образцу Zonnon (автомат из описания, `AsyncChan.SetProtocol`, трап с
@@ -303,16 +312,16 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   компутонов `pipe`/`tcp` — `SetTransport` или `ASYNC_TRANSPORT`,
   TCP по localhost, сокет исполнителя блокирующий. `Unload(module)`
   выгружает код у всех исполнителей (отказ `20`, если занят) —
-  `Test64Unload` перекомпилирует `Test64UnloadCode` и проверяет новый
+  `SystemTestsUnload` перекомпилирует `SystemTestsUnloadCode` и проверяет новый
   `Do`. Метка времени компиляции — `BB_COMPILE_TIME` в `DevCPE`;
   `tools/bootstrap.sh` сравнивает проходы B и C побайтно без маски.
-  Тесты — `Test64Protocol`, `Test64Unload`, TCP-варианты в
-  `Test64Computons`.
+  Тесты — `AsyncTestsProtocol`, `SystemTestsUnload`, TCP-варианты в
+  `AsyncTestsComputons`.
 - Подсистема `Async` собирается в `tools/build64.sh` **отдельным**
-  вызовом `CompileSubs @Lin Async`: в общем списке `CompileSubs`
-  спотыкается о псевдомодуль `ACTIVE` («sourcefile for ACTIVE not
-  found»). Следом так же отдельно собирается `Robust` (фасад
-  `RobustParallel` зависит от `AsyncComputon`).
+  вызовом `CompileSubs @Lin Async`: ей нужны `Tasks`, `LinNative` и
+  `LinThreads`, которые собираются выше отдельными `CompileThis`.
+  Следом так же отдельно собирается `Robust` (фасад `RobustParallel`
+  зависит от `AsyncComputon`).
 - GUI-прогон: `LinInit` читает внешнюю переменную `BB_RUN=Модуль.
   Процедура` и зовёт команду до `Loop.Start`; `tools/test-gui.sh`
   поднимает `gtk4-broadwayd` в своём `XDG_RUNTIME_DIR`. Системный
@@ -324,7 +333,7 @@ tools/bench-gc.sh Test64GcBench.DoSmall   # 1 и 10 млн, без 50 млн
   динамически загружаемых interface-модулей; `tools/test-win64.sh`
   собирает @Win, линкует консольный PE (`WinIntInit`, подсистема
   правится на console) и под wine гоняет `UnitTests` 4/4,
-  `Test64WinTasks` 5/5 и `Test64WinWorkers` 4/4 (пул `CreateThread`,
+  `SystemTestsWinTasks` 5/5 и `AsyncTestsWinWorkers` 4/4 (пул `CreateThread`,
   файл, `getaddrinfo`).
 - `OdcTextU`/`tools/sync-odc.sh` в `active2` не перенесены: исходники —
   `.cp`, конвертировать нечего. `DevOnce` заменён на

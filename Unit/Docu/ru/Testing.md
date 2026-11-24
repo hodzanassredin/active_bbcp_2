@@ -28,6 +28,8 @@ END TextTests.
 
 Модуль кладётся как `<Подсистема>Tests` в `<Подсистема>/Mod/Tests.cp`;
 если тем несколько — `<Подсистема>Tests<Тема>` (`TextTestsWriter`).
+Только для amd64 — `<Подсистема>/Mod64/Tests<Тема>.cp` (`AsyncTestsChannels`).
+`CompileSubs` такие файлы пропускает: тесты собирает `tools/unit.sh`.
 
 ## Правила
 
@@ -75,14 +77,17 @@ END TextTests.
 echo 'UnitRunner.Run UnitTests' | tools/run64.sh
 echo 'UnitRunner.Run TextTests slow proc' | tools/run64.sh
 
-tools/test.sh                 # модули из Test64/tests.txt
+tools/test.sh                 # модули из tools/tests.txt
 tools/test.sh --list
 tools/unit.sh CheckTests --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
-Аргументы `UnitRunner.Run`: имя модуля, имя подсистемы (загруженные
-модули `<имя>*Tests`) или `all`; `slow`, `gui`, `proc` включают
-пометки; `junit=ФАЙЛ`, `tap`, `noquit`.
+Аргументы `UnitRunner.Run`: имя модуля, имя подсистемы или `all`;
+`slow`, `gui`, `proc` включают пометки; `junit=ФАЙЛ`, `tap`, `noquit`.
+Имя подсистемы выбирает загруженные модули `<Sub>Tests` и
+`<Sub>Tests<Тема>` (например, `Async` находит `AsyncTestsChannels`);
+`all` — только модули, чьё имя оканчивается на `Tests`. Модули должны
+быть уже загружены (слинкованы) в мир.
 
 `tools/unit.sh` компилирует модуль через `tools/go64.sh` (до трёх
 проходов), запускает его отдельным `blackbox-console` и считает успехом

@@ -37,5 +37,5 @@ DemoPhilo: eaten=15
 
 ## Test
 
-`Test64Demo.TestProcPhilosophers` checks five philosophers × three
+`DemoTests.TestProcPhilosophers` checks five philosophers × three
 meals = 15 and no traps.

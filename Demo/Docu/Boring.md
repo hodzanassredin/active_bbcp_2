@@ -20,7 +20,7 @@ from each generator and stops after both sentinels. This example
 exercised a defect in `AsyncSelect.Select` (a decision on the first
 channel while the selecting task waited for the monitor of the second
 channel); the fix is in `Async/Mod/Select.cp` and the regression test is
-`Test64Channels.TestProcSelectWhileMonitorWait`.
+`AsyncTestsChannels.TestProcSelectWhileMonitorWait`.
 
 ## Run
 
@@ -36,5 +36,5 @@ DemoBoring: messages=16 fromA=8 fromB=8
 
 ## Test
 
-`Test64Demo.TestProcBoring` checks 16 messages, 8 from each generator
+`DemoTests.TestProcBoring` checks 16 messages, 8 from each generator
 and no traps.

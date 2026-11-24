@@ -29,4 +29,4 @@ DemoPingPong: hits=10 sum=45
 
 ## Test
 
-`Test64Demo.TestProcPingPong` checks 10 hits and the sum 0+…+9 = 45.
+`DemoTests.TestProcPingPong` checks 10 hits and the sum 0+…+9 = 45.

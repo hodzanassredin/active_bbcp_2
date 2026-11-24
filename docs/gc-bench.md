@@ -1,7 +1,7 @@
 # Замер сборщика на active2 (снимок Ивана)
 
-Измерения сняты `Test64GcBench.DoSmall` через
-`tools/bench-gc.sh Test64GcBench.DoSmall` на `active2` (Linux x64,
+Измерения сняты `SystemTestsGcBench.DoSmall` через
+`tools/bench-gc.sh SystemTestsGcBench.DoSmall` на `active2` (Linux x64,
 снимок Ивана DIA261123, 23.11.2026). 50 млн не запускались: по заданию
 достаточно 1 и 10 млн; `DoSmall` — тот же сценарий без 50 млн
 (`GcBench.cp`).
@@ -25,7 +25,7 @@
 | Сброс 10 млн | 91.5 мс | — | 104 КБ | 2 |
 
 Пиковый RSS — **316 484 КБ** (309 МБ), полное время прогона —
-**2 мин 02 с**, код возврата 0, маркер `TEST64-PASS`.
+**2 мин 02 с**, код возврата 0, маркер `SYSTEMTESTS-PASS`.
 
 Периодическая сборка главного цикла (`Loop.quantum := 0`,
 `gcCycle = 100`):
@@ -62,7 +62,7 @@
    сборку. Снимок берётся в `Loop.Start` после `InstallCleaner`,
    потому что установка cleaner'а сама выделяет узел.
 
-Проверка `InHeap` — `Test64InHeap.Do` (в манифесте `Test64/tests.txt`):
+Проверка `InHeap` — `SystemTestsInHeap.Do` (в манифесте `tools/tests.txt`):
 адреса внутри кластеров и на границах `[base+24, base+size)`, вне кучи
 (0, −1, адрес стека), а также после освобождения отдельного кластера
 большим объектом; инвариант «индекс = состав `root`» проверяется после
@@ -128,6 +128,6 @@
    прошлой сборки не было выделений: 500 итераций при 10 млн живых —
    0 сборок и 0.07 с вместо 4 сборок и 92 с.
 5. На `active2` замер воспроизводится командой
-   `tools/bench-gc.sh Test64GcBench.DoSmall`; полный `Do` (с 50 млн)
+   `tools/bench-gc.sh SystemTestsGcBench.DoSmall`; полный `Do` (с 50 млн)
    теперь укладывается в 7 с и тоже доступен через
-   `tools/bench-gc.sh Test64GcBench.Do`.
+   `tools/bench-gc.sh SystemTestsGcBench.Do`.
