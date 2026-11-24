@@ -16,7 +16,7 @@ MODULE AsyncWork;
 	не в реализациях: рабочая нить получает указатель на них через
 	[ccall]-процедуру и не трогает кучу. *)
 
-	IMPORT S := SYSTEM;
+	IMPORT S := SYSTEM, Dialog;
 
 	CONST
 		maxPath* = 256; maxBuf* = 4096; maxHost* = 128;
@@ -43,7 +43,7 @@ MODULE AsyncWork;
 			AsyncWork.ReadFileJob/WriteFileJob/ResolveJob. *)
 		Impl* = POINTER TO ABSTRACT RECORD END;
 
-	VAR impl: Impl;
+	VAR impl: Impl; callRes: INTEGER;
 
 	PROCEDURE (i: Impl) Submit* (procAdr, arg: S.ADDRESS): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (i: Impl) Done* (id: INTEGER): BOOLEAN, NEW, ABSTRACT;
@@ -57,10 +57,23 @@ MODULE AsyncWork;
 	PROCEDURE (i: Impl) ResolveJob* (arg: S.ADDRESS), NEW, ABSTRACT;
 
 	PROCEDURE Install* (i: Impl);
-	(** Поставить платформенную реализацию. Зовётся из init платформы. *)
+	(** Поставить платформенную реализацию. Зовётся делегатом из его
+		Install (лениво, при первом обращении к пулу). *)
 	BEGIN
 		impl := i
 	END Install;
+
+	PROCEDURE Ensure;
+	(** Ленивый запуск пула: платформенный делегат находит фасад сам.
+		Пустой errorMsg — отсутствующий на этой платформе модуль просто
+		не загрузится, без сообщения в диалоге. *)
+	BEGIN
+		IF impl = NIL THEN
+			Dialog.Call("AsyncWorkLin.Install", "", callRes);
+			IF impl = NIL THEN Dialog.Call("AsyncWorkWin.Install", "", callRes) END;
+			ASSERT(impl # NIL, 22)
+		END
+	END Ensure;
 
 	PROCEDURE Active* (): BOOLEAN;
 	BEGIN
@@ -70,7 +83,7 @@ MODULE AsyncWork;
 	PROCEDURE Submit* (procAdr, arg: S.ADDRESS): INTEGER;
 	(** Поставить задание в очередь пула; -1 — нет свободного слота. *)
 	BEGIN
-		ASSERT(impl # NIL, 21);
+		Ensure;
 		RETURN impl.Submit(procAdr, arg)
 	END Submit;
 
@@ -93,9 +106,10 @@ MODULE AsyncWork;
 	END Release;
 
 	PROCEDURE Execute* (procAdr, arg: S.ADDRESS): INTEGER;
-	(** Исполнить задание в рабочей нити и дождаться; только из задачи. *)
+	(** Исполнить задание в рабочей нити и дождаться; только из задачи.
+		Первый вызов лениво заводит пул. *)
 	BEGIN
-		ASSERT(impl # NIL, 21);
+		Ensure;
 		RETURN impl.Execute(procAdr, arg)
 	END Execute;
 

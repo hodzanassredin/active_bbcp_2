@@ -14,12 +14,12 @@ MODULE AsyncWorkWin;
 
 	Задания — те же [ccall]-процедуры фасада; тела используют Win32
 	(CreateFileA/ReadFile/WriteFile, getaddrinfo из WS2_32), поэтому
-	куча и каркас не трогаются. Kernel.EnterWorker/LeaveWorker — общий
-	отладочный счётчик NEW из рабочей нити.
+	куча и каркас не трогаются.
 
-	Install зовёт WinIntInit (консоль) и WinInit (GUI). *)
+	Install зовётся лениво из AsyncWork.Ensure при первом Execute; базовый
+	init (WinIntInit/WinInit) пул не заводит. *)
 
-	IMPORT S := SYSTEM, Kernel, Tasks, Services, AsyncWork, A := WinApi, Ws := AsyncWinSock;
+	IMPORT S := SYSTEM, Tasks, Services, AsyncWork, A := WinApi, Ws := AsyncWinSock;
 
 	CONST
 		maxWorkers = 4;
@@ -79,9 +79,7 @@ MODULE AsyncWorkWin;
 				IF qn = 0 THEN ind := A.ResetEvent(sync.workEvent) END;
 				A.LeaveCriticalSection(sync.cs);
 				p := S.VAL(AsyncWork.Proc, slots[id].procAdr);
-				Kernel.EnterWorker;
 				p(slots[id].arg);
-				Kernel.LeaveWorker;
 				A.EnterCriticalSection(sync.cs);
 				slots[id].done := TRUE;
 				A.LeaveCriticalSection(sync.cs);

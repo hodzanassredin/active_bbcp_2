@@ -10,12 +10,10 @@ MODULE AsyncWorkLin;
 	Задача ждёт результата через Execute: Submit, Park, пробуждение из
 	Scan. Главный цикл при этом работает.
 
-	Kernel.EnterWorker/LeaveWorker — отладочный счётчик обращений к куче
-	из рабочей нити (для теста дисциплины).
+	Install зовётся лениво из AsyncWork.Ensure при первом Execute: фасад
+	находит делегат сам через Dialog.Call, базовый init пул не заводит. *)
 
-	Install зовёт LinIntInit: он и ставит делегата в AsyncWork. *)
-
-	IMPORT S := SYSTEM, Kernel, Tasks, Poller, LinThreads, LinNative, LinLibc, LinNet,
+	IMPORT S := SYSTEM, Tasks, Poller, LinThreads, LinNative, LinLibc, LinNet,
 		AsyncWork;
 
 	CONST
@@ -101,9 +99,7 @@ MODULE AsyncWorkLin;
 			id := q[qh]; qh := (qh + 1) MOD queueLen; DEC(qn);
 			res := LinThreads.pthread_mutex_unlock(S.ADR(sync.mu));
 			p := S.VAL(AsyncWork.Proc, slots[id].procAdr);
-			Kernel.EnterWorker;
 			p(slots[id].arg);
-			Kernel.LeaveWorker;
 			res := LinThreads.pthread_mutex_lock(S.ADR(sync.mu));
 			slots[id].done := TRUE;
 			res := LinThreads.pthread_mutex_unlock(S.ADR(sync.mu));

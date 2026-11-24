@@ -3,8 +3,9 @@ MODULE Test64Workers;
 
 	Медленный вызов в рабочей нити не замораживает главный цикл: задача
 	ждёт Execute, главный стек продолжает крутить действия. Проверяются
-	разрешение имён и файловые задания, а также отладочный счётчик
-	обращений к куче из рабочей нити. *)
+	разрешение имён и файловые задания. Отладочный счётчик обращений к
+	куче из рабочей нити удалён из ядра: рабочие задания не выделяют
+	память по построению, а счётчик был общим флагом без атомарности. *)
 
 	IMPORT S := SYSTEM, Kernel, Services, Tasks, AsyncWork, AsyncIO,
 		LinNative, UnitAssert, Console, Strings;
@@ -13,15 +14,13 @@ MODULE Test64Workers;
 		SlowTask = POINTER TO RECORD (Tasks.Task) END;
 		FileTask = POINTER TO RECORD (Tasks.Task) END;
 		AddrTask = POINTER TO RECORD (Tasks.Task) END;
-		HeapTask = POINTER TO RECORD (Tasks.Task) END;
 
 	VAR
 		slowDone, slowRes, steps: INTEGER; slowElapsed: LONGINT;
-		fileDone, heapDone: INTEGER;
+		fileDone: INTEGER;
 		fileReq: AsyncWork.FileReq;
 		addrReq: AsyncWork.AddrReq;
 		addrStatus, addrCount: INTEGER;
-		heapBefore, heapAfter: INTEGER;
 		dlg: ARRAY 64 OF CHAR;
 
 	PROCEDURE [ccall] SlowJob (arg: S.ADDRESS);
@@ -29,18 +28,6 @@ MODULE Test64Workers;
 	BEGIN
 		res := LinNative.usleep(300000)
 	END SlowJob;
-
-	PROCEDURE AllocOnWorker;
-		TYPE R = POINTER TO RECORD x: INTEGER END;
-		VAR p: R;
-	BEGIN
-		NEW(p); p.x := 1
-	END AllocOnWorker;
-
-	PROCEDURE [ccall] HeapJob (arg: S.ADDRESS);
-	BEGIN
-		AllocOnWorker
-	END HeapJob;
 
 	PROCEDURE PumpUntil (ms: LONGINT; cond: PROCEDURE (): BOOLEAN): BOOLEAN;
 		VAR t0: LONGINT;
@@ -62,9 +49,6 @@ MODULE Test64Workers;
 
 	PROCEDURE AddrReady (): BOOLEAN;
 	BEGIN RETURN addrCount = 1 END AddrReady;
-
-	PROCEDURE HeapReady (): BOOLEAN;
-	BEGIN RETURN heapDone = 1 END HeapReady;
 
 	(* --- медленный вызов -------------------------------------------------- *)
 
@@ -143,27 +127,5 @@ MODULE Test64Workers;
 		UnitAssert.EqualInt(0, addrReq.status, "getaddrinfo succeeded");
 		UnitAssert.True(addrReq.count > 0, "at least one address")
 	END TestResolve;
-
-	(* --- дисциплина кучи -------------------------------------------------- *)
-
-	PROCEDURE (t: HeapTask) Run;
-	BEGIN
-		heapBefore := Kernel.WorkerAllocs();
-		heapAfter := AsyncWork.Execute(S.ADR(HeapJob), 0);
-		heapAfter := Kernel.WorkerAllocs();
-		heapDone := 1
-	END Run;
-
-	PROCEDURE TestHeapDiscipline*;
-		VAR t: HeapTask; before: INTEGER;
-	BEGIN
-		before := Kernel.WorkerAllocs();
-		heapBefore := 0; heapAfter := 0; heapDone := 0;
-		NEW(t); Tasks.Start(t);
-		UnitAssert.True(PumpUntil(5000, HeapReady), "heap job finishes");
-		UnitAssert.True(heapAfter > before, "worker allocation counted");
-		Console.WriteStr("Test64Workers: worker allocs="); Strings.IntToString(heapAfter - before, dlg);
-		Console.WriteStr(dlg); Console.WriteLn
-	END TestHeapDiscipline;
 
 END Test64Workers.

@@ -1,7 +1,6 @@
 MODULE LinIntInit;
 
 	IMPORT
-		S := SYSTEM,
 		Kernel,
 		StdInterpreter (* Dialog.SetCallHook *) ,
 		LinConsole (* Console.SetHook *) ,
@@ -30,12 +29,9 @@ MODULE LinIntInit;
 		
 		Windows.Init;  (* neet to set hooks *)
 
-		(* Пул рабочих нитей этапа 8: фасад AsyncWork и делегат pthread.
-		   Async/Mod64 в 32-битный мир не входит, поэтому там вызов
-		   AsyncWorkLin.Install дал бы только CodeFileNotFound в журнале. *)
-		IF SIZE(S.ADDRESS) = 8 THEN
-			Dialog.Call("AsyncWorkLin.Install", "Failed to start worker pool", res)
-		END;
+		(* Пул рабочих нитей этапа 8 стартует лениво: первый
+		   AsyncWork.Execute сам ставит платформенного делегата через
+		   Dialog.Call. Базовый init пул не заводит. *)
 
 		Dialog.Call("ConsInterp.Run", " ", res)
 		

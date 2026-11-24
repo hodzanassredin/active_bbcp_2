@@ -28,8 +28,9 @@ MODULE WinIntInit;
 		
 		Windows.Init;  (* neet to set hooks *)
 
-		(* Пул рабочих нитей этапа 8: фасад AsyncWork и делегат CreateThread. *)
-		Dialog.Call("AsyncWorkWin.Install", "Failed to start worker pool", res);
+		(* Пул рабочих нитей этапа 8 стартует лениво: первый
+		   AsyncWork.Execute сам ставит платформенного делегата через
+		   Dialog.Call. Базовый init пул не заводит. *)
 
 		Dialog.Call("ConsInterp.Run", " ", res)
 		
