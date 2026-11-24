@@ -3,6 +3,7 @@ Map to the BlackBox Component Builder Documentation
 											Guided Tour	Roadmap	Overview by Example
 
 Tutorial: Component-based Software Development with BlackBox       Table of Contents
+Tutorial: Several Things at Once in One Program       Table of Contents (Tut-Active-TOC.md; Russian: ru/Tut-Active-TOC.md)
 Part I	Part II	Part III
 User Interaction	Forms	View Construction
 Compound Documents	Texts

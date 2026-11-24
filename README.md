@@ -76,6 +76,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | руководство по модулю `Tasks` |
 | `Docu/ru/Async.md`, `Docu/Async.md` | библиотека `Async` |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | подсистема `Actor`: акторы, ящики, исполнители, супервизор; примеры `ObxActor0`–`ObxActor2` |
+| `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | учебник «несколько дел в одной программе»: когда брать действие, задачу, монитор, транзакцию, канал, выбор, рабочую нить, компутон; сквозной пример — касса и счета (`ObxBank0`–`ObxBank6`) |
 | `docs/implementation.md` | устройство ядра, мониторов, планировщика и компилятора |
 | `docs/building.md` | сборка, запуск, тесты, самосборка, возврат к исходному ядру |
 | `docs/measurements.md` | замеры и команды их воспроизведения |
@@ -84,7 +85,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `docs/adr/README.md` | записи решений: что рассматривали, что отвергли и почему |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
 | `Demo/Docu/Sys-Map.md` | карта примеров; описание каждого примера — `Demo/Docu/<Имя>.md` (`Ants`, `Barber`, `Boring`, `Buffer`, `Group`, `ModuleMonitor`, `Philo`, `PingPong`, `Pipeline`, `ReaderWriter`, `SelectTimeout`, `Sieve`, `WorkerPool`, `Support`) |
-| `Obx/Docu/ru/Sys-Map.md`, `Obx/Docu/Sys-Map.md` | раздел «Обзора на примерах» о задачах, мониторах и каналах: `ObxTasks0`–`ObxTasks4`, `ObxChan0`–`ObxChan2`, `ObxSelect0`, `ObxProto0`, `ObxOnce`, `ObxStm0`–`ObxStm2`, `ObxWork0`, `ObxComputon`, и о хранилище по содержимому: `ObxCas0`–`ObxCas2`; у каждого страница `Obx/Docu/ru/<Имя>.md` |
+| `Obx/Docu/ru/Sys-Map.md`, `Obx/Docu/Sys-Map.md` | раздел «Обзора на примерах» о задачах, мониторах и каналах: `ObxTasks0`–`ObxTasks4`, `ObxChan0`–`ObxChan2`, `ObxSelect0`, `ObxProto0`, `ObxOnce`, `ObxStm0`–`ObxStm2`, `ObxWork0`, `ObxComputon`, `ObxBank0`–`ObxBank6`, и о хранилище по содержимому: `ObxCas0`–`ObxCas2`; у каждого страница `Obx/Docu/ru/<Имя>.md` |
 | `AGENTS.md` | правила работы с репозиторием для агентов |
 
 ## Лицензия

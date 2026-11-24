@@ -328,6 +328,7 @@ code, and the checks to run before a commit.
 | `Docu/ru/Async.md`, `Docu/Async.md` | `Async` library |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | `Cas` content-addressed store |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | `Actor` subsystem: actors and supervision |
+| `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | tutorial: when to use actions, tasks, monitors, transactions, channels, selection, workers, computons (`ObxBank0`–`ObxBank6`) |
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
