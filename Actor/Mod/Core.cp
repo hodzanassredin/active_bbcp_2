@@ -167,6 +167,9 @@ MODULE ActorCore;
 			next: Future
 		END;
 
+		(* Снимает адрес ответа, если ждущую в Ask задачу отменили. *)
+		AskCleaner = POINTER TO RECORD (Kernel.TrapCleaner) f: Future; to: Ref END;
+
 		StdDirectory = POINTER TO RECORD (Directory) END;
 
 	VAR
@@ -991,6 +994,11 @@ MODULE ActorCore;
 		f.next := NIL
 	END DropFuture;
 
+	PROCEDURE (k: AskCleaner) Cleanup;
+	BEGIN
+		DropFuture(k.f); k.to.RemoveWatcher(k.f)
+	END Cleanup;
+
 	PROCEDURE Ask* (to: Ref; m: Msg; ms: LONGINT; OUT reply: Msg): INTEGER;
 	(** Ждёт ответа. Пред: вызов из задачи (трап 20); to # NIL (21);
 		m # NIL (22); вызов не из обработчика самого to (23). Отмена
@@ -998,13 +1006,16 @@ MODULE ActorCore;
 		Пост: ok — reply — первое сообщение, посланное адресу ответа
 		(Respond адресата); timedOut — за ms мс ответа нет; dead — m стало
 		мёртвым письмом или to остановился, не ответив. Кроме ok,
-		reply = NIL. Поздний ответ теряется. *)
-		VAR f: Future; ops: ARRAY 2 OF AsyncSelect.Op; res: INTEGER;
+		reply = NIL. Поздний ответ теряется. После возврата и после отмены
+		адреса ответа в каталоге нет. *)
+		VAR f: Future; ops: ARRAY 2 OF AsyncSelect.Op; res: INTEGER; k: AskCleaner;
 	BEGIN
 		ASSERT(Tasks.InTask(), 20); ASSERT(to # NIL, 21); ASSERT(m # NIL, 22);
 		ASSERT(~(to IS Context) OR ~InHandler(to(Context)), 23);
 		f := NewFuture();
 		to.AddWatcher(f); to.Post(m, f);
+		NEW(k); k.f := f; k.to := to;
+		Kernel.PushTrapCleaner(k);	(* отмена в Select снимает адрес ответа *)
 		AsyncChan.RecvAlt(f.box, ops[0]); AsyncChan.TimeoutAlt(ms, ops[1]);
 		IF AsyncChan.Select(ops) = 0 THEN
 			reply := ops[0].got;
@@ -1015,6 +1026,7 @@ MODULE ActorCore;
 		ELSE
 			reply := NIL; res := timedOut
 		END;
+		Kernel.PopTrapCleaner(k);
 		DropFuture(f); to.RemoveWatcher(f);
 		RETURN res
 	END Ask;

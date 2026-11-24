@@ -2,7 +2,9 @@ MODULE ActorRun;
 (** Исполнители ящиков: пул задач и собственные задачи акторов.
 
 	Пул — n задач, общая очередь ящиков с работой (кольцо run). Свободный
-	исполнитель ждёт в Tasks.Park; Schedule будит его Unpark. Будить
+	исполнитель ждёт в Tasks.ParkExternal: письмо может прийти с главного
+	стека, поэтому, пока пул жив, планировщик не объявляет тупик. Schedule
+	будит исполнителя Unpark. Будить
 	можно только задачу в этом ожидании: задачу, ждущую внутри Receive
 	(монитор, канал), Unpark сбил бы с ожидания. Поэтому у исполнителя
 	флаг idle, поднятый ровно на время ожидания.
@@ -14,7 +16,7 @@ MODULE ActorRun;
 	Shutdown останавливает все акторы и завершает задачи пула без отмены.
 
 	Инвариант: каждый ящик в run стоит у исполнителя (Pending) и лежит в
-	run не более одного раза; idle => исполнитель в Tasks.Park цикла. *)
+	run не более одного раза; idle => исполнитель в Tasks.ParkExternal цикла. *)
 
 	IMPORT Services, Tasks, ActorCore;
 
@@ -68,7 +70,7 @@ MODULE ActorRun;
 				IF k MOD yieldEvery = 0 THEN Tasks.Yield END
 			ELSIF e.quit THEN EXIT
 			ELSE
-				e.idle := TRUE; Tasks.Park; e.idle := FALSE
+				e.idle := TRUE; Tasks.ParkExternal; e.idle := FALSE
 			END
 		END
 	END Run;
@@ -82,7 +84,7 @@ MODULE ActorRun;
 				IF pool.Process(c, throughput) THEN Tasks.Yield END
 			ELSIF pool.Stopped(c) THEN EXIT
 			ELSE
-				t.idle := TRUE; Tasks.Park; t.idle := FALSE
+				t.idle := TRUE; Tasks.ParkExternal; t.idle := FALSE
 			END
 		END
 	END Run;

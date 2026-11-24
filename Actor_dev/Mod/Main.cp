@@ -5,7 +5,7 @@ MODULE Actor_devMain;
 	Services.actionHook.Step (Until). Ask ждёт, поэтому сценарии с Ask
 	идут в задаче Driver. *)
 
-	IMPORT Kernel, Services, Tasks, ActorCore, ActorSup, ActorRun, UnitAssert;
+	IMPORT Kernel, Services, Tasks, Strings, ActorCore, ActorSup, ActorRun, UnitAssert;
 
 	CONST
 		evStarted = 1; evStopping = 2; evStopped = 3; evRestarting = 4;
@@ -822,5 +822,36 @@ MODULE Actor_devMain;
 		UnitAssert.Traps(SetTimeoutOutside, "SetReceiveTimeout outside the handler traps");
 		UnitAssert.Traps(BecomeOutside, "Become outside the handler traps")
 	END TestHandlerOnlyCallsTrapOutside;
+
+	(* --- простой пула и отменённый Ask ------------------------------------- *)
+
+	PROCEDURE TestIdlePoolIsNoDeadlock*;
+	BEGIN
+		target := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSilent), "");
+		Idle(50);
+		UnitAssert.True(~Tasks.Deadlocked(), "idle pool waits for mail, not a deadlock")
+	END TestIdlePoolIsNoDeadlock;
+
+	PROCEDURE FindAsk (OUT name: ActorCore.Name): BOOLEAN;
+	(* Пост: name — имя ждущего адреса ответа "$ask/N" в каталоге. *)
+		VAR i: INTEGER; s: ARRAY 16 OF CHAR;
+	BEGIN
+		FOR i := 1 TO 100000 DO
+			Strings.IntToString(i, s); name := "$ask/" + s;
+			IF ActorCore.dir.Lookup(ActorCore.node, name) # NIL THEN RETURN TRUE END
+		END;
+		RETURN FALSE
+	END FindAsk;
+
+	PROCEDURE TestCancelledAskLeavesNoReplyAddress*;
+		VAR d: Driver; name: ActorCore.Name;
+	BEGIN
+		target := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSilent), "");
+		driverDone := FALSE; NEW(d); d.body := AskSilentBody; Tasks.Start(d);
+		Idle(30);
+		UnitAssert.True(FindAsk(name), "waiting reply address is in the directory");
+		Tasks.Cancel(d); Idle(30);
+		UnitAssert.Same(NIL, ActorCore.dir.Lookup(ActorCore.node, name), "cancelled Ask leaves no reply address")
+	END TestCancelledAskLeavesNoReplyAddress;
 
 END Actor_devMain.
