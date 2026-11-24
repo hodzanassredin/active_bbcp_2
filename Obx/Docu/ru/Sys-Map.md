@@ -30,6 +30,8 @@ ObxActor5  docu/sources		CQRS: отчёт «обороты по счетам» �
 ObxActor6  docu/sources		два узла: Ask через узел, поддельный адрес, потеря узла
 ObxActor7  docu/sources		сага: перевод между узлами переживает падение координатора
 ObxActor8  docu/sources		виртуальный счёт: по номеру, переезд при падении узла
+ObxRaft0  docu/sources		Raft: три узла в памяти, выборы, запись, чтение, гибель лидера
+ObxRaft1  docu/sources		стойкий счётчик на журнале Raft переживает гибель своего узла
 ObxBank0  docu/sources		учебник: действие и задача делают одну работу
 ObxBank1  docu/sources		учебник: кассиры, Join, Sleep, отмена, группа
 ObxBank2  docu/sources		учебник: ожидание денег без монитора и с AWAIT

@@ -104,6 +104,8 @@ ObxActor5  docu/sources		CQRS: a turnover report catches up with the journal
 ObxActor6  docu/sources		two nodes: Ask across a node, a forged address, node loss
 ObxActor7  docu/sources		a saga: a transfer between nodes survives a coordinator crash
 ObxActor8  docu/sources		a virtual account: by number, moves when a node crashes
+ObxRaft0  docu/sources		Raft: three nodes in memory, an election, a write, a read, the leader's death
+ObxRaft1  docu/sources		a persistent counter on a Raft journal survives its node's death
 ObxBank0  docu/sources		tutorial: an action and a task doing the same work
 ObxBank1  docu/sources		tutorial: clerks, Join, Sleep, cancellation, a group
 ObxBank2  docu/sources		tutorial: waiting for money without a monitor and with AWAIT
