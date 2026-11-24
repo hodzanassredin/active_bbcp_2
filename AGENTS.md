@@ -303,6 +303,11 @@ the console PE (`WinIntInit`, with the subsystem patched to console) and runs `U
 
 ### Documentation
 
+Before writing or editing any `.md` file, read the documentation skill
+[`.claude/skills/bb-docs/SKILL.md`](.claude/skills/bb-docs/SKILL.md): genres, order of exposition,
+language rules, the "Interface" reference section (`DEFINITION`, Pre/Post), fact checking against the
+code, and the checks to run before a commit.
+
 | File | Content |
 |---|---|
 | `Docu/ru/Active-CP-Lang.md`, `Docu/Active-CP-Lang.md` | language report |
