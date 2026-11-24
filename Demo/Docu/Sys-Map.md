@@ -58,7 +58,7 @@ tools/test-demo-gui.sh         # headless window check of DemoAnts
 
 | Module | Commands | Description |
 |---|---|---|
-| `DemoAnts` | `DemoAnts.Open`, `Start`, `Stop`, `Reset`, `Run` | 200 ants on a 48×32 field: food, nest, pheromone; field monitor, evaporator task, `Views.View` and a `Services` timer |
+| `DemoAnts` | `DemoAnts.Open`, `Start`, `Stop`, `Pause`, `Resume`, `Step`, `Faster`, `Slower`, `Reset`, `Run`, `Simulate`, `Bench` | 1000 ants on a 160×100 field with four walls and passages: food, nest, pheromone; model speed 1–200 steps/s (default 10) separate from redraw; field monitor, evaporator task, `Views.View` and a `Services` timer |
 
 `DemoSupport` is the shared helper (task pump and console output); it has
 no command of its own. `MD5` is the pre-existing hashing example and is
@@ -80,9 +80,16 @@ not part of the concurrency set.
 | `Test64Demo.TestProcWorkerPool` | 9 results, sum 285 |
 | `Test64Demo.TestProcBoring` | 16 messages, 8 from each generator |
 | `Test64Demo.TestProcGroupCancel` | one trapped, three cancelled, group failed and empty |
-| `Test64Demo.TestProcAnts` | food > 0 in 150 steps, 200 ants, no deadlock |
+| `Test64Demo.TestProcAnts` | 1000 ants × 300 steps: food > 0, count preserved, all finished |
+| `Test64Demo.TestProcAntsWalls` | ≥ 3 walls, no ant in a wall, walls deflect moves |
+| `Test64Demo.TestProcAntsReachable` | BFS from the nest reaches every food cell |
+| `Test64Demo.TestProcAntsSpeed` | `Faster` clamps at 200, `Slower` at 1 |
+| `Test64Demo.TestProcAntsFoodWalls` | 200 ants × 1200 steps: food delivered around the walls |
+| `Test64Demo.TestProcAntsMany` | 1000 ants finish, `Tasks.Count() = 0`, no traps |
+| `Test64Demo.TestProcAntsPauseStep` | `Pause` + `Step` performs exactly one round |
 
 The headless GUI stage `tools/test-demo-gui.sh` opens the `DemoAnts`
-window under `gtk4-broadwayd`, logs an ASCII frame every 10 timer ticks
-and requires `DemoAnts: ok=1` (ticks, food, frames, live ants). No mouse
-is emulated and no user display is used.
+window under `gtk4-broadwayd`, logs an ASCII frame every 40 redraw ticks
+and requires `DemoAnts: ok=1` (ticks, food, frames, frame time, live
+ants). No mouse is emulated and no user display is used. The window is
+~1000×650 px, the cell size follows the window and is at least 3 px.
