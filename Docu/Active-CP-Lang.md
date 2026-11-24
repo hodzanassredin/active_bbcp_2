@@ -477,8 +477,9 @@ IF ~c THEN Kernel.Await(P, @frm, m) END
 
 `P` is a hidden procedure nested in the exclusive one, with the body `RETURN c`. It receives the frame
 address of the waiting procedure; through it the condition reads that procedure's local variables.
-The frame exists on the waiting task's stack for the whole wait. The kernel evaluates the condition
-again in `Kernel.Await` through `Kernel.CallCond`, passing the frame in register `BX`. Both
+The frame exists on the waiting task's stack for the whole wait. `Kernel.Await` passes the call to
+module `Monitors`; it evaluates the condition again through `Kernel.CallCond`, passing the frame in
+register `BX`, and then evaluates it at each exit of another task from the monitor. Both
 restrictions of section 6.5 follow: another task evaluates the condition, so it has no calls; the frame
 belongs to one procedure, so the statement stands in its body and not in a nested one.
 

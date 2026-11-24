@@ -186,6 +186,8 @@ tools/build32.sh                      # i386 world and console in build/BB32LIN
 tools/i386-toolchain.sh               # 32-bit C toolchain without sudo (gcc flags)
 tools/bootstrap.sh                    # three passes of Dev, B and C byte-identical
 tools/bench-gc.sh System_devGcBench.DoSmall   # 1 and 10 million
+tools/iso.sh tools/build64.sh         # any command with its own /tmp (parallel copies)
+tools/worktree.sh ../active_bb-x x    # parallel worktree: links, bootstrap, build64
 ```
 
 `tools/build64.sh` compiles `Mod64` when present, writes `Code`/`Sym` to the installation, then
@@ -219,6 +221,7 @@ tools/test-robust.sh          # RobustParallel on 1/4/16 processes
 tools/test-mpi.sh             # MPI transport, mpiexec -n 5
 tools/test-gui.sh             # GUI under gtk4-broadwayd, no display
 tools/check-reject.sh         # compiler rejection cases
+tools/check-examples.sh --run # doc examples equal their module files; example pages' output
 tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
@@ -319,3 +322,4 @@ code, and the checks to run before a commit.
 | `docs/kernel-plan.md` | future kernel work |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
 | `Demo/Docu/Sys-Map.md` | examples |
+| `Obx/Docu/Sys-Map.md`, `Obx/Docu/ru/Sys-Map.md` | Overview by Example, section Tasks, Monitors and Channels |
