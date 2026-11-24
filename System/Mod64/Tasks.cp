@@ -393,7 +393,8 @@ MODULE Tasks;
 		current.deadline := Kernel.Time() + ms;
 		current.state := Sleeping;
 		current.snext := sleepers; sleepers := current;
-		SwitchTo(current.sp, schedSP)
+		SwitchTo(current.sp, schedSP);
+		current.wake := FALSE	(* Unpark разбудил сон, а не будущий Park *)
 	END Sleep;
 
 	PROCEDURE Join* (t: Task);
@@ -405,6 +406,7 @@ MODULE Tasks;
 			current.wnext := t.waiters; t.waiters := current;
 			current.state := Waiting;
 			SwitchTo(current.sp, schedSP);
+			current.wake := FALSE;	(* Unpark разбудил ожидание Join *)
 			CheckWait("Join")
 		END
 	END Join;
@@ -416,6 +418,10 @@ MODULE Tasks;
 		IF current.wake THEN current.wake := FALSE; RETURN END;
 		current.state := Parked;
 		SwitchTo(current.sp, schedSP);
+		(* Unpark выставил wake и разбудил нас: флаг съеден этим
+		   пробуждением. Иначе следующий Park (например, внутри
+		   Kernel.Lock) вернулся бы сразу без монитора. *)
+		current.wake := FALSE;
 		CheckWait("Park")
 	END Park;
 
