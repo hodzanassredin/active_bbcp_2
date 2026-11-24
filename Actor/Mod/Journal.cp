@@ -47,13 +47,16 @@ MODULE ActorJournal;
 
 		Journal* = POINTER TO ABSTRACT RECORD END;
 
-		Event = RECORD meta: Meta; body: Bytes; len: INTEGER END;
+		(* Тела событий потока лежат подряд в одном массиве data: событие без
+		   своего указателя не добавляет сборщику работы на каждую разметку. *)
+		Event = RECORD meta: Meta; pos, len: INTEGER END;
 
 		Stream = POINTER TO RECORD
 			next: Stream;
 			name: Name;
 			ev: POINTER TO ARRAY OF Event;
 			n: INTEGER;	(* событий; ev[i].meta.seq = i + 1 *)
+			data: Bytes; used: INTEGER;
 			snapSeq: LONGINT;
 			snap: Bytes; snapLen: INTEGER
 		END;
@@ -121,7 +124,7 @@ MODULE ActorJournal;
 		h := Hash(stream); s := m.tab[h];
 		WHILE (s # NIL) & (s.name # stream) DO s := s.next END;
 		IF (s = NIL) & make THEN
-			NEW(s); s.name := stream$; NEW(s.ev, 16); s.next := m.tab[h]; m.tab[h] := s
+			NEW(s); s.name := stream$; NEW(s.ev, 16); NEW(s.data, 1024); s.next := m.tab[h]; m.tab[h] := s
 		END;
 		RETURN s
 	END Find;
@@ -143,7 +146,7 @@ MODULE ActorJournal;
 
 	PROCEDURE (m: Mem) Append (IN stream: ARRAY OF CHAR; expected: LONGINT; IN meta: Meta;
 		IN body: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER);
-		VAR s: Stream; new: POINTER TO ARRAY OF Event; i: INTEGER;
+		VAR s: Stream; new: POINTER TO ARRAY OF Event; i: INTEGER; nb: Bytes;
 	BEGIN
 		ASSERT(stream # "", 20); ASSERT(meta.seq = expected + 1, 21); ASSERT((len >= 0) & (len <= LEN(body)), 22);
 		s := m.Find(stream, TRUE);
@@ -153,19 +156,31 @@ MODULE ActorJournal;
 			FOR i := 0 TO s.n - 1 DO new[i] := s.ev[i] END;
 			s.ev := new
 		END;
-		s.ev[s.n].meta := meta; s.ev[s.n].body := Copy(body, len); s.ev[s.n].len := len;
+		IF s.used + len > LEN(s.data^) THEN
+			NEW(nb, 2 * (s.used + len));
+			FOR i := 0 TO s.used - 1 DO nb[i] := s.data[i] END;
+			s.data := nb
+		END;
+		FOR i := 0 TO len - 1 DO s.data[s.used + i] := body[i] END;
+		s.ev[s.n].meta := meta; s.ev[s.n].pos := s.used; s.ev[s.n].len := len; INC(s.used, len);
 		INC(s.n); res := ok
 	END Append;
 
 	PROCEDURE (m: Mem) Read (IN stream: ARRAY OF CHAR; from: LONGINT; k: Sink; OUT res: INTEGER);
-		VAR s: Stream; i: INTEGER;
+		VAR s: Stream; i, j: INTEGER; b: Bytes;
 	BEGIN
 		ASSERT(k # NIL, 20);
 		res := ok; s := m.Find(stream, FALSE);
 		IF s = NIL THEN RETURN END;
 		IF from < 1 THEN from := 1 END;
-		i := SHORT(from) - 1;
-		WHILE (i < s.n) & k.Event(s.ev[i].meta, s.ev[i].body^, s.ev[i].len) DO INC(i) END
+		i := SHORT(from) - 1; NEW(b, 256);
+		LOOP
+			IF i >= s.n THEN EXIT END;
+			IF s.ev[i].len > LEN(b^) THEN NEW(b, s.ev[i].len) END;
+			FOR j := 0 TO s.ev[i].len - 1 DO b[j] := s.data[s.ev[i].pos + j] END;
+			IF ~k.Event(s.ev[i].meta, b^, s.ev[i].len) THEN EXIT END;
+			INC(i)
+		END
 	END Read;
 
 	PROCEDURE (m: Mem) SaveSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;

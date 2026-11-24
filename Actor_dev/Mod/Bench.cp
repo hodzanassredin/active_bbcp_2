@@ -4,11 +4,13 @@ MODULE Actor_devBench;
 	не время. Тело замера идёт в задаче: Unpark из задачи будит
 	исполнителя без задержки планировщика. *)
 
-	IMPORT Kernel, Services, Tasks, Console, Strings, ActorCore, ActorRun, UnitAssert, System_devClock;
+	IMPORT Kernel, Services, Tasks, Console, Strings, Stores, Files, CasStore, ActorCore, ActorRun,
+		ActorJournal, ActorPersist, ActorFileJournal, UnitAssert, System_devClock;
 
 	CONST
 		actors = 10000;
 		exchanges = 100000;
+		events = 100000;
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -17,6 +19,10 @@ MODULE Actor_devBench;
 		Pinger = POINTER TO RECORD (ActorCore.Actor) kick: ActorCore.Ref END;
 		Driver = POINTER TO RECORD (Tasks.Task) body: PROCEDURE END;
 
+		Added = POINTER TO RECORD (ActorPersist.Event) n: INTEGER END;
+		Burst = POINTER TO RECORD (Msg) n: INTEGER END;
+		Saver = POINTER TO RECORD (ActorPersist.Actor) sum: LONGINT END;
+
 	VAR
 		got, starts, hops, limit: INTEGER;
 		ball: Ball;
@@ -24,6 +30,9 @@ MODULE Actor_devBench;
 		allocs0, switches0: LONGINT;
 		driverDone: BOOLEAN;
 		pool: INTEGER;
+		jr: ActorJournal.Journal;
+		saved, recovered: BOOLEAN;
+		total: LONGINT;
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);
 	BEGIN
@@ -92,6 +101,119 @@ MODULE Actor_devBench;
 	BEGIN
 		NEW(a); a.kick := kickTo; RETURN a
 	END NewPinger;
+
+	(* --- персистентность ----------------------------------------------------- *)
+
+	PROCEDURE (e: Added) Externalize- (VAR wr: Stores.Writer);
+	BEGIN
+		e.Externalize^(wr); wr.WriteVersion(0); wr.WriteInt(e.n)
+	END Externalize;
+
+	PROCEDURE (e: Added) Internalize- (VAR rd: Stores.Reader);
+		VAR v: INTEGER;
+	BEGIN
+		e.Internalize^(rd); IF rd.cancelled THEN RETURN END;
+		rd.ReadVersion(0, 0, v); IF ~rd.cancelled THEN rd.ReadInt(e.n) END
+	END Internalize;
+
+	PROCEDURE (a: Saver) Externalize- (VAR wr: Stores.Writer);
+	BEGIN
+		a.Externalize^(wr); wr.WriteVersion(0); wr.WriteLong(a.sum)
+	END Externalize;
+
+	PROCEDURE (a: Saver) Internalize- (VAR rd: Stores.Reader);
+		VAR v: INTEGER;
+	BEGIN
+		a.Internalize^(rd); IF rd.cancelled THEN RETURN END;
+		rd.ReadVersion(0, 0, v); IF ~rd.cancelled THEN rd.ReadLong(a.sum) END
+	END Internalize;
+
+	PROCEDURE (a: Saver) Restore (s: Stores.Store);
+	BEGIN
+		a.sum := s(Saver).sum
+	END Restore;
+
+	PROCEDURE (a: Saver) Apply (e: ActorPersist.Event);
+	BEGIN
+		INC(a.sum, e(Added).n)
+	END Apply;
+
+	PROCEDURE (a: Saver) Handle (c: ActorCore.Context; m: Msg);
+		VAR i: INTEGER; e: Added;
+	BEGIN
+		WITH m: ActorPersist.ReplayComplete DO total := a.sum; recovered := TRUE
+		| m: Burst DO
+			FOR i := 1 TO m.n DO NEW(e); e.n := 1; a.Persist(c, e, i) END;
+			IF m.n = 0 THEN a.SaveSnapshot(c) END;
+			total := a.sum; saved := TRUE
+		ELSE
+		END
+	END Handle;
+
+	PROCEDURE NewSaver (): ActorCore.Actor;
+		VAR a: Saver;
+	BEGIN
+		NEW(a); a.journal := jr; RETURN a
+	END NewSaver;
+
+	PROCEDURE SendBurst (n: INTEGER);
+	(* Пост: актор "saver" получил команду записать n событий (0 — снимок) и выполнил её. *)
+		VAR b: Burst;
+	BEGIN
+		NEW(b); b.n := n; saved := FALSE;
+		ActorCore.Tell(ActorCore.dir.Lookup(ActorCore.node, "saver"), b);
+		WHILE ~saved DO Tasks.Yield END
+	END SendBurst;
+
+	PROCEDURE StartSaver;
+	BEGIN
+		recovered := FALSE;
+		IF ActorCore.Spawn(NIL, ActorCore.NewProps(NewSaver), "saver") = NIL THEN END;
+		WHILE ~recovered DO Tasks.Yield END
+	END StartSaver;
+
+	PROCEDURE StopSaver;
+	BEGIN
+		ActorCore.StopActor(ActorCore.dir.Lookup(ActorCore.node, "saver"));
+		WHILE ActorCore.dir.Lookup(ActorCore.node, "saver") # NIL DO Tasks.Yield END
+	END StopSaver;
+
+	PROCEDURE PersistRun (IN kind: ARRAY OF CHAR);
+	(* Пост: events событий записаны в jr, восстановлены без снимка и со снимком; строки BENCH. *)
+		VAR t0: LONGINT;
+	BEGIN
+		StartSaver;
+		t0 := Now(); SendBurst(events); Report("persist-" + kind, events, t0);
+		StopSaver;
+		t0 := Now(); StartSaver; Report("recover-" + kind + "-nosnap", events, t0);
+		SendBurst(0); StopSaver;
+		t0 := Now(); StartSaver; Report("recover-" + kind + "-snap", events, t0);
+		StopSaver
+	END PersistRun;
+
+	PROCEDURE PersistMem;
+	BEGIN
+		jr := ActorJournal.NewMem(); PersistRun("mem")
+	END PersistMem;
+
+	PROCEDURE PersistFile;
+		VAR loc: Files.Locator; res: INTEGER;
+	BEGIN
+		loc := Files.dir.This("/tmp/actor_dev_bench"); Files.dir.Delete(loc, "bench.jrn");
+		jr := ActorFileJournal.Open(loc, "bench.jrn", CasStore.NewMem(), res);
+		PersistRun("file");
+		jr.Close
+	END PersistFile;
+
+	PROCEDURE TestSlowPersist*;
+	BEGIN
+		ActorRun.Start(1);
+		UnitAssert.True(Drive(PersistFile, 300000), "file journal finished");
+		UnitAssert.EqualInt(events, total, "file: state recovered");
+		UnitAssert.True(Drive(PersistMem, 120000), "memory journal finished");
+		UnitAssert.EqualInt(events, total, "memory: state recovered");
+		ActorRun.Stop
+	END TestSlowPersist;
 
 	PROCEDURE TenThousand;
 	(* Пост: actors акторов созданы и получили по письму; строки BENCH. *)
