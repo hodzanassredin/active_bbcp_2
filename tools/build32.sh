@@ -63,6 +63,8 @@ echo "build32: компиляция подсистем"
 	echo "DevCompiler.CompileSubs @Lin $SUBS"
 	echo "DevCompiler.CompileThis Taskarch"
 	echo "DevCompiler.CompileThis Tasks"
+	# AsyncStm зависит только от Tasks и Kernel и собирается и для i386.
+	echo "DevCompiler.CompileThis AsyncStm"
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$DEV0" < "$LOG.cmd" > "$LOG" 2>&1; then

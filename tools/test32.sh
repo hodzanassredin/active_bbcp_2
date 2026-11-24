@@ -27,7 +27,8 @@ System_devMonitors|proc|300
 Dev_devActive|proc|300
 Dev_devYield|proc|300
 System_devCoTests|proc|300
-System_devUnloadGuard|proc|300'
+System_devUnloadGuard|proc|300
+Async_devStm|proc|300'
 
 LIST=0; only=""
 for a in "$@"; do
@@ -59,7 +60,8 @@ compile_dev32() {
 			System_devBasic System_devGcStack System_devTrapStack \
 			System_devCoTests System_devTasks System_devMonitors \
 			Dev_devActive Lin_devFiles 'Dev_devYield^' \
-			System_devUnloadGuardCode System_devUnloadGuard; do
+			System_devUnloadGuardCode System_devUnloadGuard \
+			AsyncProto AsyncSelect AsyncChan Async_devStm; do
 			opt=""
 			case "$m" in *\^) opt="^"; m="${m%^}";; esac
 			echo "DevCompiler.CompileThis $m $opt"
