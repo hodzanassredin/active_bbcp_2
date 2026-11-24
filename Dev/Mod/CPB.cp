@@ -2321,9 +2321,25 @@ MODULE DevCPB;
 		RETURN help
 	END MakeAwaitHelper;
 
+	PROCEDURE CopyExpr (x: DevCPT.Node): DevCPT.Node;
+	(* Глубокая копия выражения: узлы и их константы; объекты и типы общие.
+	   Поздние проходы правят узлы на месте (DevCPH.UseReals и Convert на
+	   i386: LONGINT-операции и константы переводятся в вещественные), и
+	   поддерево, стоящее в двух местах дерева, обработалось бы дважды. *)
+		VAR y: DevCPT.Node; c: DevCPT.Const;
+	BEGIN
+		IF x = NIL THEN RETURN NIL END;
+		y := DevCPT.NewNode(x.class); y^ := x^;
+		IF x.conval # NIL THEN c := DevCPT.NewConst(); c^ := x.conval^; y.conval := c END;
+		y.left := CopyExpr(x.left); y.right := CopyExpr(x.right); y.link := CopyExpr(x.link);
+		RETURN y
+	END CopyExpr;
+
 	PROCEDURE AwaitExpansion* (VAR p: DevCPT.Node): DevCPT.Node;
 	(** ACTIVE.AWAIT(c): проверка контекста и условия, раскрытие в
-		IF ~c THEN Kernel.Await(@cond, frame, monitor) END. *)
+		IF ~c THEN Kernel.Await(@cond, frame, monitor) END. Условие стоит
+		в двух местах: в проверке до ожидания (p) и в теле процедуры
+		условия (копия p). Тип условия уже проверил StPar0. *)
 		VAR proc, help, frame: DevCPT.Object;
 			pre, x, guard, callNode, condLeaf, frameLeaf, objLeaf: DevCPT.Node;
 	BEGIN
@@ -2331,9 +2347,6 @@ MODULE DevCPB;
 		IF (proc = NIL) OR (proc.sysflag # DevCPM.exclusive) THEN
 			err(225);	(* AWAIT только внутри [exclusive] *)
 			RETURN NIL
-		END;
-		IF (p.class = Ntype) OR (p.class = Nproc) OR (p.typ.form # Bool) THEN
-			err(120); p := NewBoolConst(FALSE)
 		END;
 		IF HasSideEffect(p) THEN
 			err(225);	(* условие — только чтение, без вызовов и присваиваний *)
@@ -2345,7 +2358,7 @@ MODULE DevCPB;
 		pre := DevCPT.NewNode(Nassign); pre.subcl := getrfn; pre.typ := DevCPT.notyp;
 		pre.left := NewLeaf(frame); pre.right := NewIntConst(5);	(* BP *)
 		pre.conval := DevCPT.NewConst(); pre.conval.intval := DevCPM.errpos;
-		help := MakeAwaitHelper(p, proc);
+		help := MakeAwaitHelper(CopyExpr(p), proc);
 		condLeaf := NewLeaf(help); frameLeaf := NewLeaf(frame);
 		objLeaf := MonitorActual(proc);
 		condLeaf.link := frameLeaf; frameLeaf.link := objLeaf;

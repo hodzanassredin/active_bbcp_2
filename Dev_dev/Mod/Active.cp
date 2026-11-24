@@ -1,7 +1,7 @@
 MODULE Dev_devActive;
 (** Тесты языкового расширения: [exclusive] и ACTIVE.AWAIT.
 
-	Проверяется то, что не покрывает System_devMonitors (ручные Lock/Wait):
+	Проверяется то, что не покрывает System_devMonitors (ручные Lock/Await):
 	-AWAIT в методе и в процедуре модуля (монитор модуля), условие
 	 читает поле получателя и локальную переменную через кадр ждущего;
 	- условие перевычисляется уходящим: ложное значение не будит;
@@ -25,6 +25,10 @@ MODULE Dev_devActive;
 		LocalWaiter = POINTER TO RECORD (Tasks.Task) x: INTEGER; done: BOOLEAN END;
 
 		Chewer = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+
+		Mixed = POINTER TO RECORD r: REAL; l, k: LONGINT END;
+		MixedWaiter = POINTER TO RECORD (Tasks.Task) m: Mixed; done: BOOLEAN END;
+		MixedSetter = POINTER TO RECORD (Tasks.Task) m: Mixed END;
 
 	VAR
 		g: INTEGER;
@@ -237,5 +241,52 @@ MODULE Dev_devActive;
 		UnitAssert.True(outerHeld, "outer entry survived the inner Try");
 		UnitAssert.True(~Monitors.IsLocked(b), "all entries released")
 	END TestProcExclusiveNestedTry;
+
+	(* --- условие с вещественным, LONGINT и константным подвыражением ----- *)
+
+	PROCEDURE [exclusive] (m: Mixed) WaitMixed, NEW;
+	BEGIN
+		ACTIVE.AWAIT((m.r > 0.5) & (ABS(m.l) > 2 * 3) & (m.l + 1 > m.k))
+	END WaitMixed;
+
+	PROCEDURE [exclusive] (m: Mixed) SetMixed (r: REAL; l, k: LONGINT), NEW;
+	BEGIN
+		m.r := r; m.l := l; m.k := k
+	END SetMixed;
+
+	PROCEDURE (t: MixedWaiter) Run;
+	BEGIN
+		t.m.WaitMixed; t.done := TRUE
+	END Run;
+
+	PROCEDURE (t: MixedSetter) Run;
+	BEGIN
+		t.m.SetMixed(1.0, 3, 0);	(* ABS(l) > 6 ложно *)
+		Tasks.Yield;
+		t.m.SetMixed(1.0, -10000000000, -20000000000);	(* истинно: 1e10 > 6, l + 1 > k *)
+	END Run;
+
+	PROCEDURE TestProcAwaitMixedCondition*;
+	(** Условие AWAIT стоит в двух местах дерева (проверка до ожидания и
+		процедура условия); оба места вычисляют одно и то же. *)
+		VAR m: Mixed; w: MixedWaiter; s: MixedSetter;
+	BEGIN
+		NEW(m); m.r := 0; m.l := 0; m.k := 0;
+		NEW(w); w.m := m; Tasks.Start(w);
+		NEW(s); s.m := m; Tasks.Start(s);
+		UnitAssert.True(Pump(3000), "tasks finished");
+		UnitAssert.True(w.done & ~Tasks.Failed(w), "waiter passed the condition");
+		UnitAssert.EqualInt(0, Waiters(), "no waiters left")
+	END TestProcAwaitMixedCondition;
+
+	PROCEDURE TestProcAwaitMixedTrueAtOnce*;
+	(** Истинное сразу условие не ждёт (проверка до вызова Kernel.Await). *)
+		VAR m: Mixed; w: MixedWaiter;
+	BEGIN
+		NEW(m); m.r := 2.0; m.l := 100; m.k := 0;
+		NEW(w); w.m := m; Tasks.Start(w);
+		UnitAssert.True(Pump(1000), "task finished");
+		UnitAssert.True(w.done, "condition true at once")
+	END TestProcAwaitMixedTrueAtOnce;
 
 END Dev_devActive.
