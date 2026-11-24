@@ -33,6 +33,10 @@ MODULE Test64Channels;
 		LateSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; n: INTEGER END;
 		DirectRecv = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
 
+		MonitorHolder = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
+		WaitMux = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan END;
+		RaceSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
+
 	VAR
 		onceDone: BOOLEAN;
 		trapOnce: AsyncOnce.Once;
@@ -50,6 +54,9 @@ MODULE Test64Channels;
 		toIdx: INTEGER; toElapsed: LONGINT;
 		ssIdx: INTEGER;
 		lateVal: INTEGER;
+
+		holderLocked, muxDone: BOOLEAN;
+		muxIdx, muxVal: INTEGER;
 
 	PROCEDURE Pump (ms: LONGINT): BOOLEAN;
 		(** Главный цикл без окна: действия Services (планировщик и
@@ -330,5 +337,61 @@ MODULE Test64Channels;
 		ELSE UnitAssert.Fail("wrong message type")
 		END
 	END TestSelectSendFull;
+
+	(* --- Select, пока задача ждёт монитор другого канала ------------------- *)
+	(** Дефект этапа 7: Select регистрирует альтернативы по одной. Если
+		первый канал готов, а второй занят чужим монитором, задача паркуется
+		на Kernel.Lock. Отправитель первого канала решает предложение и
+		будит задачу через Tasks.Unpark; задача просыпается в Kernel.Lock,
+		не получив монитор, и трапает «woken without the monitor». *)
+
+	PROCEDURE (h: MonitorHolder) Run;
+	BEGIN
+		Kernel.Lock(h.c);	(* держим монитор второго канала *)
+		holderLocked := TRUE;
+		Tasks.Sleep(50);
+		Kernel.Unlock(h.c)
+	END Run;
+
+	PROCEDURE (m: WaitMux) Run;
+		VAR ops: ARRAY 2 OF AsyncSelect.Op; msg: AsyncSelect.Msg;
+	BEGIN
+		AsyncChan.RecvAlt(m.a, ops[0]);
+		AsyncChan.RecvAlt(m.b, ops[1]);
+		muxIdx := AsyncChan.Select(ops);
+		muxVal := -1;
+		IF muxIdx = 0 THEN
+			msg := ops[0].got;
+			WITH msg: NumMsg DO muxVal := msg.n END
+		END;
+		muxDone := TRUE
+	END Run;
+
+	PROCEDURE (s: RaceSender) Run;
+		VAR m: NumMsg;
+	BEGIN
+		Tasks.Sleep(10);
+		NEW(m); m.n := 77;
+		s.c.Send(m)
+	END Run;
+
+	PROCEDURE TestProcSelectWhileMonitorWait*;
+		VAR a, b: AsyncChan.Chan; h: MonitorHolder; m: WaitMux; s: RaceSender;
+	BEGIN
+		a := AsyncChan.NewChan(); b := AsyncChan.NewChan();
+		holderLocked := FALSE; muxDone := FALSE; muxIdx := -1; muxVal := -1;
+		NEW(h); h.c := b; Tasks.Start(h);
+		WHILE ~holderLocked & (Tasks.Count() > 0) DO Tasks.Step END;
+		UnitAssert.True(holderLocked, "holder took the monitor");
+		NEW(m); m.a := a; m.b := b; Tasks.Start(m);
+		Tasks.Step;	(* mux зарегистрировал a и встал на монитор b *)
+		UnitAssert.True(Tasks.State(m) = Tasks.Parked, "mux waits for the monitor");
+		NEW(s); s.c := a; Tasks.Start(s);
+		UnitAssert.True(Pump(5000), "select finished after the monitor was released");
+		UnitAssert.True(~Tasks.Failed(m), "mux survived the monitor wait");
+		UnitAssert.EqualInt(0, muxIdx, "first alternative won");
+		UnitAssert.EqualInt(77, muxVal, "message was received");
+		UnitAssert.True(~Kernel.IsLocked(b), "second monitor released")
+	END TestProcSelectWhileMonitorWait;
 
 END Test64Channels.
