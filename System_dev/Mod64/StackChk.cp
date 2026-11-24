@@ -12,7 +12,7 @@ MODULE System_devStackChk;
 
 	TYPE
 		Deep = POINTER TO RECORD (Tasks.Task) END;
-		Calm = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Calm = POINTER TO RECORD (Tasks.Task) n: INTEGER; lo, hi: S.ADDRESS END;
 
 	VAR
 		depth: INTEGER;
@@ -34,8 +34,9 @@ MODULE System_devStackChk;
 	END Run;
 
 	PROCEDURE (t: Calm) Run;
-		VAR i: INTEGER;
+		VAR i: INTEGER; st: Kernel.Stack;
 	BEGIN
+		st := Kernel.StackOf(S.ADR(i)); t.lo := st.lo; t.hi := st.hi;
 		FOR i := 1 TO 10 DO INC(t.n); Tasks.Yield END
 	END Run;
 
@@ -61,5 +62,40 @@ MODULE System_devStackChk;
 		UnitAssert.EqualInt(10, c.n, "the other task finished");
 		UnitAssert.True(depth > 10, "recursion ran")
 	END TestProcOverflowTraps137;
+
+	PROCEDURE TestSlabNeighboursSurvive*;
+	(* Стеки одного размера нарезаются из одной плиты подряд (Tasks.TakeStack).
+	   Переполнение задачи в середине плиты не задевает соседей. *)
+		CONST n = 6;
+		VAR d: Deep; c: ARRAY 2 * n OF Calm; i, j: INTEGER;
+	BEGIN
+		depth := 0;
+		FOR i := 0 TO n - 1 DO NEW(c[i]); Tasks.SetStackSize(c[i], small); Tasks.Start(c[i]) END;
+		NEW(d); Tasks.SetStackSize(d, small); Tasks.Start(d);
+		FOR i := n TO 2 * n - 1 DO NEW(c[i]); Tasks.SetStackSize(c[i], small); Tasks.Start(c[i]) END;
+		Pump;
+		UnitAssert.True(Tasks.Failed(d), "deep task failed");
+		UnitAssert.EqualInt(137, Kernel.err, "trap 137 stack overflow");
+		FOR i := 0 TO 2 * n - 1 DO
+			UnitAssert.EqualInt(10, c[i].n, "neighbour finished");
+			UnitAssert.True(~Tasks.Failed(c[i]), "neighbour not failed");
+			UnitAssert.True(c[i].hi - c[i].lo >= small, "stack not smaller than asked");
+			FOR j := 0 TO i - 1 DO
+				UnitAssert.True((c[j].hi <= c[i].lo) OR (c[i].hi <= c[j].lo), "stacks do not overlap")
+			END
+		END
+	END TestSlabNeighboursSurvive;
+
+	PROCEDURE TestDefaultStackSize*;
+		VAR c: Calm; old: INTEGER;
+	BEGIN
+		old := Tasks.DefaultStackSize();
+		Tasks.SetDefaultStackSize(32 * 1024);
+		NEW(c); Tasks.Start(c);
+		Tasks.SetDefaultStackSize(old);
+		Pump;
+		UnitAssert.EqualInt(10, c.n, "task finished");
+		UnitAssert.EqualInt(32 * 1024, c.hi - c.lo, "default size applied")
+	END TestDefaultStackSize;
 
 END System_devStackChk.

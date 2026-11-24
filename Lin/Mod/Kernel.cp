@@ -290,6 +290,30 @@ MODULE LinKernel;
 		END
 	END DeallocateStackMem;
 
+	PROCEDURE (VAR p: Platform) AllocateStackSlab (size, n: INTEGER; OUT base: S.ADDRESS; OUT step: INTEGER);
+	(* Плита: одно отображение на n стеков, сторожевые страницы ставятся здесь,
+	   один раз на стек плиты. Стек плиты освобождается DeallocateStackMem:
+	   munmap части отображения допустим. *)
+		CONST protection = Libc.PROT_READ + Libc.PROT_WRITE;
+			flags = Libc.MAP_PRIVATE + Libc.MAP_ANON;
+		VAR total: S.ADDRESS; guard, i, res: INTEGER;
+	BEGIN
+		guard := p.PageSize();
+		step := ((size + guard - 1) DIV guard) * guard + guard;
+		total := step; total := total * n;
+		base := Libc.mmap(0, total, protection, flags, -1, 0);
+		IF base = Libc.MAP_FAILED THEN base := 0; step := 0; RETURN END;
+		i := 0;
+		WHILE i < n DO
+			res := Libc.mprotect(base + i * step, guard, Libc.PROT_NONE);
+			IF res # 0 THEN
+				res := Libc.munmap(base, total);
+				base := 0; step := 0; RETURN
+			END;
+			INC(i)
+		END
+	END AllocateStackSlab;
+
 	PROCEDURE (VAR p: Platform) GetTryContext (): S.ADDRESS;
 	BEGIN
 		RETURN S.VAL(S.ADDRESS, currentTryContext)

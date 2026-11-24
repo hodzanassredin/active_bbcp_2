@@ -18,6 +18,7 @@
 #include <time.h>
 #include <sys/resource.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <unistd.h>
 
 #define GUARD 4096
@@ -108,6 +109,17 @@ long test64_minflt (void) {
 	struct rusage ru;
 	if (getrusage (RUSAGE_SELF, &ru) != 0) return 0;
 	return ru.ru_minflt;
+}
+
+/* Число отображений процесса (строк /proc/self/maps): стек задачи со
+   сторожевой страницей — два отображения. */
+long test64_vmas (void) {
+	FILE *f = fopen ("/proc/self/maps", "r");
+	long n = 0; int c;
+	if (f == NULL) return -1;
+	while ((c = fgetc (f)) != EOF) if (c == '\n') n++;
+	fclose (f);
+	return n;
 }
 
 /* Окно счётчиков perf stat --control fd:CTL,ACK -D -1: фаза phase замера

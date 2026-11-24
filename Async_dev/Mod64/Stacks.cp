@@ -143,14 +143,16 @@ MODULE Async_devStacks;
 	PROCEDURE Load1 (n, size, phase: INTEGER; IN tag: ARRAY OF CHAR);
 	(* phase, phase + 1 — номера фаз создания и исполнения для окна счётчиков
 	   perf (System_devCRaw.c_perf, переменная PERF_PHASE). *)
-		VAR i: INTEGER; t: Once; t0, t1, t2, f0, f1, f2: LONGINT;
+		VAR i: INTEGER; t: Once; t0, t1, t2, t3, f0, f1, f2, vmas: LONGINT;
 	BEGIN
 		counter := 0;
 		f0 := System_devCRaw.c_minflt(); t0 := System_devClock.now();
 		System_devCRaw.c_perf(phase, 1);
 		FOR i := 1 TO n DO NEW(t); Tasks.SetStackSize(t, size); Tasks.Start(t) END;
 		System_devCRaw.c_perf(phase, 0);
-		f1 := System_devCRaw.c_minflt(); t1 := System_devClock.now();
+		t1 := System_devClock.now();
+		vmas := System_devCRaw.c_vmas();	(* чтение maps — вне окон времени *)
+		f1 := System_devCRaw.c_minflt(); t3 := System_devClock.now();
 		System_devCRaw.c_perf(phase + 1, 1);
 		Pump;
 		System_devCRaw.c_perf(phase + 1, 0);
@@ -158,7 +160,7 @@ MODULE Async_devStacks;
 		ASSERT(counter = n, 60);
 		W("BENCH "); W(tag); W(" stack="); N(size);
 		W(" setupNs="); N(t1 - t0); W(" setupFaults="); N(f1 - f0);
-		W(" stepNs="); N(t2 - t1); W(" stepFaults="); N(f2 - f1); Console.WriteLn
+		W(" stepNs="); N(t2 - t3); W(" stepFaults="); N(f2 - f1); W(" vmas="); N(vmas); Console.WriteLn
 	END Load1;
 
 	PROCEDURE Load*;

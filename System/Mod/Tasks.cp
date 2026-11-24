@@ -43,6 +43,7 @@ MODULE Tasks;
 		directMax = 64;	(* переключений задача → задача подряд, без возврата к Step *)
 		poolMax = 1024;		(* сколько свободных стеков пул держит в покое *)
 		trimStep = 16;		(* сколько лишних стеков шаг планировщика возвращает ядру *)
+		slabN = 64;		(* стеков в плите (Kernel.AllocStacks) *)
 		word = Taskarch.word;
 		defaultSlice = 5;	(* мс на шаг планировщика *)
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
@@ -126,6 +127,11 @@ MODULE Tasks;
 		   Стек в пуле не зарегистрирован в реестре ядра и не сканируется. *)
 		poolHead: S.ADDRESS;
 		poolCount: INTEGER;
+		(* Плита: стеки [slabNext + g, slabNext + slabStep) ... до slabEnd ещё не выданы;
+		   у каждого снизу сторожевая страница g. Инвариант: slabNext = slabEnd — плиты нет. *)
+		slabNext, slabEnd: S.ADDRESS;
+		slabStep, slabGuard, slabSize: INTEGER;
+		stackDefault: INTEGER;	(* размер стека по умолчанию, SetDefaultStackSize *)
 		closeT: Task; closeT0: LONGINT;	(* для CLOSE *)
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
@@ -454,11 +460,21 @@ MODULE Tasks;
 		Finish
 	END TaskBoot;
 
+	PROCEDURE DropSlab;
+	(* Пост: невыданные стеки плиты возвращены ядру, плиты нет. *)
+	BEGIN
+		WHILE slabNext # slabEnd DO
+			Kernel.FreeStack(slabEnd - slabStep + slabGuard, slabEnd); slabEnd := slabEnd - slabStep
+		END;
+		slabNext := 0; slabEnd := 0
+	END DropSlab;
+
 	PROCEDURE TakeStack (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
 	(* Пред: size > 0. Пост: TRUE — [lo, hi) пригоден под стек, запрошенный
 	   с размером size, ниже lo лежит сторожевая страница; FALSE — памяти нет.
 	   Стек берётся из пула, если на его вершине лежит стек того же размера;
-	   иначе у ядра. *)
+	   иначе из плиты того же размера; иначе у ядра новой плитой (slabN стеков,
+	   сторожевые страницы ставятся при нарезке), а без плит — по одному. *)
 		VAR sz: S.ADDRESS;
 	BEGIN
 		IF poolHead # 0 THEN
@@ -469,7 +485,17 @@ MODULE Tasks;
 				RETURN TRUE
 			END
 		END;
-		RETURN Kernel.AllocStack(size, lo, hi)
+		IF (slabNext # slabEnd) & (slabSize # size) THEN DropSlab END;
+		IF slabNext = slabEnd THEN
+			IF ~Kernel.AllocStacks(size, slabN, slabNext, slabStep, slabGuard) THEN
+				slabNext := 0; slabEnd := 0;
+				RETURN Kernel.AllocStack(size, lo, hi)
+			END;
+			slabEnd := slabNext + slabStep * slabN; slabSize := size
+		END;
+		lo := slabEnd - slabStep + slabGuard;
+		hi := slabEnd; slabEnd := slabEnd - slabStep;
+		RETURN TRUE
 	END TakeStack;
 
 	PROCEDURE GiveStack (size: INTEGER; lo, hi: S.ADDRESS);
@@ -505,12 +531,13 @@ MODULE Tasks;
 			hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
 			Kernel.FreeStack(lo, hi)
 		END;
-		poolCount := 0
+		poolCount := 0;
+		DropSlab
 	END DrainPool;
 
 	PROCEDURE StackSizeOf (t: Task): INTEGER;
 	BEGIN
-		IF t.stackSize = 0 THEN RETURN defaultStack ELSE RETURN t.stackSize END
+		IF t.stackSize = 0 THEN RETURN stackDefault ELSE RETURN t.stackSize END
 	END StackSizeOf;
 
 	PROCEDURE InitStack (t: Task): BOOLEAN;
@@ -839,6 +866,21 @@ MODULE Tasks;
 		t.stackSize := size
 	END SetStackSize;
 
+	PROCEDURE SetDefaultStackSize* (size: INTEGER);
+	(** Пред: size > 0 (трап 20). Пост: задачи без SetStackSize получают стек size байт.
+		Задаётся программно или командой при запуске (Tasks.SetDefaultStackSize(16384)).
+		Без ключа компилятора % в коде задачи переполнение малого стека ловит только
+		сторожевая страница, и трап роняет процесс. *)
+	BEGIN
+		ASSERT(size > 0, 20);
+		stackDefault := size
+	END SetDefaultStackSize;
+
+	PROCEDURE DefaultStackSize* (): INTEGER;
+	BEGIN
+		RETURN stackDefault
+	END DefaultStackSize;
+
 	PROCEDURE Count* (): INTEGER;
 	BEGIN
 		RETURN alive
@@ -931,7 +973,7 @@ MODULE Tasks;
 BEGIN
 	NEW(sched);
 	NEW(schedHook);
-	slice := defaultSlice;
+	slice := defaultSlice; stackDefault := defaultStack;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
 	lastPoll := Kernel.Time();
 	lastWake := -1;	(* первый Step обязан просмотреть спящих *)
