@@ -14,11 +14,11 @@ registered anywhere: the runner finds such procedures itself by walking the modu
 
 Tests do not live in the subsystem under test but next to it, in a subsystem with the suffix `_dev`.
 Tests of the `Text` subsystem lie in `Text_dev/Mod/<Topic>.cp`, and the module is called
-`Text_dev<Topic>`. For the first test we create the subsystem `My_dev` and the file
-`My_dev/Mod/Strings.cp`:
+`Text_dev<Topic>`. We put the first test into the subsystem `Unit_dev`, file
+`Unit_dev/Mod/Example.cp`:
 
 ```
-MODULE My_devStrings;
+MODULE Unit_devExample;
 
 	IMPORT Strings, UnitAssert;
 
@@ -41,7 +41,7 @@ MODULE My_devStrings;
 		UnitAssert.EqualInt(-1, pos, "нет образца")
 	END TestFindMissing;
 
-END My_devStrings.
+END Unit_devExample.
 ```
 
 Each test calls the procedure under test and compares the result with the expected one. The first
@@ -53,10 +53,10 @@ We run the module with the external launcher. It compiles `Unit` and the test mo
 console BlackBox and executes `UnitRunner.Run` in it:
 
 ```
-$ tools/unit.sh My_devStrings
-== Unit: run My_devStrings
-PASS My_devStrings.TestFindMissing 0 ms
-PASS My_devStrings.TestIntToStringNegative 0 ms
+$ tools/unit.sh Unit_devExample
+== Unit: run Unit_devExample
+PASS Unit_devExample.TestFindMissing 0 ms
+PASS Unit_devExample.TestIntToStringNegative 0 ms
 == Unit: passed 2, failed 0, empty 0, skipped 0
 ```
 
@@ -89,7 +89,7 @@ BEGIN
 END TestNothing;
 ```
 
-gives the line `EMPTY My_devStrings.TestNothing 0 ms: no checks`. The summary line shows empty tests
+gives the line `EMPTY Unit_devExample.TestNothing 0 ms: no checks`. The summary line shows empty tests
 separately and includes them in the number of failed ones: `passed 2, failed 1, empty 1`. A process
 with the `quit` key exits with code 1.
 

@@ -12,11 +12,11 @@
 нигде не нужно: исполнитель находит такие процедуры сам, перебирая экспорт модуля через `Meta.Scanner`.
 
 Тесты живут не в проверяемой подсистеме, а рядом с ней, в подсистеме с суффиксом `_dev`. Тесты
-подсистемы `Text` лежат в `Text_dev/Mod/<Тема>.cp`, модуль называется `Text_dev<Тема>`. Для первого
-теста заведём подсистему `My_dev` и файл `My_dev/Mod/Strings.cp`:
+подсистемы `Text` лежат в `Text_dev/Mod/<Тема>.cp`, модуль называется `Text_dev<Тема>`. Первый
+тест положим в подсистему `Unit_dev`, файл `Unit_dev/Mod/Example.cp`:
 
 ```
-MODULE My_devStrings;
+MODULE Unit_devExample;
 
 	IMPORT Strings, UnitAssert;
 
@@ -39,7 +39,7 @@ MODULE My_devStrings;
 		UnitAssert.EqualInt(-1, pos, "нет образца")
 	END TestFindMissing;
 
-END My_devStrings.
+END Unit_devExample.
 ```
 
 Каждый тест вызывает проверяемую процедуру и сравнивает результат с ожидаемым. Первым аргументом
@@ -51,10 +51,10 @@ END My_devStrings.
 консольный BlackBox и выполняет в нём `UnitRunner.Run`:
 
 ```
-$ tools/unit.sh My_devStrings
-== Unit: run My_devStrings
-PASS My_devStrings.TestFindMissing 0 ms
-PASS My_devStrings.TestIntToStringNegative 0 ms
+$ tools/unit.sh Unit_devExample
+== Unit: run Unit_devExample
+PASS Unit_devExample.TestFindMissing 0 ms
+PASS Unit_devExample.TestIntToStringNegative 0 ms
 == Unit: passed 2, failed 0, empty 0, skipped 0
 ```
 
@@ -88,7 +88,7 @@ BEGIN
 END TestNothing;
 ```
 
-даёт строку `EMPTY My_devStrings.TestNothing 0 ms: no checks`. Итоговая строка показывает пустые тесты
+даёт строку `EMPTY Unit_devExample.TestNothing 0 ms: no checks`. Итоговая строка показывает пустые тесты
 отдельно и включает их в число проваленных: `passed 2, failed 1, empty 1`. Процесс с ключом `quit`
 завершается кодом 1.
 
