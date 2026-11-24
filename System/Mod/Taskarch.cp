@@ -23,7 +23,7 @@ MODULE Taskarch;
 		add esp,4            ; параметр снят
 		call $+5             ; push адрес следующей инструкции
 		pop edx              ; edx = адрес продолжения
-		add edx,27           ; + длина хвоста switch (до после ret)
+		add edx,29           ; + длина хвоста switch (до после jmp)
 		push edx             ; синтетический адрес возврата
 		push eax             ; сохранить &from
 		push ebx; push ebp; push esi; push edi
@@ -31,13 +31,13 @@ MODULE Taskarch;
 		mov [edx],esp        ; from^ := esp
 		mov esp,[ecx]        ; esp := to^
 		pop edi; pop esi; pop ebp; pop ebx; pop eax
-		ret
+		pop edx; jmp edx     ; продолжение нового стека (ret снял бы чужую запись буфера возвратов)
 	*)
 		08BH, 00CH, 024H,		(* mov ecx,[esp] *)
 		083H, 0C4H, 004H,		(* add esp,4 *)
 		0E8H, 000H, 000H, 000H, 000H,	(* call $+5 *)
 		05AH,				(* pop edx — адрес продолжения *)
-		081H, 0C2H, 01BH, 000H, 000H, 000H,	(* add edx,27 — после ret *)
+		081H, 0C2H, 01DH, 000H, 000H, 000H,	(* add edx,29 — после jmp *)
 		052H,				(* push edx: синтетический адрес возврата *)
 		050H,				(* push eax (&from) *)
 		053H, 055H, 056H, 057H,		(* push ebx; ebp; esi; edi *)
@@ -45,6 +45,7 @@ MODULE Taskarch;
 		089H, 022H,			(* mov [edx],esp *)
 		08BH, 021H,			(* mov esp,[ecx] *)
 		05FH, 05EH, 05DH, 05BH, 058H,	(* pop edi esi ebp ebx eax *)
-		0C3H;				(* ret *)
+		05AH,				(* pop edx — адрес продолжения *)
+		0FFH, 0E2H;			(* jmp edx *)
 
 END Taskarch.
