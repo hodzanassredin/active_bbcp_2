@@ -76,3 +76,5 @@
 
 - Не пушить; ветки `active` и `ivan-dia261123` не трогать; без sudo/apt install; GUI только вне экрана; мышь не
   эмулировать.
+
+- s23 — документация приведена к итоговому состоянию кода; старые docs/stand.md, tasks.md, async-library.md, gc-bench.md, ivan-dia261123.md заменены на building.md, implementation.md, measurements.md; комментарии очищены от номеров этапов; проверки: ocf code/osf совпадают, bootstrap, test.sh.
