@@ -57,6 +57,8 @@ MODULE Raft_devSim;
 		decided: Core.Entries; dlast, maxCommit: INTEGER;
 		x, seed: LONGINT;
 		lossy: BOOLEAN;
+		compactEvery: INTEGER;	(* снимок, когда после прошлого применено столько записей; 0 — без снимков *)
+		installs*: INTEGER;	(* снимков, принятых от лидера *)
 		crashNext: INTEGER;	(* узел, который упадёт посреди ближайшего Ready; -1 — никто *)
 		harsh: INTEGER;	(* жёсткость сбоев от зерна: 1 .. 3 *)
 		batch: INTEGER;
@@ -116,12 +118,16 @@ MODULE Raft_devSim;
 	END Apply;
 
 	PROCEDURE (c: Counter) Snapshot (): Core.Bytes;
+		VAR r: Core.Bytes;
 	BEGIN
-		RETURN NIL
+		NEW(r, 4); r[0] := SHORT(SHORT(c.v MOD 256)); r[1] := SHORT(SHORT(c.v DIV 256 MOD 256));
+		r[2] := SHORT(SHORT(c.v DIV 10000H MOD 256)); r[3] := 0;
+		RETURN r
 	END Snapshot;
 
 	PROCEDURE (c: Counter) Restore (b: Core.Bytes);
 	BEGIN
+		IF b = NIL THEN c.v := 0 ELSE c.v := b[0] MOD 256 + b[1] MOD 256 * 100H + b[2] MOD 256 * 10000H END
 	END Restore;
 
 	PROCEDURE Val (r: Core.Bytes): INTEGER;
@@ -201,19 +207,19 @@ MODULE Raft_devSim;
 	END Crash;
 
 	PROCEDURE Restart (i: INTEGER);
-		VAR cnt: Counter; db: KvDb.Db; res, t, v, last: INTEGER; log: Core.Entries;
+		VAR cnt: Counter; db: KvDb.Db; res, t, v, si, st, last: INTEGER; log: Core.Entries; snap: Core.Bytes;
 	BEGIN
 		INC(restarts[i]);
 		IF onKv THEN KvDb.Open(kvs[i], db, res); ASSERT(res = KvDb.ok, 60); disk[i] := RaftKvStorage.New(db) END;
-		disk[i].Load(t, v, log, last, res); ASSERT(res = RaftStorage.ok, 61);
-		nodes[i] := Core.New(i, n, seed * 7919 + restarts[i] * 31, electionTicks, t, v, log, last);
-		NEW(cnt); sms[i] := RaftSm.New(cnt);
+		disk[i].Load(t, v, si, st, snap, log, last, res); ASSERT(res = RaftStorage.ok, 61);
+		nodes[i] := Core.New(i, n, seed * 7919 + restarts[i] * 31, electionTicks, t, v, si, st, snap, log, last);
+		NEW(cnt); sms[i] := RaftSm.New(cnt); sms[i].Restore(snap); checked[i] := si;
 		Core.SetBatch(nodes[i], batch)
 	END Restart;
 
 	PROCEDURE Process (i: INTEGER);
 	(* выполнить Ready узла; между сохранением и отправкой узел может упасть *)
-		VAR r: Core.Ready; k, c: INTEGER; e: Core.Entry; nd: Core.Node; res: Core.Bytes; dup: BOOLEAN;
+		VAR r: Core.Ready; k, c, res: INTEGER; e: Core.Entry; nd: Core.Node; out, snap: Core.Bytes; dup: BOOLEAN;
 	BEGIN
 		nd := nodes[i];
 		WHILE (nd # NIL) & Core.HasReady(nd) DO
@@ -226,9 +232,10 @@ MODULE Raft_devSim;
 			IF r.syncFirst THEN Post(r.msgs)
 			ELSIF ~Persist(i, r) THEN Crash(i); RETURN
 			END;
+			IF r.snap # NIL THEN sms[i].Restore(r.snap); INC(installs) END;
 			FOR k := r.applyLo TO r.applyHi DO
 				Core.EntryAt(nd, k, e); Decide(k, e);
-				sms[i].Apply(k, e.data, res, dup); Applied(i, k, e.data, res)
+				sms[i].Apply(k, e.data, out, dup); Applied(i, k, e.data, out)
 			END;
 			FOR k := 0 TO r.nreads - 1 DO
 				FOR c := 0 TO nClients - 1 DO
@@ -238,6 +245,12 @@ MODULE Raft_devSim;
 				END
 			END;
 			Core.Advance(nd, r);
+			IF (compactEvery > 0) & (nd.applied = nd.commit) & (nd.applied - nd.snapIndex >= compactEvery) THEN
+				(* снимок и усечение журнала: только применённое и зафиксированное *)
+				snap := sms[i].Snapshot(); Core.Compact(nd, nd.applied, snap);
+				disk[i].Compact(nd.snapIndex, nd.snapTerm, snap, res);
+				IF res # RaftStorage.ok THEN Crash(i); RETURN END
+			END;
 			ServeReads(i)
 		END
 	END Process;
@@ -258,7 +271,7 @@ MODULE Raft_devSim;
 				wasLeader[i] := TRUE;
 				IF nd.last < maxCommit THEN Violation("новый лидер без зафиксированных записей", i)
 				ELSE
-					FOR k := 1 TO maxCommit DO
+					FOR k := nd.snapIndex + 1 TO maxCommit DO
 						Core.EntryAt(nd, k, e);
 						IF (decided[k].term # -1) & ~Same(decided[k], e) THEN
 							Violation("новый лидер без зафиксированной записи", k)
@@ -276,18 +289,19 @@ MODULE Raft_devSim;
 		nd := nodes[i];
 		IF nd.commit > nd.last THEN Violation("commit за концом журнала", i) END;
 		FOR k := checked[i] + 1 TO nd.commit DO
-			IF k <= nd.last THEN Core.EntryAt(nd, k, e); Decide(k, e) END
+			IF (k <= nd.last) & (k > nd.snapIndex) THEN Core.EntryAt(nd, k, e); Decide(k, e) END
 		END;
 		IF nd.commit > checked[i] THEN checked[i] := nd.commit END;
 		IF nd.commit > maxCommit THEN INC(commits, nd.commit - maxCommit); maxCommit := nd.commit END
 	END CheckCommit;
 
 	PROCEDURE CheckMatching (a, b: Core.Node);
-		VAR i, k: INTEGER; ea, eb: Core.Entry;
+		VAR i, k, lo: INTEGER; ea, eb: Core.Entry;
 	BEGIN
+		lo := a.snapIndex; IF b.snapIndex > lo THEN lo := b.snapIndex END;	(* до lo — снимки, т. е. зафиксированное *)
 		i := a.last; IF b.last < i THEN i := b.last END;
-		WHILE (i > 0) & (Core.TermAt(a, i) # Core.TermAt(b, i)) DO DEC(i) END;
-		FOR k := 1 TO i DO
+		WHILE (i > lo) & (Core.TermAt(a, i) # Core.TermAt(b, i)) DO DEC(i) END;
+		FOR k := lo + 1 TO i DO
 			Core.EntryAt(a, k, ea); Core.EntryAt(b, k, eb);
 			IF ~Same(ea, eb) THEN Violation("журналы расходятся до общей записи", k); RETURN END
 		END
@@ -444,6 +458,7 @@ MODULE Raft_devSim;
 		FOR i := 0 TO nClients - 1 DO cl[i].state := idle; cl[i].seq := 0 END;
 		NEW(decided, 64); decided[0].term := 0;
 		NEW(leaderOf, maxTerm); FOR i := 0 TO maxTerm - 1 DO leaderOf[i] := Core.none END;
+		installs := 0; compactEvery := 0; IF Rand(2) = 0 THEN compactEvery := 5 + Rand(20) END;
 		harsh := 1 + Rand(3); batch := 1 + Rand(4); IF batch = 4 THEN batch := 64 END;
 		Heal;
 		FOR i := 0 TO n - 1 DO
@@ -615,7 +630,7 @@ MODULE Raft_devSim;
 		VAR i, idx: INTEGER; d: Core.Bytes;
 	BEGIN
 		Core.mutations := mut;
-		Init(3, 8); lossy := FALSE;
+		Init(3, 8); lossy := FALSE; compactEvery := 0; batch := 1;	(* и после перезапусков *)
 		FOR i := 0 TO 2 DO Core.SetBatch(nodes[i], 1) END;
 		Elect(0, 1); Replicate(0, 1, 4); Replicate(0, 2, 4);
 		NEW(d, 1); idx := Core.Propose(nodes[0], d); Process(0); DropAll;
@@ -636,7 +651,8 @@ MODULE Raft_devSim;
 		VAR i, idx: INTEGER; d: Core.Bytes;
 	BEGIN
 		Core.mutations := mut;
-		Init(5, 9); lossy := FALSE;
+		Init(5, 9); lossy := FALSE; compactEvery := 0; batch := 64;
+		FOR i := 0 TO 4 DO Core.SetBatch(nodes[i], 64) END;
 		Elect2(0, 1, 2); FOR i := 1 TO 4 DO Replicate(0, i, 3) END;
 		FOR i := 1 TO 3 DO NEW(d, 1); idx := Core.Propose(nodes[0], d) END;
 		Process(0); DropAll; Replicate(0, 1, 3);
@@ -670,7 +686,7 @@ MODULE Raft_devSim;
 		VAR t: INTEGER;
 	BEGIN
 		Core.mutations := mut;
-		Init(3, 10); lossy := FALSE;
+		Init(3, 10); lossy := FALSE; compactEvery := 0;
 		t := 0; WHILE (nodes[0].role # Core.candidate) & (t < 1000) DO Core.Tick(nodes[0]); Process(0); INC(t) END;
 		crashNext := 1; DeliverOne(0, 1); Restart(1); DeliverOne(1, 0); DropAll;
 		t := 0; WHILE (nodes[2].role # Core.candidate) & (t < 1000) DO Core.Tick(nodes[2]); Process(2); INC(t) END;
@@ -700,6 +716,38 @@ MODULE Raft_devSim;
 		onKv := TRUE; LostVote({Core.mutSendBeforeSync}, v, msg); onKv := FALSE;
 		UnitAssert.True(v, "голос до сохранения на Kv не пойман")
 	END TestMutLostVoteOnKv;
+
+	PROCEDURE TestSnapshotCatchUp*;
+	(* C лежит, пока A и B фиксируют 60 команд и сжимают журнал снимками;
+	   поднятый C догоняет снимком (InstallSnapshot) и тем же счётчиком. *)
+		VAR i, k, idx: INTEGER; body: ARRAY 1 OF BYTE;
+	BEGIN
+		Init(3, 11); lossy := FALSE; compactEvery := 10; batch := 64;
+		Elect(0, 1); Replicate(0, 1, 3); Replicate(0, 2, 3);
+		Crash(2);
+		body[0] := ORD("i");
+		FOR k := 1 TO 60 DO
+			idx := Core.Propose(nodes[0], RaftSm.Encode(1, k, body, 1)); Process(0);
+			Flush(0, 1); Flush(1, 0)
+		END;
+		Replicate(0, 1, 2);
+		UnitAssert.True(nodes[0].snapIndex > 40, "лидер сжал журнал");
+		Restart(2);
+		Replicate(0, 2, 6);
+		UnitAssert.True(ok, why);
+		UnitAssert.True(installs > 0, "C принял снимок");
+		UnitAssert.EqualInt(nodes[0].commit, nodes[2].commit, "C догнал");
+		UnitAssert.EqualInt(sms[0].sm(Counter).v, sms[2].sm(Counter).v, "счётчик тот же");
+		UnitAssert.EqualInt(60, sms[2].sm(Counter).v, "все 60 приращений")
+	END TestSnapshotCatchUp;
+
+	PROCEDURE TestSnapshotsInRandomRuns*;
+		VAR f, s, total: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		total := 0; s := 1;
+		WHILE s <= 40 DO Seeds(3, s, 1, 2000, {}, f, msg); UnitAssert.True(f < 0, msg); INC(total, installs); INC(s) END;
+		UnitAssert.True(total > 0, "в случайных прогонах снимки ставятся")
+	END TestSnapshotsInRandomRuns;
 
 	PROCEDURE TestFigure8Safe*;
 		VAR v: BOOLEAN; msg: ARRAY 256 OF CHAR;

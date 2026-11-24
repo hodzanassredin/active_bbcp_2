@@ -4,6 +4,7 @@ MODULE RaftKvStorage;
 	Раскладка ключей:
 	- "h" — срок и голос (по 4 байта);
 	- "l" — индекс последней записи журнала (4 байта);
+	- "s" — снимок: индекс и срок последней записи снимка (по 4 байта), затем байты снимка;
 	- "e" + индекс (4 байта, big-endian, чтобы ключи шли по порядку) —
 	  запись: срок (4 байта), признак команды (1 байт), команда.
 
@@ -18,11 +19,12 @@ MODULE RaftKvStorage;
 	TYPE
 		Storage = POINTER TO RECORD (RaftStorage.Storage)
 			db: KvDb.Db;
-			last: INTEGER	(* последний сохранённый индекс *)
+			last: INTEGER;	(* последний сохранённый индекс *)
+			snapIndex: INTEGER	(* записи по него заменены снимком *)
 		END;
 
 	VAR
-		hkey, lkey: ARRAY 1 OF BYTE;
+		hkey, lkey, skey: ARRAY 1 OF BYTE;
 
 	PROCEDURE PutInt (VAR b: ARRAY OF BYTE; i, x: INTEGER);
 	BEGIN	(* big-endian *)
@@ -40,15 +42,37 @@ MODULE RaftKvStorage;
 		k[0] := ORD("e"); PutInt(k, 1, i)
 	END Key;
 
+	PROCEDURE PutSnap (s: Storage; tx: KvDb.Tx; index, term: INTEGER; snap: Core.Bytes);
+	(* положить снимок и удалить записи, которые он заменил *)
+		VAR v: POINTER TO ARRAY OF BYTE; k, len: INTEGER; key: ARRAY 5 OF BYTE; found: BOOLEAN;
+	BEGIN
+		IF snap = NIL THEN len := 0 ELSE len := LEN(snap^) END;
+		NEW(v, 8 + len); PutInt(v^, 0, index); PutInt(v^, 4, term);
+		FOR k := 0 TO len - 1 DO v[8 + k] := snap[k] END;
+		tx.Put(skey, v^);
+		FOR k := s.snapIndex + 1 TO MIN(index, s.last) DO Key(k, key); found := tx.Delete(key) END
+	END PutSnap;
+
+	PROCEDURE (s: Storage) Compact* (index, term: INTEGER; snap: Core.Bytes; OUT res: INTEGER);
+		VAR tx: KvDb.Tx;
+	BEGIN
+		res := RaftStorage.ok;
+		IF index > s.snapIndex THEN
+			tx := s.db.Begin(TRUE); PutSnap(s, tx, index, term, snap); tx.Commit(res);
+			IF res = KvDb.ok THEN res := RaftStorage.ok; s.snapIndex := index ELSE res := RaftStorage.failed END
+		END
+	END Compact;
+
 	PROCEDURE (s: Storage) Save* (nd: Core.Node; IN r: Core.Ready; OUT res: INTEGER);
 		VAR tx: KvDb.Tx; k, j, len: INTEGER; key: ARRAY 5 OF BYTE; e: Core.Entry; v: POINTER TO ARRAY OF BYTE;
 			h: ARRAY 8 OF BYTE; l: ARRAY 4 OF BYTE; found: BOOLEAN;
 	BEGIN
-		IF ~r.hard & (r.from > r.last) & (r.last = s.last) THEN res := RaftStorage.ok; RETURN END;	(* нечего *)
+		IF ~r.hard & (r.snap = NIL) & (r.from > r.last) & (r.last = s.last) THEN res := RaftStorage.ok; RETURN END;	(* нечего *)
 		tx := s.db.Begin(TRUE);
 		IF r.hard THEN PutInt(h, 0, r.term); PutInt(h, 4, r.vote); tx.Put(hkey, h) END;
+		IF r.snap # NIL THEN PutSnap(s, tx, r.snapIndex, r.snapTerm, r.snap) END;
 		IF r.from <= r.last + 1 THEN
-			FOR k := r.last + 1 TO s.last DO Key(k, key); found := tx.Delete(key) END;
+			FOR k := MAX(r.last, s.snapIndex) + 1 TO s.last DO Key(k, key); found := tx.Delete(key) END;
 			FOR k := r.from TO r.last DO
 				Core.EntryAt(nd, k, e);
 				IF e.data = NIL THEN len := 0 ELSE len := LEN(e.data^) END;
@@ -62,44 +86,52 @@ MODULE RaftKvStorage;
 		tx.Commit(res);
 		IF res = KvDb.ok THEN
 			res := RaftStorage.ok;
-			IF r.from <= r.last + 1 THEN s.last := r.last END
+			IF r.from <= r.last + 1 THEN s.last := r.last END;
+			IF (r.snap # NIL) & (r.snapIndex > s.snapIndex) THEN s.snapIndex := r.snapIndex END
 		ELSE res := RaftStorage.failed
 		END
 	END Save;
 
-	PROCEDURE (s: Storage) Load* (OUT term, vote: INTEGER; OUT log: Core.Entries; OUT last, res: INTEGER);
-		VAR tx: KvDb.Tx; v: KvDb.Bytes; k, j: INTEGER; key: ARRAY 5 OF BYTE;
+	PROCEDURE (s: Storage) Load* (OUT term, vote, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
+		OUT log: Core.Entries; OUT last, res: INTEGER);
+		VAR tx: KvDb.Tx; v: KvDb.Bytes; k, j, slast: INTEGER; key: ARRAY 5 OF BYTE;
 	BEGIN
-		term := 0; vote := Core.none; last := 0; res := RaftStorage.ok;
+		term := 0; vote := Core.none; last := 0; snapIndex := 0; snapTerm := 0; snap := NIL; res := RaftStorage.ok;
 		tx := s.db.Begin(FALSE);
 		IF tx.Get(hkey, v) THEN term := Int(v, 0); vote := Int(v, 4) END;
 		IF tx.Get(lkey, v) THEN last := Int(v, 0) END;
-		NEW(log, last + 1);
-		k := 1;
+		IF tx.Get(skey, v) THEN
+			snapIndex := Int(v, 0); snapTerm := Int(v, 4);
+			NEW(snap, LEN(v^) - 8); FOR j := 0 TO LEN(v^) - 9 DO snap[j] := v[8 + j] END
+		END;
+		slast := last; IF last < snapIndex THEN last := snapIndex END;
+		NEW(log, last - snapIndex + 1);
+		k := snapIndex + 1;
 		WHILE (res = RaftStorage.ok) & (k <= last) DO
 			Key(k, key);
 			IF tx.Get(key, v) THEN
-				log[k].term := Int(v, 0);
+				log[k - snapIndex].term := Int(v, 0);
 				IF v[4] # 0 THEN
-					NEW(log[k].data, LEN(v^) - 5); FOR j := 0 TO LEN(v^) - 6 DO log[k].data[j] := v[5 + j] END
+					NEW(log[k - snapIndex].data, LEN(v^) - 5);
+					FOR j := 0 TO LEN(v^) - 6 DO log[k - snapIndex].data[j] := v[5 + j] END
 				END
 			ELSE res := RaftStorage.failed
 			END;
 			INC(k)
 		END;
 		tx.Abort;
-		s.last := last
+		s.last := slast; s.snapIndex := snapIndex
 	END Load;
 
 	PROCEDURE New* (db: KvDb.Db): RaftStorage.Storage;
 	(** Пред: db открыта — 20. База отдана узлу целиком: другие ключи "h", "l", "e…" не писать. *)
-		VAR s: Storage; t, vt, l, res: INTEGER; log: Core.Entries;
+		VAR s: Storage; t, vt, si, st, l, res: INTEGER; log: Core.Entries; snap: Core.Bytes;
 	BEGIN
 		ASSERT(db # NIL, 20);
-		NEW(s); s.db := db; s.Load(t, vt, log, l, res);
+		NEW(s); s.db := db; s.Load(t, vt, si, st, snap, log, l, res);
 		RETURN s
 	END New;
 
 BEGIN
-	hkey[0] := ORD("h"); lkey[0] := ORD("l")
+	hkey[0] := ORD("h"); lkey[0] := ORD("l"); skey[0] := ORD("s")
 END RaftKvStorage.

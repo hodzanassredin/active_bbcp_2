@@ -11,6 +11,9 @@ MODULE RaftStorage;
 	лидер принял после прошлой Save, уходят одной фиксацией (групповая
 	фиксация) — один fsync на пачку, а не на запись.
 
+	Снимок автомата заменяет начало журнала: Compact сохраняет снимок
+	своего узла, Save с Ready.snap — снимок, принятый от лидера.
+
 	Реализации: Mem (в памяти, для тестов и примеров) и RaftKvStorage (Kv,
 	фиксация с fsync). *)
 
@@ -25,22 +28,29 @@ MODULE RaftStorage;
 
 		Mem = POINTER TO RECORD (Storage)
 			term, vote, last: INTEGER;
-			log: Core.Entries
+			snapIndex, snapTerm: INTEGER; snap: Core.Bytes;
+			log: Core.Entries	(* log[i] — запись i (снимок записи не убирает: память теста) *)
 		END;
 
 	PROCEDURE (s: Storage) Save* (nd: Core.Node; IN r: Core.Ready; OUT res: INTEGER), NEW, ABSTRACT;
-	(** Сохранить из r: при r.hard — срок и голос; записи r.from .. r.last
+	(** Сохранить из r: при r.snap # NIL — снимок (записи по r.snapIndex
+		больше не нужны); при r.hard — срок и голос; записи r.from .. r.last
 		(читаются EntryAt у nd), отбросив сохранённые после r.from-1.
 		Пост: res = ok — сохранённое переживёт выключение питания. *)
 
-	PROCEDURE (s: Storage) Load* (OUT term, vote: INTEGER; OUT log: Core.Entries; OUT last, res: INTEGER),
-		NEW, ABSTRACT;
-	(** Пост: res = ok — состояние последней удачной Save; log[1 .. last]. *)
+	PROCEDURE (s: Storage) Compact* (index, term: INTEGER; snap: Core.Bytes; OUT res: INTEGER), NEW, ABSTRACT;
+	(** Сохранить снимок snap по запись index срока term; записи 1 .. index больше не нужны. *)
+
+	PROCEDURE (s: Storage) Load* (OUT term, vote, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
+		OUT log: Core.Entries; OUT last, res: INTEGER), NEW, ABSTRACT;
+	(** Пост: res = ok — состояние последних удачных Save и Compact: снимок
+		по snapIndex и записи snapIndex+1 .. last в log[1 .. last-snapIndex]. *)
 
 	PROCEDURE (s: Mem) Save* (nd: Core.Node; IN r: Core.Ready; OUT res: INTEGER);
 		VAR a: Core.Entries; k: INTEGER; e: Core.Entry;
 	BEGIN
 		IF r.hard THEN s.term := r.term; s.vote := r.vote END;
+		IF r.snap # NIL THEN s.snap := r.snap; s.snapIndex := r.snapIndex; s.snapTerm := r.snapTerm END;
 		IF r.from <= r.last + 1 THEN
 			IF r.last >= LEN(s.log^) THEN
 				NEW(a, 2 * r.last + 16); FOR k := 0 TO LEN(s.log^) - 1 DO a[k] := s.log[k] END;
@@ -53,9 +63,21 @@ MODULE RaftStorage;
 		res := ok
 	END Save;
 
-	PROCEDURE (s: Mem) Load* (OUT term, vote: INTEGER; OUT log: Core.Entries; OUT last, res: INTEGER);
+	PROCEDURE (s: Mem) Compact* (index, term: INTEGER; snap: Core.Bytes; OUT res: INTEGER);
 	BEGIN
-		term := s.term; vote := s.vote; log := s.log; last := s.last; res := ok
+		IF index > s.snapIndex THEN s.snapIndex := index; s.snapTerm := term; s.snap := snap END;
+		res := ok
+	END Compact;
+
+	PROCEDURE (s: Mem) Load* (OUT term, vote, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
+		OUT log: Core.Entries; OUT last, res: INTEGER);
+		VAR k: INTEGER;
+	BEGIN
+		term := s.term; vote := s.vote; snapIndex := s.snapIndex; snapTerm := s.snapTerm; snap := s.snap;
+		last := s.last; IF last < snapIndex THEN last := snapIndex END;
+		NEW(log, last - snapIndex + 1);
+		FOR k := snapIndex + 1 TO s.last DO log[k - snapIndex] := s.log[k] END;
+		res := ok
 	END Load;
 
 	PROCEDURE NewMem* (): Storage;

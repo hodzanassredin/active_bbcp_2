@@ -14,6 +14,10 @@ MODULE RaftSm;
 	трогая автомат. Клиент шлёт операции по одной (следующую — после
 	ответа на предыдущую), поэтому достаточно одного номера на клиента.
 
+	Снимок узла — снимок сеансов вместе со снимком автомата: без таблицы
+	сеансов повтор, пришедший после установки снимка, применился бы
+	заново.
+
 	Сеансы живут вечно: вытеснения старых клиентов нет (граница этапа). *)
 
 	IMPORT Core := RaftCore;
@@ -103,5 +107,47 @@ MODULE RaftSm;
 			END
 		END
 	END Apply;
+
+	PROCEDURE (s: Sessions) Snapshot* (): Bytes, NEW;
+	(** Пост: сеансы и снимок автомата одним массивом байтов. *)
+		VAR p: Session; n, size, k, i, len: INTEGER; b, inner: Bytes;
+	BEGIN
+		inner := s.sm.Snapshot(); n := 0; size := 8;
+		p := s.list;
+		WHILE p # NIL DO
+			INC(n); INC(size, 12); IF p.res # NIL THEN INC(size, LEN(p.res^)) END; p := p.next
+		END;
+		IF inner # NIL THEN INC(size, LEN(inner^)) END;
+		NEW(b, size); PutInt(b, 0, n); k := 4; p := s.list;
+		WHILE p # NIL DO
+			PutInt(b, k, p.client); PutInt(b, k + 4, p.seq);
+			IF p.res = NIL THEN len := -1 ELSE len := LEN(p.res^) END;
+			PutInt(b, k + 8, len); INC(k, 12);
+			FOR i := 0 TO len - 1 DO b[k + i] := p.res[i] END;
+			IF len > 0 THEN INC(k, len) END;
+			p := p.next
+		END;
+		IF inner = NIL THEN len := -1 ELSE len := LEN(inner^) END;
+		PutInt(b, k, len); INC(k, 4);
+		FOR i := 0 TO len - 1 DO b[k + i] := inner[i] END;
+		RETURN b
+	END Snapshot;
+
+	PROCEDURE (s: Sessions) Restore* (b: Bytes), NEW;
+	(** Пред: b — результат Snapshot или NIL (пустое состояние). *)
+		VAR p: Session; n, k, i, len: INTEGER; inner: Bytes;
+	BEGIN
+		s.list := NIL;
+		IF b = NIL THEN s.sm.Restore(NIL); RETURN END;
+		n := Int(b, 0); k := 4;
+		WHILE n > 0 DO
+			NEW(p); p.client := Int(b, k); p.seq := Int(b, k + 4); len := Int(b, k + 8); INC(k, 12);
+			IF len >= 0 THEN NEW(p.res, len); FOR i := 0 TO len - 1 DO p.res[i] := b[k + i] END; INC(k, len) END;
+			p.next := s.list; s.list := p; DEC(n)
+		END;
+		len := Int(b, k); INC(k, 4); inner := NIL;
+		IF len >= 0 THEN NEW(inner, len); FOR i := 0 TO len - 1 DO inner[i] := b[k + i] END END;
+		s.sm.Restore(inner)
+	END Restore;
 
 END RaftSm.
