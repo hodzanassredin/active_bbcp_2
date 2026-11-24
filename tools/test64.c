@@ -1,4 +1,4 @@
-/* libtest64.so / libtest32.so — помощник тестов Test64: переключение стека
+/* libtest64.so / libtest32.so — помощник тестов SystemTests: переключение стека
    в одной нити через ucontext (getcontext/makecontext/swapcontext).
    amd64: tools/test.sh и tools/bench-gc.sh собирают cc -shared -fPIC -O2
    в <BB64LIN>/libtest64.so. i386: tools/build32.sh и tools/test32.sh
@@ -69,7 +69,7 @@ int t64_co_create_on (void *base, long size, void *entry, void *arg) {
 }
 
 /* «Сырые» переключения: сохранение/восстановление состояния Kernel.Try
-   делает CP-обёртка Test64Co (SwitchSave/SwitchRestore вокруг вызова). */
+   делает CP-обёртка SystemTestsCo (SwitchSave/SwitchRestore вокруг вызова). */
 int t64_co_resume (void) {
 	if (!ready) return -1;
 	return swapcontext (&mainctx, &coctx);
@@ -93,7 +93,7 @@ int t64_co_release (void) {
 	return r;
 }
 
-/* Монотонные наносекунды для замеров (Test64GcBench). */
+/* Монотонные наносекунды для замеров (SystemTestsGcBench). */
 long test64_ns (void) {
 	struct timespec ts;
 	if (clock_gettime (CLOCK_MONOTONIC, &ts) != 0) return 0;

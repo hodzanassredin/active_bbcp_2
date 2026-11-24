@@ -1,0 +1,23 @@
+# Тесты стенда через подсистему Unit.
+# Формат: <модуль>|<marks>|<таймаут, с>|<доп. модули для компиляции>|<опции>
+#
+# marks: slow, gui, proc — какие пометки TestSlow/TestGui/TestProc включать.
+# Каждый модуль запускается отдельным процессом (tools/unit.sh);
+# TestProc-сценарии трогают ядро/сборщик/стеки и потому помечены proc.
+SystemTests|proc|900|SystemTestsSupport SystemTestsCRaw SystemTestsCo SystemTestsBasic SystemTestsHeap SystemTestsTrap SystemTestsActionTrap SystemTestsGcStack SystemTestsTrapStack SystemTestsInHeap
+LinTestsFiles|proc slow|600|
+SystemTestsTasks|proc slow|900|SystemTestsCRaw SystemTestsClock
+SystemTestsMonitors|proc|300|
+UnitTests||180|UnitTestsProbe
+CheckTests|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
+DevTestsActive|proc|300|
+DevTestsYield|proc|300||^
+AsyncTestsChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
+AsyncTestsIO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
+AsyncTestsWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
+AsyncTestsComputons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
+AsyncTestsProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
+SystemTestsUnload|proc|600|SystemTestsUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
+SystemTestsUnloadGuard|proc|300|SystemTestsUnloadGuardCode
+# Примеры Demo: задачи, мониторы, каналы, муравьи (amd64).
+DemoTests|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool

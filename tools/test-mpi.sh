@@ -11,7 +11,7 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=Test64Mpi
+MOD=AsyncTestsMpi
 MARKS=proc
 TMO=180
 DEPS="AsyncMpi AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads"
@@ -68,7 +68,7 @@ LD_LIBRARY_PATH="$INSTALL:$MPIDIR:$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 	timeout -k 5 "$TMO" "$MPIRUN" -n 5 sh "$work/launch.sh" >"$work/out" 2>&1
 rc=$?
 
-grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|Test64Mpi:)' "$work/out" || true
+grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|AsyncTestsMpi:)' "$work/out" || true
 if [ $rc -eq 124 ]; then
 	echo "test-mpi: $MOD — таймаут ${TMO}s" >&2
 	tail -20 "$work/out" >&2; exit 1

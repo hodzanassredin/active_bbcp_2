@@ -1,9 +1,0 @@
-MODULE Test64RejLocal;
-	IMPORT ACTIVE;
-	PROCEDURE P*;
-		PROCEDURE [exclusive] Q;
-		BEGIN
-		END Q;
-	BEGIN Q
-	END P;
-END Test64RejLocal.

@@ -15,7 +15,7 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-MOD=Test64Resolver
+MOD=CommTestsResolver
 MARKS=proc
 TMO=180
 DEPS="LinThreads LinNative AsyncWork AsyncWorkLin AsyncIO AsyncSelect AsyncChan AsyncOnce"
@@ -72,7 +72,7 @@ unshare -rmn sh -c "
 " >"$work/out" 2>&1
 rc=$?
 
-grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|Test64Resolver:)' "$work/out" || true
+grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|CommTestsResolver:)' "$work/out" || true
 if [ $rc -eq 124 ]; then
 	echo "test-resolver: $MOD — таймаут ${TMO}s" >&2
 	tail -20 "$work/out" >&2; exit 1

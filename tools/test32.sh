@@ -2,7 +2,7 @@
 # Прогон i386-мира: UnitTests и расширение этапов 2–6 на 32-битной цели.
 #
 #   tools/test32.sh              # build32.sh, затем все модули
-#   tools/test32.sh Test64Tasks  # только указанные модули (мир не собирается)
+#   tools/test32.sh SystemTestsTasks  # только указанные модули (мир не собирается)
 #   tools/test32.sh --list
 #
 # Каждый модуль — отдельный процесс blackbox-console (i386). Итог берётся
@@ -11,7 +11,7 @@
 # других процессов стенда не считаются).
 #
 # libtest32.so собирается флагами tools/i386-toolchain.sh (без sudo).
-# Нет 32-битного C-тулчейна — Test64CoTests пропускается с причиной;
+# Нет 32-битного C-тулчейна — SystemTestsCoTests пропускается с причиной;
 # остальные модули от C-помощника не зависят.
 set -u
 . "$(dirname "$0")/env.sh"
@@ -21,13 +21,13 @@ INTERP32="$INSTALL/blackbox-console"
 
 # <модуль>|<marks>|<таймаут>
 MANIFEST='UnitTests||180
-Test64Files|proc slow|600
-Test64Tasks|proc slow|900
-Test64Monitors|proc|300
-Test64Active|proc|300
-Test64Yield|proc|300
-Test64CoTests|proc|300
-Test64UnloadGuard|proc|300'
+LinTestsFiles|proc slow|600
+SystemTestsTasks|proc slow|900
+SystemTestsMonitors|proc|300
+DevTestsActive|proc|300
+DevTestsYield|proc|300
+SystemTestsCoTests|proc|300
+SystemTestsUnloadGuard|proc|300'
 
 LIST=0; only=""
 for a in "$@"; do
@@ -48,7 +48,7 @@ fi
 [ -x "$INTERP32" ] || { echo "test32: нет $INTERP32 — tools/build32.sh" >&2; exit 2; }
 
 # libtest32.so — C-помощник сопрограмм (ucontext, tools/test64.c).
-# Пустой stdout tools/i386-toolchain.sh — тулчейна нет: Test64CoTests
+# Пустой stdout tools/i386-toolchain.sh — тулчейна нет: SystemTestsCoTests
 # пропускается, остальные модули от C-помощника не зависят.
 have_lib=0
 if I386FLAGS=$("$BB/tools/i386-toolchain.sh"); then
@@ -92,8 +92,8 @@ while IFS='|' read -r mod marks tmo; do
 	if [ -n "$only" ]; then
 		case " $only " in *" $mod "*) ;; *) continue;; esac
 	fi
-	if [ "$have_lib" -eq 0 ] && [ "$mod" = Test64CoTests ]; then
-		echo "SKIP Test64CoTests: нет libtest32.so (32-битный C-тулчейн недоступен)"
+	if [ "$have_lib" -eq 0 ] && [ "$mod" = SystemTestsCoTests ]; then
+		echo "SKIP SystemTestsCoTests: нет libtest32.so (32-битный C-тулчейн недоступен)"
 		skipped=$((skipped + 1)); continue
 	fi
 	total=$((total + 1))

@@ -1,0 +1,9 @@
+MODULE DevRejLocal;
+	IMPORT ACTIVE;
+	PROCEDURE P*;
+		PROCEDURE [exclusive] Q;
+		BEGIN
+		END Q;
+	BEGIN Q
+	END P;
+END DevRejLocal.

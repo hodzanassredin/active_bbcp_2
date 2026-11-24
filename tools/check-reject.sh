@@ -4,7 +4,7 @@
 #
 #   tools/check-reject.sh
 #
-# Фикстуры лежат в Test64/Reject; сценарий временно кладёт каждую на путь,
+# Фикстуры лежат в Dev/Reject; сценарий временно кладёт каждую на путь,
 # который выберет DevLibrarian по имени модуля, компилирует и ждёт ошибку.
 set -u
 . "$(dirname "$0")/env.sh"
@@ -14,21 +14,21 @@ CC32="$BB/tools/go32.sh"
 ok=0; bad=0
 
 cleanup () {
-	rm -f "$BB/Test64/Mod/RejAwait.cp" "$BB/Test64/Mod/RejCall.cp" \
-		"$BB/Test64/Mod/RejLocal.cp" "$BB/Test64/Mod/RejNoActive.cp" \
-		"$BB/Test64/Mod/RejCode.cp" "$BB/Test64/Mod/KeyProbe.cp" "$BB/Test64/Mod/RejGuarded.cp" \
+	rm -f "$BB/Dev/Mod/RejAwait.cp" "$BB/Dev/Mod/RejCall.cp" \
+		"$BB/Dev/Mod/RejLocal.cp" "$BB/Dev/Mod/RejNoActive.cp" \
+		"$BB/Dev/Mod/RejCode.cp" "$BB/Dev/Mod/KeyProbe.cp" "$BB/Dev/Mod/RejGuarded.cp" \
 		"$BB/System/Mod/KeyProbe.cp" "$BB/System/Mod/Usermod.cp"
-	rm -f "$BB"/.work/BB64LIN/Test64/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,KeyProbe}.ocf 2>/dev/null
+	rm -f "$BB"/.work/BB64LIN/Dev/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,KeyProbe}.ocf 2>/dev/null
 	rm -f "$BB"/.work/BB64LIN/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
 	rm -f "$BB"/.work/i386/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
-	rm -f "$BB"/.work/i386/Test64/Code/KeyProbe.ocf 2>/dev/null
+	rm -f "$BB"/.work/i386/Dev/Code/KeyProbe.ocf 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
 # run <фикстура> <куда положить> <компилятор> <модуль[опции]> <что должно быть>
 run () {
 	fix="$1"; dest="$2"; cc="$3"; mod="$4"; why="$5"
-	cp "$BB/Test64/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
+	cp "$BB/Dev/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
 	if out=$("$cc" "$mod" 2>&1); then
 		echo "BAD  $why: компиляция прошла" >&2
 		printf '%s\n' "$out" | tail -5 >&2
@@ -49,7 +49,7 @@ run () {
 # каркасом любой модуль с однословным именем и отвергал ключ.
 run_ok () {
 	fix="$1"; dest="$2"; cc="$3"; mod="$4"; why="$5"
-	cp "$BB/Test64/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
+	cp "$BB/Dev/Reject/$fix" "$dest" || { echo "BAD  $why: не скопировать $fix" >&2; bad=$((bad+1)); return; }
 	if out=$("$cc" "$mod" 2>&1); then
 		echo "PASS $why"
 		ok=$((ok + 1))
@@ -61,21 +61,21 @@ run_ok () {
 	rm -f "$dest"
 }
 
-run AwaitOutsideExclusive.cp "$BB/Test64/Mod/RejAwait.cp" "$CC64" Test64RejAwait \
+run AwaitOutsideExclusive.cp "$BB/Dev/Mod/RejAwait.cp" "$CC64" DevRejAwait \
 	"AWAIT вне [exclusive]"
-run AwaitWithCall.cp "$BB/Test64/Mod/RejCall.cp" "$CC64" Test64RejCall \
+run AwaitWithCall.cp "$BB/Dev/Mod/RejCall.cp" "$CC64" DevRejCall \
 	"AWAIT с вызовом процедуры в условии"
-run LocalExclusive.cp "$BB/Test64/Mod/RejLocal.cp" "$CC64" Test64RejLocal \
+run LocalExclusive.cp "$BB/Dev/Mod/RejLocal.cp" "$CC64" DevRejLocal \
 	"[exclusive] у вложенной процедуры"
-run ExclusiveNoActive.cp "$BB/Test64/Mod/RejNoActive.cp" "$CC64" Test64RejNoActive \
+run ExclusiveNoActive.cp "$BB/Dev/Mod/RejNoActive.cp" "$CC64" DevRejNoActive \
 	"[exclusive] без IMPORT ACTIVE"
-run ExclusiveWithCode.cp "$BB/Test64/Mod/RejCode.cp" "$CC64" Test64RejCode \
+run ExclusiveWithCode.cp "$BB/Dev/Mod/RejCode.cp" "$CC64" DevRejCode \
 	"[exclusive] вместе с [code]"
 run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC64" 'SystemKeyProbe^' \
 	"ключ точек уступки в модуле каркаса (System)"
 run KeyFramework.cp "$BB/System/Mod/KeyProbe.cp" "$CC32" 'SystemKeyProbe^' \
 	"ключ точек уступки на i386 в модуле каркаса"
-run GuardedAmd64.cp "$BB/Test64/Mod/RejGuarded.cp" "$CC64" Test64RejGuarded \
+run GuardedAmd64.cp "$BB/Dev/Mod/RejGuarded.cp" "$CC64" DevRejGuarded \
 	"[guarded] на amd64 (SEH/GetComKernel)"
 run_ok UserKey.cp "$BB/System/Mod/Usermod.cp" "$CC64" 'Usermod^' \
 	"ключ точек уступки в однословном пользовательском модуле"
