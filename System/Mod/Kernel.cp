@@ -232,9 +232,9 @@ MODULE Kernel;
 			trapped: BOOLEAN
 		END;
 
-		(* Мониторы (этап 4) вынесены в обычный модуль Monitors (s18).
-		   Ядро зовёт реализацию через один объект-крючок; сигнатуры
-		   экспортируемых Lock/Unlock/Wait/Await не менялись. *)
+		(* Мониторы реализует обычный модуль Monitors. Ядро зовёт реализацию
+		   через объект-крючок; сигнатуры экспортируемых Lock/Unlock/Wait/Await
+		   совпадают с Kernel. *)
 		CondProc* = PROCEDURE (frame: S.ADDRESS): BOOLEAN;
 
 		MonitorHook* = POINTER TO ABSTRACT RECORD END;
@@ -242,8 +242,8 @@ MODULE Kernel;
 		(* Крючок планировщика: реализация в Tasks. *)
 		Scheduler* = POINTER TO ABSTRACT RECORD END;
 
-		(* Реестр стеков (этап 2). Одна запись на любой стек: главный,
-		   задача (этап 3), сигнальный. *)
+		(* Реестр стеков. Одна запись на любой стек: главный, задача,
+		   сигнальный. *)
 		Stack* = POINTER TO StackDesc;
 		StackDesc* = RECORD
 			next: Stack;
@@ -362,7 +362,7 @@ MODULE Kernel;
 		nofcand: INTEGER;
 		heapMin, heapMax: INTEGER;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
-		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock (Loop, этап 2а) *)
+		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock (Loop) *)
 		ttotal: INTEGER;	(* current total size of BlackBox heap *)	(* committed heap size *)
 		(* total is used only in monocluster mode; it stands for the committed heap size; in monocluster mode, all of heap is in root. The committed size of root is root.size. So, total is not needed? *)
 		used: LONGINT;	(* bytes allocated on system heap *)
@@ -459,7 +459,7 @@ MODULE Kernel;
 	(*PROCEDURE (VAR p: Platform) Try* (h: TryHandler; a, b, c: INTEGER), NEW, ABSTRACT;
 	(* hook for implementation of PROCEDURE Try *)*)
 	PROCEDURE (VAR p: Platform) InActivationStack* (pc: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
-	(* Память под стек задачи (этап 3): mmap + сторожевая страница.
+	(* Память под стек задачи: mmap + сторожевая страница.
 	   По умолчанию — нет поддержки. *)
 	PROCEDURE (VAR p: Platform) AllocateStackMem* (size: INTEGER; OUT lo, hi: S.ADDRESS), NEW, EXTENSIBLE;
 	BEGIN lo := 0; hi := 0
@@ -468,7 +468,7 @@ MODULE Kernel;
 	BEGIN
 	END DeallocateStackMem;
 	(* Контекст Kernel.Try на текущем стеке: сохраняется/восстанавливается
-	   при переключении стеков (этап 2). По умолчанию пусто. *)
+	   при переключении стеков. По умолчанию пусто. *)
 	PROCEDURE (VAR p: Platform) GetTryContext* (): S.ADDRESS, NEW, EXTENSIBLE;
 	BEGIN RETURN 0 END GetTryContext;
 	PROCEDURE (VAR p: Platform) SetTryContext* (ctx: S.ADDRESS), NEW, EXTENSIBLE;
@@ -1879,7 +1879,7 @@ MODULE Kernel;
 		END
 	END CheckCandidates;
 
-	(* -------------------- реестр стеков (этап 2) -------------------------- *)
+	(* -------------------- реестр стеков ---------------------------------- *)
 
 	PROCEDURE StackOf* (adr: S.ADDRESS): Stack;
 	(* Запись, в диапазон [lo, hi) которой попадает adr. Если диапазоны
@@ -2658,8 +2658,8 @@ MODULE Kernel;
 	END SetTrapGuard;
 
 	PROCEDURE Try* (h: TryHandler; a, b, c: INTEGER);
-	(** Мониторы вынесены в Monitors: крючок запоминает глубину цепочки
-		взятий и при трапе снимает всё, взятое внутри h (этап 4). *)
+	(** Мониторы реализует модуль Monitors: крючок запоминает глубину цепочки
+		взятий и при трапе снимает всё, взятое внутри h. *)
 		VAR mark: INTEGER;
 	BEGIN
 		IF ~platform.initialized THEN

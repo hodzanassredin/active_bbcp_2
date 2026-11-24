@@ -40,7 +40,7 @@ MODULE CommStreams;
 		VAR x: ARRAY OF BYTE; beg, len: INTEGER; OUT read: INTEGER), NEW, ABSTRACT;
 	PROCEDURE (s: Stream) Close*, NEW, ABSTRACT;
 
-	(** Платформенный дескриптор для ожидания готовности (этап 7).
+	(** Платформенный дескриптор для ожидания готовности.
 		-1 — поток не умеет отдавать дескриптор; ожидание тогда
 		сводится к повторным попыткам. *)
 	PROCEDURE (s: Stream) Handle* (): INTEGER, NEW, EXTENSIBLE;

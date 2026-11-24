@@ -1,5 +1,5 @@
 MODULE AsyncWork;
-(** Рабочие нити ОС для блокирующих вызовов (этап 8): фасад пула.
+(** Рабочие нити ОС для блокирующих вызовов: фасад пула.
 
 	Клиентский код (Execute, Submit, ReadFileJob, WriteFileJob,
 	ResolveJob) не зависит от платформы. Реализацию ставит делегат:
@@ -8,9 +8,9 @@ MODULE AsyncWork;
 	- AsyncWorkWin — CreateThread, CRITICAL_SECTION, событие и действие
 	  Services (Windows x64).
 
-	Регистрирует делегата платформенный init (LinIntInit, WinIntInit,
-	WinInit) вызовом <Модуль>.Install. Пока делегат не поставлен,
-	любая операция пула трапает.
+	Делегат ставится лениво при первом Execute или Submit: AsyncWork.Ensure
+	зовёт Dialog.Call для AsyncWorkLin.Install, затем AsyncWorkWin.Install.
+	Пока делегат не поставлен, Done, Result и Release трапают.
 
 	Форматы запросов и заданий общие, поэтому записи объявлены здесь, а
 	не в реализациях: рабочая нить получает указатель на них через

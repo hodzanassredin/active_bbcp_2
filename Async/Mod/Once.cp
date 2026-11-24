@@ -1,5 +1,5 @@
 MODULE AsyncOnce;
-(** Однократная переменная этапа 7: Fill/Read.
+(** Однократная переменная: Fill/Read.
 
 	Fill — ровно один раз (повторный — трап 21); Read ждёт заполнения.
 	Объект — монитор: [exclusive] + ACTIVE.AWAIT. Значение — INTEGER

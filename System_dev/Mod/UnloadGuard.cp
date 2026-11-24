@@ -1,5 +1,5 @@
 MODULE System_devUnloadGuard;
-(** Красный тест этапа 2: Kernel.UnloadMod не выгружает модуль, пока его
+(** Kernel.UnloadMod не выгружает модуль, пока его
 	код есть в кадрах стека.
 
 	Модуль-мишень System_devUnloadGuardCode ни кем не импортируется (тест

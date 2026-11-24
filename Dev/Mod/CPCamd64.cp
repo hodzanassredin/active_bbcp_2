@@ -2500,7 +2500,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		DevCPE.PutWord(call, DevCPE.pc - call - 4)
 	END Ms64Entry;
 
-	(* --- [exclusive]: монитор в прологе и на общем выходе (этап 6.3) ----- *)
+	(* --- [exclusive]: монитор в прологе и на общем выходе ---------------- *)
 
 	PROCEDURE MonitorArg (proc: DevCPT.Object; VAR x, r: DevCPLamd64.Item);
 	(** Операнд объекта-монитора: [RBP + получатель] у метода, адрес

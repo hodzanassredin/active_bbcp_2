@@ -1,12 +1,12 @@
 MODULE System_devMonitors;
-(** Тесты мониторов этапа 4 (Kernel.Lock/Unlock/Wait/Await).
+(** Тесты мониторов (Kernel.Lock/Unlock/Wait/Await).
 
 	Монитор — побочная запись ядра по адресу объекта. Все сценарии,
 	кроме проверок отказов, идут в задачах Tasks: ожидание вне задачи
 	и без планировщика — трап. Нагрузка — ограниченный буфер на ручных
 	Lock/Wait/Unlock; Await проверяется с модульной процедурой условия
 	(кадр не используется — компиляторную схему с вложенной процедурой
-	проверит этап 6). *)
+	проверяет Dev_devActive). *)
 
 	IMPORT S := SYSTEM, Kernel, Monitors, Tasks, UnitAssert, Console, Strings;
 

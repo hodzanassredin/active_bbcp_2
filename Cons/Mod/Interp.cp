@@ -121,7 +121,7 @@ MODULE ConsInterp;
 		done := FALSE;
 		REPEAT
 			(* Действия исполняются и между командами, и пока ждём ввода:
-			   это консольный вариант главного цикла (этап 1). *)
+			   это консольный вариант главного цикла. *)
 			Services.actionHook.Step;
 			IF Console.WaitInput(100) THEN
 				Console.ReadLn(s);

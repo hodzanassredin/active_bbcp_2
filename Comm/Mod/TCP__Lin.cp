@@ -261,7 +261,7 @@ MODULE CommTCP__Lin;
 			adr: Net.sockaddr_storage;
 	BEGIN
 		(* poll, не select: таблица fd_set ограничена 1024 дескрипторами,
-		   а этап 7 держит тысячи соединений *)
+		   а библиотека ожиданий держит тысячи соединений *)
 		p.fd := l.sock; p.events := 1; p.revents := 0;
 		res := Libc.poll(SYSTEM.ADR(p), 1, 0);
 		ASSERT(res # SOCKET_ERROR, 100);

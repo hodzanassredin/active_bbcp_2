@@ -1,5 +1,5 @@
 MODULE Robust_devParallel;
-(** Тесты фасада RobustParallel (этап 9).
+(** Тесты фасада RobustParallel.
 
 	Клиент Robust_devClient написан в стиле MPI против опубликованного
 	определения; тест проверяет сумму 1..1000 при размере мира из

@@ -94,7 +94,7 @@ MODULE DevCPM;
 		allSysVal* = 14;
 		sysImp* = 15;
 		trap* = 31;
-		exclusive* = 32;	(* sysflag процедуры [exclusive] (этап 6) *)
+		exclusive* = 32;	(* sysflag процедуры [exclusive] *)
 		sys386 = 10; sys68k = 20;	(* processor type in options if system imported *)
 		
 	CONST

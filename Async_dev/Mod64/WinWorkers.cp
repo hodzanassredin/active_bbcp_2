@@ -1,5 +1,5 @@
 MODULE Async_devWinWorkers;
-(** Тесты рабочих нитей этапа 8 на Windows x64 (под wine).
+(** Тесты рабочих нитей на Windows x64 (под wine).
 
 	Отдельный модуль, а не Async_devWorkers: тот использует usleep и
 	файловый путь /tmp, а здесь те же проверки на Win32: Sleep(300) в

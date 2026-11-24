@@ -1,5 +1,5 @@
 MODULE System_devUnloadGuardCode;
-(** Модуль-мишень для System_devUnloadGuard (этап 2: запрет выгрузки
+(** Модуль-мишень для System_devUnloadGuard (запрет выгрузки
 	модуля с живым кадром).
 
 	Тест загружает его через Meta, поэтому никто его не импортирует:

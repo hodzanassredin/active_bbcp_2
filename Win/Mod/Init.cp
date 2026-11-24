@@ -108,7 +108,7 @@ MODULE WinInit;
 		WinClipboard.Install;
 		WinShowHook.SetShowHook;
 
-		(* Пул рабочих нитей этапа 8 стартует лениво при первом
+		(* Пул рабочих нитей стартует лениво при первом
 		   AsyncWork.Execute; базовый init его не заводит. *)
 
 		Dialog.Call("WinGui.InstallCtrlBreakInterrupt", "Failed to set Ctrl+Break interrupt", res_);

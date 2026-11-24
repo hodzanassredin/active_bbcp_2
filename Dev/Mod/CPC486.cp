@@ -2201,7 +2201,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		RETURN FALSE
 	END NeedOutPtrInit;
 	
-	(* --- [exclusive]: монитор в прологе и на общем выходе (этап 6.3) ----- *)
+	(* --- [exclusive]: монитор в прологе и на общем выходе ---------------- *)
 
 	PROCEDURE MonitorArg (proc: DevCPT.Object; VAR x, r: DevCPL486.Item);
 	(** Операнд объекта-монитора: [EBP + получатель] у метода, адрес

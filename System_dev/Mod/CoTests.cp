@@ -1,5 +1,5 @@
 MODULE System_devCoTests;
-(** Точки входа Unit для тестов сопрограмм (этап 2) на i386.
+(** Точки входа Unit для тестов сопрограмм на i386.
 
 	На amd64 те же сценарии идут через System_devMain, но тот импортирует и
 	System_devInHeap (Cluster*-API есть только в System/Mod64/Kernel).

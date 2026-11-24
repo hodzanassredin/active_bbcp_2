@@ -1637,7 +1637,7 @@ MODULE DevCPT;
 		obj.mode := Attr; obj.adr := num
 	END EnterAttr;
 
-	(* --- псевдомодуль "$$" и скрытые объекты расширения (этап 6) ------ *)
+	(* --- псевдомодуль "$$" и скрытые объекты расширения -------------- *)
 
 	PROCEDURE NewHidden* (IN prefix: ARRAY OF SHORTCHAR; OUT name: Name);
 	(** Уникальное скрытое имя: prefix + номер (ARRAY как результат

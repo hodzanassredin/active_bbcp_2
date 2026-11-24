@@ -1,5 +1,5 @@
 MODULE Dev_devActive;
-(** Тесты языкового расширения этапа 6: [exclusive] и ACTIVE.AWAIT.
+(** Тесты языкового расширения: [exclusive] и ACTIVE.AWAIT.
 
 	Проверяется то, что не покрывает System_devMonitors (ручные Lock/Wait):
 	-AWAIT в методе и в процедуре модуля (монитор модуля), условие

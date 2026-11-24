@@ -93,7 +93,7 @@ MODULE DevCPB;
 	BEGIN DevCPM.err(n)
 	END err;
 
-	(* Раскрытие ACTIVE.AWAIT (этап 6.1). Определено после Call;
+	(* Раскрытие ACTIVE.AWAIT. Определено после Call;
 	   StFct зовёт его через это предварительное объявление. *)
 	PROCEDURE ^AwaitExpansion* (VAR p: DevCPT.Node): DevCPT.Node;
 
@@ -2249,7 +2249,7 @@ MODULE DevCPB;
 		END
 	END ShowTree;
 *)
-	(* --- ACTIVE.AWAIT: раскрытие по схеме Мюллера (этап 6.1) ------------ *)
+	(* --- ACTIVE.AWAIT: раскрытие по схеме Мюллера ---------------------- *)
 	(*
 		ACTIVE.AWAIT(c) в теле процедуры P с [exclusive] раскрывается в
 

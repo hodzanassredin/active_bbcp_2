@@ -28,7 +28,7 @@ MODULE Services;
 		InsistentAction* = POINTER TO ABSTRACT RECORD (Action) END;
 
 		(** Работа, отложенная в главный цикл. Единственная точка входа для
-			будущих задач (этап 8): задача кладёт сюда процедуру, а главный
+			будущих задач: задача кладёт сюда процедуру, а главный
 			цикл исполняет её на своём стеке. Сейчас очередь однонитевая;
 			при переходе на нити ОС сюда добавится блокировка. *)
 		Work* = PROCEDURE;
@@ -137,9 +137,9 @@ MODULE Services;
 			p := candidates; WHILE p.next # NIL DO p := p.next END;	(* find last element of candidates list *)
 			p.next := actions; actions := candidates; candidates := NIL	(* prepend candidates list to actions list *)
 		END;
-		(* Действие, трапнувшее в Do, НЕ возвращается в очередь: так было в
-		   исходном BlackBox и это единственный способ остановить сломанное
-		   действие, иначе оно трапает на каждом шаге главного цикла. *)
+		(* Действие, трапнувшее в Do, НЕ возвращается в очередь: это
+		   единственный способ остановить сломанное действие, иначе оно
+		   трапает на каждом шаге главного цикла. *)
 		executing := NIL;
 		actionsInTheQueue := 0; p := actions;
 		WHILE p # NIL DO p := p.next; INC(actionsInTheQueue); END;
@@ -166,7 +166,7 @@ MODULE Services;
 		END
 	END RemoveAction;
 
-	(** --- очередь в главный цикл (задел под задачи, этап 8) --- **)
+	(** --- очередь в главный цикл для работ из другой нити --- **)
 
 	PROCEDURE Post* (w: Work);
 	(** Отложить работу w до ближайшего шага главного цикла.
@@ -219,7 +219,7 @@ MODULE Services;
 	END SetWakeHook;
 
 	PROCEDURE Wake*;
-	(** Разбудить главный цикл (точка входа из другой нити, этап 8):
+	(** Разбудить главный цикл (точка входа из другой нити):
 		например, записать байт в eventfd/pipe, который ждёт главный цикл. **)
 	BEGIN
 		IF wakeHook # NIL THEN wakeHook END

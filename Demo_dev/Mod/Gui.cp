@@ -1,5 +1,5 @@
 MODULE Demo_devGui;
-(** GUI-сценарий этапа 3/1 без участия человека.
+(** GUI-сценарий без участия человека.
 
 	Запускается из tools/test-gui.sh хостом под broadwayd:
 	`blackbox --BB_RUN=Demo_devGui.Run`. Команда только заводит две задачи

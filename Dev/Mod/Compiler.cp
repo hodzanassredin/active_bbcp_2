@@ -23,7 +23,7 @@ MODULE DevCompiler;
 		(* compiler options: *)
 		checks = 0; allchecks = 1; assert = 2; obj = 3; ref = 4;
 		allref = 5; srcpos = 6; reallib = 7; signatures = 8;
-		yieldPts = 13;	(* ключ точек уступки (только amd64), символ "^" *)
+		yieldPts = 13;	(* ключ точек уступки, символ "^" *)
 		hint = 29; oberon = 30; errorTrap = 31;
 		defopt = {checks, assert, obj, ref, allref, srcpos, signatures};
 

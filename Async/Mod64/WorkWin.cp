@@ -1,11 +1,10 @@
 MODULE AsyncWorkWin;
-(** Рабочие нити ОС для блокирующих вызовов (этап 8): Windows x64.
+(** Рабочие нити ОС для блокирующих вызовов: Windows x64.
 
 	Делегат фасада AsyncWork. Пул из 4 нитей CreateThread; задания и
 	результаты — статические слоты в [untagged]-памяти, очередь под
-	CRITICAL_SECTION. Готовность — счётчик done и auto-reset событие:
-	рабочая нить после задания поднимает событие, главный цикл забирает
-	готовые задания действием Services (без блокировки окон). Действие
+	CRITICAL_SECTION. Готовность — счётчик done: главный цикл забирает готовые задания
+	действием Services (без блокировки окон). Действие
 	само переставляется через 5 мс, пока в пуле есть занятые слоты.
 
 	Очередь ждёт manual-reset событие: Submit поднимает его, рабочая нить
@@ -16,7 +15,7 @@ MODULE AsyncWorkWin;
 	(CreateFileA/ReadFile/WriteFile, getaddrinfo из WS2_32), поэтому
 	куча и каркас не трогаются.
 
-	Install зовётся лениво из AsyncWork.Ensure при первом Execute; базовый
+	Install зовётся лениво из AsyncWork.Ensure при первом Execute или Submit; базовый
 	init (WinIntInit/WinInit) пул не заводит. *)
 
 	IMPORT S := SYSTEM, Tasks, Services, AsyncWork, A := WinApi, Ws := AsyncWinSock;

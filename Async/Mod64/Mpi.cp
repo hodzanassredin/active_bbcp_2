@@ -1,5 +1,5 @@
 MODULE AsyncMpi;
-(** MPI-транспорт компутонов (этап 9) поверх MPICH.
+(** MPI-транспорт компутонов поверх MPICH.
 
 	AsyncComputon не импортирует этот модуль: тест сам зовёт
 	AsyncMpi.Install и SetTransport("mpi"), поэтому обычные прогоны не
