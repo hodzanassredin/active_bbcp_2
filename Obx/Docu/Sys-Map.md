@@ -110,3 +110,8 @@ Content-Addressed Store
 ObxCas0  docu/sources		a block named by its hash: deduplication
 ObxCas1  docu/sources		cutting two nearly equal inputs by content
 ObxCas2  docu/sources		two authors publish change sets, one rebases
+
+Key-Value Store
+ObxKv0  docu/sources		Kv store: open, write, read, walk a range
+ObxKv1  docu/sources		an event log: append, tail, a reader's snapshot
+ObxKv2  docu/sources		a transfer between accounts in one transaction and Abort

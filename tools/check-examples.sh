@@ -32,6 +32,7 @@ if [ $# -eq 0 ]; then
 		Unit/Docu/Testing.md Unit/Docu/ru/Testing.md \
 		Cas/Docu/Cas.md Cas/Docu/ru/Cas.md \
 		Actor/Docu/Actors.md Actor/Docu/ru/Actors.md \
+		Kv/Docu/Kv.md Kv/Docu/ru/Kv.md \
 		Obx/Docu/*.md Obx/Docu/ru/*.md Demo/Docu/*.md
 fi
 tmp=$(mktemp -d)

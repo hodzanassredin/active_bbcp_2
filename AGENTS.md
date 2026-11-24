@@ -214,7 +214,7 @@ System` selects loaded `System_dev*`; `all` selects every module whose name cont
 tools/test.sh                 # all modules from tools/tests.txt
 tools/test.sh --list
 tools/test.sh System_devMain  # selected modules
-tools/test32.sh               # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard, Cas
+tools/test32.sh               # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard, Cas, Kv
 tools/test-win64.sh           # Windows x64 under wine
 tools/test-resolver.sh        # resolver in unshare -rmn
 tools/test-robust.sh          # RobustParallel on 1/4/16 processes
@@ -329,6 +329,7 @@ code, and the checks to run before a commit.
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | `Cas` content-addressed store |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | `Actor` subsystem: actors and supervision |
 | `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | tutorial: when to use actions, tasks, monitors, transactions, channels, selection, workers, computons (`ObxBank0`–`ObxBank6`) |
+| `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | `Kv` key-value store with transactions |
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
