@@ -6,9 +6,9 @@
 `ACTIVE.AWAIT` и точки уступки — определена в `Docu/ru/Active-CP-Lang.md`; задачи — в
 `Docu/ru/Tasks.md`.
 
-Библиотека написана на расширении языка и не меняет каркас: модули каркаса по-прежнему
-компилируются без ключа уступок и не ждут. Подсистема собирается только для AMD64; ядро
-расширения работает и на i386.
+Библиотека написана на расширении языка и не меняет каркас: модули каркаса компилируются без
+ключа уступок и не ждут. Подсистема собирается только для AMD64; ядро расширения работает и на
+i386. Экспорт каждого модуля с пред- и постусловиями перечислен в разделе 10.
 
 ## 1. Сообщение
 
@@ -142,8 +142,8 @@ c.Recv(m);        (* ждёт отправителя *)
 2. Прямые `Send` и `Recv` обслуживают и предложения `Select`: отправка в буфер завершает
    отложенный приём, приём из буфера освобождает место для отложенной отправки. Поэтому канал
    можно смешивать с выбором.
-3. `Send` и `Recv` — точки ожидания. Отмена задачи, ожидающей в канале, срабатывает как обычно:
-   трап 21.
+3. `Recv` всех видов и `Send` встречи и буфера — точки переключения. `Send` ящика ждёт, только
+   если монитор канала держит другая задача. Отменённая задача трапает в ожидании с кодом 127.
 4. У канала может быть необязательный протокол диалога (раздел 5).
 
 ```
@@ -217,6 +217,8 @@ m := ops[i].got;                   (* результат приёма *)
 2. Число альтернатив — не более 32; иначе трап 21. Каждая альтернатива заполнена
    `AltSend`/`AltRecv`/`AltTimeout`/`AltSignal` (иначе трап 22); у отправки и приёма есть канал
    (иначе трап 23), у сигнала — сигнал (иначе трап 24). Предусловия проверяются до регистрации.
+   Трап 22 возникает, только если вид альтернативы вне допустимого диапазона. Незаполненная
+   альтернатива с нулевым видом считается отправкой и даёт трап 23.
 3. Альтернативы проверяются в порядке индексов. Побеждает первая, которая может выполниться
    немедленно.
 4. Из нескольких тайм-аутов учитывается наименьший `ms`; при равенстве — первый по индексу.
@@ -225,9 +227,11 @@ m := ops[i].got;                   (* результат приёма *)
    владелец сигнала позже зовёт `SignalReady`.
 6. После пробуждения задача снимает проигравшие предложения. Предложение не исполняется против
    предложения того же `Select`. Поле `got` заполняется только для победившего приёма.
-7. Отмена задачи во время ожидания трапает её в `Tasks.Park`. Предложения остаются в каналах и
-   снимаются лениво: канал считает предложение мёртвым, когда задача достигла `Finished` или
-   `Cancelled`.
+7. Отмена задачи во время ожидания трапает её в `Tasks.Park` с кодом 127. Предложения остаются в
+   каналах и снимаются лениво: канал считает предложение мёртвым, когда задача достигла
+   `Finished` или `Cancelled`.
+8. Если протокол отверг отправку этой задачи, `Select` снимает все предложения и затем трапает
+   с кодом 21.
 
 ```
 VAR ops: ARRAY 3 OF AsyncSelect.Op;
@@ -264,33 +268,24 @@ wait: EndMsg > done; done:
 6. Имя сообщения — имя динамического типа записи `AsyncSelect.Msg`; суффикс `^` срезается.
    `NIL` даёт метку `NIL`, неизвестный тип — `?`.
 
-Операции:
-
-```
-p := AsyncProto.New(desc);        (* NIL при ошибке описания *)
-AsyncProto.LastError(msg);        (* текст ошибки разбора *)
-AsyncChan.SetProtocol(c, p);      (* прикрепить протокол; NIL снять *)
-AsyncProto.IsFinal(p, state);     (* нет исходящих переходов *)
-AsyncProto.LastViolation(p, msg); (* текст последнего нарушения *)
-```
+Операции `AsyncProto` и `AsyncChan.SetProtocol` перечислены в разделе 10.
 
 Проверка:
 
-1. Прямой `Send` проверяет сообщение при входе, до возможного ожидания.
-2. `SendAlt` проверяет сообщение в момент, когда предложение действительно исполняется:
-   при немедленной регистрации, когда получатель забирает ждущее предложение, или при
-   освобождении места в буфере. Проигравшее предложение состояние не меняет.
-3. Нарушение печатает в консоль `AsyncChan protocol: <текст>` и трапает отправителя с кодом 21.
-   Протокол проверяется в момент, когда отправка совершается. Если отправитель ждал получателя
-   или места, трап получает он, а не задача, которая приняла бы сообщение; сообщение не доставляется.
-   Текст остаётся в `LastViolation`; ожидаемые сообщения перечислены в описании нарушения.
-4. Без протокола проверка выходит после одной проверки `NIL`; накладных расходов нет.
-5. Прикрепление протокола сбрасывает состояние в начальное.
+1. Протокол проверяет сообщение в момент, когда отправка совершается. Это одинаково для прямого
+   `Send` и для `SendAlt`.
+2. Отправка совершается в одном из трёх мест: при входе, если получатель ждёт или есть место;
+   когда получатель забирает ждущее предложение; когда в буфере освобождается место.
+3. Проигравшее предложение `Select` состояние протокола не меняет.
+4. Нарушение печатает в консоль `AsyncChan protocol: <текст>`. Отправитель трапает с кодом 21, а
+   сообщение не доставляется. Если отправитель ждал, трап получает он, а не задача-получатель.
+5. Отвергнутая отправка состояние протокола не меняет. Текст нарушения остаётся в
+   `LastViolation` и перечисляет ожидаемые сообщения.
+6. Без протокола проверка выходит после одной проверки `NIL`.
+7. Прикрепление протокола сбрасывает состояние в начальное.
 
 Ограничения: не более 32 состояний и 128 переходов; имя состояния и метки — до 31 символа;
 текст нарушения — до 255 символов. Автомат детерминированный; операторов `*`, `+`, `?`, `|` нет.
-Прямой `Send` сдвигает состояние при входе, поэтому отмена после входа состояние не
-восстанавливает.
 
 ## 6. Ввод-вывод
 
@@ -326,7 +321,7 @@ AsyncIO.Poll(timeout);            (* прогнать ожидания, для �
 
 Ограничения: не более 4096 одновременных ожиданий (`LinConsole`); при переполнении ожидающий
 немедленно получает `Ready` и повторяет попытку. `CommTCP__Lin` работает по IPv4, очередь
-accept — 128; `poll` заменил `select`, потому что `fd_set` ограничен 1024 дескрипторами.
+accept — 128. Реестр использует `poll`, а не `select`: `fd_set` ограничен 1024 дескрипторами.
 
 ## 7. Рабочие нити
 
@@ -335,27 +330,13 @@ accept — 128; `poll` заменил `select`, потому что `fd_set` о�
 продолжали работать.
 
 ```
-id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* из задачи; ждёт *)
-status := AsyncWork.Result(id);
-AsyncWork.Release(id);
+status := AsyncWork.Execute(S.ADR(SomeJob), S.VAL(S.ADDRESS, arg));  (* из задачи; ждёт *)
 
-id := AsyncWork.Submit(S.ADR(SomeJob), S.ADDRESS(arg));   (* не ждёт *)
-IF AsyncWork.Done(id) THEN status := AsyncWork.Result(id) END;
-AsyncWork.Release(id);
+id := AsyncWork.Submit(S.ADR(SomeJob), S.VAL(S.ADDRESS, arg));   (* не ждёт *)
+IF AsyncWork.Done(id) THEN status := AsyncWork.Result(id); AsyncWork.Release(id) END;
 ```
 
-Операции:
-
-| Операция | Что делает |
-|---|---|
-| `Execute(procAdr, arg)` | ставит задание, ждёт готовности, возвращает статус; только из задачи |
-| `Submit(procAdr, arg)` | ставит задание и возвращает номер; −1 — нет слота или очередь полна |
-| `Done(id)` | готово ли задание |
-| `Result(id)` | статус задания |
-| `Release(id)` | освобождает слот; обязателен |
-| `Workers()` | число созданных нитей |
-| `Scan` | разбирает готовые задания; зовёт главный цикл |
-| `Install(impl)` | ставит платформенного делегата |
+`Execute` сам освобождает слот и возвращает статус задания. Операции перечислены в разделе 10.
 
 Готовые задания: `ReadFileJob`, `WriteFileJob`, `ResolveJob`. Записи `FileReq` и `AddrReq`
 объявлены в фасаде; вызывающий выделяет их заранее, рабочая нить получает только адрес.
@@ -370,8 +351,9 @@ AsyncWork.Release(id);
    `Services`, опрашивающее счётчик `done` каждые 5 мс, пока есть занятые слоты.
 3. Рабочая нить не имеет права обращаться к куче, вызывать `NEW`, `Kernel.Try`, журнал и каркас.
    Это правило дисциплины, а не барьер.
-4. `Execute` — точка ожидания задачи. `Submit`, `Done`, `Result`, `Release` не ждут.
-5. `Release` обязателен: иначе слот занят до конца процесса.
+4. `Execute` — точка переключения задачи; вне задачи он трапает с кодом 21. `Submit`, `Done`,
+   `Result`, `Release` не ждут.
+5. После `Submit` вызов `Release` обязателен: иначе слот занят до конца процесса.
 6. На Windows пул работает, пока крутится цикл `Services`; блокирующий консольный ввод
    останавливает доставку готовности.
 
@@ -400,25 +382,15 @@ TYPE Computon* = POINTER TO ABSTRACT RECORD (Stores.Store) END;
 
 ### 8.1. Операции
 
-```
-AsyncComputon.Start(n);                        (* n исполнителей, 1..16 *)
-AsyncComputon.Push(c, rank, tag);
-r := AsyncComputon.Pull(rank, tag);            (* ждать; точка ожидания *)
-ok := AsyncComputon.Try(rank, tag, r);         (* не ждать *)
-sig := AsyncComputon.AltPull(rank, tag);       (* альтернатива Select *)
-AsyncComputon.Stop;
-AsyncComputon.Size(); AsyncComputon.Rank();
-AsyncComputon.LastError(); AsyncComputon.WorkerPid(rank);
-AsyncComputon.Unload(module);                  (* выгрузить код у исполнителей *)
-```
+Операции `AsyncComputon` перечислены в разделе 10. Правила:
 
-Правила:
-
-1. `Start(n)` запускает `n` исполнителей; `n` — от 1 до 16. `Rank()` управляющего — 0.
+1. `Start(n)` запускает `n` исполнителей; `n` — от 1 до 16, иначе трап 20. `Rank()` управляющего —
+   0.
 2. `Push` сериализует компутон и отправляет его исполнителю `rank`; ошибки видны через
    `LastError` или `Hook.Failed`.
 3. `Pull` ждёт результат не дольше 10 000 мс; ожидание — `Tasks.Sleep(10)`, то есть точка
-   ожидания. По тайм-ауту `Pull` возвращает `NIL`, `LastError = -4`.
+   переключения. Вне задачи `Pull` трапает с кодом 21. По тайм-ауту `Pull` возвращает `NIL`,
+   `LastError = -4`.
 4. `Try` не ждёт: возвращает `TRUE`, если запрос завершён, и результат или `NIL` с кодом в
    `LastError`.
 5. Запрос сопоставляется **только по `tag`**; `rank` в `Pull` используется лишь для `Hook`, в
@@ -503,7 +475,7 @@ END ObxComputon.
 ```
 
 `Do` исполняется в отдельном процессе, поэтому `NEW` внутри него разрешён. `Pull` — точка
-ожидания и вызывается из задачи; команда `Run` крутит `Tasks.Step`, пока клиент не получит
+переключения и вызывается из задачи; команда `Run` крутит `Tasks.Step`, пока клиент не получит
 результат.
 
 ### 8.4. MPI
@@ -555,6 +527,7 @@ PROCEDURE Unload* (module: ARRAY OF CHAR);
    не запускает.
 5. `Unload` не возвращает результат: отказ печатается в консоль.
 6. `Wait` — пустая процедура; все ожидания выражены `Pull` и `Try`.
+7. `Push`, `Pull` и `Try` с рангом вне `1..size−1` трапают с кодом 20.
 
 ## 9. Общие ограничения
 
@@ -566,55 +539,603 @@ PROCEDURE Unload* (module: ARRAY OF CHAR);
    `Push`, `Try`, `Unload` задачи не требуют.
 4. `Once` — монитор: методы `[exclusive]`, ожидание — `ACTIVE.AWAIT`. Каналы ждут в `Tasks.Park`
    и уважают монитор объекта канала, если его держит задача.
-5. Отмена задачи во время ожидания трапает её; предложения `Select` снимаются лениво, а
+5. Отмена задачи во время ожидания трапает её с кодом 127; предложения `Select` снимаются лениво, а
    незавершённые запросы компутона остаются занятыми до `Stop`.
 
-## 10. Схема реализации
+## 10. Интерфейс
+
+Раздел перечисляет экспорт модулей в форме документации BlackBox: блок `DEFINITION`, затем
+описание каждой процедуры. Строка «Пред» называет условие и номер трапа при его нарушении.
+Условие с пометкой «не проверяется» код не проверяет; его нарушение даёт неопределённый результат
+или трап разыменования `NIL`. Строка «Пост» называет состояние после возврата.
+
+### 10.1. AsyncSelect
+
+```
+DEFINITION AsyncSelect;
+
+	IMPORT AsyncProto;
+
+	CONST
+		Rendezvous = 0; Bounded = 1; Mailbox = 2;
+
+	TYPE
+		Msg = POINTER TO ABSTRACT RECORD END;
+
+		Ctx = POINTER TO RECORD END;
+
+		Core = POINTER TO EXTENSIBLE RECORD
+			count-: INTEGER;
+			protoState-: INTEGER
+		END;
+
+		Signal = POINTER TO ABSTRACT RECORD
+			(s: Signal) Arm (ctx: Ctx; idx: INTEGER): BOOLEAN, NEW, ABSTRACT;
+			(s: Signal) Disarm, NEW, ABSTRACT
+		END;
+
+		Op = RECORD
+			got-: Msg
+		END;
+
+	PROCEDURE InitCore (c: Core; kind, capacity: INTEGER);
+	PROCEDURE SetProtocol (c: Core; p: AsyncProto.Protocol);
+	PROCEDURE QueueSend (c: Core; m: Msg);
+	PROCEDURE QueueRecv (c: Core; OUT m: Msg);
+	PROCEDURE AltSend (core: Core; msg: Msg; OUT op: Op);
+	PROCEDURE AltRecv (core: Core; OUT op: Op);
+	PROCEDURE AltTimeout (ms: LONGINT; OUT op: Op);
+	PROCEDURE AltSignal (sig: Signal; OUT op: Op);
+	PROCEDURE Select (VAR ops: ARRAY OF Op): INTEGER;
+	PROCEDURE SignalReady (ctx: Ctx; idx: INTEGER);
+
+END AsyncSelect.
+```
+
+`Msg` — базовый тип сообщения. `Core` — ядро канала: `count` — число сообщений в кольце,
+`protoState` — состояние протокола (0 без протокола). `Op` — альтернатива `Select`; `got` —
+сообщение победившего приёма. `Ctx` — решение одного `Select` или одного ожидания.
+
+**PROCEDURE InitCore (c: Core; kind, capacity: INTEGER)**
+Задаёт вид и ёмкость нового ядра канала.
+Пред: `c` только что создано `NEW` — не проверяется; `kind` — `Rendezvous`, `Bounded` или
+`Mailbox` — трап 20; `capacity > 0` для `Bounded`, иначе `capacity = 0` — трап 21.
+Пост: `c` — пустой канал вида `kind` без протокола.
+
+**PROCEDURE SetProtocol (c: Core; p: AsyncProto.Protocol)**
+Прикрепляет протокол к каналу или снимает его.
+Пред: `c # NIL` — не проверяется.
+Пост: каждая отправка в `c` проверяется протоколом `p` в момент, когда совершается;
+`protoState` — начальное состояние `p`. При `p = NIL` протокола нет, `protoState = 0`.
+
+**PROCEDURE QueueSend (c: Core; m: Msg)**
+Отправляет `m` в канал; ждёт, если получателя или места нет.
+Пред: `c # NIL` — не проверяется; ожидание только из задачи — трап 20 в `Tasks.Park`.
+Пост: `m` отдано получателю или лежит в кольце. Протокол отверг `m` — трап 21, `m` не
+отправлено.
+
+**PROCEDURE QueueRecv (c: Core; OUT m: Msg)**
+Принимает сообщение; ждёт, если сообщений и ждущих отправителей нет.
+Пред: `c # NIL` — не проверяется; ожидание только из задачи — трап 20 в `Tasks.Park`.
+Пост: `m` — первое сообщение кольца или сообщение первого ждущего отправителя.
+
+**PROCEDURE AltSend (core: Core; msg: Msg; OUT op: Op)**
+Строит альтернативу отправки.
+Пред: `core # NIL` — трап 23 в `Select`.
+Пост: `op` — отправка `msg` в `core`.
+
+**PROCEDURE AltRecv (core: Core; OUT op: Op)**
+Строит альтернативу приёма.
+Пред: `core # NIL` — трап 23 в `Select`.
+Пост: `op` — приём из `core`.
+
+**PROCEDURE AltTimeout (ms: LONGINT; OUT op: Op)**
+Строит альтернативу тайм-аута.
+Пост: `op` — тайм-аут `ms` мс от начала ожидания; `ms <= 0` срабатывает сразу.
+
+**PROCEDURE AltSignal (sig: Signal; OUT op: Op)**
+Строит альтернативу внешнего сигнала.
+Пред: `sig # NIL` — трап 24 в `Select`.
+Пост: `op` — ожидание сигнала `sig`.
+
+**PROCEDURE Select (VAR ops: ARRAY OF Op): INTEGER**
+Ждёт, пока исполнится ровно одна альтернатива, и возвращает её индекс.
+Пред: вызов из задачи — трап 20; `LEN(ops) <= 32` — трап 21; вид каждой альтернативы допустим —
+трап 22; у отправки и приёма канал не `NIL` — трап 23; у сигнала сигнал не `NIL` — трап 24.
+Пост: исполнена ровно одна альтернатива `i`, результат — `i`. У приёма `ops[i].got` — сообщение.
+Проигравшие предложения сняты, сигналы разоружены. Протокол отверг отправку — трап 21 после
+снятия всех предложений.
+
+**PROCEDURE SignalReady (ctx: Ctx; idx: INTEGER)**
+Сообщает о готовности внешнего сигнала.
+Пред: вызывает владелец сигнала; `ctx` и `idx` получены в `Arm`; `Disarm` ещё не вызван — не
+проверяется.
+Пост: если решения не было, победила альтернатива `idx`; ждущая задача разбужена.
+
+**PROCEDURE (s: Signal) Arm (ctx: Ctx; idx: INTEGER): BOOLEAN**
+Абстрактный метод; его вызывает `Select` при регистрации.
+Пост: `TRUE` — сигнал готов. `FALSE` — владелец позже вызовет `SignalReady(ctx, idx)` не более
+одного раза, если до того не вызван `Disarm`.
+
+**PROCEDURE (s: Signal) Disarm**
+Абстрактный метод; его вызывает `Select` после решения.
+Пост: владелец сигнала больше не использует `ctx` из `Arm` и не вызывает с ним `SignalReady`.
+
+### 10.2. AsyncChan
+
+```
+DEFINITION AsyncChan;
+
+	IMPORT AsyncSelect, AsyncProto;
+
+	TYPE
+		Chan = POINTER TO RECORD (AsyncSelect.Core)
+			(c: Chan) Send (m: AsyncSelect.Msg), NEW;
+			(c: Chan) Recv (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+		Buffer = POINTER TO RECORD (AsyncSelect.Core)
+			(c: Buffer) Send (m: AsyncSelect.Msg), NEW;
+			(c: Buffer) Recv (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+		Mailbox = POINTER TO RECORD (AsyncSelect.Core)
+			(c: Mailbox) Send (m: AsyncSelect.Msg), NEW;
+			(c: Mailbox) Recv (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+	PROCEDURE NewChan (): Chan;
+	PROCEDURE NewBuffer (capacity: INTEGER): Buffer;
+	PROCEDURE NewMailbox (): Mailbox;
+	PROCEDURE SetProtocol (c: AsyncSelect.Core; p: AsyncProto.Protocol);
+	PROCEDURE SendAlt (c: AsyncSelect.Core; m: AsyncSelect.Msg; OUT op: AsyncSelect.Op);
+	PROCEDURE RecvAlt (c: AsyncSelect.Core; OUT op: AsyncSelect.Op);
+	PROCEDURE TimeoutAlt (ms: LONGINT; OUT op: AsyncSelect.Op);
+	PROCEDURE Select (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER;
+
+END AsyncChan.
+```
+
+**PROCEDURE NewChan (): Chan**
+Пост: новая пустая встреча без протокола.
+
+**PROCEDURE NewBuffer (capacity: INTEGER): Buffer**
+Пред: `capacity > 0` — трап 20.
+Пост: новый пустой буфер на `capacity` сообщений без протокола.
+
+**PROCEDURE NewMailbox (): Mailbox**
+Пост: новый пустой неограниченный ящик без протокола.
+
+**PROCEDURE (c: Chan) Send (m: AsyncSelect.Msg)**
+**PROCEDURE (c: Buffer) Send (m: AsyncSelect.Msg)**
+**PROCEDURE (c: Mailbox) Send (m: AsyncSelect.Msg)**
+Отправляют `m`; то же, что `AsyncSelect.QueueSend(c, m)`.
+Пред: ожидание только из задачи — трап 20 в `Tasks.Park`. `Mailbox.Send` ждёт, только если
+монитор канала держит другая задача.
+Пост: встреча — получатель забрал `m`; буфер и ящик — `m` последнее в очереди. Протокол отверг
+`m` — трап 21, `m` не отправлено.
+
+**PROCEDURE (c: Chan) Recv (OUT m: AsyncSelect.Msg)**
+**PROCEDURE (c: Buffer) Recv (OUT m: AsyncSelect.Msg)**
+**PROCEDURE (c: Mailbox) Recv (OUT m: AsyncSelect.Msg)**
+Принимают сообщение; то же, что `AsyncSelect.QueueRecv(c, m)`.
+Пред: ожидание только из задачи — трап 20 в `Tasks.Park`.
+Пост: `m` — первое сообщение очереди или первого ждущего отправителя.
+
+**PROCEDURE SetProtocol (c: AsyncSelect.Core; p: AsyncProto.Protocol)**
+То же, что `AsyncSelect.SetProtocol`.
+
+**PROCEDURE SendAlt (c: AsyncSelect.Core; m: AsyncSelect.Msg; OUT op: AsyncSelect.Op)**
+**PROCEDURE RecvAlt (c: AsyncSelect.Core; OUT op: AsyncSelect.Op)**
+**PROCEDURE TimeoutAlt (ms: LONGINT; OUT op: AsyncSelect.Op)**
+**PROCEDURE Select (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER**
+То же, что `AsyncSelect.AltSend`, `AltRecv`, `AltTimeout` и `Select` (раздел 10.1).
+
+### 10.3. AsyncOnce
+
+```
+DEFINITION AsyncOnce;
+
+	IMPORT AsyncSelect;
+
+	TYPE
+		Once = POINTER TO RECORD
+			done: BOOLEAN;
+			(o: Once) FillInt (x: INTEGER), NEW;
+			(o: Once) ReadInt (): INTEGER, NEW;
+			(o: Once) FillMsg (m: AsyncSelect.Msg), NEW;
+			(o: Once) ReadMsg (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+	PROCEDURE New (): Once;
+
+END AsyncOnce.
+```
+
+Все четыре метода — исключающие процедуры (`[exclusive]`). Поле `done` экспортировано для
+чтения и записи; запись извне нарушает однократность, и код её не запрещает.
+
+**PROCEDURE New (): Once**
+Пост: незаполненная переменная, `done = FALSE`.
+
+**PROCEDURE (o: Once) FillInt (x: INTEGER)**
+Пред: `~o.done` — трап 21.
+Пост: `o.done`; значение — `x`.
+
+**PROCEDURE (o: Once) ReadInt (): INTEGER**
+Ждёт заполнения в `ACTIVE.AWAIT(o.done)`.
+Пред: ожидание только из задачи — трап 24 монитора, если переменная не заполнена.
+Пост: результат — целое из `FillInt`; после `FillMsg` — 0.
+
+**PROCEDURE (o: Once) FillMsg (m: AsyncSelect.Msg)**
+Пред: `~o.done` — трап 22.
+Пост: `o.done`; значение — `m`.
+
+**PROCEDURE (o: Once) ReadMsg (OUT m: AsyncSelect.Msg)**
+Ждёт заполнения в `ACTIVE.AWAIT(o.done)`.
+Пред: ожидание только из задачи — трап 24 монитора, если переменная не заполнена.
+Пост: `m` — сообщение из `FillMsg`; после `FillInt` — `NIL`.
+
+### 10.4. AsyncProto
+
+```
+DEFINITION AsyncProto;
+
+	TYPE
+		Message = ARRAY 256 OF CHAR;
+		Protocol = POINTER TO RECORD END;
+
+	PROCEDURE New (IN desc: ARRAY OF CHAR): Protocol;
+	PROCEDURE LastError (OUT msg: Message);
+	PROCEDURE Start (p: Protocol): INTEGER;
+	PROCEDURE StateName (p: Protocol; state: INTEGER; OUT name: ARRAY OF CHAR);
+	PROCEDURE IsFinal (p: Protocol; state: INTEGER): BOOLEAN;
+	PROCEDURE Step (p: Protocol; VAR state: INTEGER; IN label: ARRAY OF CHAR; OUT ok: BOOLEAN);
+	PROCEDURE LastViolation (p: Protocol; OUT msg: Message);
+
+END AsyncProto.
+```
+
+**PROCEDURE New (IN desc: ARRAY OF CHAR): Protocol**
+Строит автомат из описания (раздел 5).
+Пост: автомат или `NIL` при ошибке описания; текст ошибки — в `LastError`.
+
+**PROCEDURE LastError (OUT msg: Message)**
+Пост: `msg` — текст последней ошибки разбора.
+
+**PROCEDURE Start (p: Protocol): INTEGER**
+Пост: индекс начального состояния; при `p = NIL` — 0.
+
+**PROCEDURE StateName (p: Protocol; state: INTEGER; OUT name: ARRAY OF CHAR)**
+Пост: `name` — имя состояния; `""`, если `p = NIL` или индекса нет.
+
+**PROCEDURE IsFinal (p: Protocol; state: INTEGER): BOOLEAN**
+Пред: `p # NIL` — не проверяется.
+Пост: `TRUE`, если из `state` нет исходящих переходов.
+
+**PROCEDURE Step (p: Protocol; VAR state: INTEGER; IN label: ARRAY OF CHAR; OUT ok: BOOLEAN)**
+Проверяет очередное сообщение с меткой `label`.
+Пост: `ok` — `state` переведено по переходу `label`. `~ok` — `state` прежнее, текст нарушения — в
+`LastViolation`. При `p = NIL` — `ok`.
+
+**PROCEDURE LastViolation (p: Protocol; OUT msg: Message)**
+Пост: `msg` — текст последнего нарушения; при `p = NIL` — `""`.
+
+### 10.5. AsyncIO
+
+```
+DEFINITION AsyncIO;
+
+	IMPORT CommStreams;
+
+	PROCEDURE WaitFd (fd: INTEGER; events: SET);
+	PROCEDURE Poll (timeout: LONGINT);
+	PROCEDURE Read (s: CommStreams.Stream; VAR x: ARRAY OF BYTE; beg, len: INTEGER;
+		OUT read: INTEGER);
+	PROCEDURE Write (s: CommStreams.Stream; IN x: ARRAY OF BYTE; beg, len: INTEGER;
+		OUT written: INTEGER);
+	PROCEDURE Accept (l: CommStreams.Listener; OUT s: CommStreams.Stream;
+		timeout: LONGINT): BOOLEAN;
+
+END AsyncIO.
+```
+
+**PROCEDURE WaitFd (fd: INTEGER; events: SET)**
+Ждёт готовности дескриптора; регистрация одноразовая.
+Пред: вызов из задачи — трап 20.
+Пост: `fd` готов к `events`; при `fd < 0` прошёл `Tasks.Sleep(1)`.
+
+**PROCEDURE Poll (timeout: LONGINT)**
+Прогоняет ожидания `Poller` для тестового насоса.
+Пост: готовые ожидающие не дольше `timeout` мс разбужены.
+
+**PROCEDURE Read (s; VAR x; beg, len: INTEGER; OUT read: INTEGER)**
+Пред: ожидание только из задачи — трап 20 в `WaitFd` или `Tasks.Sleep`.
+Пост: `read > 0` — прочитано `read` байт; `read = 0` — конец или обрыв.
+
+**PROCEDURE Write (s; IN x; beg, len: INTEGER; OUT written: INTEGER)**
+Пред: ожидание только из задачи — трап 20 в `WaitFd` или `Tasks.Sleep`.
+Пост: `written > 0` — записано `written` байт; `written = 0` — обрыв.
+
+**PROCEDURE Accept (l; OUT s; timeout: LONGINT): BOOLEAN**
+Пред: ожидание только из задачи — трап 20 в `WaitFd` или `Tasks.Sleep`.
+Пост: `TRUE` — `s` принятое соединение; `FALSE` — истёк `timeout` мс, `s = NIL`. При
+`timeout < 0` срока нет.
+
+### 10.6. AsyncWork
+
+```
+DEFINITION AsyncWork;
+
+	IMPORT SYSTEM;
+
+	CONST
+		maxPath = 256; maxBuf = 4096; maxHost = 128;
+
+	TYPE
+		Proc = PROCEDURE [ccall] (arg: SYSTEM.ADDRESS);
+
+		FileReq = RECORD [untagged]
+			path: ARRAY maxPath OF SHORTCHAR;
+			buf: ARRAY maxBuf OF SHORTCHAR;
+			len, status: INTEGER
+		END;
+
+		AddrReq = RECORD [untagged]
+			host: ARRAY maxHost OF SHORTCHAR;
+			count, status: INTEGER
+		END;
+
+		FileReqPtr = POINTER [untagged] TO FileReq;
+		AddrReqPtr = POINTER [untagged] TO AddrReq;
+
+		Impl = POINTER TO ABSTRACT RECORD
+			(i: Impl) Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Done (id: INTEGER): BOOLEAN, NEW, ABSTRACT;
+			(i: Impl) Result (id: INTEGER): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Release (id: INTEGER), NEW, ABSTRACT;
+			(i: Impl) Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Workers (): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Scan, NEW, ABSTRACT;
+			(i: Impl) ReadFileJob (arg: SYSTEM.ADDRESS), NEW, ABSTRACT;
+			(i: Impl) WriteFileJob (arg: SYSTEM.ADDRESS), NEW, ABSTRACT;
+			(i: Impl) ResolveJob (arg: SYSTEM.ADDRESS), NEW, ABSTRACT
+		END;
+
+	PROCEDURE Install (i: Impl);
+	PROCEDURE Active (): BOOLEAN;
+	PROCEDURE Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER;
+	PROCEDURE Done (id: INTEGER): BOOLEAN;
+	PROCEDURE Result (id: INTEGER): INTEGER;
+	PROCEDURE Release (id: INTEGER);
+	PROCEDURE Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER;
+	PROCEDURE Workers (): INTEGER;
+	PROCEDURE Scan;
+	PROCEDURE [ccall] ReadFileJob (arg: SYSTEM.ADDRESS);
+	PROCEDURE [ccall] WriteFileJob (arg: SYSTEM.ADDRESS);
+	PROCEDURE [ccall] ResolveJob (arg: SYSTEM.ADDRESS);
+
+END AsyncWork.
+```
+
+`Impl` — платформенный делегат; его ставят `AsyncWorkLin` и `AsyncWorkWin`. Номера трапов
+делегата приведены для Linux и Windows; они совпадают.
+
+**PROCEDURE Install (i: Impl)**
+Ставит делегата. Его вызывает `Install` делегата.
+Пост: пул обслуживает `i`.
+
+**PROCEDURE Active (): BOOLEAN**
+Пост: `TRUE`, если делегат поставлен.
+
+**PROCEDURE Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER**
+Ставит задание в очередь; при необходимости ставит делегата.
+Пред: делегат найден — трап 22.
+Пост: номер слота; −1 — нет свободного слота или очередь полна.
+
+**PROCEDURE Done (id: INTEGER): BOOLEAN**
+Пред: делегат поставлен — трап 21; `0 <= id <` числа слотов — трап 20 в делегате.
+Пост: `TRUE`, если задание `id` завершено.
+
+**PROCEDURE Result (id: INTEGER): INTEGER**
+Пред: те же, что у `Done`.
+Пост: статус задания `id`.
+
+**PROCEDURE Release (id: INTEGER)**
+Пред: те же, что у `Done`.
+Пост: слот `id` свободен.
+
+**PROCEDURE Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER**
+Исполняет задание в рабочей нити и ждёт его; точка переключения.
+Пред: делегат найден — трап 22; вызов из задачи — трап 21 в делегате.
+Пост: статус задания, слот освобождён; −1 — нет свободного слота.
+
+**PROCEDURE Workers (): INTEGER**
+Пост: число созданных рабочих нитей; без делегата — 0.
+
+**PROCEDURE Scan**
+Разбирает завершённые задания; его вызывает главный цикл.
+Пост: задачи, чьи задания завершены, разбужены.
+
+**PROCEDURE ReadFileJob (arg: SYSTEM.ADDRESS)**
+**PROCEDURE WriteFileJob (arg: SYSTEM.ADDRESS)**
+**PROCEDURE ResolveJob (arg: SYSTEM.ADDRESS)**
+Задания для рабочей нити; `arg` — адрес `FileReq` или `AddrReq`.
+Пред: делегат поставлен — трап 21.
+Пост: статус задания — в поле `status` записи (коды — в разделе 7).
+
+### 10.7. AsyncComputon
+
+```
+DEFINITION AsyncComputon;
+
+	IMPORT Stores, AsyncSelect;
+
+	TYPE
+		Computon = POINTER TO ABSTRACT RECORD (Stores.Store)
+			(c: Computon) Do, NEW, ABSTRACT
+		END;
+
+		Hook = POINTER TO ABSTRACT RECORD
+			(h: Hook) Failed (rank, tag, err: INTEGER), NEW, ABSTRACT
+		END;
+
+		Transport = POINTER TO ABSTRACT RECORD
+			(t: Transport) Start (n: INTEGER; OUT size: INTEGER), NEW, ABSTRACT;
+			(t: Transport) SendFrame (rank, tag, kind: INTEGER;
+				buf: POINTER TO ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN, NEW, ABSTRACT;
+			(t: Transport) Poll, NEW, ABSTRACT;
+			(t: Transport) Stop, NEW, ABSTRACT;
+			(t: Transport) Alive (rank: INTEGER): BOOLEAN, NEW, ABSTRACT
+		END;
+
+	PROCEDURE Serialize (c: Computon; OUT buf: POINTER TO ARRAY OF SHORTCHAR; OUT len: INTEGER);
+	PROCEDURE Deserialize (VAR b: ARRAY OF SHORTCHAR; len: INTEGER): Computon;
+	PROCEDURE SetTransport (IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE SetTransportObject (t: Transport);
+	PROCEDURE AltPull (rank, tag: INTEGER): AsyncSelect.Signal;
+	PROCEDURE Push (c: Computon; rank, tag: INTEGER);
+	PROCEDURE PullTimeout (rank, tag: INTEGER; ms: LONGINT): Computon;
+	PROCEDURE Pull (rank, tag: INTEGER): Computon;
+	PROCEDURE Try (rank, tag: INTEGER; OUT c: Computon): BOOLEAN;
+	PROCEDURE Wait;
+	PROCEDURE LastError (): INTEGER;
+	PROCEDURE SetHook (h: Hook);
+	PROCEDURE LogMsg (IN msg: ARRAY OF CHAR);
+	PROCEDURE Unload (IN module: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Size (): INTEGER;
+	PROCEDURE Rank (): INTEGER;
+	PROCEDURE WorkerPid (rank: INTEGER): INTEGER;
+	PROCEDURE WorkerDead (rank: INTEGER): BOOLEAN;
+	PROCEDURE Stop;
+	PROCEDURE Start (n: INTEGER);
+	PROCEDURE MarkDead (idx: INTEGER);
+	PROCEDURE DeliverFrame (rank, tag, status: INTEGER; VAR b: ARRAY OF SHORTCHAR; len: INTEGER);
+	PROCEDURE RunDo (c: Computon; OUT err: INTEGER);
+	PROCEDURE WorkerLoop;
+
+END AsyncComputon.
+```
+
+Коды `LastError` перечислены в разделе 8.1. `Transport`, `SetTransportObject`, `MarkDead`,
+`DeliverFrame`, `RunDo`, `Serialize` и `Deserialize` служат транспортам и исполнителю.
+
+**PROCEDURE Start (n: INTEGER)**
+Останавливает прежний пул и запускает `n` исполнителей.
+Пред: `1 <= n <= 16` — трап 20; для транспорта `mpi` поставлен внешний транспорт — трап 21.
+Пост: `Size()` — число запущенных исполнителей.
+
+**PROCEDURE Stop**
+Пост: исполнители убиты, каналы закрыты, `Size() = 0`.
+
+**PROCEDURE SetTransport (IN name: ARRAY OF CHAR): BOOLEAN**
+Пост: `TRUE` — выбран транспорт `"pipe"` (и `""`), `"tcp"` или `"mpi"`; `FALSE` — имя неизвестно.
+
+**PROCEDURE Push (c: Computon; rank, tag: INTEGER)**
+Сериализует `c` и отправляет исполнителю `rank`.
+Пост: запрос `tag` поставлен; при ошибке `LastError = -1`, отправка не удалась — повтор на живом.
+
+**PROCEDURE PullTimeout (rank, tag: INTEGER; ms: LONGINT): Computon**
+**PROCEDURE Pull (rank, tag: INTEGER): Computon**
+Ждут результат запроса `tag`; `Pull` — с `ms = 10000`.
+Пред: вызов из задачи — трап 21.
+Пост: результат или `NIL` с кодом в `LastError`; запрос освобождён.
+
+**PROCEDURE Try (rank, tag: INTEGER; OUT c: Computon): BOOLEAN**
+Пост: `TRUE` — запрос завершён и освобождён, `c` — результат или `NIL` с кодом в `LastError`;
+`FALSE` — результата нет, `c = NIL`.
+
+**PROCEDURE AltPull (rank, tag: INTEGER): AsyncSelect.Signal**
+Пост: сигнал для `Select`, готовый, когда завершён запрос `tag`.
+
+**PROCEDURE Unload (IN module: ARRAY OF CHAR): BOOLEAN**
+Пост: `TRUE` — все живые исполнители выгрузили модуль или пул не запущен; `FALSE` — отказ, код в
+`LastError`.
+
+**PROCEDURE Size (): INTEGER**, **Rank (): INTEGER**, **WorkerPid (rank): INTEGER**,
+**WorkerDead (rank): BOOLEAN**, **LastError (): INTEGER**
+Пост: число исполнителей; 0; pid исполнителя или −1; признак гибели (`TRUE` вне диапазона);
+код последней ошибки.
+
+**PROCEDURE SetHook (h: Hook)**, **LogMsg (IN msg)**, **Wait**
+Ставят обработчик ошибок, пишут строку в консоль; `Wait` ничего не делает.
+
+### 10.8. AsyncMpi
+
+```
+DEFINITION AsyncMpi;
+
+	PROCEDURE Install (): BOOLEAN;
+	PROCEDURE Available (): BOOLEAN;
+	PROCEDURE Rank (): INTEGER;
+	PROCEDURE WorldSize (): INTEGER;
+	PROCEDURE WorkerLoop;
+
+END AsyncMpi.
+```
+
+**PROCEDURE Install (): BOOLEAN**
+Пост: `TRUE` — `libbbmpi.so` привязана, транспорт поставлен в `AsyncComputon`.
+
+**PROCEDURE Available (): BOOLEAN**
+Пост: `TRUE` — библиотека MPICH и обёртка найдены; `MPI_Init` не вызывается.
+
+**PROCEDURE Rank (): INTEGER**, **WorldSize (): INTEGER**
+Пост: ранг и размер мира MPI; до инициализации — −1 и 0.
+
+**PROCEDURE WorkerLoop**
+Точка входа процесса-исполнителя ранга больше 0.
+
+## 11. Схема реализации
 
 Раздел не определяет поведение; он описывает, как оно получено.
 
-### 10.1. Канал и выбор
+### 11.1. Канал и выбор
 
 `AsyncSelect.Core` — расширяемая запись с видом, ёмкостью, очередью сообщений и головами двух
 очередей предложений (`waitS`, `waitR`). Предложение (`Offer`) хранит общий контекст `Ctx`,
 индекс альтернативы, вид операции и сообщение.
 
-Предложения и контексты берутся из свободных списков и возвращаются туда после `Select`: выбор
-без тайм-аута памяти не выделяет. Очередь сообщений `Buffer` и `Mailbox` — кольцо в массиве; у `Buffer` его длина
+Предложения и контексты берутся из свободных списков `freeOffers` и `freeCtx` и возвращаются
+туда после операции. Запись свободного списка не лежит ни в одной очереди канала. Выбор без
+тайм-аута памяти не выделяет. Очередь сообщений `Buffer` и `Mailbox` — кольцо в массиве; у `Buffer` его длина
 равна ёмкости, у `Mailbox` кольцо удваивается при заполнении.
 
-Операция над каналом между двумя точками ожидания исполняется без переключений: одна нить и
-вытеснения нет. Поэтому монитор канала берётся (`Enter`), только если его кто-то держит: тогда
-операция ждёт его освобождения; иначе исключение обеспечено и без монитора.
+Операция над каналом между двумя точками переключения исполняется без переключений: нить одна,
+вытеснения нет. Поэтому `Enter` берёт монитор канала, только если его кто-то держит
+(`Monitors.IsLocked`). Тогда операция ждёт освобождения монитора; иначе исключение обеспечено без
+монитора.
+
+Две процедуры исполняют операцию над каналом. `Put` отдаёт сообщение ждущему получателю или
+кладёт его в кольцо и проверяет протокол. `Take` берёт сообщение из кольца или у ждущего
+отправителя. После `Take` из кольца `CompleteSend` исполняет ждущие отправки, пока есть место.
+Обе процедуры пропускают предложения с решением вызывающего: предложение не исполняется против
+предложения с тем же `Ctx`.
 
 `Select` обходит альтернативы в порядке индексов. Для отправки и приёма он берёт предложение и
-вызывает `Register`. Если `Register` исполнил операцию сразу, решение
-принято; иначе предложение остаётся в очереди. Тайм-аут с наименьшим `ms` ставит действие
-`Services`; задача спит в `Tasks.Park`, пока `Ctx.decided` не станет истинным.
+вызывает `Register`. `Register` исполняет операцию через `Put` или `Take` либо ставит предложение
+в `waitS` или `waitR`. Тайм-аут с наименьшим `ms` ставит действие `Services`. Задача спит в
+`Tasks.Park`, пока `Ctx.decided` не станет истинным.
 
-Решение ставит первый канал, готовый исполнить предложение: под своим монитором он записывает
-`ctx.decided` и `ctx.winner`, забирает или отдаёт сообщение и будит задачу через `Tasks.Unpark`.
-`Wake` будит только при `ctx.ready = TRUE`: во время регистрации задача ещё не в `Park`, и
-`Unpark` перевёл бы её в `Ready` без монитора. После пробуждения владелец снимает проигравшие
-предложения (`Withdraw`); снятие идемпотентно, поэтому победитель снимается тем же вызовом.
+Решение принимает сторона, которая первой исполнила предложение. Она записывает `ctx.decided` и
+`ctx.winner`, забирает или отдаёт сообщение и будит задачу через `Tasks.Unpark`. Монитор канала
+при этом взят, только если его держал кто-то другой. `Wake` будит только при `ctx.ready = TRUE`.
+Во время регистрации задача может ждать монитор другого канала, и `Unpark` перевёл бы её в
+`Ready` без монитора. После пробуждения владелец снимает предложения (`Withdraw`). Снятие
+идемпотентно, поэтому победитель снимается тем же вызовом.
 
-Прямые `Send` и `Recv` всех трёх видов — `QueueSend` и `QueueRecv`, выбор из одной альтернативы
-без регистрации таймеров: операция исполняется сразу (ждущему получателю, в очередь, из очереди
-или у ждущего отправителя) или кладёт предложение в `waitS`/`waitR` и спит в `Tasks.Park`. Другая
-сторона исполняет предложение и будит задачу без передачи монитора, поэтому отправитель буфера
-продолжает класть сообщения, пока получатель ещё не начал разбирать очередь. Встреча — канал
-ёмкости 0: отправка без получателя, прямая или из `Select`, всегда ждёт в `waitS`, получатель
-забирает первое живое предложение оттуда. Предложение не исполняется против предложения с тем же
-`ctx`. Мёртвые предложения снимаются, когда очередь просматривается при поиске пары. Мёртвым считается предложение задачи в состоянии `Finished` или `Cancelled`, а не
-просто отменённой.
-
-### 10.2. Ввод-вывод
+Прямые `Send` и `Recv` всех трёх видов — `QueueSend` и `QueueRecv`. Операция исполняется сразу
+через `Put` или `Take`, иначе предложение встаёт в `waitS` или `waitR`, а задача спит в
+`Tasks.Park`. Другая сторона исполняет предложение и будит задачу без передачи монитора. Встреча —
+канал ёмкости 0: отправка без получателя всегда ждёт в `waitS`. Мёртвые предложения снимаются при
+просмотре очереди. Мёртвым считается предложение задачи в состоянии `Finished` или `Cancelled`.
+### 11.2. Ввод-вывод
 
 `Poller` хранит только указатель на платформенный хук. Реестр дескрипторов и `poll` лежат в
 `LinConsole`: массив на 4096 записей, stdin первым элементом, одноразовая регистрация. Готовые
 записи снимаются до вызова `Waiter.Ready`, чтобы повторная регистрация не испортила обход.
 
-### 10.3. Рабочие нити
+### 11.3. Рабочие нити
 
 `AsyncWork` — фасад; `AsyncWorkLin` и `AsyncWorkWin` — делегаты. Linux: до четырёх pthread,
 статический массив слотов под мьютексом и условной переменной, кольцевая очередь на 256 заданий,
@@ -625,7 +1146,7 @@ PROCEDURE Unload* (module: ARRAY OF CHAR);
 Примитивы синхронизации лежат в куче, а не в глобальных записях модуля: глобальные записи не
 получают гарантированного выравнивания, а futex и `CRITICAL_SECTION` его требуют.
 
-### 10.4. Компутоны
+### 11.4. Компутоны
 
 `AsyncComputon` держит до 16 исполнителей и до 128 запросов. Запрос (`Req`) хранит `tag`, ранг,
 буфер, задачу и контекст `Select`. `Push` сериализует объект через `Stores` во временный файл и

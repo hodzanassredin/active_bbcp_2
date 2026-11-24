@@ -43,8 +43,8 @@ END Text_devWriter.
 2. **Фикстуры.** Необязательные `Setup*`/`Teardown*` — вокруг каждого
    теста, `SetupModule*`/`TeardownModule*` — один раз на модуль.
    `Teardown` выполняется и после трапа.
-3. **Проверки.** `UnitAssert.True`, `EqualInt`, `EqualReal`,
-   `EqualStr`, `EqualSet`, `NotNil`, `Same`, `Traps`, `Fail`. Обычный
+3. **Проверки.** Процедуры `UnitAssert` перечислены в разделе
+   «Интерфейс». Обычный
    `ASSERT` тоже работает: неожиданный трап = провал теста (ядро
    печатает свой TRAP REPORT). Текст провала — `expected X, got Y: msg`;
    для строк — `expected <...>, got <...>`.
@@ -61,8 +61,8 @@ END Text_devWriter.
    правилами стенда.
 7. **Отчёт.** Строка на тест: `PASS Модуль.Тест 0 ms`,
    `FAIL Модуль.Тест 0 ms: сообщение`, `EMPTY …`, `SKIP … (пометка)`;
-   итог `== Unit: passed N, failed M, empty K, skipped S`. В консоли
-   исполнитель зовёт `Kernel.Quit(0|1)` — оболочка получает код.
+   итог `== Unit: passed N, failed M, empty K, skipped S`. С ключом
+   `quit` исполнитель зовёт `Kernel.Quit(0|1)`, и оболочка получает код.
    `tap` печатает TAP, `junit=ФАЙЛ` пишет JUnit XML (путь относительно
    рабочего каталога консоли).
 8. **Временные файлы.** `UnitRunner.TempDir` возвращает `UnitTmp`.
@@ -104,6 +104,112 @@ tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat6
 только итог `failed 0` и код 0. Это внешний запускатель для `TestProc…`:
 тест, который зовёт `Kernel.Quit` или роняет процесс, не уносит
 остальные модули.
+
+## Интерфейс
+
+```
+DEFINITION UnitAssert;
+
+	TYPE
+		Message = ARRAY 256 OF CHAR;
+		State = RECORD
+			checks-: LONGINT;
+			failures-: INTEGER;
+			msg-: Message
+		END;
+
+	PROCEDURE Reset;
+	PROCEDURE Save (OUT s: State);
+	PROCEDURE Restore (IN s: State);
+	PROCEDURE Checks (): LONGINT;
+	PROCEDURE Failures (): INTEGER;
+	PROCEDURE LastMessage (OUT m: Message);
+	PROCEDURE Checked;
+	PROCEDURE True (cond: BOOLEAN; IN m: ARRAY OF CHAR);
+	PROCEDURE Fail (IN m: ARRAY OF CHAR);
+	PROCEDURE EqualInt (expected, actual: LONGINT; IN m: ARRAY OF CHAR);
+	PROCEDURE EqualReal (expected, actual, eps: REAL; IN m: ARRAY OF CHAR);
+	PROCEDURE EqualStr (IN expected, actual: ARRAY OF CHAR; IN m: ARRAY OF CHAR);
+	PROCEDURE EqualSet (expected, actual: SET; IN m: ARRAY OF CHAR);
+	PROCEDURE NotNil (p: ANYPTR; IN m: ARRAY OF CHAR);
+	PROCEDURE Same (expected, actual: ANYPTR; IN m: ARRAY OF CHAR);
+	PROCEDURE Traps (p: PROCEDURE; IN m: ARRAY OF CHAR);
+
+END UnitAssert.
+```
+
+Процедуры `UnitAssert` предусловий не проверяют и не трапают. Каждая проверка увеличивает
+счётчик проверок. Провал увеличивает счётчик провалов и запоминает сообщение.
+
+**PROCEDURE Reset**
+Пост: счётчики равны 0, сообщение пусто.
+
+**PROCEDURE Save (OUT s: State)**, **Restore (IN s: State)**
+Пост: `s` — копия счётчиков и сообщения; `Restore` возвращает их из `s`.
+
+**PROCEDURE Checks (): LONGINT**, **Failures (): INTEGER**, **LastMessage (OUT m: Message)**
+Пост: число проверок, число провалов, сообщение последнего провала.
+
+**PROCEDURE Checked**
+Учитывает проверку без условия.
+Пост: счётчик проверок увеличен на 1.
+
+**PROCEDURE True (cond: BOOLEAN; IN m: ARRAY OF CHAR)**
+Пост: `~cond` — провал с сообщением `m`.
+
+**PROCEDURE Fail (IN m: ARRAY OF CHAR)**
+Пост: провал с сообщением `m`.
+
+**PROCEDURE EqualInt (expected, actual: LONGINT; IN m: ARRAY OF CHAR)**
+Пост: `expected # actual` — провал `expected X, got Y: m`.
+
+**PROCEDURE EqualReal (expected, actual, eps: REAL; IN m: ARRAY OF CHAR)**
+Пост: провал, если `ABS(actual - expected) > eps`. При `eps <= 0` или `expected = 0`
+сравнение точное.
+
+**PROCEDURE EqualStr (IN expected, actual: ARRAY OF CHAR; IN m: ARRAY OF CHAR)**
+Пост: строки различны — провал `expected <X>, got <Y>: m`.
+
+**PROCEDURE EqualSet (expected, actual: SET; IN m: ARRAY OF CHAR)**
+Пост: множества различны — провал `expected set X, got Y: m`; множества печатаются числами.
+
+**PROCEDURE NotNil (p: ANYPTR; IN m: ARRAY OF CHAR)**
+Пост: `p = NIL` — провал.
+
+**PROCEDURE Same (expected, actual: ANYPTR; IN m: ARRAY OF CHAR)**
+Пост: `expected # actual` — провал.
+
+**PROCEDURE Traps (p: PROCEDURE; IN m: ARRAY OF CHAR)**
+Вызывает `p` под `Kernel.Try`.
+Пост: `p` не трапнула или `p = NIL` — провал.
+
+```
+DEFINITION UnitRunner;
+
+	TYPE
+		Counts = RECORD
+			passed, failed, empty, skipped: INTEGER
+		END;
+
+	PROCEDURE RunModuleCounts (IN module: ARRAY OF CHAR; IN marks: ARRAY OF CHAR;
+		quietRun: BOOLEAN; OUT c: Counts);
+	PROCEDURE TempDir (OUT path: ARRAY OF CHAR);
+	PROCEDURE Run;
+
+END UnitRunner.
+```
+
+**PROCEDURE RunModuleCounts (IN module, marks: ARRAY OF CHAR; quietRun: BOOLEAN; OUT c: Counts)**
+Исполняет тесты модуля `module` с пометками `marks`; `quietRun` подавляет вывод.
+Пост: `c` — итоги; состояние `UnitAssert` восстановлено. Модуль не найден — один провал.
+
+**PROCEDURE TempDir (OUT path: ARRAY OF CHAR)**
+Пост: `path = "UnitTmp"`.
+
+**PROCEDURE Run**
+Команда; аргументы перечислены в разделе «Запуск».
+Пост: итог напечатан. С ключом `quit` процесс завершён кодом 1 при провалах и пустых тестах,
+иначе кодом 0.
 
 ## Самопроверка
 

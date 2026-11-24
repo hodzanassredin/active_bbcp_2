@@ -44,10 +44,11 @@ subsystems; tests are built on demand by `tools/unit.sh`.
 2. **Fixtures.** Optional `Setup*`/`Teardown*` run around every test;
    `SetupModule*`/`TeardownModule*` once per module. `Teardown` runs even
    after a trap.
-3. **Checks.** `UnitAssert.True`, `EqualInt`, `EqualReal`,
-   `EqualStr`, `EqualSet`, `NotNil`, `Same`, `Traps`, `Fail`. A plain
+3. **Checks.** The procedures of `UnitAssert` are listed in the
+   section "Interface". A plain
    `ASSERT` also works: any unexpected trap is a failed test with the
-   kernel's trap report. Failure text follows “expected X, got Y: msg”.
+   kernel's trap report. Failure text is `expected X, got Y: msg`;
+   for strings — `expected <...>, got <...>`.
 4. **No checks — a failure.** A test that made no `UnitAssert` call and
    did not trap is reported `EMPTY` and counted as failed.
 5. **Isolation.** Every test and every fixture runs under `Kernel.Try`;
@@ -61,8 +62,8 @@ subsystems; tests are built on demand by `tools/unit.sh`.
    rules.
 7. **Report.** One line per test: `PASS Module.Test 0 ms`,
    `FAIL Module.Test 0 ms: message`, `EMPTY …`, `SKIP … (mark)`; then
-   `== Unit: passed N, failed M, empty K, skipped S`. In the console the
-   runner calls `Kernel.Quit(0|1)`, so the shell sees a status. `tap`
+   `== Unit: passed N, failed M, empty K, skipped S`. With the `quit` key
+   the runner calls `Kernel.Quit(0|1)`, so the shell sees a status. `tap`
    prints TAP, `junit=FILE` writes a JUnit XML file (relative to the
    working directory of the console).
 8. **Temporary files.** `UnitRunner.TempDir` returns `UnitTmp`. The
@@ -104,6 +105,112 @@ passes), runs it in a separate `blackbox-console`, and succeeds only when
 the summary says `failed 0` and the process exits with 0. This is the
 external launcher for `TestProc…`: a test that calls `Kernel.Quit` or
 crashes the process cannot take other modules down.
+
+## Interface
+
+```
+DEFINITION UnitAssert;
+
+	TYPE
+		Message = ARRAY 256 OF CHAR;
+		State = RECORD
+			checks-: LONGINT;
+			failures-: INTEGER;
+			msg-: Message
+		END;
+
+	PROCEDURE Reset;
+	PROCEDURE Save (OUT s: State);
+	PROCEDURE Restore (IN s: State);
+	PROCEDURE Checks (): LONGINT;
+	PROCEDURE Failures (): INTEGER;
+	PROCEDURE LastMessage (OUT m: Message);
+	PROCEDURE Checked;
+	PROCEDURE True (cond: BOOLEAN; IN m: ARRAY OF CHAR);
+	PROCEDURE Fail (IN m: ARRAY OF CHAR);
+	PROCEDURE EqualInt (expected, actual: LONGINT; IN m: ARRAY OF CHAR);
+	PROCEDURE EqualReal (expected, actual, eps: REAL; IN m: ARRAY OF CHAR);
+	PROCEDURE EqualStr (IN expected, actual: ARRAY OF CHAR; IN m: ARRAY OF CHAR);
+	PROCEDURE EqualSet (expected, actual: SET; IN m: ARRAY OF CHAR);
+	PROCEDURE NotNil (p: ANYPTR; IN m: ARRAY OF CHAR);
+	PROCEDURE Same (expected, actual: ANYPTR; IN m: ARRAY OF CHAR);
+	PROCEDURE Traps (p: PROCEDURE; IN m: ARRAY OF CHAR);
+
+END UnitAssert.
+```
+
+The procedures of `UnitAssert` check no preconditions and do not trap. Every check increments the
+check counter. A failure increments the failure counter and stores the message.
+
+**PROCEDURE Reset**
+Post: the counters are 0, the message is empty.
+
+**PROCEDURE Save (OUT s: State)**, **Restore (IN s: State)**
+Post: `s` is a copy of the counters and the message; `Restore` takes them back from `s`.
+
+**PROCEDURE Checks (): LONGINT**, **Failures (): INTEGER**, **LastMessage (OUT m: Message)**
+Post: the number of checks, the number of failures, the message of the last failure.
+
+**PROCEDURE Checked**
+Counts a check without a condition.
+Post: the check counter is incremented by 1.
+
+**PROCEDURE True (cond: BOOLEAN; IN m: ARRAY OF CHAR)**
+Post: `~cond` — a failure with message `m`.
+
+**PROCEDURE Fail (IN m: ARRAY OF CHAR)**
+Post: a failure with message `m`.
+
+**PROCEDURE EqualInt (expected, actual: LONGINT; IN m: ARRAY OF CHAR)**
+Post: `expected # actual` — failure `expected X, got Y: m`.
+
+**PROCEDURE EqualReal (expected, actual, eps: REAL; IN m: ARRAY OF CHAR)**
+Post: a failure if `ABS(actual - expected) > eps`. With `eps <= 0` or `expected = 0` the
+comparison is exact.
+
+**PROCEDURE EqualStr (IN expected, actual: ARRAY OF CHAR; IN m: ARRAY OF CHAR)**
+Post: the strings differ — failure `expected <X>, got <Y>: m`.
+
+**PROCEDURE EqualSet (expected, actual: SET; IN m: ARRAY OF CHAR)**
+Post: the sets differ — failure `expected set X, got Y: m`; sets are printed as numbers.
+
+**PROCEDURE NotNil (p: ANYPTR; IN m: ARRAY OF CHAR)**
+Post: `p = NIL` — a failure.
+
+**PROCEDURE Same (expected, actual: ANYPTR; IN m: ARRAY OF CHAR)**
+Post: `expected # actual` — a failure.
+
+**PROCEDURE Traps (p: PROCEDURE; IN m: ARRAY OF CHAR)**
+Calls `p` under `Kernel.Try`.
+Post: `p` did not trap or `p = NIL` — a failure.
+
+```
+DEFINITION UnitRunner;
+
+	TYPE
+		Counts = RECORD
+			passed, failed, empty, skipped: INTEGER
+		END;
+
+	PROCEDURE RunModuleCounts (IN module: ARRAY OF CHAR; IN marks: ARRAY OF CHAR;
+		quietRun: BOOLEAN; OUT c: Counts);
+	PROCEDURE TempDir (OUT path: ARRAY OF CHAR);
+	PROCEDURE Run;
+
+END UnitRunner.
+```
+
+**PROCEDURE RunModuleCounts (IN module, marks: ARRAY OF CHAR; quietRun: BOOLEAN; OUT c: Counts)**
+Runs the tests of module `module` with marks `marks`; `quietRun` suppresses output.
+Post: `c` holds the totals; the `UnitAssert` state is restored. A module not found — one failure.
+
+**PROCEDURE TempDir (OUT path: ARRAY OF CHAR)**
+Post: `path = "UnitTmp"`.
+
+**PROCEDURE Run**
+A command; its arguments are listed in the section "Running".
+Post: the summary is printed. With the `quit` key the process exits with code 1 on failures and
+empty tests, otherwise with code 0.
 
 ## Self-check
 

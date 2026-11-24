@@ -7,8 +7,9 @@ non-blocking I/O, a worker-thread pool and computons. The language part — excl
 `Docu/Tasks.md`.
 
 The library is written on the language extension and does not change the framework: framework
-modules are still compiled without the yield key and do not wait. The subsystem is built for AMD64
-only; the core extension also works on i386.
+modules are compiled without the yield key and do not wait. The subsystem is built for AMD64 only;
+the core extension also works on i386. Section 10 lists the exports of each module with pre- and
+postconditions.
 
 ## 1. Message
 
@@ -144,8 +145,9 @@ order is the sending order.
 2. Direct `Send` and `Recv` also serve `Select` offers: a send into a buffer completes a pending
    receive, and a receive from a buffer makes room for a pending send. A channel can therefore be
    mixed with selection.
-3. `Send` and `Recv` are wait points. Cancellation of a task waiting in a channel works as usual:
-   trap 21.
+3. `Recv` of all kinds and `Send` of a rendezvous and a buffer are switch points. `Send` into a
+   mailbox waits only if another task holds the channel monitor. A cancelled task traps in the wait
+   with code 127.
 4. A channel may carry an optional dialogue protocol (section 5).
 
 ```
@@ -219,7 +221,8 @@ Rules:
 2. The number of alternatives is at most 32; otherwise trap 21. Every alternative is filled by
    `AltSend`/`AltRecv`/`AltTimeout`/`AltSignal` (otherwise trap 22); a send or a receive has a channel
    (otherwise trap 23), a signal alternative has a signal (otherwise trap 24). Preconditions are
-   checked before any registration.
+   checked before any registration. Trap 22 occurs only if the alternative kind is out of the
+   allowed range. An unfilled alternative with kind zero counts as a send and gives trap 23.
 3. Alternatives are checked in index order. The first one that can be performed immediately wins.
 4. Of several timeouts the smallest `ms` is used; on a tie, the first by index. A timeout with
    `ms <= 0` fires immediately if no alternative is ready.
@@ -227,9 +230,11 @@ Rules:
    the signal owner later calls `SignalReady`.
 6. After waking, the task withdraws the losing offers. An offer is not performed against an offer
    of the same `Select`. The field `got` is filled only for the winning receive.
-7. Cancellation while waiting traps the task in `Tasks.Park`. Offers remain in the channels and are
-   removed lazily: a channel considers an offer dead when the task has reached `Finished` or
-   `Cancelled`.
+7. Cancellation while waiting traps the task in `Tasks.Park` with code 127. Offers remain in the
+   channels and are removed lazily: a channel considers an offer dead when the task has reached
+   `Finished` or `Cancelled`.
+8. If the protocol rejected a send of this task, `Select` withdraws all offers and then traps with
+   code 21.
 
 ```
 VAR ops: ARRAY 3 OF AsyncSelect.Op;
@@ -266,34 +271,26 @@ Description rules:
 6. The message label is the dynamic type name of the `AsyncSelect.Msg` record; the suffix `^` is
    stripped. `NIL` gives the label `NIL`, an unknown type gives `?`.
 
-Operations:
-
-```
-p := AsyncProto.New(desc);        (* NIL on a description error *)
-AsyncProto.LastError(msg);        (* description error text *)
-AsyncChan.SetProtocol(c, p);      (* attach the protocol; NIL removes it *)
-AsyncProto.IsFinal(p, state);     (* no outgoing transitions *)
-AsyncProto.LastViolation(p, msg); (* text of the last violation *)
-```
+The operations of `AsyncProto` and `AsyncChan.SetProtocol` are listed in section 10.
 
 Checks:
 
-1. A direct `Send` checks the message at entry, before any possible wait.
-2. `SendAlt` checks the message at the moment the offer is actually performed: on immediate
-   registration, when a receiver takes a waiting offer, or when room appears in a buffer. A losing
-   offer does not change the state.
-3. A violation prints `AsyncChan protocol: <text>` to the console and traps the sender with code 21.
-   The protocol is checked at the moment the send takes place. If the sender was waiting for a
-   receiver or for space, the sender gets the trap, not the task that would have received the
-   message; the message is not delivered.
-   The text remains in `LastViolation`; the expected messages are listed in the violation text.
-4. Without a protocol the check returns after one `NIL` test; there is no overhead.
-5. Attaching a protocol resets the state to the start state.
+1. The protocol checks a message at the moment the send takes place. This holds both for a direct
+   `Send` and for `SendAlt`.
+2. A send takes place in one of three places: at entry, if a receiver waits or there is room; when
+   a receiver takes a waiting offer; when room appears in a buffer.
+3. A losing `Select` offer does not change the protocol state.
+4. A violation prints `AsyncChan protocol: <text>` to the console. The sender traps with code 21,
+   and the message is not delivered. If the sender was waiting, it gets the trap, not the receiving
+   task.
+5. A rejected send does not change the protocol state. The violation text remains in
+   `LastViolation` and lists the expected messages.
+6. Without a protocol the check returns after one `NIL` test.
+7. Attaching a protocol resets the state to the start state.
 
 Limits: at most 32 states and 128 transitions; a state name and a label are at most 31 characters;
 a violation text is at most 255 characters. The machine is deterministic; there are no `*`, `+`,
-`?` or `|` operators. A direct `Send` advances the state at entry, so cancellation after entry does
-not restore it.
+`?` or `|` operators.
 
 ## 6. I/O
 
@@ -327,8 +324,8 @@ Only `CommTCP__Lin` overrides it: there `Handle` returns the socket. On other pl
 works through `Sleep(1)`.
 
 Limits: at most 4096 simultaneous waits (`LinConsole`); on overflow the waiter immediately receives
-`Ready` and retries. `CommTCP__Lin` works over IPv4, the accept backlog is 128; `poll` replaced
-`select` because `fd_set` is limited to 1024 descriptors.
+`Ready` and retries. `CommTCP__Lin` works over IPv4, the accept backlog is 128. The registry uses
+`poll`, not `select`: `fd_set` is limited to 1024 descriptors.
 
 ## 7. Worker Threads
 
@@ -337,27 +334,13 @@ The `AsyncWork` pool moves such a call out of a task, so that the main loop and 
 running.
 
 ```
-id := AsyncWork.Execute(S.ADR(SomeJob), S.ADDRESS(arg));  (* from a task; waits *)
-status := AsyncWork.Result(id);
-AsyncWork.Release(id);
+status := AsyncWork.Execute(S.ADR(SomeJob), S.VAL(S.ADDRESS, arg));  (* from a task; waits *)
 
-id := AsyncWork.Submit(S.ADR(SomeJob), S.ADDRESS(arg));   (* does not wait *)
-IF AsyncWork.Done(id) THEN status := AsyncWork.Result(id) END;
-AsyncWork.Release(id);
+id := AsyncWork.Submit(S.ADR(SomeJob), S.VAL(S.ADDRESS, arg));   (* does not wait *)
+IF AsyncWork.Done(id) THEN status := AsyncWork.Result(id); AsyncWork.Release(id) END;
 ```
 
-Operations:
-
-| Operation | Effect |
-|---|---|
-| `Execute(procAdr, arg)` | submits a job, waits for completion, returns the status; from a task only |
-| `Submit(procAdr, arg)` | submits a job and returns its number; −1 — no slot or the queue is full |
-| `Done(id)` | whether the job is done |
-| `Result(id)` | the job status |
-| `Release(id)` | frees the slot; mandatory |
-| `Workers()` | number of created threads |
-| `Scan` | scans completed jobs; called by the main loop |
-| `Install(impl)` | installs the platform delegate |
+`Execute` frees the slot itself and returns the job status. The operations are listed in section 10.
 
 Provided jobs: `ReadFileJob`, `WriteFileJob`, `ResolveJob`. The `FileReq` and `AddrReq` records are
 declared in the facade; the caller allocates them in advance, and the worker thread receives only
@@ -373,8 +356,10 @@ Rules:
    by a `Services` action that polls the `done` counter every 5 ms while slots are busy.
 3. A worker thread must not touch the heap, call `NEW`, `Kernel.Try`, the journal or the framework.
    This is a rule of discipline, not a barrier.
-4. `Execute` is a wait point of the task. `Submit`, `Done`, `Result` and `Release` do not wait.
-5. `Release` is mandatory: otherwise the slot stays busy until the end of the process.
+4. `Execute` is a switch point of the task; outside a task it traps with code 21. `Submit`, `Done`,
+   `Result` and `Release` do not wait.
+5. After `Submit` a call of `Release` is mandatory: otherwise the slot stays busy until the end of
+   the process.
 6. On Windows the pool works while the `Services` loop runs; blocking console input stops the
    delivery of readiness.
 
@@ -405,25 +390,15 @@ A computon type must implement `Externalize` and `Internalize`: the object is pa
 
 ### 8.1. Operations
 
-```
-AsyncComputon.Start(n);                        (* n executors, 1..16 *)
-AsyncComputon.Push(c, rank, tag);
-r := AsyncComputon.Pull(rank, tag);            (* wait; a wait point *)
-ok := AsyncComputon.Try(rank, tag, r);         (* do not wait *)
-sig := AsyncComputon.AltPull(rank, tag);       (* a Select alternative *)
-AsyncComputon.Stop;
-AsyncComputon.Size(); AsyncComputon.Rank();
-AsyncComputon.LastError(); AsyncComputon.WorkerPid(rank);
-AsyncComputon.Unload(module);                  (* drop module code on executors *)
-```
+The operations of `AsyncComputon` are listed in section 10. Rules:
 
-Rules:
-
-1. `Start(n)` starts `n` executors; `n` is from 1 to 16. `Rank()` of the controller is 0.
+1. `Start(n)` starts `n` executors; `n` is from 1 to 16, otherwise trap 20. `Rank()` of the
+   controller is 0.
 2. `Push` serializes the computon and sends it to executor `rank`; errors are visible through
    `LastError` or `Hook.Failed`.
-3. `Pull` waits for the result for at most 10,000 ms; the wait is `Tasks.Sleep(10)`, a wait point.
-   On timeout `Pull` returns `NIL` and `LastError = -4`.
+3. `Pull` waits for the result for at most 10,000 ms; the wait is `Tasks.Sleep(10)`, a switch
+   point. Outside a task `Pull` traps with code 21. On timeout `Pull` returns `NIL` and
+   `LastError = -4`.
 4. `Try` does not wait: it returns `TRUE` if the request is done, and the result or `NIL` with a code
    in `LastError`.
 5. A request is matched **by `tag` only**; `rank` in `Pull` is used only for `Hook`, in `Try` and
@@ -509,7 +484,7 @@ MODULE ObxComputon;
 END ObxComputon.
 ```
 
-`Do` runs in a separate process, so `NEW` inside it is allowed. `Pull` is a wait point and is called
+`Do` runs in a separate process, so `NEW` inside it is allowed. `Pull` is a switch point and is called
 from a task; the `Run` command drives `Tasks.Step` until the client gets the result.
 
 ### 8.4. MPI
@@ -561,6 +536,7 @@ Rules:
    start its own pool.
 5. `Unload` returns no result: a refusal is printed to the console.
 6. `Wait` is an empty procedure; all waits are expressed by `Pull` and `Try`.
+7. `Push`, `Pull` and `Try` with a rank outside `1..size−1` trap with code 20.
 
 ## 9. General Limits
 
@@ -572,56 +548,607 @@ Rules:
    `Push`, `Try` and `Unload` do not require a task.
 4. `Once` is a monitor: the methods are `[exclusive]`, waiting uses `ACTIVE.AWAIT`. Channels wait in
    `Tasks.Park` and respect the monitor of the channel object when a task holds it.
-5. Cancellation of a task during a wait traps it; `Select` offers are removed lazily, and unfinished
+5. Cancellation of a task during a wait traps it with code 127; `Select` offers are removed lazily, and unfinished
    computon requests remain busy until `Stop`.
 
-## 10. Implementation Scheme
+## 10. Interface
+
+This section lists the module exports in the form of BlackBox documentation: a `DEFINITION` block,
+then a description of each procedure. A "Pre" line names a condition and the trap number on its
+violation. A condition marked "not checked" is not checked by the code; its violation gives an
+undefined result or a `NIL` dereference trap. A "Post" line names the state after return.
+
+### 10.1. AsyncSelect
+
+```
+DEFINITION AsyncSelect;
+
+	IMPORT AsyncProto;
+
+	CONST
+		Rendezvous = 0; Bounded = 1; Mailbox = 2;
+
+	TYPE
+		Msg = POINTER TO ABSTRACT RECORD END;
+
+		Ctx = POINTER TO RECORD END;
+
+		Core = POINTER TO EXTENSIBLE RECORD
+			count-: INTEGER;
+			protoState-: INTEGER
+		END;
+
+		Signal = POINTER TO ABSTRACT RECORD
+			(s: Signal) Arm (ctx: Ctx; idx: INTEGER): BOOLEAN, NEW, ABSTRACT;
+			(s: Signal) Disarm, NEW, ABSTRACT
+		END;
+
+		Op = RECORD
+			got-: Msg
+		END;
+
+	PROCEDURE InitCore (c: Core; kind, capacity: INTEGER);
+	PROCEDURE SetProtocol (c: Core; p: AsyncProto.Protocol);
+	PROCEDURE QueueSend (c: Core; m: Msg);
+	PROCEDURE QueueRecv (c: Core; OUT m: Msg);
+	PROCEDURE AltSend (core: Core; msg: Msg; OUT op: Op);
+	PROCEDURE AltRecv (core: Core; OUT op: Op);
+	PROCEDURE AltTimeout (ms: LONGINT; OUT op: Op);
+	PROCEDURE AltSignal (sig: Signal; OUT op: Op);
+	PROCEDURE Select (VAR ops: ARRAY OF Op): INTEGER;
+	PROCEDURE SignalReady (ctx: Ctx; idx: INTEGER);
+
+END AsyncSelect.
+```
+
+`Msg` is the base message type. `Core` is the channel core: `count` is the number of messages in
+the ring, `protoState` is the protocol state (0 without a protocol). `Op` is a `Select` alternative;
+`got` is the message of the winning receive. `Ctx` is the decision of one `Select` or one wait.
+
+**PROCEDURE InitCore (c: Core; kind, capacity: INTEGER)**
+Sets the kind and capacity of a new channel core.
+Pre: `c` has just been created by `NEW` — not checked; `kind` is `Rendezvous`, `Bounded` or
+`Mailbox` — trap 20; `capacity > 0` for `Bounded`, otherwise `capacity = 0` — trap 21.
+Post: `c` is an empty channel of kind `kind` without a protocol.
+
+**PROCEDURE SetProtocol (c: Core; p: AsyncProto.Protocol)**
+Attaches a protocol to a channel or removes it.
+Pre: `c # NIL` — not checked.
+Post: every send into `c` is checked by protocol `p` at the moment it takes place; `protoState` is
+the start state of `p`. With `p = NIL` there is no protocol, `protoState = 0`.
+
+**PROCEDURE QueueSend (c: Core; m: Msg)**
+Sends `m` into the channel; waits if there is no receiver or no room.
+Pre: `c # NIL` — not checked; waiting only from a task — trap 20 in `Tasks.Park`.
+Post: `m` is given to a receiver or lies in the ring. The protocol rejected `m` — trap 21, `m` is
+not sent.
+
+**PROCEDURE QueueRecv (c: Core; OUT m: Msg)**
+Receives a message; waits if there are no messages and no waiting senders.
+Pre: `c # NIL` — not checked; waiting only from a task — trap 20 in `Tasks.Park`.
+Post: `m` is the first message of the ring or the message of the first waiting sender.
+
+**PROCEDURE AltSend (core: Core; msg: Msg; OUT op: Op)**
+Builds a send alternative.
+Pre: `core # NIL` — trap 23 in `Select`.
+Post: `op` is a send of `msg` into `core`.
+
+**PROCEDURE AltRecv (core: Core; OUT op: Op)**
+Builds a receive alternative.
+Pre: `core # NIL` — trap 23 in `Select`.
+Post: `op` is a receive from `core`.
+
+**PROCEDURE AltTimeout (ms: LONGINT; OUT op: Op)**
+Builds a timeout alternative.
+Post: `op` is a timeout of `ms` ms from the start of the wait; `ms <= 0` fires at once.
+
+**PROCEDURE AltSignal (sig: Signal; OUT op: Op)**
+Builds an external-signal alternative.
+Pre: `sig # NIL` — trap 24 in `Select`.
+Post: `op` is a wait for signal `sig`.
+
+**PROCEDURE Select (VAR ops: ARRAY OF Op): INTEGER**
+Waits until exactly one alternative is performed and returns its index.
+Pre: call from a task — trap 20; `LEN(ops) <= 32` — trap 21; the kind of every alternative is
+valid — trap 22; a send or a receive has a non-`NIL` channel — trap 23; a signal alternative has a
+non-`NIL` signal — trap 24.
+Post: exactly one alternative `i` is performed, the result is `i`. For a receive `ops[i].got` is the
+message. Losing offers are withdrawn, signals are disarmed. The protocol rejected a send — trap 21
+after all offers are withdrawn.
+
+**PROCEDURE SignalReady (ctx: Ctx; idx: INTEGER)**
+Reports readiness of an external signal.
+Pre: called by the signal owner; `ctx` and `idx` come from `Arm`; `Disarm` is not yet called — not
+checked.
+Post: if there was no decision, alternative `idx` won; the waiting task is woken.
+
+**PROCEDURE (s: Signal) Arm (ctx: Ctx; idx: INTEGER): BOOLEAN**
+Abstract method; `Select` calls it during registration.
+Post: `TRUE` — the signal is ready. `FALSE` — the owner later calls `SignalReady(ctx, idx)` at most
+once, unless `Disarm` is called first.
+
+**PROCEDURE (s: Signal) Disarm**
+Abstract method; `Select` calls it after the decision.
+Post: the signal owner no longer uses `ctx` from `Arm` and does not call `SignalReady` with it.
+
+### 10.2. AsyncChan
+
+```
+DEFINITION AsyncChan;
+
+	IMPORT AsyncSelect, AsyncProto;
+
+	TYPE
+		Chan = POINTER TO RECORD (AsyncSelect.Core)
+			(c: Chan) Send (m: AsyncSelect.Msg), NEW;
+			(c: Chan) Recv (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+		Buffer = POINTER TO RECORD (AsyncSelect.Core)
+			(c: Buffer) Send (m: AsyncSelect.Msg), NEW;
+			(c: Buffer) Recv (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+		Mailbox = POINTER TO RECORD (AsyncSelect.Core)
+			(c: Mailbox) Send (m: AsyncSelect.Msg), NEW;
+			(c: Mailbox) Recv (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+	PROCEDURE NewChan (): Chan;
+	PROCEDURE NewBuffer (capacity: INTEGER): Buffer;
+	PROCEDURE NewMailbox (): Mailbox;
+	PROCEDURE SetProtocol (c: AsyncSelect.Core; p: AsyncProto.Protocol);
+	PROCEDURE SendAlt (c: AsyncSelect.Core; m: AsyncSelect.Msg; OUT op: AsyncSelect.Op);
+	PROCEDURE RecvAlt (c: AsyncSelect.Core; OUT op: AsyncSelect.Op);
+	PROCEDURE TimeoutAlt (ms: LONGINT; OUT op: AsyncSelect.Op);
+	PROCEDURE Select (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER;
+
+END AsyncChan.
+```
+
+**PROCEDURE NewChan (): Chan**
+Post: a new empty rendezvous without a protocol.
+
+**PROCEDURE NewBuffer (capacity: INTEGER): Buffer**
+Pre: `capacity > 0` — trap 20.
+Post: a new empty buffer for `capacity` messages without a protocol.
+
+**PROCEDURE NewMailbox (): Mailbox**
+Post: a new empty unbounded mailbox without a protocol.
+
+**PROCEDURE (c: Chan) Send (m: AsyncSelect.Msg)**
+**PROCEDURE (c: Buffer) Send (m: AsyncSelect.Msg)**
+**PROCEDURE (c: Mailbox) Send (m: AsyncSelect.Msg)**
+Send `m`; the same as `AsyncSelect.QueueSend(c, m)`.
+Pre: waiting only from a task — trap 20 in `Tasks.Park`. `Mailbox.Send` waits only if another task
+holds the channel monitor.
+Post: rendezvous — the receiver took `m`; buffer and mailbox — `m` is the last in the queue. The
+protocol rejected `m` — trap 21, `m` is not sent.
+
+**PROCEDURE (c: Chan) Recv (OUT m: AsyncSelect.Msg)**
+**PROCEDURE (c: Buffer) Recv (OUT m: AsyncSelect.Msg)**
+**PROCEDURE (c: Mailbox) Recv (OUT m: AsyncSelect.Msg)**
+Receive a message; the same as `AsyncSelect.QueueRecv(c, m)`.
+Pre: waiting only from a task — trap 20 in `Tasks.Park`.
+Post: `m` is the first message of the queue or of the first waiting sender.
+
+**PROCEDURE SetProtocol (c: AsyncSelect.Core; p: AsyncProto.Protocol)**
+The same as `AsyncSelect.SetProtocol`.
+
+**PROCEDURE SendAlt (c: AsyncSelect.Core; m: AsyncSelect.Msg; OUT op: AsyncSelect.Op)**
+**PROCEDURE RecvAlt (c: AsyncSelect.Core; OUT op: AsyncSelect.Op)**
+**PROCEDURE TimeoutAlt (ms: LONGINT; OUT op: AsyncSelect.Op)**
+**PROCEDURE Select (VAR ops: ARRAY OF AsyncSelect.Op): INTEGER**
+The same as `AsyncSelect.AltSend`, `AltRecv`, `AltTimeout` and `Select` (section 10.1).
+
+### 10.3. AsyncOnce
+
+```
+DEFINITION AsyncOnce;
+
+	IMPORT AsyncSelect;
+
+	TYPE
+		Once = POINTER TO RECORD
+			done: BOOLEAN;
+			(o: Once) FillInt (x: INTEGER), NEW;
+			(o: Once) ReadInt (): INTEGER, NEW;
+			(o: Once) FillMsg (m: AsyncSelect.Msg), NEW;
+			(o: Once) ReadMsg (OUT m: AsyncSelect.Msg), NEW
+		END;
+
+	PROCEDURE New (): Once;
+
+END AsyncOnce.
+```
+
+All four methods are exclusive procedures (`[exclusive]`). The field `done` is exported for reading
+and writing; an outside write breaks single assignment, and the code does not forbid it.
+
+**PROCEDURE New (): Once**
+Post: an unfilled variable, `done = FALSE`.
+
+**PROCEDURE (o: Once) FillInt (x: INTEGER)**
+Pre: `~o.done` — trap 21.
+Post: `o.done`; the value is `x`.
+
+**PROCEDURE (o: Once) ReadInt (): INTEGER**
+Waits for filling in `ACTIVE.AWAIT(o.done)`.
+Pre: waiting only from a task — monitor trap 24 if the variable is not filled.
+Post: the result is the integer from `FillInt`; after `FillMsg` it is 0.
+
+**PROCEDURE (o: Once) FillMsg (m: AsyncSelect.Msg)**
+Pre: `~o.done` — trap 22.
+Post: `o.done`; the value is `m`.
+
+**PROCEDURE (o: Once) ReadMsg (OUT m: AsyncSelect.Msg)**
+Waits for filling in `ACTIVE.AWAIT(o.done)`.
+Pre: waiting only from a task — monitor trap 24 if the variable is not filled.
+Post: `m` is the message from `FillMsg`; after `FillInt` it is `NIL`.
+
+### 10.4. AsyncProto
+
+```
+DEFINITION AsyncProto;
+
+	TYPE
+		Message = ARRAY 256 OF CHAR;
+		Protocol = POINTER TO RECORD END;
+
+	PROCEDURE New (IN desc: ARRAY OF CHAR): Protocol;
+	PROCEDURE LastError (OUT msg: Message);
+	PROCEDURE Start (p: Protocol): INTEGER;
+	PROCEDURE StateName (p: Protocol; state: INTEGER; OUT name: ARRAY OF CHAR);
+	PROCEDURE IsFinal (p: Protocol; state: INTEGER): BOOLEAN;
+	PROCEDURE Step (p: Protocol; VAR state: INTEGER; IN label: ARRAY OF CHAR; OUT ok: BOOLEAN);
+	PROCEDURE LastViolation (p: Protocol; OUT msg: Message);
+
+END AsyncProto.
+```
+
+**PROCEDURE New (IN desc: ARRAY OF CHAR): Protocol**
+Builds a state machine from a description (section 5).
+Post: the machine, or `NIL` on a description error; the error text is in `LastError`.
+
+**PROCEDURE LastError (OUT msg: Message)**
+Post: `msg` is the text of the last parse error.
+
+**PROCEDURE Start (p: Protocol): INTEGER**
+Post: the index of the start state; 0 when `p = NIL`.
+
+**PROCEDURE StateName (p: Protocol; state: INTEGER; OUT name: ARRAY OF CHAR)**
+Post: `name` is the state name; `""` if `p = NIL` or the index does not exist.
+
+**PROCEDURE IsFinal (p: Protocol; state: INTEGER): BOOLEAN**
+Pre: `p # NIL` — not checked.
+Post: `TRUE` if `state` has no outgoing transitions.
+
+**PROCEDURE Step (p: Protocol; VAR state: INTEGER; IN label: ARRAY OF CHAR; OUT ok: BOOLEAN)**
+Checks the next message with label `label`.
+Post: `ok` — `state` follows the transition `label`. `~ok` — `state` is unchanged, the violation
+text is in `LastViolation`. With `p = NIL` — `ok`.
+
+**PROCEDURE LastViolation (p: Protocol; OUT msg: Message)**
+Post: `msg` is the text of the last violation; `""` when `p = NIL`.
+
+### 10.5. AsyncIO
+
+```
+DEFINITION AsyncIO;
+
+	IMPORT CommStreams;
+
+	PROCEDURE WaitFd (fd: INTEGER; events: SET);
+	PROCEDURE Poll (timeout: LONGINT);
+	PROCEDURE Read (s: CommStreams.Stream; VAR x: ARRAY OF BYTE; beg, len: INTEGER;
+		OUT read: INTEGER);
+	PROCEDURE Write (s: CommStreams.Stream; IN x: ARRAY OF BYTE; beg, len: INTEGER;
+		OUT written: INTEGER);
+	PROCEDURE Accept (l: CommStreams.Listener; OUT s: CommStreams.Stream;
+		timeout: LONGINT): BOOLEAN;
+
+END AsyncIO.
+```
+
+**PROCEDURE WaitFd (fd: INTEGER; events: SET)**
+Waits for descriptor readiness; the registration is one-shot.
+Pre: call from a task — trap 20.
+Post: `fd` is ready for `events`; with `fd < 0` one `Tasks.Sleep(1)` has passed.
+
+**PROCEDURE Poll (timeout: LONGINT)**
+Runs the `Poller` waits for a test pump.
+Post: ready waiters are woken within at most `timeout` ms.
+
+**PROCEDURE Read (s; VAR x; beg, len: INTEGER; OUT read: INTEGER)**
+Pre: waiting only from a task — trap 20 in `WaitFd` or `Tasks.Sleep`.
+Post: `read > 0` — `read` bytes are read; `read = 0` — end or disconnection.
+
+**PROCEDURE Write (s; IN x; beg, len: INTEGER; OUT written: INTEGER)**
+Pre: waiting only from a task — trap 20 in `WaitFd` or `Tasks.Sleep`.
+Post: `written > 0` — `written` bytes are written; `written = 0` — disconnection.
+
+**PROCEDURE Accept (l; OUT s; timeout: LONGINT): BOOLEAN**
+Pre: waiting only from a task — trap 20 in `WaitFd` or `Tasks.Sleep`.
+Post: `TRUE` — `s` is the accepted connection; `FALSE` — `timeout` ms expired, `s = NIL`. With
+`timeout < 0` there is no deadline.
+
+### 10.6. AsyncWork
+
+```
+DEFINITION AsyncWork;
+
+	IMPORT SYSTEM;
+
+	CONST
+		maxPath = 256; maxBuf = 4096; maxHost = 128;
+
+	TYPE
+		Proc = PROCEDURE [ccall] (arg: SYSTEM.ADDRESS);
+
+		FileReq = RECORD [untagged]
+			path: ARRAY maxPath OF SHORTCHAR;
+			buf: ARRAY maxBuf OF SHORTCHAR;
+			len, status: INTEGER
+		END;
+
+		AddrReq = RECORD [untagged]
+			host: ARRAY maxHost OF SHORTCHAR;
+			count, status: INTEGER
+		END;
+
+		FileReqPtr = POINTER [untagged] TO FileReq;
+		AddrReqPtr = POINTER [untagged] TO AddrReq;
+
+		Impl = POINTER TO ABSTRACT RECORD
+			(i: Impl) Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Done (id: INTEGER): BOOLEAN, NEW, ABSTRACT;
+			(i: Impl) Result (id: INTEGER): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Release (id: INTEGER), NEW, ABSTRACT;
+			(i: Impl) Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Workers (): INTEGER, NEW, ABSTRACT;
+			(i: Impl) Scan, NEW, ABSTRACT;
+			(i: Impl) ReadFileJob (arg: SYSTEM.ADDRESS), NEW, ABSTRACT;
+			(i: Impl) WriteFileJob (arg: SYSTEM.ADDRESS), NEW, ABSTRACT;
+			(i: Impl) ResolveJob (arg: SYSTEM.ADDRESS), NEW, ABSTRACT
+		END;
+
+	PROCEDURE Install (i: Impl);
+	PROCEDURE Active (): BOOLEAN;
+	PROCEDURE Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER;
+	PROCEDURE Done (id: INTEGER): BOOLEAN;
+	PROCEDURE Result (id: INTEGER): INTEGER;
+	PROCEDURE Release (id: INTEGER);
+	PROCEDURE Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER;
+	PROCEDURE Workers (): INTEGER;
+	PROCEDURE Scan;
+	PROCEDURE [ccall] ReadFileJob (arg: SYSTEM.ADDRESS);
+	PROCEDURE [ccall] WriteFileJob (arg: SYSTEM.ADDRESS);
+	PROCEDURE [ccall] ResolveJob (arg: SYSTEM.ADDRESS);
+
+END AsyncWork.
+```
+
+`Impl` is the platform delegate; `AsyncWorkLin` and `AsyncWorkWin` install it. The delegate trap
+numbers are given for Linux and Windows; they coincide.
+
+**PROCEDURE Install (i: Impl)**
+Installs the delegate. The delegate's own `Install` calls it.
+Post: the pool is served by `i`.
+
+**PROCEDURE Active (): BOOLEAN**
+Post: `TRUE` if a delegate is installed.
+
+**PROCEDURE Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER**
+Queues a job; installs the delegate if needed.
+Pre: a delegate is found — trap 22.
+Post: the slot number; −1 — no free slot or the queue is full.
+
+**PROCEDURE Done (id: INTEGER): BOOLEAN**
+Pre: a delegate is installed — trap 21; `0 <= id <` the number of slots — trap 20 in the delegate.
+Post: `TRUE` if job `id` is done.
+
+**PROCEDURE Result (id: INTEGER): INTEGER**
+Pre: the same as for `Done`.
+Post: the status of job `id`.
+
+**PROCEDURE Release (id: INTEGER)**
+Pre: the same as for `Done`.
+Post: slot `id` is free.
+
+**PROCEDURE Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER**
+Runs a job in a worker thread and waits for it; a switch point.
+Pre: a delegate is found — trap 22; call from a task — trap 21 in the delegate.
+Post: the job status, the slot is freed; −1 — no free slot.
+
+**PROCEDURE Workers (): INTEGER**
+Post: the number of created worker threads; 0 without a delegate.
+
+**PROCEDURE Scan**
+Scans completed jobs; the main loop calls it.
+Post: the tasks whose jobs are done are woken.
+
+**PROCEDURE ReadFileJob (arg: SYSTEM.ADDRESS)**
+**PROCEDURE WriteFileJob (arg: SYSTEM.ADDRESS)**
+**PROCEDURE ResolveJob (arg: SYSTEM.ADDRESS)**
+Jobs for a worker thread; `arg` is the address of a `FileReq` or an `AddrReq`.
+Pre: a delegate is installed — trap 21.
+Post: the job status is in the record field `status` (codes in section 7).
+
+### 10.7. AsyncComputon
+
+```
+DEFINITION AsyncComputon;
+
+	IMPORT Stores, AsyncSelect;
+
+	TYPE
+		Computon = POINTER TO ABSTRACT RECORD (Stores.Store)
+			(c: Computon) Do, NEW, ABSTRACT
+		END;
+
+		Hook = POINTER TO ABSTRACT RECORD
+			(h: Hook) Failed (rank, tag, err: INTEGER), NEW, ABSTRACT
+		END;
+
+		Transport = POINTER TO ABSTRACT RECORD
+			(t: Transport) Start (n: INTEGER; OUT size: INTEGER), NEW, ABSTRACT;
+			(t: Transport) SendFrame (rank, tag, kind: INTEGER;
+				buf: POINTER TO ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN, NEW, ABSTRACT;
+			(t: Transport) Poll, NEW, ABSTRACT;
+			(t: Transport) Stop, NEW, ABSTRACT;
+			(t: Transport) Alive (rank: INTEGER): BOOLEAN, NEW, ABSTRACT
+		END;
+
+	PROCEDURE Serialize (c: Computon; OUT buf: POINTER TO ARRAY OF SHORTCHAR; OUT len: INTEGER);
+	PROCEDURE Deserialize (VAR b: ARRAY OF SHORTCHAR; len: INTEGER): Computon;
+	PROCEDURE SetTransport (IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE SetTransportObject (t: Transport);
+	PROCEDURE AltPull (rank, tag: INTEGER): AsyncSelect.Signal;
+	PROCEDURE Push (c: Computon; rank, tag: INTEGER);
+	PROCEDURE PullTimeout (rank, tag: INTEGER; ms: LONGINT): Computon;
+	PROCEDURE Pull (rank, tag: INTEGER): Computon;
+	PROCEDURE Try (rank, tag: INTEGER; OUT c: Computon): BOOLEAN;
+	PROCEDURE Wait;
+	PROCEDURE LastError (): INTEGER;
+	PROCEDURE SetHook (h: Hook);
+	PROCEDURE LogMsg (IN msg: ARRAY OF CHAR);
+	PROCEDURE Unload (IN module: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Size (): INTEGER;
+	PROCEDURE Rank (): INTEGER;
+	PROCEDURE WorkerPid (rank: INTEGER): INTEGER;
+	PROCEDURE WorkerDead (rank: INTEGER): BOOLEAN;
+	PROCEDURE Stop;
+	PROCEDURE Start (n: INTEGER);
+	PROCEDURE MarkDead (idx: INTEGER);
+	PROCEDURE DeliverFrame (rank, tag, status: INTEGER; VAR b: ARRAY OF SHORTCHAR; len: INTEGER);
+	PROCEDURE RunDo (c: Computon; OUT err: INTEGER);
+	PROCEDURE WorkerLoop;
+
+END AsyncComputon.
+```
+
+The `LastError` codes are listed in section 8.1. `Transport`, `SetTransportObject`, `MarkDead`,
+`DeliverFrame`, `RunDo`, `Serialize` and `Deserialize` serve the transports and the executor.
+
+**PROCEDURE Start (n: INTEGER)**
+Stops the previous pool and starts `n` executors.
+Pre: `1 <= n <= 16` — trap 20; for the `mpi` transport an external transport is installed — trap 21.
+Post: `Size()` is the number of started executors.
+
+**PROCEDURE Stop**
+Post: the executors are killed, the channels are closed, `Size() = 0`.
+
+**PROCEDURE SetTransport (IN name: ARRAY OF CHAR): BOOLEAN**
+Post: `TRUE` — transport `"pipe"` (also `""`), `"tcp"` or `"mpi"` is chosen; `FALSE` — unknown name.
+
+**PROCEDURE Push (c: Computon; rank, tag: INTEGER)**
+Serializes `c` and sends it to executor `rank`.
+Post: request `tag` is queued; on error `LastError = -1`; on a failed send — a retry on a live one.
+
+**PROCEDURE PullTimeout (rank, tag: INTEGER; ms: LONGINT): Computon**
+**PROCEDURE Pull (rank, tag: INTEGER): Computon**
+Wait for the result of request `tag`; `Pull` uses `ms = 10000`.
+Pre: call from a task — trap 21.
+Post: the result, or `NIL` with a code in `LastError`; the request is freed.
+
+**PROCEDURE Try (rank, tag: INTEGER; OUT c: Computon): BOOLEAN**
+Post: `TRUE` — the request is done and freed, `c` is the result or `NIL` with a code in
+`LastError`; `FALSE` — no result yet, `c = NIL`.
+
+**PROCEDURE AltPull (rank, tag: INTEGER): AsyncSelect.Signal**
+Post: a signal for `Select` that is ready when request `tag` is done.
+
+**PROCEDURE Unload (IN module: ARRAY OF CHAR): BOOLEAN**
+Post: `TRUE` — all live executors dropped the module, or the pool is not started; `FALSE` — a
+refusal, the code is in `LastError`.
+
+**PROCEDURE Size (): INTEGER**, **Rank (): INTEGER**, **WorkerPid (rank): INTEGER**,
+**WorkerDead (rank): BOOLEAN**, **LastError (): INTEGER**
+Post: the number of executors; 0; the executor pid or −1; the death flag (`TRUE` out of range); the
+code of the last error.
+
+**PROCEDURE SetHook (h: Hook)**, **LogMsg (IN msg)**, **Wait**
+Install the error handler, write a line to the console; `Wait` does nothing.
+
+### 10.8. AsyncMpi
+
+```
+DEFINITION AsyncMpi;
+
+	PROCEDURE Install (): BOOLEAN;
+	PROCEDURE Available (): BOOLEAN;
+	PROCEDURE Rank (): INTEGER;
+	PROCEDURE WorldSize (): INTEGER;
+	PROCEDURE WorkerLoop;
+
+END AsyncMpi.
+```
+
+**PROCEDURE Install (): BOOLEAN**
+Post: `TRUE` — `libbbmpi.so` is bound, the transport is installed in `AsyncComputon`.
+
+**PROCEDURE Available (): BOOLEAN**
+Post: `TRUE` — the MPICH library and the wrapper are found; `MPI_Init` is not called.
+
+**PROCEDURE Rank (): INTEGER**, **WorldSize (): INTEGER**
+Post: the MPI rank and world size; before initialization −1 and 0.
+
+**PROCEDURE WorkerLoop**
+Entry point of an executor process of rank greater than 0.
+
+## 11. Implementation Scheme
 
 This section does not define behaviour; it describes how the behaviour is obtained.
 
-### 10.1. Channel and Selection
+### 11.1. Channel and Selection
 
 `AsyncSelect.Core` is an extensible record with a kind, a capacity, a message queue and the heads of
 two offer queues (`waitS`, `waitR`). An offer (`Offer`) stores a common context `Ctx`, the index of
 the alternative, the operation kind and the message.
 
-Offers and contexts come from free lists and return there after `Select`: selection without a
-timeout does not allocate. The message queue of `Buffer` and `Mailbox` is a ring in an array; for `Buffer` its length
+Offers and contexts come from the free lists `freeOffers` and `freeCtx` and return there after the
+operation. A free-list record lies in no channel queue. Selection without a timeout does not
+allocate. The message queue of `Buffer` and `Mailbox` is a ring in an array; for `Buffer` its length
 is the capacity, for `Mailbox` the ring doubles when full.
 
-An operation on a channel between two wait points runs without switches: there is one thread and no
-preemption. So the channel monitor is taken (`Enter`) only when someone holds it: then the operation
-waits for its release; otherwise exclusion holds without the monitor.
+An operation on a channel between two switch points runs without switches: there is one thread and
+no preemption. So `Enter` takes the channel monitor only when someone holds it
+(`Monitors.IsLocked`). Then the operation waits for the monitor release; otherwise exclusion holds
+without the monitor.
+
+Two procedures perform an operation on a channel. `Put` gives the message to a waiting receiver or
+puts it into the ring and checks the protocol. `Take` takes a message from the ring or from a
+waiting sender. After a `Take` from the ring, `CompleteSend` performs waiting sends while there is
+room. Both procedures skip offers with the caller's decision: an offer is not performed against an
+offer with the same `Ctx`.
 
 `Select` walks alternatives in index order. For a send or a receive it takes an offer and calls
-`Register`. If `Register` performed the operation immediately, the
-decision is made; otherwise the offer stays in the queue. The timeout with the smallest `ms`
-schedules a `Services` action; the task sleeps in `Tasks.Park` until `Ctx.decided` becomes true.
+`Register`. `Register` performs the operation through `Put` or `Take` or puts the offer into
+`waitS` or `waitR`. The timeout with the smallest `ms` schedules a `Services` action. The task
+sleeps in `Tasks.Park` until `Ctx.decided` becomes true.
 
-The decision is made by the first channel able to perform an offer: under its monitor it writes
-`ctx.decided` and `ctx.winner`, takes or gives the message and wakes the task with `Tasks.Unpark`.
-`Wake` wakes only when `ctx.ready = TRUE`: during registration the task is not yet in `Park`, and
-`Unpark` would move it to `Ready` without the monitor. After waking, the owner withdraws the losing
-offers (`Withdraw`); withdrawal is idempotent, so the winner is withdrawn by the same call.
+The decision is made by the side that performed the offer first. It writes `ctx.decided` and
+`ctx.winner`, takes or gives the message and wakes the task with `Tasks.Unpark`. The channel
+monitor is held at that moment only if someone else held it. `Wake` wakes only when
+`ctx.ready = TRUE`. During registration the task may wait for the monitor of another channel, and
+`Unpark` would move it to `Ready` without the monitor. After waking, the owner withdraws the offers
+(`Withdraw`). Withdrawal is idempotent, so the winner is withdrawn by the same call.
 
-Direct `Send` and `Recv` of all three kinds are `QueueSend` and `QueueRecv`, a selection of one
-alternative without timers: the operation runs at once (to a waiting receiver, into the queue, from
-the queue or from a waiting sender) or puts an offer into `waitS`/`waitR` and sleeps in
+Direct `Send` and `Recv` of all three kinds are `QueueSend` and `QueueRecv`. The operation runs at
+once through `Put` or `Take`; otherwise the offer joins `waitS` or `waitR`, and the task sleeps in
 `Tasks.Park`. The other side performs the offer and wakes the task without handing over the
-monitor, so a buffer sender keeps adding messages while the receiver has not yet started draining.
-A rendezvous is a channel of capacity 0: a send without a receiver, direct or from `Select`, always
-waits in `waitS`, and the receiver takes the first live offer from there. An offer is not performed
-against an offer with the same `ctx`. Dead offers are removed when a queue is walked in search of a
-partner. An offer is dead when the task is in `Finished` or `Cancelled`, not merely cancelled.
+monitor. A rendezvous is a channel of capacity 0: a send without a receiver always waits in
+`waitS`. Dead offers are removed when a queue is walked. An offer is dead when its task is in
+`Finished` or `Cancelled`.
 
-### 10.2. I/O
+### 11.2. I/O
 
 `Poller` stores only a pointer to the platform hook. The descriptor registry and `poll` live in
 `LinConsole`: an array of 4096 entries, stdin as the first element, one-shot registration. Ready
 entries are removed before `Waiter.Ready` is called, so that a repeated registration does not
 disturb the walk.
 
-### 10.3. Worker Threads
+### 11.3. Worker Threads
 
 `AsyncWork` is the facade; `AsyncWorkLin` and `AsyncWorkWin` are the delegates. Linux: up to four
 pthreads, a static slot array under a mutex and a condition variable, a ring queue of 256 jobs, a
@@ -632,7 +1159,7 @@ every 5 ms.
 Synchronization primitives live in the heap, not in global module records: global records do not get
 guaranteed alignment, and futex and `CRITICAL_SECTION` require it.
 
-### 10.4. Computons
+### 11.4. Computons
 
 `AsyncComputon` keeps up to 16 executors and up to 128 requests. A request (`Req`) stores a `tag`, a
 rank, a buffer, a task and a `Select` context. `Push` serializes the object through `Stores` into a
