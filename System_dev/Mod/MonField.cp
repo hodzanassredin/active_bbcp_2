@@ -27,6 +27,7 @@ MODULE System_devMonField;
 		Node = POINTER TO RECORD next: Node; depth: INTEGER END;
 
 		Runner = POINTER TO RECORD (Tasks.Task) kind: INTEGER END;
+		Bare = POINTER TO RECORD x: INTEGER END;	(* без исключающих методов *)
 
 	VAR
 		ext: Ext; pext: PlainExt; leaf: Leaf; empty: Empty; buf: Buf;
@@ -314,5 +315,26 @@ MODULE System_devMonField;
 		UnitAssert.EqualInt(4, modCount, "all levels ran");
 		UnitAssert.EqualInt(0, Monitors.LockDepth(), "nothing held")
 	END TestProcModuleMonitorReentry;
+
+	PROCEDURE TestIsLockedShortcut*;
+	(** IsLocked без поиска в таблице, когда ничего не взято: ответ тот же,
+		что с поиском, в каждом углу. *)
+		VAR a, b: Bare;
+	BEGIN
+		NEW(a); NEW(b);
+		UnitAssert.True(~Monitors.IsLocked(a), "nothing held");
+		Kernel.Lock(a);
+		UnitAssert.True(Monitors.IsLocked(a), "held through the table");
+		UnitAssert.True(~Monitors.IsLocked(b), "other object free");
+		Kernel.Unlock(a);
+		UnitAssert.True(~Monitors.IsLocked(a), "free again (hot record left)");
+		Kernel.Lock(a); Kernel.Lock(a);
+		UnitAssert.True(Monitors.IsLocked(a), "re-entered hot record");
+		Kernel.Unlock(a); Kernel.Unlock(a);
+		NEW(empty);
+		empty.Hit;
+		UnitAssert.True(lockedInside, "held on the fast-path stack");
+		UnitAssert.True(~Monitors.IsLocked(empty), "free after exit")
+	END TestIsLockedShortcut;
 
 END System_devMonField.
