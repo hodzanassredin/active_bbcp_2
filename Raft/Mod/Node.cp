@@ -50,6 +50,7 @@ MODULE RaftNode;
 	TYPE
 		Bytes* = Core.Bytes;
 		Config* = POINTER TO ConfigDesc;
+		Caps* = ARRAY Core.maxNodes OF ARRAY capLen OF CHAR;	(** пропуски узлов-акторов по номерам *)
 
 		Tick* = POINTER TO RECORD (ActorCore.Msg) END;
 
@@ -103,7 +104,7 @@ MODULE RaftNode;
 		ConfigDesc* = RECORD
 			id*, n*: INTEGER;	(** номер узла и размер кластера *)
 			net*: ActorNet.Node;	(** узел ActorNet, на котором живёт актор *)
-			peers*: ARRAY Core.maxNodes OF ARRAY capLen OF CHAR;	(** пропуски узлов-акторов; свой — не нужен *)
+			peers*: Caps;	(** пропуски узлов-акторов; свой — не нужен *)
 			storage*: RaftStorage.Storage;	(** переживает перезапуск узла *)
 			newSm*: PROCEDURE (): RaftSm.StateMachine;	(** пустой автомат *)
 			electionTicks*: INTEGER;	(** по умолчанию 10 *)
