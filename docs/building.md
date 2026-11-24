@@ -53,7 +53,7 @@ tools/build64.sh System Lin       # выборочно, поверх готов�
 2. Компилирует подсистемы `Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit`
    через `DevCompiler64.CompileSubs @Lin`.
 3. Отдельно компилирует `Tasks`, `LinThreads`, `LinNative`, подсистему `Async` и её
-   `Mod64`-модули, фасад `Robust`, примеры задач и каналов `Obx/Mod64` и примеры `Demo`.
+   `Mod64`-модули, фасад `Robust`, подсистему `Actor`, примеры задач и каналов `Obx/Mod64` и примеры `Demo`.
 4. Проверяет журнал на `error:`, `N error(s) detected`, `~TRAP`, `syntax error`, `not found`.
 5. Линкует консоль `Kernel+ LinKernel Files LinFiles StdLoader LinIntInit` и, если не указан
    `--console-only`, окно `Kernel+ LinKernel Files LinFiles StdLoader LinLoader`.
@@ -321,7 +321,7 @@ Lin/Mod/Init.cp             Lin/Mod/IntInit.cp
 Win/Mod/Init.cp             Win/Mod/IntInit.cp
 ```
 
-4. Удалите `Async/`, `Robust/`, `System/Mod/Tasks.cp`, `System/Mod/Taskarch.cp`, `System/Mod64/Taskarch.cp`,
+4. Удалите `Async/`, `Robust/`, `Actor/`, `System/Mod/Tasks.cp`, `System/Mod/Taskarch.cp`, `System/Mod64/Taskarch.cp`,
    `System/Mod/Monitors.cp` и тестовые подсистемы `*_dev`, `Unit`.
 5. Соберите базовый мир:
 

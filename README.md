@@ -75,6 +75,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `Docu/ru/Active-CP-Lang.md`, `Docu/Active-CP-Lang.md` | сообщение о языке: задачи, мониторы, `ACTIVE.AWAIT`, точки уступки |
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | руководство по модулю `Tasks` |
 | `Docu/ru/Async.md`, `Docu/Async.md` | библиотека `Async` |
+| `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | подсистема `Actor`: акторы, ящики, исполнители, супервизор; пример `ActorDemoBank` |
 | `docs/implementation.md` | устройство ядра, мониторов, планировщика и компилятора |
 | `docs/building.md` | сборка, запуск, тесты, самосборка, возврат к исходному ядру |
 | `docs/measurements.md` | замеры и команды их воспроизведения |

@@ -192,7 +192,7 @@ tools/worktree.sh ../active_bb-x x    # parallel worktree: links, bootstrap, bui
 
 `tools/build64.sh` compiles `Mod64` when present, writes `Code`/`Sym` to the installation, then
 compiles `Tasks`, `LinThreads`, `LinNative`, `Async` (separately, because it needs those modules),
-`Robust` and `Demo`. It links `blackbox-console` and, unless `--console-only` is given, `blackbox`.
+`Robust`, `Actor` and `Demo`. It links `blackbox-console` and, unless `--console-only` is given, `blackbox`.
 
 `tools/env.sh:clean_host_temp` removes `odc` names with five digits from `/tmp` before starting
 `dev0Linux`: the packaged host still creates such names and probes at most 200 of them.
@@ -327,6 +327,7 @@ code, and the checks to run before a commit.
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | `Tasks` module |
 | `Docu/ru/Async.md`, `Docu/Async.md` | `Async` library |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | `Cas` content-addressed store |
+| `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | `Actor` subsystem: actors and supervision |
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
