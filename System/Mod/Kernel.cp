@@ -246,7 +246,7 @@ MODULE Kernel;
 		   сигнальный. *)
 		Stack* = POINTER TO StackDesc;
 		StackDesc* = RECORD
-			next: Stack;
+			next, prev: Stack;
 			lo*, hi*: S.ADDRESS;	(* стек занимает [lo, hi); hi — верх *)
 			sp: S.ADDRESS;			(* сохранённый SP, пока стек не текущий *)
 			fp: S.ADDRESS;			(* FP вызывающего SwitchSave *)
@@ -1905,7 +1905,9 @@ MODULE Kernel;
 		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
 		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
 		s.signal := signal; s.main := FALSE;
-		s.next := stacks; stacks := s;
+		s.prev := NIL; s.next := stacks;
+		IF stacks # NIL THEN stacks.prev := s END;
+		stacks := s;
 		RETURN s
 	END NewStack;
 
@@ -1938,25 +1940,21 @@ MODULE Kernel;
 	END FreeStack;
 
 	PROCEDURE UnregisterStack* (s: Stack);
-		VAR p: Stack;
 	BEGIN
-		IF s # NIL THEN
-			IF stacks = s THEN stacks := s.next
-			ELSE
-				p := stacks;
-				WHILE (p # NIL) & (p.next # s) DO p := p.next END;
-				IF p # NIL THEN p.next := s.next END
-			END;
-			s.next := NIL
+		IF (s # NIL) & ((s.prev # NIL) OR (stacks = s)) THEN
+			IF s.prev = NIL THEN stacks := s.next ELSE s.prev.next := s.next END;
+			IF s.next # NIL THEN s.next.prev := s.prev END;
+			s.next := NIL; s.prev := NIL
 		END
 	END UnregisterStack;
 
-	PROCEDURE SwitchSave*;
-	(** Сохранить состояние исполнения текущего стека перед переключением. *)
-		VAR sp, fpp: S.ADDRESS; s: Stack; ar: AdrRef;
+	PROCEDURE SwitchSave* (s: Stack);
+	(** Сохранить состояние исполнения текущего стека перед переключением.
+		s — запись текущего стека; NIL — найти её по указателю стека. *)
+		VAR sp, fpp: S.ADDRESS; ar: AdrRef;
 	BEGIN
 		S.GETREG(SP, sp);
-		s := StackOf(sp);
+		IF s = NIL THEN s := StackOf(sp) END;
 		IF s # NIL THEN
 			(* Скан спящего стека идёт от s.sp; сохраняемые переключателем
 			   регистры лежат ниже SP на момент вызова. Опускаем границу
@@ -1974,12 +1972,12 @@ MODULE Kernel;
 		trapStack := NIL; tryCount := 0
 	END SwitchSave;
 
-	PROCEDURE SwitchRestore*;
-	(** Восстановить состояние исполнения стека после входа на него. *)
-		VAR sp: S.ADDRESS; s: Stack;
+	PROCEDURE SwitchRestore* (s: Stack);
+	(** Восстановить состояние исполнения стека после входа на него.
+		s — запись этого стека; NIL — найти её по указателю стека. *)
+		VAR sp: S.ADDRESS;
 	BEGIN
-		S.GETREG(SP, sp);
-		s := StackOf(sp);
+		IF s = NIL THEN S.GETREG(SP, sp); s := StackOf(sp) END;
 		IF s # NIL THEN
 			IF platform # NIL THEN platform.SetTryContext(s.tryContext) END;
 			trapStack := s.trapStack;
@@ -2863,7 +2861,7 @@ MODULE Kernel;
 		mainStack.sp := baseStack; mainStack.fp := 0; mainStack.tryContext := 0;
 		mainStack.trapStack := NIL; mainStack.tryCount := 0;
 		mainStack.signal := FALSE; mainStack.main := TRUE;
-		mainStack.next := NIL; stacks := mainStack
+		mainStack.next := NIL; mainStack.prev := NIL; stacks := mainStack
 	END SetPlatform;
 	
 	

@@ -35,6 +35,9 @@ MODULE Tasks;
 	CONST
 		nameLen = 64;
 		defaultStack = 256 * 1024;
+		poolMax = 1024;		(* сколько свободных стеков пул держит в покое *)
+		trimStep = 16;		(* сколько лишних стеков шаг планировщика возвращает ядру *)
+		word = 4;			(* SIZE(SYSTEM.ADDRESS) *)
 		defaultSlice = 5;	(* мс на шаг планировщика *)
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
 
@@ -89,6 +92,13 @@ MODULE Tasks;
 		lastWake: LONGINT;	(* время последнего просмотра спящих в Step *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
+		(* Пул свободных стеков: односвязный список через верхние слова самого
+		   стека. Инвариант: poolHead = 0 равносильно poolCount = 0; иначе poolHead —
+		   верх hi свободного стека, в [hi - word] — верх следующего, в [hi - 2*word] —
+		   его lo, в [hi - 3*word] — размер, с которым стек запрошен у ядра.
+		   Стек в пуле не зарегистрирован в реестре ядра и не сканируется. *)
+		poolHead: S.ADDRESS;
+		poolCount: INTEGER;
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
 
@@ -156,13 +166,13 @@ MODULE Tasks;
 		05FH, 05EH, 05DH, 05BH, 058H,	(* pop edi esi ebp ebx eax *)
 		0C3H;				(* ret *)
 
-	PROCEDURE SwitchTo (VAR from, to: S.ADDRESS);
+	PROCEDURE SwitchTo (VAR from, to: S.ADDRESS; self: Kernel.Stack);
 	(** Сырое переключение с сохранением контекста ядра своего стека. *)
 	BEGIN
 		INC(switches);
-		Kernel.SwitchSave;
+		Kernel.SwitchSave(self);
 		Switch(from, to);
-		Kernel.SwitchRestore
+		Kernel.SwitchRestore(self)
 	END SwitchTo;
 
 	(* --- очереди ---------------------------------------------------------- *)
@@ -252,7 +262,7 @@ MODULE Tasks;
 	PROCEDURE Finish;
 	(** Вызывается сTaskBoot на стеке задачи: перейти на главный стек. *)
 	BEGIN
-		SwitchTo(current.sp, schedSP);
+		SwitchTo(current.sp, schedSP, current.stackRec);
 		(* сюда не возвращаемся: задача завершена *)
 		HALT(22)
 	END Finish;
@@ -276,7 +286,7 @@ MODULE Tasks;
 				Finish; RETURN
 			END;
 			t.state := Parked;
-			SwitchTo(t.sp, schedSP)
+			SwitchTo(t.sp, schedSP, t.stackRec)
 		END
 	END WaitOwnGroup;
 
@@ -284,8 +294,8 @@ MODULE Tasks;
 	(** Точка входа нового стека (адрес возврата из Switch). *)
 		VAR t: Task;
 	BEGIN
-		Kernel.SwitchRestore;
 		t := current;
+		Kernel.SwitchRestore(t.stackRec);
 		IF t.cancel THEN
 			t.state := Cancelled
 		ELSE
@@ -309,18 +319,78 @@ MODULE Tasks;
 		Finish
 	END TaskBoot;
 
-	PROCEDURE InitStack (t: Task): BOOLEAN;
-		VAR lo, hi, sp: S.ADDRESS; size: INTEGER;
+	PROCEDURE TakeStack (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(* Пред: size > 0. Пост: TRUE — [lo, hi) пригоден под стек, запрошенный
+	   с размером size, ниже lo лежит сторожевая страница; FALSE — памяти нет.
+	   Стек берётся из пула, если на его вершине лежит стек того же размера;
+	   иначе у ядра. *)
+		VAR sz: S.ADDRESS;
 	BEGIN
-		size := t.stackSize;
-		IF size = 0 THEN size := defaultStack END;
-		IF ~Kernel.AllocStack(size, lo, hi) THEN RETURN FALSE END;
+		IF poolHead # 0 THEN
+			S.GET(poolHead - 3 * word, sz);
+			IF sz = size THEN
+				hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
+				DEC(poolCount);
+				RETURN TRUE
+			END
+		END;
+		RETURN Kernel.AllocStack(size, lo, hi)
+	END TakeStack;
+
+	PROCEDURE GiveStack (size: INTEGER; lo, hi: S.ADDRESS);
+	(* Пред: [lo, hi) получен от TakeStack(size), на нём никто не исполняется,
+	   запись реестра ядра снята. Пост: стек в пуле. *)
+		VAR sz: S.ADDRESS;
+	BEGIN
+		IF lo = 0 THEN RETURN END;
+		sz := size;
+		S.PUT(hi - word, poolHead); S.PUT(hi - 2 * word, lo); S.PUT(hi - 3 * word, sz);
+		poolHead := hi; INC(poolCount)
+	END GiveStack;
+
+	PROCEDURE TrimPool;
+	(* Пул принимает любой освобождённый стек: возврат памяти ядру стоит
+	   системного вызова, и при массовом завершении задач он дороже самих
+	   задач. Лишнее сверх poolMax возвращается понемногу, не больше trimStep
+	   стеков за шаг планировщика. *)
+		VAR lo, hi: S.ADDRESS; n: INTEGER;
+	BEGIN
+		n := 0;
+		WHILE (poolCount > poolMax) & (n < trimStep) DO
+			hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
+			DEC(poolCount); INC(n);
+			Kernel.FreeStack(lo, hi)
+		END
+	END TrimPool;
+
+	PROCEDURE DrainPool;
+		VAR lo, hi: S.ADDRESS;
+	BEGIN
+		WHILE poolHead # 0 DO
+			hi := poolHead; S.GET(hi - 2 * word, lo); S.GET(hi - word, poolHead);
+			Kernel.FreeStack(lo, hi)
+		END;
+		poolCount := 0
+	END DrainPool;
+
+	PROCEDURE StackSizeOf (t: Task): INTEGER;
+	BEGIN
+		IF t.stackSize = 0 THEN RETURN defaultStack ELSE RETURN t.stackSize END
+	END StackSizeOf;
+
+	PROCEDURE InitStack (t: Task): BOOLEAN;
+		VAR lo, hi, sp, a, zero: S.ADDRESS; size: INTEGER;
+	BEGIN
+		size := StackSizeOf(t);
+		IF ~TakeStack(size, lo, hi) THEN RETURN FALSE END;
 		t.lo := lo; t.hi := hi;
 		t.stackRec := Kernel.RegisterStack(lo, hi);
-		IF t.stackRec = NIL THEN Kernel.FreeStack(lo, hi); t.lo := 0; RETURN FALSE END;
-		(* 13 нулевых слотов регистров (mmap уже нулевой), адрес входа,
+		IF t.stackRec = NIL THEN GiveStack(size, lo, hi); t.lo := 0; RETURN FALSE END;
+		(* 13 нулевых слотов регистров (обнуляются ниже: стек из пула не пуст), адрес входа,
 		   8 байт запаса: sp % 16 = 8, после 13 pop и ret rsp % 16 = 8 *)
 		sp := hi - stackHead;
+		zero := 0; a := sp;
+		WHILE a < hi DO S.PUT(a, zero); INC(a, word) END;
 		S.PUT(sp + entryOff, S.ADR(TaskBoot));
 		t.sp := sp;
 		RETURN TRUE
@@ -329,12 +399,7 @@ MODULE Tasks;
 	PROCEDURE CheckTask (t: Task);
 	BEGIN
 		IF t = NIL THEN Fail("NIL task") END;
-		IF t.state # New THEN Fail("task already started or finished") END;
-		(* ABB-проверка: объект задачи не должен лежать на стеке (например,
-		   если его адрес пришёл из VAR-параметра). *)
-		IF Kernel.StackOf(S.ADR(t^)) # NIL THEN
-			Fail("task object is allocated on a stack")
-		END
+		IF t.state # New THEN Fail("task already started or finished") END
 	END CheckTask;
 
 	PROCEDURE StartIn* (t: Task; g: Group);
@@ -366,7 +431,7 @@ MODULE Tasks;
 		IF t.next # NIL THEN t.next.prev := t.prev END;
 		t.next := NIL; t.prev := NIL;
 		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL END;
-		Kernel.FreeStack(t.lo, t.hi);
+		GiveStack(StackSizeOf(t), t.lo, t.hi);
 		t.lo := 0; t.hi := 0;
 		WakeWaiters(t);
 		DEC(alive);
@@ -384,7 +449,7 @@ MODULE Tasks;
 	BEGIN
 		CheckWait("Yield");
 		current.state := Ready; Enqueue(current);
-		SwitchTo(current.sp, schedSP)
+		SwitchTo(current.sp, schedSP, current.stackRec)
 	END Yield;
 
 	PROCEDURE Sleep* (ms: LONGINT);
@@ -394,7 +459,7 @@ MODULE Tasks;
 		current.deadline := Kernel.Time() + ms;
 		current.state := Sleeping;
 		current.snext := sleepers; sleepers := current;
-		SwitchTo(current.sp, schedSP);
+		SwitchTo(current.sp, schedSP, current.stackRec);
 		current.wake := FALSE	(* Unpark разбудил сон, а не будущий Park *)
 	END Sleep;
 
@@ -406,7 +471,7 @@ MODULE Tasks;
 		WHILE ~IsDone(t) DO
 			current.wnext := t.waiters; t.waiters := current;
 			current.state := Waiting;
-			SwitchTo(current.sp, schedSP);
+			SwitchTo(current.sp, schedSP, current.stackRec);
 			current.wake := FALSE;	(* Unpark разбудил ожидание Join *)
 			CheckWait("Join")
 		END
@@ -418,7 +483,7 @@ MODULE Tasks;
 		CheckWait("Park");
 		IF current.wake THEN current.wake := FALSE; RETURN END;
 		current.state := Parked;
-		SwitchTo(current.sp, schedSP);
+		SwitchTo(current.sp, schedSP, current.stackRec);
 		(* Unpark выставил wake и разбудил нас: флаг съеден этим
 		   пробуждением. Иначе следующий Park (например, внутри
 		   Kernel.Lock) вернулся бы сразу без монитора. *)
@@ -530,31 +595,33 @@ MODULE Tasks;
 	PROCEDURE Step*;
 	(** Исполнить готовые задачи, не дольше slice мс. Вызывается со дна
 		главного цикла (действие планировщика) или тестом. *)
-		VAR t: Task; t0: LONGINT;
+		VAR t: Task; t0, now: LONGINT; schedStack: Kernel.Stack;
 	BEGIN
 		IF current # NIL THEN Fail("Step called from a task") END;
 		IF inStep THEN Fail("Step is not reentrant") END;
 		Services.SetTrapGuardCleanup;	(* страховка от трапа в прошлом действии *)
 		inStep := TRUE;
-		t0 := Kernel.Time();
+		(* Запись своего стека ищем один раз на шаг; задачи свои записи знают.
+		   Переключение обходится без поиска в реестре стеков. *)
+		schedStack := Kernel.StackOf(S.ADR(t0));
+		t0 := Kernel.Time(); now := t0;
 		LOOP
-			IF Kernel.Time() - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
-				Kernel.RequestPoll; lastPoll := Kernel.Time()
+			(* Инвариант: now — время, прочитанное после последнего переключения. *)
+			IF now - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
+				Kernel.RequestPoll; lastPoll := now
 			END;
-			(* Спящих просматриваем не чаще раза на изменившееся время: при
-			   10 тыс. спящих линейный обход на каждой итерации Step дороже
-			   самих переключений. *)
-			IF Kernel.Time() # lastWake THEN
-				lastWake := Kernel.Time(); WakeSleepers(lastWake)
-			END;
+			(* Спящих просматриваем не чаще раза на изменившееся время. *)
+			IF now # lastWake THEN lastWake := now; WakeSleepers(now) END;
 			t := Dequeue();
 			IF t = NIL THEN CheckDeadlock; EXIT END;
 			current := t; t.state := Running;
-			SwitchTo(schedSP, t.sp);
+			SwitchTo(schedSP, t.sp, schedStack);
 			current := NIL;
 			IF IsDone(t) THEN Reap(t) END;
-			IF Kernel.Time() - t0 >= slice THEN EXIT END
+			now := Kernel.Time();
+			IF now - t0 >= slice THEN EXIT END
 		END;
+		TrimPool;
 		inStep := FALSE;
 		IF alive > 0 THEN EnsureScheduled END
 	END Step;
@@ -722,6 +789,7 @@ CLOSE
 		all.lo := 0; all.hi := 0;
 		all := all.next
 	END;
+	DrainPool;
 	readyHead := NIL; readyTail := NIL; sleepers := NIL; current := NIL;
 	scheduled := FALSE; inStep := FALSE
 END Tasks.

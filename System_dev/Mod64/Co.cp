@@ -43,9 +43,9 @@ MODULE System_devCo;
 	PROCEDURE co_resume* (): INTEGER;
 		VAR res: INTEGER;
 	BEGIN
-		Kernel.SwitchSave;
+		Kernel.SwitchSave(NIL);
 		res := System_devCRaw.c_resume();
-		Kernel.SwitchRestore;
+		Kernel.SwitchRestore(NIL);
 		RETURN res
 	END co_resume;
 
@@ -53,9 +53,9 @@ MODULE System_devCo;
 	PROCEDURE co_yield* (): INTEGER;
 		VAR res: INTEGER;
 	BEGIN
-		Kernel.SwitchSave;
+		Kernel.SwitchSave(NIL);
 		res := System_devCRaw.c_yield();
-		Kernel.SwitchRestore;
+		Kernel.SwitchRestore(NIL);
 		RETURN res
 	END co_yield;
 

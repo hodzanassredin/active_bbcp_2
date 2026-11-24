@@ -370,12 +370,14 @@ MODULE System_devTasks;
 
 	PROCEDURE TestProcThousand*;
 	BEGIN
-		LoadBench(1000, benchStack, "tasks1000")
+		LoadBench(1000, benchStack, "tasks1000");
+		LoadBench(1000, benchStack, "tasks1000-warm")	(* стеки уже в пуле *)
 	END TestProcThousand;
 
 	PROCEDURE TestSlowLoadTenThousand*;
 	BEGIN
-		LoadBench(10000, benchStack, "tasks10k")
+		LoadBench(10000, benchStack, "tasks10k");
+		LoadBench(10000, benchStack, "tasks10k-warm")
 	END TestSlowLoadTenThousand;
 
 	PROCEDURE SpawnShort (n: INTEGER);
