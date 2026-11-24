@@ -36,6 +36,12 @@ MODULE Kernel;
 
 	CONST
 		strictStackSweep = TRUE;
+		(* Правило запуска сборки (как GOGC): при нехватке свободного блока
+		   NewBlock собирает, только если с прошлой сборки выделено не меньше
+		   gcPercent процентов выжившего в ней, но не меньше gcMinGrowth байт;
+		   иначе растит кучу. *)
+		gcPercent = 100;
+		gcMinGrowth = 4 * 1024 * 1024;
 
 		nameLen* = 256;
 
@@ -362,6 +368,7 @@ MODULE Kernel;
 		nofcand: INTEGER;
 		heapMin, heapMax: INTEGER;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
+		gcGoal: LONGINT;	(* Инвариант: после Sweep = выжившее + MAX(выжившее * gcPercent DIV 100, gcMinGrowth) *)
 		allocCount: LONGINT;	(* монотонный счётчик успешных NewBlock (Loop) *)
 		ttotal: INTEGER;	(* current total size of BlackBox heap *)	(* committed heap size *)
 		(* total is used only in monocluster mode; it stands for the committed heap size; in monocluster mode, all of heap is in root. The committed size of root is root.size. So, total is not needed? *)
@@ -2303,7 +2310,8 @@ MODULE Kernel;
 			b := free[i]; fblk := sentinel;
 			WHILE b # sentinel DO t := b; b := t.next; t.next := fblk; fblk := t END;
 			free[i] := fblk
-		UNTIL i = 0
+		UNTIL i = 0;
+		gcGoal := allocated + MAX(allocated * gcPercent DIV 100, gcMinGrowth)
 	END Sweep;
 
 	PROCEDURE Collect*;
@@ -2484,17 +2492,19 @@ MODULE Kernel;
 	END MakeFreeMulticluster;
 
 	PROCEDURE NewBlock (size: INTEGER): Block;
-		VAR tsize, a, s: INTEGER; b: FreeBlock; new, c: Cluster; r: Reducer; 
+		VAR tsize, a, s: INTEGER; b: FreeBlock; new, c: Cluster; r: Reducer; collected: BOOLEAN;
 	BEGIN
 		ASSERT(size >= 0, 20);
 		IF size > MAX(INTEGER) - 19 THEN RETURN NIL END;
 		tsize := (size + 19) DIV 16 * 16;	(* tsize is at least 4 bytes greater than size, and always a quotient of 16. 19 = 16 - 1 + 4 *)
 		GetOldFreeBlock(tsize, b);	(* 1) search for free block *)
-		IF (b = NIL) & ~dontCollect THEN
-			FastCollect; GetOldFreeBlock(tsize, b);	(* 2) collect *)
-			IF b = NIL THEN
-				Collect; GetOldFreeBlock(tsize, b);	(* 2a) fully collect *)
-			END
+		(* 2) Сборка — только когда выделено с прошлой сборки достаточно
+		   (gcGoal); иначе куча растёт без сборки. Не выросла — собираем. *)
+		collected := FALSE;
+		IF (b = NIL) & ~dontCollect & (allocated >= gcGoal) THEN
+			FastCollect; GetOldFreeBlock(tsize, b);
+			IF b = NIL THEN Collect; GetOldFreeBlock(tsize, b) END;
+			collected := TRUE
 		END;
 		IF b = NIL THEN 
 			IF monoClusterMem THEN
@@ -2502,6 +2512,10 @@ MODULE Kernel;
 			ELSE
 				MakeFreeMulticluster(tsize, b)
 			END
+		END;
+		IF (b = NIL) & ~dontCollect & ~collected THEN
+			FastCollect; GetOldFreeBlock(tsize, b);
+			IF b = NIL THEN Collect; GetOldFreeBlock(tsize, b) END
 		END;
 		IF b # NIL THEN (* b # NIL *)
 			a := b.size + 4 - tsize;

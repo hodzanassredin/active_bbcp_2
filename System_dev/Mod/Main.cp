@@ -19,6 +19,11 @@ MODULE System_devMain;
 		System_devHeap.Do
 	END TestProcHeap;
 
+	PROCEDURE TestProcGcPace*;
+	BEGIN
+		System_devHeap.Pace
+	END TestProcGcPace;
+
 	PROCEDURE TestProcTrap*;
 	BEGIN
 		System_devTrap.Do

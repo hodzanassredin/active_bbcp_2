@@ -6,6 +6,51 @@ MODULE System_devHeap;
 
 	IMPORT Kernel, System_devSupport;
 
+	TYPE
+		Node = POINTER TO RECORD next: Node; val: INTEGER END;
+
+	VAR
+		collects: INTEGER;	(* сборок за замер: события 1 и 2 Kernel.watcher *)
+		keep: Node;	(* живой список: корень — глобальная переменная *)
+
+	PROCEDURE Watch (e: INTEGER);
+	BEGIN
+		IF (e = 1) OR (e = 2) THEN INC(collects) END
+	END Watch;
+
+	PROCEDURE Fill (n: INTEGER; live: BOOLEAN);
+	(* Пост: выделено n узлов; live — все они в keep, иначе мусор. *)
+		VAR i: INTEGER; x: Node;
+	BEGIN
+		FOR i := 1 TO n DO
+			NEW(x); x.val := i;
+			IF live THEN x.next := keep; keep := x END
+		END
+	END Fill;
+
+	PROCEDURE Pace*;
+	(** Правило запуска сборки: рост живых данных меньше нижнего порога
+		(4 МБ) после сборки не собирает; поток мусора собирается, и куча не
+		растёт пропорционально выделенному. Счёт сборок — Kernel.watcher. *)
+		CONST node = 32;
+		VAR oldW: PROCEDURE (e: INTEGER); oldD: BOOLEAN; used0: LONGINT;
+	BEGIN
+		System_devSupport.Begin("GcPace");
+		oldW := Kernel.watcher; oldD := Kernel.debug;
+		keep := NIL; Kernel.Collect;
+		collects := 0; Kernel.watcher := Watch; Kernel.debug := TRUE;
+		Fill(3 * 1024 * 1024 DIV node, TRUE);	(* 3 МБ живых *)
+		Kernel.watcher := oldW; Kernel.debug := oldD;
+		System_devSupport.Check(collects = 0, "growth below the floor collected");
+		keep := NIL; Kernel.Collect; used0 := Kernel.Used();
+		collects := 0; Kernel.watcher := Watch; Kernel.debug := TRUE;
+		Fill(64 * 1024 * 1024 DIV node, FALSE);	(* 64 МБ мусора *)
+		Kernel.watcher := oldW; Kernel.debug := oldD;
+		System_devSupport.Check(collects >= 2, "garbage stream not collected");
+		System_devSupport.Check(Kernel.Used() - used0 < 32 * 1024 * 1024, "heap grew with garbage");
+		System_devSupport.End
+	END Pace;
+
 	PROCEDURE Do*;
 		CONST n = 48;
 		TYPE Arr = POINTER TO ARRAY 1024 * 1024 OF LONGINT;	(* 8 МБ *)
