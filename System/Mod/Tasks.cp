@@ -857,6 +857,7 @@ MODULE Tasks;
 		главного цикла (действие планировщика) или тестом. Один Kernel.TryTasks
 		на проход: трап задачи возвращает сюда, задача завершается, проход
 		продолжается. Платформа без TryShared — Try на задачу (TaskBoot). *)
+		VAR here: INTEGER;	(* адрес на стеке планировщика *)
 	BEGIN
 		IF current # NIL THEN Msg("Step called from a task") END;
 		ASSERT(current = NIL, 20);
@@ -866,7 +867,7 @@ MODULE Tasks;
 		inStep := TRUE;
 		(* Запись своего стека ищем один раз на шаг; задачи свои записи знают.
 		   Переключение обходится без поиска в реестре стеков. *)
-		stepStack := Kernel.StackOf(S.ADR(stepT0));
+		stepStack := Kernel.StackOf(S.ADR(here));	(* не адрес глобала: запись стека ищется по адресу на нём *)
 		stepT0 := Kernel.Time();
 		REPEAT
 			loopDone := FALSE;
