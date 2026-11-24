@@ -77,3 +77,18 @@ ObxCount0, ObxCount1, ObxLookup0, ObxLookup1,
 ObxViews0, ObxViews1, ObxViews2, ObxViews3, ObxViews4, ObxViews5, ObxViews6,
 ObxViews10, ObxViews11, ObxViews12, ObxViews13, ObxViews14.
 
+
+Tasks, Monitors and Channels
+ObxTasks0  docu/sources		two tasks share a counter without a monitor
+ObxTasks1  docu/sources		waiting: Park and Unpark, Sleep, Join
+ObxTasks2  docu/sources		a server and a hundred clients on a module monitor
+ObxTasks3  docu/sources		a task group: a failing child cancels the others
+ObxTasks4  docu/sources		deadlock detection by the scheduler
+ObxChan0  docu/sources		rendezvous: a channel that holds no messages
+ObxChan1  docu/sources		a bounded buffer lets the producer run ahead
+ObxChan2  docu/sources		a mailbox: sending never waits
+ObxSelect0  docu/sources		selection with a timeout
+ObxProto0  docu/sources		a dialogue protocol checked at every send
+ObxOnce  docu/sources		a single-assignment variable
+ObxWork0  docu/sources		a blocking call on a worker thread
+ObxComputon  docu/sources		a computon executed in a separate process
