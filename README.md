@@ -91,6 +91,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `docs/measurements.md` | замеры и команды их воспроизведения |
 | `docs/kernel-plan.md` | план будущих правок ядра |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | хранилище по содержимому `Cas`: SHA-256, блоки, нарезка, деревья, наборы изменений |
+| `docs/stacks-study.md` | стеки задач: где уходит время, глубина стека, переключение и счётчики процессора |
 | `docs/adr/README.md` | записи решений: что рассматривали, что отвергли и почему |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
 | `Demo/Docu/Sys-Map.md` | карта примеров; описание каждого примера — `Demo/Docu/<Имя>.md` (`Ants`, `Barber`, `Boring`, `Buffer`, `Group`, `ModuleMonitor`, `Philo`, `PingPong`, `Pipeline`, `ReaderWriter`, `SelectTimeout`, `Sieve`, `WorkerPool`, `Support`) |
