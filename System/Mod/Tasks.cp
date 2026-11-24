@@ -20,8 +20,11 @@ MODULE Tasks;
 
 	Отмена — флаг; каждая точка ожидания проверяет его до и после
 	ожидания и прерывает задачу трапом 127. Нарушение предусловия — трап
-	20–24 с текстом в Console (номер — по порядку проверок в процедуре);
+	20–25 с текстом в Console (номер — по порядку проверок в процедуре);
 	100 — нарушен инвариант планировщика.
+
+	Неделимый участок (BeginAtomic/EndAtomic) запрещает точки
+	переключения: на нём держится транзакция AsyncStm.
 
 	Мониторы ([exclusive], ACTIVE.AWAIT) реализует модуль Monitors; ему
 	этот модуль отдаёт крючок Kernel.Scheduler: токен задачи, ожидание
@@ -120,6 +123,7 @@ MODULE Tasks;
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
 		nExternal: INTEGER;	(* инвариант: число задач с external = TRUE *)
+		atomic: INTEGER;	(* глубина BeginAtomic: > 0 — точки переключения запрещены *)
 		(* Пул свободных стеков: односвязный список через верхние слова самого
 		   стека. Инвариант: poolHead = 0 равносильно poolCount = 0; иначе poolHead —
 		   верх hi свободного стека, в [hi - word] — верх следующего, в [hi - 2*word] —
@@ -340,7 +344,9 @@ MODULE Tasks;
 		ASSERT(current # NIL, 20);
 		IF current.cancel THEN Msg("cancelled"); HALT(127) END;
 		IF InFramework() THEN Msg(what); Msg("wait inside an action handler or domain broadcast") END;
-		ASSERT(~InFramework(), 21)
+		ASSERT(~InFramework(), 21);
+		IF atomic > 0 THEN Msg(what); Msg("wait inside an atomic section") END;
+		ASSERT(atomic = 0, 25)
 	END CheckWait;
 
 	(* --- завершение и запуск ---------------------------------------------- *)
@@ -734,6 +740,8 @@ MODULE Tasks;
 		ASSERT(current = NIL, 20);
 		IF inStep THEN Msg("Step is not reentrant") END;
 		ASSERT(~inStep, 21);
+		IF atomic > 0 THEN Msg("Step inside an atomic section") END;
+		ASSERT(atomic = 0, 22);
 		Services.SetTrapGuardCleanup;	(* страховка от трапа в прошлом действии *)
 		inStep := TRUE;
 		(* Запись своего стека ищем один раз на шаг; задачи свои записи знают.
@@ -812,6 +820,23 @@ MODULE Tasks;
 	BEGIN
 		RETURN alive
 	END Count;
+
+	PROCEDURE BeginAtomic*;
+	(** Начать неделимый участок; участки вкладываются.
+		Пост: до парного EndAtomic ожидание (Yield, Sleep, Join, Park, вход в
+		занятый монитор, AWAIT) — трап 25, Step — трап 22, точка уступки не
+		переключает. *)
+	BEGIN
+		INC(atomic)
+	END BeginAtomic;
+
+	PROCEDURE EndAtomic*;
+	(** Пред: идёт неделимый участок (трап 20). Пост: участок закрыт. *)
+	BEGIN
+		IF atomic <= 0 THEN Msg("EndAtomic without BeginAtomic") END;
+		ASSERT(atomic > 0, 20);
+		DEC(atomic)
+	END EndAtomic;
 
 	PROCEDURE Deadlocked* (): BOOLEAN;
 	(** Планировщик упёрся в «все ждут, сроков нет» и напечатал журнал. *)
@@ -896,7 +921,7 @@ MODULE Tasks;
 		монитора. Отмена проверяется в Yield (CheckWait): Poll — тоже
 		точка отмены. *)
 	BEGIN
-		IF (current # NIL) & ~InFramework() & (Monitors.LockDepth() = 0) THEN
+		IF (current # NIL) & (atomic = 0) & ~InFramework() & (Monitors.LockDepth() = 0) THEN
 			Yield; RETURN TRUE
 		ELSE
 			RETURN FALSE
