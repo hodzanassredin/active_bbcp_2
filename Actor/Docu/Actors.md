@@ -501,7 +501,7 @@ and the new field gets its default. A frame from a future version and a frame of
 frames.
 
 **Cost.** Each change is the encoding of a frame through `Stores` and a write to the journal;
-recovery without a snapshot goes through all events of the stream (measurements in section 11). The
+recovery without a snapshot goes through all events of the stream (measurements in section 12). The
 journal grows without bound: events before a snapshot are not deleted, because the audit needs the
 history. The file journal (`ActorFileJournal`) is a temporary store until an ordered key-value
 store: one process per file, `Flush` without `fsync` (a power failure can take the last records; on
@@ -518,7 +518,7 @@ are three journal implementations:
 | transactions | — | no; a torn tail is dropped on open | yes: `Append` is one write transaction |
 | processes | one | one per file | one per base |
 | opening | — | reads the whole file, index in memory | reads the meta; tree lookup |
-| writing an event (section 11) | 4.7–4.9 µs | 6.4–7.0 µs | 1.6–1.7 ms (two `Sync`) |
+| writing an event (section 12) | 4.7–4.9 µs | 6.4–7.0 µs | 1.6–1.7 ms (two `Sync`) |
 
 The append-only file stays as a simple implementation for examples and tests without a base; where
 an event must survive a power failure, the journal is `ActorKvJournal`.
@@ -651,7 +651,65 @@ on the driver's tick.
 Examples: `ObxActor6`, two nodes in one process, `Ask`, refusal of a forged address and node loss;
 `ObxActor7`, a saga with a node crash.
 
-## 11. Measurements
+## 11. Virtual Actors
+
+A client needs account 42 by its number, not by its place: it has no reason to know which node the
+account lives on now, and the node may go away. A virtual actor is addressed by a kind and a key,
+`("acct", "42")`. It comes up on one of the nodes at the first letter, takes its state from the
+journal, goes away after idling, and comes up on another node when its node is lost.
+
+```
+ca := ActorGrain.New(a, j); ActorGrain.Register(ca, "acct", NewAccount);
+cb := ActorGrain.New(b, j); ActorGrain.Register(cb, "acct", NewAccount);
+ActorGrain.HostCap(ca, cap); ActorGrain.Member(cb, cap);
+ActorGrain.HostCap(cb, cap); ActorGrain.Member(ca, cap);
+acct := ActorGrain.Ref(cb, "acct", "42");
+c.Tell(acct, deposit)
+```
+
+**Cluster and host.** `ActorGrain.New` creates a host on the node, a root actor named after the
+node, and a cluster with a member list. Members are given explicitly: the capability of one node's
+host (`HostCap`) is handed to another (`Member`). The journal `j` is shared by all nodes: the nodes
+share storage, like a common database, not memory.
+
+**Placement.** The owner of a key is the live member with the largest weight
+`hash(member, kind, key)`. This is rendezvous hashing, as in protoactor-go: when a member leaves,
+only its keys move. The owner is computed on every send. A letter to a key's address goes to the
+owner's host in an envelope; the host finds the activation (the child `kind.key`) or brings it up and
+passes the letter on with the original sender, so `Respond` answers the client directly
+(`TestActivateOnFirstMessage`).
+
+**State.** An activation extends `ActorGrain.Actor`, a persistent actor (section 8). Its journal
+stream is `kind.key` without the node name (the field `stream`), so the same state comes up on
+another node. A repeated command is guarded, as in the saga, by an operation number
+(`TestRetryIdempotent`).
+
+**Passivation.** The host counts idle ticks of each activation: `ActorGrain.Tick(cl)`; after `idle`
+ticks without letters the activation saves a snapshot and stops. The next letter brings it up from
+the snapshot (`TestPassivateAndReactivate`). A tick is a letter, not a timer: in a deterministic run
+the driver gives it, on a live node a `Services` action.
+
+**Node loss.** The host watches the hosts of the other members. `Terminated` with reason
+`byNodeLoss` makes the member dead, and its keys are placed among the live ones
+(`TestMoveOnNodeLoss`); a returning member announces `Rejoin`. A letter on its way to the lost node is
+lost; the client repeats it with the same operation number.
+
+**One activation without consensus.** If the network splits, each node may consider itself the owner
+and bring up its own activation of a key. Only one of them can write: an event is written with a
+number check (`Append` with the expected `seq`), the second activation gets `conflict` and stops
+(`ActorPersist.conflictTrap`), and the next letter brings it up with the other's event already in
+(`TestSplitBrainOneWriter`). Before writing, the second activation may read stale state; agreeing on
+the owner is stage 5.
+
+`TestSeeds` runs 100 seeds: three nodes, five keys, twenty operations; the network loses and
+duplicates frames, nodes crash and come back, and the client repeats unacknowledged operations.
+Every operation is executed exactly once, and a rerun of a seed matches step by step; 2000 seeds are
+`Actor_devGrain.Long`.
+
+Example: `ObxActor8`, an account on two nodes: access by number, a node crash, continuation on the
+other node.
+
+## 12. Measurements
 
 `Actor_devBench` prints `BENCH` lines of the same form as `Async_devBench`. On the development machine
 (Linux x86-64, three runs in a row, `tools/test.sh Actor_devBench`) two actors answering each other
@@ -684,7 +742,14 @@ Nodes (`Actor_devNet`, network in memory, `ActorSim`): a saga run of 8 transfers
 it the node's network and frames; the heap grew and the collector worked longer and longer. The list
 is gone (`TestSagaRunsFreeMemory`).
 
-## 12. Limitations
+Virtual actors (`Actor_devGrain.Bench`, one node, journal in memory, 2000 keys, three runs): the
+first letter to a key with activation and an event write costs 200–209 µs, a letter to an active
+activation 39–44 µs, passivation with a snapshot 47–51 µs per activation, activation from a snapshot
+189–193 µs, activation without a snapshot from 20 events 0.99–1.18 ms. Activation without a snapshot
+grows with the stream length; the passivation snapshot makes the activation cost constant. A call
+includes a scan of the host's activation list (2000 entries).
+
+## 13. Limitations
 
 - One OS thread: actors run in turn, and computation in one actor delays the others until the next
   switch point of the executor (an executor yields every 64 mailboxes).
@@ -694,17 +759,19 @@ is gone (`TestSagaRunsFreeMemory`).
   holder of one valid capability can send under another name and move that name's repeat window;
   channel protection (TLS, signing frames with a secret of the node pair) is out of this stage.
   At-most-once delivery; the TCP transport is Linux only;
-  there are no virtual actors and no consensus (Raft) (section 10).
+  there is no consensus (Raft): when the network splits, two activations of a key are possible and
+  only one can write (section 11). The host finds an activation by scanning a list, so a call grows
+  more expensive with the number of active keys.
 - One strategy, `OneForOne`; "all for one" is not implemented.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
 - `Ask` to itself from the handler traps with code 23.
 
-## 13. Interface
+## 14. Interface
 
 Trap numbers: 20–26 — violated precondition (the number is given at the procedure), 100 — violated
 module invariant, 127 — the task was cancelled.
 
-### 13.1. ActorCore
+### 14.1. ActorCore
 
 ```
 DEFINITION ActorCore;
@@ -975,7 +1042,7 @@ Post: `dispatcher = d`; the methods of `Dispatcher` other than `Schedule` work o
 Pre: `d # NIL` — trap 20.
 Post: `dir = d`; the first installed directory stays in `stdDir`.
 
-### 13.2. ActorSup
+### 14.2. ActorSup
 
 ```
 DEFINITION ActorSup;
@@ -993,7 +1060,7 @@ Pre: `directive` is `Resume`, `Restart`, `Stop` or `Escalate` — trap 20; `max 
 Post: the strategy answers a child's failure with directive `directive`; for `Restart` it answers
 `Stop` if this is failure number `max + 1` within `withinMs` ms from the first failure of the window.
 
-### 13.3. ActorRun
+### 14.3. ActorRun
 
 ```
 DEFINITION ActorRun;
@@ -1027,7 +1094,7 @@ parents); the pool tasks ended by themselves, without cancellation; the own task
 together with the actors; `n = 0`. An actor that has not stopped within 5 s remains, and the pool
 tasks are then cancelled.
 
-### 13.4. ActorJournal
+### 14.4. ActorJournal
 
 ```
 DEFINITION ActorJournal;
@@ -1116,7 +1183,7 @@ module is loaded, `dir` is a memory journal.
 **PROCEDURE Now (): LONGINT**
 Post: the current UTC time as `YYYYMMDDhhmmss`.
 
-### 13.5. ActorCodec
+### 14.5. ActorCodec
 
 ```
 DEFINITION ActorCodec;
@@ -1155,7 +1222,7 @@ version is out of range, `s = NIL`.
 **PROCEDURE SetDir (c: Codec)**
 Pre: `c # NIL`, trap 20. Post: `dir = c`; the first codec installed stays in `stdDir`.
 
-### 13.6. ActorPersist
+### 14.6. ActorPersist
 
 ```
 DEFINITION ActorPersist;
@@ -1176,11 +1243,12 @@ DEFINITION ActorPersist;
 			seq-: LONGINT;
 			snapEvery: INTEGER;
 			journal: ActorJournal.Journal;
+			stream: ActorCore.Name;
 			(a: Actor) Apply (e: Event), NEW, ABSTRACT;
 			(a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg), NEW, ABSTRACT;
 			(a: Actor) Snapshot (): Stores.Store, NEW, EXTENSIBLE;
 			(a: Actor) Restore (s: Stores.Store), NEW, EMPTY;
-			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg), EXTENSIBLE;
 			(a: Actor) SaveSnapshot (c: ActorCore.Context), NEW;
 			(a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT), NEW
 		END;
@@ -1195,7 +1263,8 @@ DEFINITION ActorPersist;
 END ActorPersist.
 ```
 
-The stream of an actor is its name (`c.name`). `journal = NIL` means `ActorJournal.dir`. `seq` is the
+The stream of an actor is `stream` or, when it is empty, the mailbox name (`c.name`); virtual actors
+set `stream` so that the stream does not depend on the node (section 11). `journal = NIL` means `ActorJournal.dir`. `seq` is the
 number of the last applied event. `snapEvery > 0` takes a snapshot after each event whose number is
 a multiple of `snapEvery`; 0 only on `SaveSnapshot`.
 
@@ -1240,7 +1309,7 @@ Post: the events numbered `>= from` are parsed and given to `v.Visit` in order; 
 is the number of the last one given (`from - 1` if there are no new ones); otherwise `res` is a
 journal error or `corrupt` (a frame cannot be read), and `last` is the number of the last good one.
 
-### 13.7. ActorFileJournal
+### 14.7. ActorFileJournal
 
 ```
 DEFINITION ActorFileJournal;
@@ -1269,7 +1338,7 @@ Limits: `Flush` without `fsync`; one process per file; the stream index in memor
 event); opening reads the whole file; the checksum catches a tear and accidental damage, not a
 deliberate change.
 
-### 13.8. ActorKvJournal
+### 14.8. ActorKvJournal
 
 ```
 DEFINITION ActorKvJournal;
@@ -1291,7 +1360,7 @@ committed to the medium; on `conflict` nothing is written. Base errors: `KvDb.co
 Pre: `db # NIL`, trap 20.
 Post: a journal in the open base `db`; `Close` of the journal closes the base.
 
-### 13.9. ActorNet
+### 14.9. ActorNet
 
 ```
 DEFINITION ActorNet;
@@ -1325,6 +1394,8 @@ DEFINITION ActorNet;
 	PROCEDURE Import (n: Node; IN cap: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE WriteRef (VAR wr: Stores.Writer; r: ActorCore.Ref);
 	PROCEDURE ReadRef (VAR rd: Stores.Reader; OUT r: ActorCore.Ref);
+	PROCEDURE WriteMsg (VAR wr: Stores.Writer; m: Msg);
+	PROCEDURE ReadMsg (VAR rd: Stores.Reader; OUT m: Msg);
 	PROCEDURE Deliver (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER);
 	PROCEDURE Lost (n: Node; IN node: ARRAY OF CHAR);
 
@@ -1371,6 +1442,12 @@ Pre: called from `Msg.Write` and `Msg.Read` — trap 20 in `WriteRef`.
 Post: the address is written as a capability of the node encoding the frame, and read back: an own
 address with a right mark is the local actor, with a wrong one `NIL`, a foreign one a remote address.
 
+**PROCEDURE WriteMsg (VAR wr: Stores.Writer; m: Msg)**
+**PROCEDURE ReadMsg (VAR rd: Stores.Reader; OUT m: Msg)**
+A letter inside a letter (an envelope field): `WriteMsg` writes the module and type name and the
+fields of `m` (or a `NIL` mark), `ReadMsg` reads it back; the type is looked up among loaded modules
+only, and if not found `m = NIL` and `rd.cancelled`. The letter is best made the last field.
+
 **PROCEDURE Deliver (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER)**
 For a transport. Post: a repeat, a foreign mark and a broken frame are dropped and counted; otherwise
 the letter is in the target's mailbox.
@@ -1379,7 +1456,7 @@ the letter is in the target's mailbox.
 For a transport. Post: every watcher of an address on `node` received `Terminated`; watches requested
 by `node` are removed.
 
-### 13.10. ActorNetMem
+### 14.10. ActorNetMem
 
 ```
 DEFINITION ActorNetMem;
@@ -1431,7 +1508,7 @@ seed.
 **PROCEDURE Crash (net: Net; IN name: ARRAY OF CHAR)** — Pre: the node is in the network — trap 20.
 Post: `ActorNet.Down` of the node, frames to it are lost, the other nodes received `Lost(name)`.
 
-### 13.11. ActorSim
+### 14.11. ActorSim
 
 ```
 DEFINITION ActorSim;
@@ -1458,7 +1535,7 @@ was no work; `TRUE` — the first mailbox processed all system letters and at mo
 Post: `TRUE` — no work left.
 **PROCEDURE Idle (): BOOLEAN** — Post: no mailbox has work.
 
-### 13.12. ActorNetTcp
+### 14.12. ActorNetTcp
 
 ```
 DEFINITION ActorNetTcp;
@@ -1495,3 +1572,72 @@ frames go to node `n` (created on `net`).
 **PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR)** — Post: frames to node `name` go to `adr`.
 **PROCEDURE Close (net: Net)** — Post: the listener and connections are closed, the tasks end; other
 nodes see the break.
+
+### 14.13. ActorGrain
+
+```
+DEFINITION ActorGrain;
+
+	IMPORT ActorCore, ActorJournal, ActorPersist, ActorNet;
+
+	CONST
+		maxMembers = 32;
+		notNetMsg = 31;
+
+	TYPE
+		Actor = POINTER TO ABSTRACT RECORD (ActorPersist.Actor)
+			kind-, key-: ActorCore.Name;
+			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg)
+		END;
+
+		Cluster = POINTER TO LIMITED RECORD
+			node-: ActorNet.Node;
+			journal-: ActorJournal.Journal;
+			idle: INTEGER;
+			activations-, passivations-: LONGINT
+		END;
+
+	PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster;
+	PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR);
+	PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR);
+	PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR);
+	PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR);
+	PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
+	PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref;
+	PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR);
+	PROCEDURE Tick (cl: Cluster);
+
+END ActorGrain.
+```
+
+**TYPE Actor** — an activation. `kind` and `key` are set before `Started`; the journal stream is
+`kind.key`, the journal is the cluster's. `Receive` intercepts the passivation letter (a snapshot if
+there are events, then a stop) and hands the rest to `ActorPersist`.
+
+**TYPE Cluster** — the node's cluster: `idle` is the number of idle ticks before passivation (0 — no
+passivation); counters of activations and passivations.
+
+**PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster** — Pre: `n # NIL` — 20;
+`j # NIL` — 21; no root actor named after the node — 22. Post: the host is created, the node itself
+is the only member.
+**PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR)** — Post: the host's capability for
+`Member` on other nodes.
+**PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR)** — Pre: the capability parses — 20; fewer
+than `maxMembers` members — 21. Post: the member is alive, its host is watched.
+**PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR)** — Pre: the member exists — 20. Post: the
+member is alive and watched again.
+**PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR)** — Pre: the member exists and is not the
+node itself — 20. Post: the member is considered dead (a decision from outside).
+**PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN** — Post: the member is alive in
+`cl`'s view.
+**PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory)** — Pre:
+`kind # ""`, without `.` and `/` — 20; `f # NIL` — 21. Post: `f` creates activations of the kind; if
+`f` returns something other than an `Actor`, no activation comes up.
+**PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref** — Pre: `key # ""`,
+without `/` — 20. Post: `Tell` and `Ask` to the address go to the activation at the current owner; a
+letter that is not an `ActorNet.Msg` traps with `notNetMsg`; `Watch` has no effect.
+**PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR)** — Post: the
+owner node among the live members, in `cl`'s view.
+**PROCEDURE Tick (cl: Cluster)** — Post: activations of the node without letters for `idle` ticks in
+a row are passivated.

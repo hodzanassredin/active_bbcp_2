@@ -487,7 +487,7 @@ N выбирают больше числа операций, которые мо
 события нельзя переименовывать и удалять, пока в журналах есть его кадры.
 
 **Цена.** Каждое изменение — кодирование кадра через `Stores` и запись в журнал; восстановление без
-снимка проходит все события потока (замеры — раздел 11). Журнал растёт без предела: события до
+снимка проходит все события потока (замеры — раздел 12). Журнал растёт без предела: события до
 снимка не удаляются, потому что история нужна аудиту. Журнал в файле (`ActorFileJournal`) —
 временное хранилище до упорядоченного «ключ — значение»: один процесс на файл, `Flush` без `fsync`
 (сбой питания может унести последние записи — при открытии они отбросятся как оборванный хвост),
@@ -503,7 +503,7 @@ N выбирают больше числа операций, которые мо
 | транзакции | — | нет; оборванный хвост отбрасывается при открытии | да: `Append` — одна пишущая транзакция |
 | процессы | один | один на файл | один на базу |
 | открытие | — | читает весь файл, указатель в памяти | читает мету; поиск по дереву |
-| запись события (раздел 11) | 4,7–4,9 мкс | 6,4–7,0 мкс | 1,6–1,7 мс (два `Sync`) |
+| запись события (раздел 12) | 4,7–4,9 мкс | 6,4–7,0 мкс | 1,6–1,7 мс (два `Sync`) |
 
 Файл «только дозапись» оставлен как простая реализация для примеров и тестов без базы; там, где
 событие должно пережить выключение питания, журнал — `ActorKvJournal`.
@@ -627,7 +627,61 @@ echo 'Actor_devNet.Long' | tools/run64.sh
 Примеры: `ObxActor6` — два узла в одном процессе, `Ask`, отказ поддельному адресу и потеря узла;
 `ObxActor7` — сага с падением узла.
 
-## 11. Замеры
+## 11. Виртуальные акторы
+
+Счёт номер 42 нужен клиенту по номеру, а не по месту: на каком узле он сейчас живёт, клиенту знать
+незачем, а узел может пропасть. Виртуальный актор адресуется видом и ключом — `("acct", "42")`.
+Он поднимается при первом письме на одном из узлов, состояние берёт из журнала, после простоя
+уходит, а при потере узла поднимается на другом.
+
+```
+ca := ActorGrain.New(a, j); ActorGrain.Register(ca, "acct", NewAccount);
+cb := ActorGrain.New(b, j); ActorGrain.Register(cb, "acct", NewAccount);
+ActorGrain.HostCap(ca, cap); ActorGrain.Member(cb, cap);
+ActorGrain.HostCap(cb, cap); ActorGrain.Member(ca, cap);
+acct := ActorGrain.Ref(cb, "acct", "42");
+c.Tell(acct, deposit)
+```
+
+**Кластер и хозяин.** `ActorGrain.New` создаёт на узле хозяина — корневой актор с именем узла — и
+кластер со списком членов. Члены задаются явно: пропуск хозяина одного узла (`HostCap`) передаётся
+другому (`Member`). Журнал `j` общий для всех узлов: узлы делят хранилище, как общую базу, а не
+память.
+
+**Размещение.** Владелец ключа — живой член с наибольшим весом `хеш(член, вид, ключ)`. Это
+рандеву-хеш, как в protoactor-go: когда член уходит, переезжают только его ключи. Владелец
+считается при каждой отправке. Письмо адресу ключа уходит хозяину владельца конвертом; хозяин
+находит воплощение (ребёнка `вид.ключ`) или поднимает его и передаёт письмо с исходным отправителем,
+поэтому `Respond` отвечает прямо клиенту (`TestActivateOnFirstMessage`).
+
+**Состояние.** Воплощение — наследник `ActorGrain.Actor`, персистентный актор (раздел 8). Его поток
+журнала — `вид.ключ` без имени узла (поле `stream`), поэтому на другом узле поднимается то же
+состояние. Повтор команды защищает, как в саге, номер операции (`TestRetryIdempotent`).
+
+**Пассивация.** Хозяин считает тики простоя каждого воплощения: `ActorGrain.Tick(cl)`; после `idle`
+тиков без писем воплощение сохраняет снимок и останавливается. Следующее письмо поднимает его из
+снимка (`TestPassivateAndReactivate`). Тик — письмо, а не таймер: в детерминированном прогоне его
+даёт водитель, на живом узле — действие `Services`.
+
+**Потеря узла.** Хозяин наблюдает хозяев других членов. `Terminated` с причиной `byNodeLoss` делает
+член мёртвым, и его ключи размещаются среди живых (`TestMoveOnNodeLoss`); вернувшийся член
+объявляет `Rejoin`. Письмо, которое шло к пропавшему узлу, теряется — клиент повторяет его с тем же
+номером операции.
+
+**Одно воплощение — без согласования.** Если сеть разделилась, каждый узел может считать владельцем
+себя и поднять своё воплощение ключа. Писать сможет только одно: событие пишется с проверкой номера
+(`Append` с ожидаемым `seq`), второе воплощение получает `conflict` и останавливается
+(`ActorPersist.conflictTrap`), а следующее письмо поднимает его уже с чужим событием
+(`TestSplitBrainOneWriter`). Читать устаревшее состояние второе воплощение до записи может;
+согласование владельца — этап 5.
+
+`TestSeeds` прогоняет 100 зёрен: три узла, пять ключей, двадцать операций; сеть теряет и дублирует
+кадры, узлы падают и поднимаются, клиент повторяет неподтверждённые операции. Каждая операция
+исполнена ровно один раз, повтор зерна совпадает шаг в шаг; 2000 зёрен — `Actor_devGrain.Long`.
+
+Пример: `ObxActor8` — счёт на двух узлах: обращение по номеру, падение узла, продолжение на другом.
+
+## 12. Замеры
 
 `Actor_devBench` печатает строки `BENCH` того же вида, что `Async_devBench`. На машине разработки
 (Linux x86-64, три прогона подряд, `tools/test.sh Actor_devBench`) два актора, отвечающих друг
@@ -660,7 +714,14 @@ echo 'Actor_devNet.Long' | tools/run64.sh
 узел, а с ним его сеть и кадры; куча росла, сборщик работал всё дольше. Список убран
 (`TestSagaRunsFreeMemory`).
 
-## 12. Ограничения
+Виртуальные акторы (`Actor_devGrain.Bench`, один узел, журнал в памяти, 2000 ключей, три прогона):
+первое письмо ключу с подъёмом и записью события — 200–209 мкс, письмо активному воплощению —
+39–44 мкс, пассивация со снимком — 47–51 мкс на воплощение, подъём из снимка — 189–193 мкс, подъём
+без снимка из 20 событий — 0,99–1,18 мс. Подъём без снимка растёт с длиной потока; снимок при
+пассивации делает цену подъёма постоянной. В цену обращения входит перебор списка воплощений
+хозяина (2000 элементов).
+
+## 13. Ограничения
 
 - Одна нить ОС: акторы исполняются по очереди, вычислительная работа одного актора задерживает
   остальных до точки переключения исполнителя (исполнитель уступает каждые 64 ящика).
@@ -670,17 +731,18 @@ echo 'Actor_devNet.Long' | tools/run64.sh
   действующего пропуска может слать от чужого имени и двигать окно повторов этого имени; защита
   канала (TLS, подпись кадра секретом пары узлов) — вне этапа. Доставка «не более одного раза»,
   TCP-транспорт только на Linux;
-  виртуальных акторов и согласования (Raft) нет (раздел 10).
+  согласования (Raft) нет: при разделении сети возможны два воплощения ключа, писать может одно
+  (раздел 11). Хозяин ищет воплощение перебором списка: обращение дорожает с числом активных ключей.
 - Стратегия одна — `OneForOne`; «все за одного» не реализована.
 - Пока пул жив, планировщик не объявляет тупик прочих задач (раздел 3).
 - `Ask` к самому себе из обработчика трапует с кодом 23.
 
-## 13. Интерфейс
+## 14. Интерфейс
 
 Номера трапов: 20–26 — нарушение предусловия (номер указан у процедуры), 100 — нарушен инвариант
 модуля, 127 — задача отменена.
 
-### 13.1. ActorCore
+### 14.1. ActorCore
 
 ```
 DEFINITION ActorCore;
@@ -949,7 +1011,7 @@ name», пустое `name` — `"$номер"`; первым обработчи
 Пред: `d # NIL` — трап 20.
 Пост: `dir = d`; первый установленный каталог остаётся в `stdDir`.
 
-### 13.2. ActorSup
+### 14.2. ActorSup
 
 ```
 DEFINITION ActorSup;
@@ -967,7 +1029,7 @@ END ActorSup.
 Пост: стратегия отвечает на отказ ребёнка директивой `directive`; для `Restart` — `Stop`, если
 это отказ с номером `max + 1` за `withinMs` мс от первого отказа окна.
 
-### 13.3. ActorRun
+### 14.3. ActorRun
 
 ```
 DEFINITION ActorRun;
@@ -999,7 +1061,7 @@ END ActorRun.
 задачи пула завершились сами, без отмены; собственные задачи акторов завершаются вместе с
 акторами; `n = 0`. Актор, не остановившийся за 5 с, остаётся, а задачи пула тогда отменяются.
 
-### 13.4. ActorJournal
+### 14.4. ActorJournal
 
 ```
 DEFINITION ActorJournal;
@@ -1087,7 +1149,7 @@ END ActorJournal.
 **PROCEDURE Now (): LONGINT**
 Пост: текущее время UTC в виде `ГГГГММДДччммсс`.
 
-### 13.5. ActorCodec
+### 14.5. ActorCodec
 
 ```
 DEFINITION ActorCodec;
@@ -1126,7 +1188,7 @@ END ActorCodec.
 **PROCEDURE SetDir (c: Codec)**
 Пред: `c # NIL` — трап 20. Пост: `dir = c`; первый установленный кодек остаётся в `stdDir`.
 
-### 13.6. ActorPersist
+### 14.6. ActorPersist
 
 ```
 DEFINITION ActorPersist;
@@ -1147,11 +1209,12 @@ DEFINITION ActorPersist;
 			seq-: LONGINT;
 			snapEvery: INTEGER;
 			journal: ActorJournal.Journal;
+			stream: ActorCore.Name;
 			(a: Actor) Apply (e: Event), NEW, ABSTRACT;
 			(a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg), NEW, ABSTRACT;
 			(a: Actor) Snapshot (): Stores.Store, NEW, EXTENSIBLE;
 			(a: Actor) Restore (s: Stores.Store), NEW, EMPTY;
-			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg), EXTENSIBLE;
 			(a: Actor) SaveSnapshot (c: ActorCore.Context), NEW;
 			(a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT), NEW
 		END;
@@ -1166,7 +1229,8 @@ DEFINITION ActorPersist;
 END ActorPersist.
 ```
 
-Поток актора — его имя (`c.name`). `journal = NIL` — `ActorJournal.dir`. `seq` — номер последнего
+Поток актора — `stream`, а если оно пустое, — имя ящика (`c.name`); виртуальные акторы задают
+`stream`, чтобы поток не зависел от узла (раздел 11). `journal = NIL` — `ActorJournal.dir`. `seq` — номер последнего
 применённого события. `snapEvery > 0` — снимок после каждого события с номером, кратным `snapEvery`;
 0 — только по `SaveSnapshot`.
 
@@ -1209,7 +1273,7 @@ END ActorPersist.
 номер последнего отданного (`from - 1`, если новых нет); иначе `res` — ошибка журнала или `corrupt`
 (кадр не читается), `last` — номер последнего удачного.
 
-### 13.7. ActorFileJournal
+### 14.7. ActorFileJournal
 
 ```
 DEFINITION ActorFileJournal;
@@ -1236,7 +1300,7 @@ END ActorFileJournal.
 Границы: `Flush` без `fsync`; один процесс на файл; указатель потоков в памяти (одна запись на
 событие); открытие читает весь файл; сумма ловит обрыв и случайную порчу, но не подмену.
 
-### 13.8. ActorKvJournal
+### 14.8. ActorKvJournal
 
 ```
 DEFINITION ActorKvJournal;
@@ -1257,7 +1321,7 @@ END ActorKvJournal.
 Пред: `db # NIL` — трап 20.
 Пост: журнал в открытой базе `db`; `Close` журнала закрывает базу.
 
-### 13.9. ActorNet
+### 14.9. ActorNet
 
 ```
 DEFINITION ActorNet;
@@ -1291,6 +1355,8 @@ DEFINITION ActorNet;
 	PROCEDURE Import (n: Node; IN cap: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE WriteRef (VAR wr: Stores.Writer; r: ActorCore.Ref);
 	PROCEDURE ReadRef (VAR rd: Stores.Reader; OUT r: ActorCore.Ref);
+	PROCEDURE WriteMsg (VAR wr: Stores.Writer; m: Msg);
+	PROCEDURE ReadMsg (VAR rd: Stores.Reader; OUT m: Msg);
 	PROCEDURE Deliver (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER);
 	PROCEDURE Lost (n: Node; IN node: ARRAY OF CHAR);
 
@@ -1336,6 +1402,12 @@ END ActorNet.
 Пост: адрес записан пропуском узла, который кодирует кадр, и прочитан: свой адрес с верной меткой —
 локальный актор, с неверной — `NIL`, чужой — удалённый адрес.
 
+**PROCEDURE WriteMsg (VAR wr: Stores.Writer; m: Msg)**
+**PROCEDURE ReadMsg (VAR rd: Stores.Reader; OUT m: Msg)**
+Письмо внутри письма (поле конверта): `WriteMsg` пишет имя модуля и типа и поля `m` (или признак
+`NIL`), `ReadMsg` читает его; тип ищется только среди загруженных модулей, не найден — `m = NIL` и
+`rd.cancelled`. Письмо удобно делать последним полем.
+
 **PROCEDURE Deliver (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER)**
 Для транспорта. Пост: повтор, чужая метка и битый кадр отброшены и посчитаны; иначе письмо в ящике
 адресата.
@@ -1344,7 +1416,7 @@ END ActorNet.
 Для транспорта. Пост: каждый наблюдатель адреса на `node` получил `Terminated`; наблюдения по
 просьбам `node` сняты.
 
-### 13.10. ActorNetMem
+### 14.10. ActorNetMem
 
 ```
 DEFINITION ActorNetMem;
@@ -1395,7 +1467,7 @@ END ActorNetMem.
 **PROCEDURE Crash (net: Net; IN name: ARRAY OF CHAR)** — Пред: узел есть в сети — трап 20. Пост:
 `ActorNet.Down` узла, кадры к нему пропали, остальные узлы получили `Lost(name)`.
 
-### 13.11. ActorSim
+### 14.11. ActorSim
 
 ```
 DEFINITION ActorSim;
@@ -1422,7 +1494,7 @@ END ActorSim.
 `TRUE` — работы нет.
 **PROCEDURE Idle (): BOOLEAN** — Пост: ящиков с работой нет.
 
-### 13.12. ActorNetTcp
+### 14.12. ActorNetTcp
 
 ```
 DEFINITION ActorNetTcp;
@@ -1458,3 +1530,69 @@ END ActorNetTcp.
 **PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR)** — Пост: кадры узлу `name` идут на `adr`.
 **PROCEDURE Close (net: Net)** — Пост: слушатель и соединения закрыты, задачи завершаются; другие
 узлы видят обрыв.
+
+### 14.13. ActorGrain
+
+```
+DEFINITION ActorGrain;
+
+	IMPORT ActorCore, ActorJournal, ActorPersist, ActorNet;
+
+	CONST
+		maxMembers = 32;
+		notNetMsg = 31;
+
+	TYPE
+		Actor = POINTER TO ABSTRACT RECORD (ActorPersist.Actor)
+			kind-, key-: ActorCore.Name;
+			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg)
+		END;
+
+		Cluster = POINTER TO LIMITED RECORD
+			node-: ActorNet.Node;
+			journal-: ActorJournal.Journal;
+			idle: INTEGER;
+			activations-, passivations-: LONGINT
+		END;
+
+	PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster;
+	PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR);
+	PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR);
+	PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR);
+	PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR);
+	PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
+	PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref;
+	PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR);
+	PROCEDURE Tick (cl: Cluster);
+
+END ActorGrain.
+```
+
+**TYPE Actor** — воплощение. `kind` и `key` заданы до `Started`; поток журнала — `kind.key`, журнал —
+журнал кластера. `Receive` перехватывает письмо пассивации (снимок, если есть события, и
+остановка), прочие отдаёт `ActorPersist`.
+
+**TYPE Cluster** — кластер узла: `idle` — тиков простоя до пассивации (0 — без пассивации),
+счётчики поднятых и пассивированных воплощений.
+
+**PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster** — Пред: `n # NIL` — 20;
+`j # NIL` — 21; корневого актора с именем узла нет — 22. Пост: хозяин создан, член — сам узел.
+**PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR)** — Пост: пропуск хозяина для `Member`
+других узлов.
+**PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR)** — Пред: пропуск разобран — 20; мест меньше
+`maxMembers` — 21. Пост: член живой, его хозяин наблюдается.
+**PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR)** — Пред: член есть — 20. Пост: член живой
+и снова наблюдается.
+**PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR)** — Пред: член есть и это не сам узел — 20.
+Пост: член считается мёртвым (решение снаружи).
+**PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN** — Пост: член живой, по мнению `cl`.
+**PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory)** — Пред:
+`kind # ""`, без `.` и `/` — 20; `f # NIL` — 21. Пост: воплощения вида создаёт `f`; `f`, вернувшая не
+`Actor`, — воплощение не поднимается.
+**PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref** — Пред: `key # ""`, без
+`/` — 20. Пост: `Tell` и `Ask` к адресу идут воплощению у текущего владельца; письмо не
+`ActorNet.Msg` — трап `notNetMsg`; `Watch` не действует.
+**PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR)** — Пост: узел-
+владелец среди живых членов, по мнению `cl`.
+**PROCEDURE Tick (cl: Cluster)** — Пост: воплощения узла без писем `idle` тиков подряд пассивируются.
