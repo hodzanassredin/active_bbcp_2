@@ -4,7 +4,7 @@ MODULE System_devStackDirs;
 	на стек, (в) плотные плиты с запасом и канарейкой. Модуль собран с
 	ключом % (tools/tests.txt): его задачи проверяют границу стека в прологе. *)
 
-	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert;
+	IMPORT S := SYSTEM, Kernel, Tasks, System_devStackPlain, UnitAssert;
 
 	CONST
 		nDirs = 3;
@@ -14,6 +14,8 @@ MODULE System_devStackDirs;
 	TYPE
 		Calm = POINTER TO RECORD (Tasks.Task) n: INTEGER; lo, hi: S.ADDRESS END;
 		Smash = POINTER TO RECORD (Tasks.Task) END;
+		PlainSub = POINTER TO RECORD (System_devStackPlain.Plain) END;	(* Run унаследован: без ключа *)
+		PlainOwn = POINTER TO RECORD (System_devStackPlain.Plain) END;	(* свой Run: с ключом *)
 
 	VAR
 		dirs: ARRAY nDirs OF Tasks.StackDir;
@@ -34,6 +36,11 @@ MODULE System_devStackDirs;
 		S.PUT(Kernel.StackOf(S.ADR(x)).lo, 0);
 		Tasks.Yield;
 		x := 1
+	END Run;
+
+	PROCEDURE (t: PlainOwn) Run;
+	BEGIN
+		t.n := 2
 	END Run;
 
 	PROCEDURE Pump;
@@ -112,5 +119,33 @@ MODULE System_devStackDirs;
 		UnitAssert.EqualInt(10, c.n, "neighbour finished");
 		UnitAssert.True(~Tasks.Failed(c), "neighbour not failed")
 	END TestProcCanaryCaught;
+
+	PROCEDURE TestModuleCheckedFlag*;
+	(* Признак «собран с ключом %» — бит опций модуля из объектного файла. *)
+	BEGIN
+		UnitAssert.True(Tasks.ModuleChecked(Kernel.ThisMod("System_devStackDirs")), "this module has %");
+		UnitAssert.True(~Tasks.ModuleChecked(Kernel.ThisMod("System_devStackPlain")), "plain module has no %");
+		UnitAssert.True(~Tasks.ModuleChecked(Kernel.ThisMod("Tasks")), "Tasks has no %")
+	END TestModuleCheckedFlag;
+
+	PROCEDURE TestProcDenseOnlyForCheckedRun*;
+	(* Плотный поставщик даёт стек только задаче, чей Run собран с ключом %;
+	   остальные получают стек со сторожем (не от плотного поставщика). *)
+		VAR old: Tasks.StackDir; c: Calm; p: System_devStackPlain.Plain; ps: PlainSub; po: PlainOwn;
+	BEGIN
+		old := Tasks.StackDirOf();
+		Use(2);
+		NEW(c); Tasks.Start(c);
+		NEW(p); Tasks.Start(p);
+		NEW(ps); Tasks.Start(ps);
+		NEW(po); Tasks.Start(po);
+		UnitAssert.True(Tasks.StackDirOfTask(c) = dirs[2], "checked Run: dense");
+		UnitAssert.True(Tasks.StackDirOfTask(po) = dirs[2], "own checked Run over plain base: dense");
+		UnitAssert.True((Tasks.StackDirOfTask(p) # NIL) & (Tasks.StackDirOfTask(p) # dirs[2]), "plain Run: guarded");
+		UnitAssert.True((Tasks.StackDirOfTask(ps) # NIL) & (Tasks.StackDirOfTask(ps) # dirs[2]), "inherited plain Run: guarded");
+		Pump;
+		Tasks.SetStackDir(old);
+		UnitAssert.EqualInt(2, p.n, "plain ran"); UnitAssert.EqualInt(2, ps.n, "sub ran"); UnitAssert.EqualInt(2, po.n, "own ran")
+	END TestProcDenseOnlyForCheckedRun;
 
 END System_devStackDirs.

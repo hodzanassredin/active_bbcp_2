@@ -48,6 +48,8 @@ MODULE Tasks;
 		denseMax = 32 * 1024 * 1024;	(* наибольшая плотная плита, байт *)
 		denseMinChecked = 2048;	(* наименьший стек выше запаса плотной плиты *)
 		canaryVal = 5AFEC0DEH;	(* слово у дна плотного стека *)
+		stackChkOpt = 12;	(* бит Kernel.Module.opts: модуль собран с ключом % (Compiler64.stackChk;
+			DevCPE пишет в объектный файл биты опций 0..15) *)
 		denseReserve = 8 * 1024;	(* запас UseDenseStacks: глубина кода без проверки по замеру
 			(docs/stacks-study.md, 6.5) — не больше 7,8 КБ на всех тестах *)
 		word = Taskarch.word;
@@ -136,6 +138,9 @@ MODULE Tasks;
 			slabs: DenseSlab
 		END;
 
+		ProbeA = POINTER TO RECORD (Task) END;	(* два Run: по разнице таблиц методов — номер Run *)
+		ProbeB = POINTER TO RECORD (Task) END;
+
 		SchedAction = POINTER TO RECORD (Services.Action) END;
 		Sched = POINTER TO RECORD (Kernel.Scheduler) END;
 
@@ -172,6 +177,8 @@ MODULE Tasks;
 		guardDir: StackDir;	(* поставщик со сторожем: по умолчанию и для кода без ключа % *)
 		dirs: StackDir;		(* поставщики, у которых есть стеки (живые или в пуле) *)
 		canaryCell: S.ADDRESS;	(* канарейка стеков со сторожем: всегда canaryVal *)
+		runSlot: INTEGER;	(* номер Run в таблице методов; -1 — не найден *)
+		lastType: Kernel.Type; lastChecked: BOOLEAN;	(* итог RunChecked для последнего типа *)
 		(* Проход Step: его стек и начало, итог RunLoop. oneTry — один Kernel.Try
 		   на проход (TryTasks); FALSE — платформа его не даёт, Try на задачу. *)
 		stepStack: Kernel.Stack;
@@ -181,6 +188,56 @@ MODULE Tasks;
 		closeT: Task; closeT0: LONGINT;	(* для CLOSE *)
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
+
+	PROCEDURE (p: ProbeA) Run;
+	BEGIN
+	END Run;
+
+	PROCEDURE (p: ProbeB) Run;
+	BEGIN
+		HALT(100)
+	END Run;
+
+	PROCEDURE FindRunSlot;
+	(* Пост: runSlot — номер метода Run: единственный слот, в котором таблицы
+	   методов ProbeA и ProbeB расходятся (методы ANYREC у них общие). *)
+		VAR a: ProbeA; b: ProbeB; ta, tb, x, y: S.ADDRESS; n: INTEGER;
+	BEGIN
+		NEW(a); NEW(b);
+		ta := S.VAL(S.ADDRESS, Kernel.TypeOf(a^)); tb := S.VAL(S.ADDRESS, Kernel.TypeOf(b^));
+		runSlot := -1; n := 0;
+		WHILE (runSlot < 0) & (n < 16) DO
+			S.GET(ta - word * (n + 1), x); S.GET(tb - word * (n + 1), y);
+			IF x # y THEN runSlot := n END;
+			INC(n)
+		END
+	END FindRunSlot;
+
+	PROCEDURE ModuleChecked* (m: Kernel.Module): BOOLEAN;
+	(** Модуль m собран с ключом % (проверка границы стека в прологе). Пред: m # NIL. *)
+	BEGIN
+		RETURN stackChkOpt IN m.opts
+	END ModuleChecked;
+
+	PROCEDURE RunChecked* (t: Task): BOOLEAN;
+	(** Метод Run задачи t (её динамического типа) собран с ключом %. Признак
+		модуля, а не всего кода: Run может звать модули без ключа и C, их
+		покрывает запас поставщика. *)
+		VAR typ: Kernel.Type; adr: S.ADDRESS; m: Kernel.Module; offs: INTEGER;
+	BEGIN
+		ASSERT(t # NIL, 20);
+		typ := Kernel.TypeOf(t^);
+		IF typ # lastType THEN
+			lastChecked := FALSE;
+			IF runSlot >= 0 THEN
+				S.GET(S.VAL(S.ADDRESS, typ) - word * (runSlot + 1), adr);
+				Kernel.SearchProcVar(adr, m, offs);
+				lastChecked := (m # NIL) & ModuleChecked(m)
+			END;
+			lastType := typ
+		END;
+		RETURN lastChecked
+	END RunChecked;
 
 	PROCEDURE (d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
 	(** Пред: size > 0. Пост: TRUE — [lo, hi) новый стек не меньше size байт; FALSE — памяти нет.
@@ -801,6 +858,7 @@ MODULE Tasks;
 	BEGIN
 		size := StackSizeOf(t);
 		d := dir;
+		IF d.checked & ~RunChecked(t) THEN d := guardDir END;	(* код задачи без проверки — стек со сторожем *)
 		IF ~TakeStack(d, size, lo, hi) THEN RETURN FALSE END;
 		t.stackRec := Kernel.RegisterStack(lo, hi);
 		IF t.stackRec = NIL THEN GiveStack(d, size, lo, hi); RETURN FALSE END;
@@ -1282,7 +1340,7 @@ BEGIN
 	NEW(sched);
 	NEW(schedHook);
 	slice := defaultSlice; stackDefault := defaultStack; oneTry := TRUE;
-	canaryCell := canaryVal;
+	canaryCell := canaryVal; FindRunSlot;
 	guardDir := NewSlabDir(); dir := guardDir;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
 	lastPoll := Kernel.Time();
