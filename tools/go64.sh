@@ -26,6 +26,8 @@ MARK=$(mktemp)
 trap 'rm -f "$MARK" "$LOG" "$LOG.cmd"' EXIT
 : > "$LOG.cmd"
 echo 'DevCompiler64.InitLogMarks' >> "$LOG.cmd"
+# Проба переноса стека: STACKCHK_ALL=1 — ключ % всем модулям, кроме ядра.
+[ "${STACKCHK_ALL:-0}" = 1 ] && echo 'DevCompiler64.ForceStackChk' >> "$LOG.cmd"
 echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')" >> "$LOG.cmd"
 for m in "$@"; do
 	# Модуль с суффиксом опций: Dev_devYield^ -> CompileThis Dev_devYield ^,
