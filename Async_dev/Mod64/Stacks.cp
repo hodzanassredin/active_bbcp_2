@@ -253,4 +253,11 @@ MODULE Async_devStacks;
 		Load1(10000, 8 * 1024, 3, "load8k-warm")
 	END LoadSmall;
 
+	PROCEDURE LoadTiny*;
+	(** То же со стеком 4 КБ — стартовый стек пробы переноса (docs/stack-copy-study.md). *)
+	BEGIN
+		Load1(10000, 4 * 1024, 1, "load4k");
+		Load1(10000, 4 * 1024, 3, "load4k-warm")
+	END LoadTiny;
+
 END Async_devStacks.

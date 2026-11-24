@@ -27,3 +27,5 @@ Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer 
 System_devStackChk|proc|300||%
 System_devSchedTrap|proc|300||
 System_devStackDirs|proc|300|System_devStackPlain|%
+# Проба переноса стека (Stackmove, docs/stack-copy-study.md; только amd64).
+System_devStackMove|proc|300|System_devCRaw System_devClock System_devStackMoveCode% System_devStackMoveSys%
