@@ -400,6 +400,23 @@ printf 'Async_devStacks.Load\n' | PERF_CTL_FD=7 PERF_ACK_FD=8 PERF_PHASE=2 \
 чтобы его звал и `Step`. Это изменение ядра и `Tasks` с повторной сборкой и полными прогонами; в эту серию
 оно не вошло.
 
+Что `Try` задачи обязан сохранить при замене, и тест на каждый пункт (`System_devTasks`, все зелёные на
+коде с `Try` на задачу):
+
+| Пункт | Тест |
+|---|---|
+| трап убивает только свою задачу, `Failed` истинно, состояние `Finished` | `TestProcTrapIsolation`, `TestProcTrapReportedOnce` |
+| отчёт о трапе печатается один раз (`Kernel.trapCount` + 1) | `TestProcTrapReportedOnce` |
+| монитор, взятый в теле, освобождён; ждущая задача входит; главный стек мониторов не держит | `TestProcTrapReleasesTaskMonitor` |
+| флаг обработчика `Services.executingAction` снят (в этой ветке нет `BeginAtomic`; ближайшее — этот флаг, его снимает уборщик `GuardCleaner` внутри `HandleTrap` и `TaskBoot`) | отдельного теста нет |
+| свой `Kernel.Try` задачи с переключениями внутри ловит свой трап, задача живёт дальше | `TestProcUserTryAcrossSwitches` |
+| `tryCount` и контекст `Try` не путаются между задачей с открытым `Try` и задачей без него | `TestProcUserTryAcrossSwitches` |
+| трап в задаче, запущенной из `Step` и прямым переключением | `TestProcTrapIsolation`, `TestProcDirectFinishAndTrap` |
+| трап после цепочки прямых переключений длиннее `directMax` | `TestProcTrapAfterDirectChain` |
+| стек из пула после трапнувшей задачи: свой `Try` на нём работает, следующий трап убивает свою задачу | `TestProcPoolStackAfterTrap` |
+| `Kernel.Try` главного стека после трапа в задаче | `TestProcMainTryAfterTaskTrap` |
+| группа трапнувшей задачи отменяется | `TestProcGroupTrap`, `TestProcTrapCancelsOwnGroup` |
+
 Э4. Источник ошибок предсказания найден по стеку последних ветвлений (`perf record -b`, процессор AMD Zen 4
 даёт LBR в пользовательском режиме). Все ошибки предсказания исполнения — возвраты вверх по цепочке кадров
 после смены стека: возврат из `Taskarch.Switch`, затем из `SwitchTo` в `Leave`, из `Leave` в `Yield`, из
