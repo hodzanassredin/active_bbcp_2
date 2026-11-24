@@ -269,7 +269,7 @@ MODULE ActorNet;
 		b.Internalize^(rd); IF rd.cancelled THEN RETURN END;
 		rd.ReadVersion(0, 0, v); IF rd.cancelled THEN RETURN END;
 		rd.ReadString(mod); rd.ReadString(typ);
-		m := Kernel.ThisMod(mod); t := NIL;
+		m := Kernel.ThisLoadedMod(mod); t := NIL;	(* кадр не загружает модулей: тип только среди загруженных *)
 		IF m # NIL THEN t := Kernel.ThisType(m, typ) END;
 		a := NIL;
 		IF t # NIL THEN Kernel.NewObj(p, t); a := S.VAL(ANYPTR, p) END;
@@ -420,16 +420,19 @@ MODULE ActorNet;
 		IF has THEN GetName(frame, pos, len, ok, snode); GetName(frame, pos, len, ok, sname); GetMac(frame, pos, len, ok, smac) END;
 		blen := SHORT(Get(frame, pos, len, 4, ok));
 		IF ~ok OR (blen < 0) OR (pos + blen > len) THEN INC(n.refused); RETURN END;
-		IF ~n.Fresh(from, inc, seq) THEN INC(n.duplicates); RETURN END;
-		INC(n.received);
-		IF kind = kTerm THEN	(* адрес на узле from кончился *)
+		(* метка проверяется до окна повторов: окно двигает только держатель пропуска *)
+		IF kind = kTerm THEN	(* адрес на узле from кончился; метка — та, что выдал владелец *)
 			r := n.remotes;
 			WHILE (r # NIL) & ((r.node # from) OR (r.name # name)) DO r := r.next END;
-			IF r # NIL THEN r.Ended END;
+			IF (r = NIL) OR ~SameMac(r.mac, mac) THEN INC(n.refused); RETURN END;
+			IF ~n.Fresh(from, inc, seq) THEN INC(n.duplicates); RETURN END;
+			INC(n.received); r.Ended;
 			RETURN
 		END;
 		n.Mac(name, mine);
 		IF ~SameMac(mine, mac) THEN INC(n.refused); RETURN END;
+		IF ~n.Fresh(from, inc, seq) THEN INC(n.duplicates); RETURN END;
+		INC(n.received);
 		to := ActorCore.dir.Lookup(ActorCore.node, name);
 		IF kind = kWatch THEN
 			IF to # NIL THEN n.Watch(from, to, mac) ELSE n.Send(kTerm, from, name, mac, NIL, NIL) END
@@ -525,10 +528,18 @@ MODULE ActorNet;
 		VAR i, k, j: INTEGER; node, name: Name; mac: Mac; c: CHAR; v: INTEGER; x: ARRAY macLen OF INTEGER;
 	BEGIN
 		i := 0; k := 0;
-		WHILE (cap[i] # 0X) & (cap[i] # "|") DO node[k] := cap[i]; INC(i); INC(k) END;
-		node[k] := 0X; IF cap[i] # "|" THEN RETURN NIL END; INC(i); k := 0;
-		WHILE (cap[i] # 0X) & (cap[i] # "|") DO name[k] := cap[i]; INC(i); INC(k) END;
-		name[k] := 0X; IF cap[i] # "|" THEN RETURN NIL END; INC(i);
+		WHILE (i < LEN(cap)) & (cap[i] # 0X) & (cap[i] # "|") DO
+			IF k >= ActorCore.nameLen - 1 THEN RETURN NIL END;
+			node[k] := cap[i]; INC(i); INC(k)
+		END;
+		node[k] := 0X; IF (i >= LEN(cap)) OR (cap[i] # "|") OR (k = 0) THEN RETURN NIL END; INC(i); k := 0;
+		WHILE (i < LEN(cap)) & (cap[i] # 0X) & (cap[i] # "|") DO
+			IF k >= ActorCore.nameLen - 1 THEN RETURN NIL END;
+			name[k] := cap[i]; INC(i); INC(k)
+		END;
+		name[k] := 0X; IF (i >= LEN(cap)) OR (cap[i] # "|") OR (k = 0) THEN RETURN NIL END; INC(i);
+		IF i + 2 * macLen > LEN(cap) THEN RETURN NIL END;
+		IF (i + 2 * macLen < LEN(cap)) & (cap[i + 2 * macLen] # 0X) THEN RETURN NIL END;	(* хвост после метки *)
 		FOR j := 0 TO 2 * macLen - 1 DO
 			c := cap[i + j];
 			IF (c >= "0") & (c <= "9") THEN v := ORD(c) - ORD("0")

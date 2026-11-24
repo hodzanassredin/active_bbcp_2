@@ -596,7 +596,9 @@ protects against guessing, not against eavesdropping.
 
 **Letter.** The sender writes `Tell(r, m)` or `Ask(r, m, …)` as locally. A letter that goes to another
 node extends `ActorNet.Msg` and implements `Write` and `Read` over `Stores.Writer` and `Reader`; the
-type is found by module and type name, as in `Stores`. A letter of another type sent to a remote
+type is found by module and type name among loaded modules only: a frame loads no modules, and a
+letter of an unloaded type is refused. The receiver loads the modules of its letters itself (for
+example, by importing them). A letter of another type sent to a remote
 address traps with `ActorNet.notNetMsg`.
 
 **At-most-once delivery.** A frame carries the sender node's name, its incarnation number and a
@@ -678,7 +680,10 @@ probably because of node and name lists the runs do not free; the cause is not a
   switch point of the executor (an executor yields every 64 mailboxes).
 - Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per batch; a batch is
   formed only from tasks writing at the same time (section 8).
-- Nodes: at-most-once delivery, frames are not encrypted, the TCP transport is Linux only;
+- Nodes: frames are neither signed nor encrypted, and the "from" field is not authenticated: the
+  holder of one valid capability can send under another name and move that name's repeat window;
+  channel protection (TLS, signing frames with a secret of the node pair) is out of this stage.
+  At-most-once delivery; the TCP transport is Linux only;
   there are no virtual actors and no consensus (Raft) (section 10).
 - One strategy, `OneForOne`; "all for one" is not implemented.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).

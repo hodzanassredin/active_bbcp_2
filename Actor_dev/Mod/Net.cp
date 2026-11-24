@@ -10,7 +10,7 @@ MODULE Actor_devNet;
 	тику; счёт отвечает на повтор операции тем же итогом. Прогон саги —
 	функция зерна: провал печатает зерно, Rerun повторяет последнее. *)
 
-	IMPORT Services, Tasks, Strings, Stores, Log := StdLog, CommStreams, AsyncIO,
+	IMPORT Kernel, Services, Tasks, Strings, Stores, Log := StdLog, CommStreams, AsyncIO,
 		ActorCore, ActorRun, ActorJournal, ActorPersist, ActorNet, ActorNetMem, ActorNetTcp, ActorSim, UnitAssert;
 
 	CONST
@@ -62,6 +62,11 @@ MODULE Actor_devNet;
 		Sum = POINTER TO RECORD (ActorPersist.Visitor) total: INTEGER END;
 
 		Driver = POINTER TO RECORD (Tasks.Task) body: PROCEDURE END;
+
+		(* транспорт-перехватчик: помнит последний кадр и передаёт его сети *)
+		Tap = POINTER TO RECORD (ActorNet.Transport)
+			inner: ActorNetMem.Net; last: ActorJournal.Bytes; len: INTEGER
+		END;
 
 		Trace = RECORD steps, delivered, lost, dup: LONGINT; a, b, crashes: INTEGER END;
 
@@ -622,6 +627,137 @@ MODULE Actor_devNet;
 		UnitAssert.EqualInt(-100, sum.total, "withdrawn once");
 		UnitAssert.True(net.lost >= 1, "reply was lost")
 	END TestRetryAfterLostReply;
+
+	(* --- защита: подделанные кадры и пропуска ------------------------------------ *)
+
+	PROCEDURE (t: Tap) Send (IN from, to: ARRAY OF CHAR; IN frame: ARRAY OF BYTE; len: INTEGER);
+		VAR i: INTEGER;
+	BEGIN
+		NEW(t.last, MAX(len, 1)); t.len := len; FOR i := 0 TO len - 1 DO t.last[i] := frame[i] END;
+		t.inner.Send(from, to, frame, len)
+	END Send;
+
+	PROCEDURE TapPair (OUT tap: Tap);
+	(* Как Pair(3, FALSE), но кадры узлов идут через перехватчик tap. *)
+		VAR s: Name;
+	BEGIN
+		ActorSim.Install; net := ActorNetMem.New(gen);
+		NEW(tap); tap.inner := net;
+		NodeName("A", s); na := ActorNet.New(s, tap, 11); ActorNetMem.Add(net, na);
+		NodeName("B", s); nb := ActorNet.New(s, tap, 22); ActorNetMem.Add(net, nb);
+		StartRoot(3, nb.name)
+	END TapPair;
+
+	PROCEDURE Copy (t: Tap; OUT b: ActorJournal.Bytes);
+		VAR i: INTEGER;
+	BEGIN
+		NEW(b, LEN(t.last^)); FOR i := 0 TO t.len - 1 DO b[i] := t.last[i] END
+	END Copy;
+
+	PROCEDURE NameEnd (IN b: ARRAY OF BYTE; pos: INTEGER): INTEGER;
+	(* Пост: позиция после имени кадра (2 байта длины и по 2 байта на знак) с позиции pos. *)
+	BEGIN
+		RETURN pos + 2 + 2 * (b[pos] MOD 256 + 256 * (b[pos + 1] MOD 256))
+	END NameEnd;
+
+	PROCEDURE MacPos (IN b: ARRAY OF BYTE): INTEGER;
+	(* Пост: позиция метки адресата: вид, from, воплощение, номер, имя. *)
+	BEGIN
+		RETURN NameEnd(b, NameEnd(b, 1) + 16)
+	END MacPos;
+
+	PROCEDURE PutLong (VAR b: ARRAY OF BYTE; pos: INTEGER; x: LONGINT);
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO 7 DO b[pos + i] := SHORT(SHORT(SHORT(x MOD 256))); x := x DIV 256 END
+	END PutLong;
+
+	PROCEDURE SettleBody;
+	BEGIN
+		Settle; ActorNet.Export(nb, target, capB)
+	END SettleBody;
+
+	PROCEDURE Step2Body;
+	BEGIN
+		Settle
+	END Step2Body;
+
+	PROCEDURE TestUnloadedModuleRefused*;
+	(* Кадр, где тип письма — из незагруженного модуля, отклонён; модуль не загружен. *)
+		VAR tap: Tap; b: ActorJournal.Bytes; i, k: INTEGER; pat, rep: ARRAY 16 OF CHAR; hit: BOOLEAN;
+	BEGIN
+		TapPair(tap); UnitAssert.True(Drive(SettleBody, 3000), "started");
+		UnitAssert.True(Kernel.ThisLoadedMod("ObxFact") = NIL, "precondition: ObxFact not loaded");
+		ActorCore.Tell(ActorNet.Import(na, capB), NewPing(1)); Copy(tap, b); ActorNetMem.Drop(net);
+		pat := "Actor_devNet"; rep := "ObxFact"; hit := FALSE;
+		i := 0;
+		WHILE ~hit & (i + 2 * 12 <= tap.len) DO
+			k := 0; WHILE (k < 12) & (b[i + 2 * k] = ORD(pat[k])) & (b[i + 2 * k + 1] = 0) DO INC(k) END;
+			IF k = 12 THEN
+				hit := TRUE; FOR k := 0 TO 11 DO b[i + 2 * k] := SHORT(SHORT(ORD(rep[k]) MOD 128)); b[i + 2 * k + 1] := 0 END
+			ELSE INC(i)
+			END
+		END;
+		UnitAssert.True(hit, "module name found in frame");
+		ActorNet.Deliver(nb, b, tap.len);
+		UnitAssert.True(Kernel.ThisLoadedMod("ObxFact") = NIL, "module not loaded by a frame");
+		UnitAssert.EqualInt(1, nb.refused, "frame refused")
+	END TestUnloadedModuleRefused;
+
+	PROCEDURE TestBadCapabilityGivesNil*;
+	(* Длинный, обрезанный и с лишним хвостом пропуск — NIL, без трапа. *)
+		VAR cap: ARRAY 1024 OF CHAR; i: INTEGER; ok: ARRAY 256 OF CHAR;
+	BEGIN
+		Pair(3, FALSE);
+		FOR i := 0 TO 400 DO cap[i] := "x" END; cap[401] := "|"; cap[402] := "y"; cap[403] := "|"; cap[404] := 0X;
+		UnitAssert.True(ActorNet.Import(na, cap) = NIL, "long node name");
+		cap := "n|"; FOR i := 2 TO 400 DO cap[i] := "y" END; cap[401] := "|"; cap[402] := 0X;
+		UnitAssert.True(ActorNet.Import(na, cap) = NIL, "long actor name");
+		cap := "n|x|0123";
+		UnitAssert.True(ActorNet.Import(na, cap) = NIL, "truncated mark");
+		ok := "n|x|00112233445566778899aabbccddeeff";
+		UnitAssert.True(ActorNet.Import(na, ok) # NIL, "good capability");
+		cap := ok$ + "00";
+		UnitAssert.True(ActorNet.Import(na, cap) = NIL, "mark too long")
+	END TestBadCapabilityGivesNil;
+
+	PROCEDURE TestForgedFrameKeepsWindow*;
+	(* Кадр от имени A с неверной меткой и воплощением 1000 не сдвигает окно
+		повторов: следующий настоящий кадр A доставлен. *)
+		VAR tap: Tap; b: ActorJournal.Bytes; p: INTEGER;
+	BEGIN
+		TapPair(tap); UnitAssert.True(Drive(SettleBody, 3000), "started");
+		ActorCore.Tell(ActorNet.Import(na, capB), NewPing(1)); Copy(tap, b); ActorNetMem.Drop(net);
+		PutLong(b, NameEnd(b, 1), 1000);
+		p := MacPos(b); b[p] := SHORT(SHORT((b[p] + 1) MOD 128));
+		ActorNet.Deliver(nb, b, tap.len);
+		UnitAssert.EqualInt(1, nb.refused, "forged refused");
+		ActorCore.Tell(ActorNet.Import(na, capB), NewPing(2));
+		UnitAssert.True(Drive(Step2Body, 3000), "settled");
+		UnitAssert.EqualInt(1, executed, "real frame delivered")
+	END TestForgedFrameKeepsWindow;
+
+	PROCEDURE TestForgedTermRefused*;
+	(* Кадр term с неверной меткой не будит наблюдателя; с верной — будит. *)
+		VAR tap: Tap; b: ActorJournal.Bytes; p, k: INTEGER;
+	BEGIN
+		TapPair(tap); UnitAssert.True(Drive(SettleBody, 3000), "started");
+		watched := ActorNet.Import(na, capB); StartRoot(5, na.name);
+		UnitAssert.True(Drive(Step2Body, 3000), "watching");
+		(* последний кадр — просьба watch от A; из неё — term от имени B *)
+		Copy(tap, b); UnitAssert.EqualInt(1, b[0], "watch frame");
+		b[0] := 3; b[3] := 66;	(* вид term, from "A…" -> "B…" *)
+		PutLong(b, NameEnd(b, 1) + 8, 100000);	(* свой номер кадра *)
+		p := MacPos(b); k := b[p]; b[p] := SHORT(SHORT((k + 1) MOD 128));
+		ActorNet.Deliver(na, b, tap.len);
+		UnitAssert.True(Drive(Step2Body, 3000), "settled");
+		UnitAssert.EqualInt(0, terms, "forged term ignored");
+		UnitAssert.EqualInt(1, na.refused, "forged term refused");
+		b[p] := SHORT(SHORT(k)); PutLong(b, NameEnd(b, 1) + 8, 100001);
+		ActorNet.Deliver(na, b, tap.len);
+		UnitAssert.True(Drive(Step2Body, 3000), "settled");
+		UnitAssert.EqualInt(1, terms, "real term wakes watcher")
+	END TestForgedTermRefused;
 
 	(* --- сага --------------------------------------------------------------------- *)
 
