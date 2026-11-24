@@ -12,6 +12,7 @@ MODULE Actor_devGrain;
 	CONST
 		maxOps = 64;
 		nodes = 3;
+		benchN = 2000; benchEv = 20;
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -38,6 +39,7 @@ MODULE Actor_devGrain;
 		nd: ARRAY nodes OF ActorNet.Node;
 		cl: ARRAY nodes OF ActorGrain.Cluster;
 		client: ActorCore.Ref; key: Name;
+		benchT: ARRAY 6 OF LONGINT;
 		j: ActorJournal.Journal;
 		replies, lastBalance, executed, restores: INTEGER; lastOp: LONGINT;
 		gen: INTEGER; driverDone: BOOLEAN;
@@ -457,6 +459,61 @@ MODULE Actor_devGrain;
 	BEGIN
 		UnitAssert.True(Seeds(1, 100, TRUE), runMsg)
 	END TestSeeds;
+
+	(* --- замер ---------------------------------------------------------------------- *)
+
+	PROCEDURE BenchKey (prefix: CHAR; i: INTEGER; OUT k: Name);
+		VAR d: ARRAY 16 OF CHAR;
+	BEGIN
+		Strings.IntToString(i, d); k := "x" + d$; k[0] := prefix
+	END BenchKey;
+
+	PROCEDURE SendAll (prefix: CHAR; op: LONGINT);
+		VAR i: INTEGER; k: Name;
+	BEGIN
+		FOR i := 0 TO benchN - 1 DO BenchKey(prefix, i, k); Ask(ActorGrain.Ref(cl[0], "acct", k), op, 1) END;
+		Settle
+	END SendAll;
+
+	PROCEDURE BenchBody;
+	(* Один узел (без сети): цена активации пустого ключа, обращения к
+		активному, пассивации, подъёма из снимка и из журнала без снимка. *)
+		VAR t: LONGINT; e: INTEGER;
+	BEGIN
+		Cluster(1, FALSE); Settle; cl[0].idle := 1;
+		t := Kernel.Time(); SendAll("s", 1); benchT[0] := Kernel.Time() - t;	(* активация пустого *)
+		t := Kernel.Time(); SendAll("s", 0); benchT[1] := Kernel.Time() - t;	(* к активному *)
+		FOR e := 2 TO benchEv DO SendAll("s", e) END;
+		t := Kernel.Time(); ActorGrain.Tick(cl[0]); Settle; benchT[2] := Kernel.Time() - t;	(* пассивация со снимком *)
+		t := Kernel.Time(); SendAll("s", 0); benchT[3] := Kernel.Time() - t;	(* подъём из снимка *)
+		FOR e := 1 TO benchEv DO SendAll("n", e) END;
+		ActorNet.Down(nd[0]); Settle; ActorNet.Up(nd[0]);	(* остановка без снимка *)
+		cl[0] := ActorGrain.New(nd[0], j); ActorGrain.Register(cl[0], "acct", NewAccount);
+		client := ActorCore.Spawn(ActorCore.dir.Lookup(ActorCore.node, nd[0].name)(ActorCore.Context),
+			ActorCore.NewProps(NewClient), "c");
+		Settle;
+		t := Kernel.Time(); SendAll("n", 0); benchT[4] := Kernel.Time() - t	(* подъём из 20 событий *)
+	END BenchBody;
+
+	PROCEDURE Line (IN what: ARRAY OF CHAR; ms: LONGINT);
+		VAR d: ARRAY 32 OF CHAR;
+	BEGIN
+		Strings.IntToString(ms * 1000 DIV benchN, d);
+		Log.String("BENCH grain-" + what + " " + d$ + " us/op"); Log.Ln
+	END Line;
+
+	PROCEDURE Bench*;
+	(** Строки BENCH: активация, обращение к активному, пассивация, подъём из
+		снимка и из журнала без снимка (2000 ключей, журнал в памяти). *)
+	BEGIN
+		Setup;
+		IF Drive(BenchBody, 600000) THEN
+			Line("activate-empty", benchT[0]); Line("call-active", benchT[1]);
+			Line("passivate", benchT[2]); Line("activate-snapshot", benchT[3]);
+			Line("activate-20-events", benchT[4])
+		ELSE Log.String("bench hung"); Log.Ln
+		END
+	END Bench;
 
 	PROCEDURE Long*;
 	(** Долгий прогон: 2000 зёрен. *)
