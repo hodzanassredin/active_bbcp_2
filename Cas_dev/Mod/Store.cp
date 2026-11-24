@@ -81,7 +81,7 @@ MODULE Cas_devStore;
 	END Absent;
 
 	PROCEDURE Refs (s: CasStore.Store);
-		VAR b: ARRAY 8 OF BYTE; n, res: INTEGER; a, c, nil, cur: CasHash.Id;
+		VAR b: ARRAY 8 OF BYTE; n, res, r: INTEGER; a, c, nil, cur: CasHash.Id;
 	BEGIN
 		CasHash.Clear(nil);
 		Bytes("a", b, n); CasHash.Of(b, 0, n, a);
@@ -89,11 +89,13 @@ MODULE Cas_devStore;
 		s.GetRef("main", cur, res);
 		UnitAssert.EqualInt(CasStore.ok, res, "нет ссылки — не ошибка");
 		UnitAssert.True(CasHash.IsNil(cur), "нет ссылки — пустой Id");
-		UnitAssert.True(s.CasRef("main", nil, a), "пусто -> a");
-		UnitAssert.True(~s.CasRef("main", nil, c), "ожидали пусто, а там a");
+		UnitAssert.True(s.CasRef("main", nil, a, r), "пусто -> a");
+		UnitAssert.EqualInt(CasStore.ok, r, "res замены");
+		UnitAssert.True(~s.CasRef("main", nil, c, r), "ожидали пусто, а там a");
+		UnitAssert.EqualInt(CasStore.ok, r, "несовпадение — не ошибка среды");
 		s.GetRef("main", cur, res);
 		UnitAssert.True(CasHash.Equal(a, cur), "отказ не меняет ссылку");
-		UnitAssert.True(s.CasRef("main", a, c), "a -> c");
+		UnitAssert.True(s.CasRef("main", a, c, r), "a -> c");
 		s.GetRef("main", cur, res);
 		UnitAssert.True(CasHash.Equal(c, cur), "ссылка = c");
 		s.GetRef("other", cur, res);
@@ -166,7 +168,7 @@ MODULE Cas_devStore;
 		s := CasFiles.New(path, res);
 		Bytes("keep", b, n); s.Put(b, n, x, res);
 		CasHash.Clear(nil);
-		UnitAssert.True(s.CasRef("head", nil, x), "публикация");
+		UnitAssert.True(s.CasRef("head", nil, x, res), "публикация");
 		t := CasFiles.New(path, res);
 		UnitAssert.True(t.Has(x), "блок виден");
 		t.GetRef("head", cur, res);
@@ -193,5 +195,21 @@ MODULE Cas_devStore;
 		UnitAssert.EqualInt(CasStore.corrupt, res, "хеш не сошёлся");
 		UnitAssert.True(got = NIL, "без данных")
 	END TestFilesCorrupt;
+
+	PROCEDURE TestFilesRefDamaged*;
+	(* испорченный файл ссылки: CasRef возвращает FALSE с res = corrupt, а не «не совпало» *)
+		VAR s: CasStore.Store; loc: Files.Locator; f: Files.File; w: Files.Writer; res: INTEGER;
+			nil, x, cur: CasHash.Id; b: ARRAY 8 OF BYTE; n: INTEGER;
+	BEGIN
+		s := CasFiles.New(path, res);
+		Bytes("x", b, n); CasHash.Of(b, 0, n, x); CasHash.Clear(nil);
+		loc := Files.dir.This(path);
+		f := Files.dir.New(loc, Files.dontAsk); w := f.NewWriter(NIL); w.WriteBytes(b, 0, 3);
+		f.Register("ref-main", "", Files.dontAsk, res);
+		UnitAssert.True(~s.CasRef("main", nil, x, res), "замены нет");
+		UnitAssert.EqualInt(CasStore.corrupt, res, "ошибка среды отдельно");
+		s.GetRef("main", cur, res);
+		UnitAssert.EqualInt(CasStore.corrupt, res, "ссылка не тронута")
+	END TestFilesRefDamaged;
 
 END Cas_devStore.

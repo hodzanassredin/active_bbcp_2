@@ -92,7 +92,10 @@ would pass on silently: the name of a block promises content that is not there.
 
 A store in a directory is used by one process. Comparing and replacing a reference (section 3) is
 indivisible only within a process: another process can step in between reading the reference and
-writing the new file. Neither the compiler nor `CasFiles` checks this.
+writing the new file. Suppose two processes publish sets into one directory. Both read the
+reference, both see the expected `Id`, both write — and the reference points to the set of the one
+that wrote second; the set of the first drops out of the history, and neither gets `FALSE`. Neither
+the compiler nor `CasFiles` checks this.
 
 ## 3. References and Publication
 
@@ -101,7 +104,7 @@ Blocks are immutable, but a program needs to know which version is the latest. F
 the result is the empty `Id` (`CasHash.IsNil`). A reference name has 1 to 63 characters from
 letters, digits, `_`, `-` and `.`; any other name traps with number 22.
 
-Only `CasRef(name, expected, new)` changes a reference: if the reference equals the expected `Id`, it
+Only `CasRef(name, expected, new, res)` changes a reference: if the reference equals the expected `Id`, it
 receives the new one and the result is `TRUE`; otherwise the reference does not change and the
 result is `FALSE`. This compare-and-swap is the publication. Suppose Ann and Bob read the head `h` and
 each prepared a version. Ann publishes first: `CasRef("main", h, ann)` yields `TRUE`. Bob calls
@@ -110,8 +113,12 @@ Bob would write `bob` over `ann`, and Ann's work would vanish from the history w
 error. With the check Bob learns about it at once, rereads the head and retries. The check is
 optimistic: nobody waits for anybody, and the one who came late pays for the collision.
 
-`FALSE` is also returned when writing the reference failed. The caller tells this case apart by the
-`res` of the following `GetRef`.
+An error of the environment is a separate result `res`, as in `Files`. With `res = ok` the value
+`FALSE` means exactly one thing: the reference is not equal to the expected one. If the reference
+file was not read, is damaged or was not written, `res` is `failed` or `corrupt`, the result is
+`FALSE`, and the reference does not change. A program that retried `CasRef` on any `FALSE` would loop
+forever on a damaged reference file; from `res` it sees that a retry will not help.
+`CasChange.Commit` returns `conflict` only when `res = ok`.
 
 ## 4. Cutting by Content
 
@@ -185,8 +192,10 @@ A written set cannot be changed: `Set` after `Put` traps with number 23. A new v
 
 ## 7. Cost and Limits
 
-The store only grows: blocks no reference leads to any more are not deleted. There is no garbage
-collection of the store. The in-memory store finds a block by the first byte of its `Id` in one of
+The store only grows: blocks no reference leads to any more are not deleted; there is no garbage
+collection of the store. A program that writes a 1 MB snapshot of new data once a minute adds about
+1.4 GB to the directory per day, even if it keeps a reference only to the latest snapshot. It has to
+delete unneeded blocks itself, knowing which roots are still needed. The in-memory store finds a block by the first byte of its `Id` in one of
 256 chains; the directory store by opening a file. A change set reads the whole chain down to its
 parent on every `Rebase`, so a long foreign history between the parent and the head costs one `Get`
 per set.
@@ -254,8 +263,8 @@ DEFINITION CasStore;
 			(s: Store) Has (IN id: CasHash.Id): BOOLEAN, NEW, ABSTRACT;
 			(s: Store) GetRef (IN name: ARRAY OF CHAR; OUT id: CasHash.Id; OUT res: INTEGER),
 				NEW, ABSTRACT;
-			(s: Store) CasRef (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id): BOOLEAN,
-				NEW, ABSTRACT
+			(s: Store) CasRef (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id;
+				OUT res: INTEGER): BOOLEAN, NEW, ABSTRACT
 		END;
 
 		Mem = POINTER TO RECORD (Store)
@@ -295,14 +304,14 @@ Post: res = ok: id — value of the reference; no reference — id is empty
 Post: res = failed or corrupt: id is empty
 ```
 
-**PROCEDURE (s: Store) CasRef (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id): BOOLEAN**
+**PROCEDURE (s: Store) CasRef (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id; OUT res: INTEGER): BOOLEAN**
 Compares and swaps: a reference equal to `old` (the empty `Id` — no reference) receives the value
 `new`.
 
 ```
 Pre: ValidRef(name) — 22
-Post: TRUE — the reference equals new
-Post: FALSE — the reference is not old or the write failed; the reference is unchanged
+Post: res = ok: TRUE — the reference equals new; FALSE — the reference is not old and is unchanged
+Post: res = failed or corrupt: the result is FALSE, the reference is unchanged
 ```
 
 **PROCEDURE ValidRef (IN name: ARRAY OF CHAR): BOOLEAN**
@@ -478,7 +487,7 @@ Pre: c # NIL — 21
 Pre: CasStore.ValidRef(ref) — 22
 Post: res = ok: ref = id = c.id
 Post: res = conflict: ref # c.parent, the reference is unchanged, the set's block is written
-Post: otherwise — a store error, the reference is unchanged
+Post: res = failed or corrupt — error writing or reading the reference, the reference is unchanged
 ```
 
 **PROCEDURE Rebase (s: CasStore.Store; c: Change; IN head: CasHash.Id; OUT new: Change; OUT clash: Name; OUT res: INTEGER)**

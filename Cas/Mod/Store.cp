@@ -80,13 +80,13 @@ MODULE CasStore;
 		Пост: res = ok: id — значение ссылки; ссылки нет — id пуст (CasHash.IsNil).
 		Пост: res = failed или corrupt: id пуст. *)
 
-	PROCEDURE (s: Store) CasRef* (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id): BOOLEAN,
-		NEW, ABSTRACT;
+	PROCEDURE (s: Store) CasRef* (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id;
+		OUT res: INTEGER): BOOLEAN, NEW, ABSTRACT;
 	(** Сравнить и заменить: если ссылка name равна old (пустой Id — ссылки нет),
 		она получает значение new.
 		Пред: ValidRef(name) — 22.
-		Пост: TRUE — ссылка равна new. FALSE — ссылка не равна old или запись не удалась;
-		ссылка не изменилась. *)
+		Пост: res = ok: TRUE — ссылка равна new; FALSE — ссылка не равна old и не изменилась.
+		Пост: res # ok (failed, corrupt) — ошибка среды: результат FALSE, ссылка не изменилась. *)
 
 	(* Mem *)
 
@@ -160,11 +160,12 @@ MODULE CasStore;
 		res := ok
 	END GetRef;
 
-	PROCEDURE (m: Mem) CasRef* (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id): BOOLEAN;
+	PROCEDURE (m: Mem) CasRef* (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id;
+		OUT res: INTEGER): BOOLEAN;
 		VAR r: Ref; cur: CasHash.Id;
 	BEGIN
 		ASSERT(ValidRef(name), 22);
-		r := m.FindRef(name);
+		res := ok; r := m.FindRef(name);
 		IF r = NIL THEN CasHash.Clear(cur) ELSE cur := r.id END;
 		IF ~CasHash.Equal(cur, old) THEN RETURN FALSE END;
 		IF r = NIL THEN NEW(r); r.name := name$; r.next := m.refs; m.refs := r END;

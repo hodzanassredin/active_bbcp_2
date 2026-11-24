@@ -116,8 +116,9 @@ MODULE CasFiles;
 		END
 	END GetRef;
 
-	PROCEDURE (s: Store) CasRef* (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id): BOOLEAN;
-		VAR cur: CasHash.Id; res: INTEGER; fn: Files.Name;
+	PROCEDURE (s: Store) CasRef* (IN name: ARRAY OF CHAR; IN old, new: CasHash.Id;
+		OUT res: INTEGER): BOOLEAN;
+		VAR cur: CasHash.Id; fn: Files.Name;
 	BEGIN
 		ASSERT(CasStore.ValidRef(name), 22);
 		s.GetRef(name, cur, res);

@@ -203,7 +203,9 @@ MODULE CasChange;
 	BEGIN
 		ASSERT(s # NIL, 20); ASSERT(c # NIL, 21); ASSERT(CasStore.ValidRef(ref), 22);
 		Put(s, c, id, res);
-		IF (res = CasStore.ok) & ~s.CasRef(ref, c.parent, id) THEN res := conflict END
+		IF (res = CasStore.ok) & ~s.CasRef(ref, c.parent, id, res) & (res = CasStore.ok) THEN
+			res := conflict
+		END
 	END Commit;
 
 	PROCEDURE Rebase* (s: CasStore.Store; c: Change; IN head: CasHash.Id; OUT new: Change;
