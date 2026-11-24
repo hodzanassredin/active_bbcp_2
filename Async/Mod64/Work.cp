@@ -81,9 +81,11 @@ MODULE AsyncWork;
 	END Active;
 
 	PROCEDURE Submit* (procAdr, arg: S.ADDRESS): INTEGER;
-	(** Поставить задание в очередь пула; -1 — нет свободного слота. *)
+	(** Пред: делегат пула есть (трап 22), в пуле хотя бы одна нить (23).
+		Пост: задание в очереди пула; -1 — нет свободного слота. *)
 	BEGIN
 		Ensure;
+		ASSERT(impl.Workers() > 0, 23);
 		RETURN impl.Submit(procAdr, arg)
 	END Submit;
 
@@ -107,9 +109,11 @@ MODULE AsyncWork;
 
 	PROCEDURE Execute* (procAdr, arg: S.ADDRESS): INTEGER;
 	(** Исполнить задание в рабочей нити и дождаться; только из задачи.
-		Первый вызов лениво заводит пул. *)
+		Первый вызов лениво заводит пул.
+		Пред: делегат пула есть (трап 22), в пуле хотя бы одна нить (23). *)
 	BEGIN
 		Ensure;
+		ASSERT(impl.Workers() > 0, 23);
 		RETURN impl.Execute(procAdr, arg)
 	END Execute;
 

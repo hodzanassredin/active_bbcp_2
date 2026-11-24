@@ -23,7 +23,6 @@ MODULE AsyncWorkLin;
 		slotFree = 0; slotBusy = 1; slotDone = 2;
 		(* O_WRONLY|O_CREAT|O_TRUNC *)
 		writeFlags = {0, 6, 9};
-		fileMode = {2,5,7,8};	(* 0644 *)
 
 	TYPE
 		Slot = RECORD [untagged]

@@ -43,12 +43,15 @@ subsystems; tests are built on demand by `tools/unit.sh`.
    order. No registry, like `test_*` in pytest.
 2. **Fixtures.** Optional `Setup*`/`Teardown*` run around every test;
    `SetupModule*`/`TeardownModule*` once per module. `Teardown` runs even
-   after a trap.
+   after a trap. If `SetupModule` traps, it is reported as a failure and
+   the tests of the module do not run: they are `SKIP` with the reason
+   `SetupModule trapped`.
 3. **Checks.** The procedures of `UnitAssert` are listed in the
    section "Interface". A plain
    `ASSERT` also works: any unexpected trap is a failed test with the
    kernel's trap report. Failure text is `expected X, got Y: msg`;
-   for strings — `expected <...>, got <...>`.
+   for strings — `expected <...>, got <...>`. The text is cut at 255
+   characters (`UnitAssert.Message`); long strings do not trap.
 4. **No checks — a failure.** A test that made no `UnitAssert` call and
    did not trap is reported `EMPTY` and counted as failed.
 5. **Isolation.** Every test and every fixture runs under `Kernel.Try`;
@@ -64,8 +67,9 @@ subsystems; tests are built on demand by `tools/unit.sh`.
    `FAIL Module.Test 0 ms: message`, `EMPTY …`, `SKIP … (mark)`; then
    `== Unit: passed N, failed M, empty K, skipped S`. With the `quit` key
    the runner calls `Kernel.Quit(0|1)`, so the shell sees a status. `tap`
-   prints TAP, `junit=FILE` writes a JUnit XML file (relative to the
-   working directory of the console).
+   prints TAP, `junit=FILE` writes a JUnit XML file in UTF-8 (relative to
+   the working directory of the console); a skipped test carries its
+   reason in `<skipped message="…"/>`.
 8. **Temporary files.** `UnitRunner.TempDir` returns `UnitTmp`. The
    BlackBox process has no portable `mkdir`; the external launcher
    (`tools/unit.sh`) creates and removes the directory.

@@ -68,17 +68,34 @@ MODULE AsyncIO;
 		END
 	END Write;
 
+	PROCEDURE WaitFdFor (fd: INTEGER; events: SET; ms: LONGINT);
+	(* Пред: в задаче, fd >= 0, ms > 0. Пост: дескриптор готов, истекли ms
+	   миллисекунд или задачу разбудил Unpark. Готовность будит Sleep
+	   (Unpark из Ready); регистрация снимается в любом случае. *)
+		VAR w: Waiter;
+	BEGIN
+		NEW(w); w.task := Tasks.Current();
+		Poller.Add(fd, events, w);
+		Tasks.Sleep(ms);
+		Poller.Remove(w)
+	END WaitFdFor;
+
 	PROCEDURE Accept* (l: CommStreams.Listener; OUT s: CommStreams.Stream; timeout: LONGINT): BOOLEAN;
-	(** Принять соединение; timeout < 0 — ждать бесконечно. *)
-		VAR t0: LONGINT; fd: INTEGER;
+	(** Принять соединение; timeout < 0 — ждать бесконечно. Пост: TRUE —
+		s принят; FALSE — за timeout мс соединения не было. *)
+		VAR t0, left: LONGINT; fd: INTEGER;
 	BEGIN
 		s := NIL; t0 := Kernel.Time();
 		LOOP
 			l.Accept(s);
 			IF s # NIL THEN RETURN TRUE END;
-			IF (timeout >= 0) & (Kernel.Time() - t0 >= timeout) THEN RETURN FALSE END;
+			left := timeout - (Kernel.Time() - t0);
+			IF (timeout >= 0) & (left <= 0) THEN RETURN FALSE END;
 			fd := l.Handle();
-			IF fd < 0 THEN Tasks.Sleep(1) ELSE WaitFd(fd, Poller.In) END
+			IF fd < 0 THEN Tasks.Sleep(1)
+			ELSIF timeout < 0 THEN WaitFd(fd, Poller.In)
+			ELSE WaitFdFor(fd, Poller.In, left)
+			END
 		END
 	END Accept;
 

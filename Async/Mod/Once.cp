@@ -9,7 +9,7 @@ MODULE AsyncOnce;
 
 	TYPE
 		Once* = POINTER TO RECORD
-			done*: BOOLEAN;
+			done-: BOOLEAN;
 			n: INTEGER;
 			m: AsyncSelect.Msg
 		END;

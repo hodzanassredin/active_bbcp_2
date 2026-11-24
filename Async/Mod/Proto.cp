@@ -14,12 +14,13 @@ MODULE AsyncProto;
 	исходящих переходов — конечное (диалог завершён). Разделитель
 	пунктов — ";" или перевод строки, стрелка — ">" или "->".
 	Автомат детерминированный: два перехода из одного состояния по
-	одному имени типа — ошибка описания.
+	одному имени типа — ошибка описания. Имя длиннее nameLen - 1 знаков
+	и пункт без ":" — тоже ошибки описания.
 
 	Проверка включается только прикреплением протокола к каналу
-	(AsyncChan.SetProtocol); без протокола CheckSend сразу возвращается,
-	накладных расходов нет. Нарушение — трап с текстом в консоль;
-	текст остаётся в Protocol.LastViolation. *)
+	(AsyncChan.SetProtocol); без протокола канал Step не зовёт, накладных
+	расходов нет. Нарушение — трап отправителя с текстом в консоль;
+	текст остаётся доступен через LastViolation(p, msg). *)
 
 	CONST
 		maxStates = 32;
@@ -90,30 +91,21 @@ MODULE AsyncProto;
 		WHILE IsBlank(d[i]) OR (d[i] = ";") OR (d[i] = 0DX) OR (d[i] = 0AX) DO INC(i) END
 	END SkipBreaks;
 
-	PROCEDURE ReadUntil (IN d: ARRAY OF CHAR; VAR i: INTEGER; stop: CHAR; OUT name: ARRAY OF CHAR);
-		VAR j: INTEGER;
+	PROCEDURE ReadName (IN d: ARRAY OF CHAR; VAR i: INTEGER; stop: CHAR; OUT name: ARRAY OF CHAR): BOOLEAN;
+	(* Имя до stop, конца пункта (IsBreak) или, при stop = ">", до "-".
+	   Пост: FALSE — имя не помещается в name (parseMsg задан). *)
+		VAR j: INTEGER; long: BOOLEAN;
 	BEGIN
-		SkipBlanks(d, i); j := 0;
-		WHILE (d[i] # 0X) & (d[i] # stop) & (d[i] # 0DX) & (d[i] # 0AX) DO
-			IF j < LEN(name) - 1 THEN name[j] := d[i]; INC(j) END;
+		SkipBlanks(d, i); j := 0; long := FALSE;
+		WHILE ~IsBreak(d[i]) & (d[i] # stop) & ~((stop = ">") & (d[i] = "-")) DO
+			IF j < LEN(name) - 1 THEN name[j] := d[i]; INC(j) ELSE long := TRUE END;
 			INC(i)
 		END;
 		WHILE (j > 0) & IsBlank(name[j-1]) DO DEC(j) END;
-		name[j] := 0X
-	END ReadUntil;
-
-	PROCEDURE ReadLabel (IN d: ARRAY OF CHAR; VAR i: INTEGER; OUT name: ARRAY OF CHAR);
-		VAR j: INTEGER;
-	BEGIN
-		SkipBlanks(d, i); j := 0;
-		WHILE (d[i] # 0X) & (d[i] # "-") & (d[i] # ">") & (d[i] # ";") &
-			(d[i] # 0DX) & (d[i] # 0AX) DO
-			IF j < LEN(name) - 1 THEN name[j] := d[i]; INC(j) END;
-			INC(i)
-		END;
-		WHILE (j > 0) & IsBlank(name[j-1]) DO DEC(j) END;
-		name[j] := 0X
-	END ReadLabel;
+		name[j] := 0X;
+		IF long THEN parseMsg := "name too long: "; Append(name, parseMsg) END;
+		RETURN ~long
+	END ReadName;
 
 	PROCEDURE FindState (p: Protocol; IN name: ARRAY OF CHAR): INTEGER;
 		VAR i: INTEGER;
@@ -165,8 +157,8 @@ MODULE AsyncProto;
 		LOOP
 			SkipBreaks(d, i);
 			IF (d[i] = 0X) OR ~ok THEN EXIT END;
-			ReadUntil(d, i, ":", sname);
-			IF sname = "" THEN parseMsg := "expected a state name"; ok := FALSE
+			IF ~ReadName(d, i, ":", sname) THEN ok := FALSE
+			ELSIF sname = "" THEN parseMsg := "expected a state name"; ok := FALSE
 			ELSIF d[i] # ":" THEN parseMsg := "expected ':' after state name"; ok := FALSE
 			ELSE
 				INC(i);
@@ -175,15 +167,17 @@ MODULE AsyncProto;
 					IF p.start < 0 THEN p.start := src END;
 					SkipBlanks(d, i);
 					IF ~IsBreak(d[i]) THEN
-						ReadLabel(d, i, lname);
-						IF d[i] = "-" THEN INC(i) END;
-						IF d[i] # ">" THEN parseMsg := "expected '>' or '->'"; ok := FALSE
+						IF ~ReadName(d, i, ">", lname) THEN ok := FALSE
 						ELSE
-							INC(i);
-							ReadUntil(d, i, ";", tname);
-							IF tname = "" THEN parseMsg := "expected a target state"; ok := FALSE
-							ELSIF ~FindOrAdd(p, tname, tgt) THEN parseMsg := "too many states"; ok := FALSE
-							ELSE ok := AddEdge(p, src, lname, tgt)
+							IF d[i] = "-" THEN INC(i) END;
+							IF d[i] # ">" THEN parseMsg := "expected '>' or '->'"; ok := FALSE
+							ELSE
+								INC(i);
+								IF ~ReadName(d, i, ";", tname) THEN ok := FALSE
+								ELSIF tname = "" THEN parseMsg := "expected a target state"; ok := FALSE
+								ELSIF ~FindOrAdd(p, tname, tgt) THEN parseMsg := "too many states"; ok := FALSE
+								ELSE ok := AddEdge(p, src, lname, tgt)
+								END
 							END
 						END
 					END;
@@ -226,9 +220,10 @@ MODULE AsyncProto;
 	END StateName;
 
 	PROCEDURE IsFinal* (p: Protocol; state: INTEGER): BOOLEAN;
-	(** В состоянии нет исходящих переходов. *)
+	(** Пред: p # NIL (трап 20). Пост: в состоянии нет исходящих переходов. *)
 		VAR i: INTEGER;
 	BEGIN
+		ASSERT(p # NIL, 20);
 		FOR i := 0 TO p.nedges - 1 DO
 			IF p.edges[i].from = state THEN RETURN FALSE END
 		END;

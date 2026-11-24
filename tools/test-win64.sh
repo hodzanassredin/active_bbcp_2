@@ -48,7 +48,7 @@ if [ "$rebuild" -eq 1 ] || [ ! -f "$OUT/System/Code/Kernel.ocf" ]; then
 fi
 
 # 2. Unit, Tasks (System/Mod64), пул нитей и Win-тесты задач.
-printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Unit_devProbe\nDevCompiler64.CompileThis Unit_devMain\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis AsyncWinSock\nDevCompiler64.CompileThis AsyncWork\nDevCompiler64.CompileThis AsyncWorkWin\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis System_devWinTasks\nDevCompiler64.CompileThis Async_devWinWorkers\nDevLibrarian.DisableDevLib\n" \
+printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Unit_devProbe\nDevCompiler64.CompileThis Unit_devBadSetup\nDevCompiler64.CompileThis Unit_devCyr\nDevCompiler64.CompileThis Unit_devMain\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis AsyncWinSock\nDevCompiler64.CompileThis AsyncWork\nDevCompiler64.CompileThis AsyncWorkWin\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis System_devWinTasks\nDevCompiler64.CompileThis Async_devWinWorkers\nDevLibrarian.DisableDevLib\n" \
 	| timeout 600 "$DEV0" >"$OUT/unit-build.log" 2>&1 || {
 		echo "test-win64: компиляция Unit/Tasks не удалась:" >&2
 		tail -30 "$OUT/unit-build.log" >&2; exit 1; }
@@ -90,7 +90,7 @@ run() {
 	fi
 }
 
-run Unit_devMain "" "passed 4"
+run Unit_devMain "" "passed 7"
 run System_devWinTasks proc "passed 5"
 run Async_devWinWorkers proc "passed 4"
 exit 0

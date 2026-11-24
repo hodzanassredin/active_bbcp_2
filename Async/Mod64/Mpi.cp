@@ -21,14 +21,13 @@ MODULE AsyncMpi;
 	CONST
 		maxFrame = 60000;
 		tagHdr = 1000; tagBody = 1001; tagResp = 2000;
-		kindCheck = 0; kindStop = 1; kindUnload = 2;
+		kindStop = 1; kindUnload = 2;
 		libName = "libbbmpi.so";
 
 	TYPE
 		InitProc = PROCEDURE [ccall] (): INTEGER;
 		RankProc = PROCEDURE [ccall] (): INTEGER;
 		SendProc = PROCEDURE [ccall] (dest, tag: INTEGER; buf: S.ADDRESS; len: INTEGER): INTEGER;
-		RecvProc = PROCEDURE [ccall] (src, tag: INTEGER; buf: S.ADDRESS; len: INTEGER): INTEGER;
 		ProbeProc = PROCEDURE [ccall] (src, tag: INTEGER): INTEGER;
 
 		MpiTransport = POINTER TO RECORD (AsyncComputon.Transport)
@@ -216,7 +215,11 @@ MODULE AsyncMpi;
 			IF kind = kindStop THEN EXIT END;
 			IF (len < 0) OR (len > maxFrame) THEN EXIT END;
 			IF kind = kindUnload THEN
-				err := -1; outLen := 0	(* MPI не поддерживает выгрузку кода *)
+				(* Тело (имя модуля) принимается и отбрасывается: иначе оно
+				   осталось бы в очереди tagBody и досталось бы следующему
+				   заданию. MPI не поддерживает выгрузку кода. *)
+				IF (len > 0) & (recvP(0, tagBody, S.ADR(payload[0]), len) # 0) THEN EXIT END;
+				err := -1; outLen := 0
 			ELSE
 				IF (len > 0) & (recvP(0, tagBody, S.ADR(payload[0]), len) # 0) THEN EXIT END;
 				c := AsyncComputon.Deserialize(payload, len);

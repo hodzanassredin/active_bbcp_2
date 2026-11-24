@@ -54,7 +54,7 @@ compile_dev32() {
 	{
 		echo 'DevCompiler.InitLogMarks'
 		echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod')"
-		for m in Unit_devProbe Unit_devMain System_devClock \
+		for m in Unit_devProbe Unit_devBadSetup Unit_devCyr Unit_devMain System_devClock \
 			System_devSupport System_devCRaw System_devCo \
 			System_devBasic System_devGcStack System_devTrapStack \
 			System_devCoTests System_devTasks System_devMonitors \

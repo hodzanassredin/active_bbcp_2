@@ -5,7 +5,7 @@ MODULE Async_devComputons;
 	16 процессов считает одни и те же 12 компутонов. Проверяются повтор
 	после убитого исполнителя (Sleeper) и возврат ошибки Do (Boomer). *)
 
-	IMPORT S := SYSTEM, Kernel, Services, Tasks, Stores, AsyncComputon,
+	IMPORT S := SYSTEM, Kernel, Services, Tasks, Stores, Files, AsyncComputon,
 		AsyncIO, AsyncChan, AsyncSelect, LinNative, UnitAssert;
 
 	CONST
@@ -16,6 +16,8 @@ MODULE Async_devComputons;
 		Square = POINTER TO RECORD (AsyncComputon.Computon) x, y: INTEGER END;
 		Sleeper = POINTER TO RECORD (AsyncComputon.Computon) ms, y: INTEGER END;
 		Boomer = POINTER TO RECORD (AsyncComputon.Computon) END;
+		Plain = POINTER TO RECORD (Stores.Store) END;
+		LateTask = POINTER TO RECORD (Tasks.Task) first: BOOLEAN; y: INTEGER END;
 
 		SquareTask = POINTER TO RECORD (Tasks.Task) n, done, bad: INTEGER END;
 		ResultTask = POINTER TO RECORD (Tasks.Task) rank, tag: INTEGER; ok: BOOLEAN; y: INTEGER END;
@@ -273,5 +275,62 @@ MODULE Async_devComputons;
 		UnitAssert.EqualInt(0, altIdx2, "pull signal wins the second select");
 		UnitAssert.EqualInt(200, altY, "computon result after alt")
 	END TestAltPull;
+
+	(* --- не компутон ------------------------------------------------------ *)
+
+	PROCEDURE (p: Plain) Externalize (VAR wr: Stores.Writer);
+	BEGIN
+		wr.WriteVersion(0)
+	END Externalize;
+
+	PROCEDURE (p: Plain) Internalize (VAR rd: Stores.Reader);
+		VAR version: INTEGER;
+	BEGIN
+		rd.ReadVersion(0, 0, version)
+	END Internalize;
+
+	PROCEDURE TestDeserializeNotComputon*;
+	(** Хранимый объект другого типа даёт NIL, а не трап. *)
+		VAR p: Plain; f: Files.File; wr: Stores.Writer; rd: Files.Reader;
+			b: POINTER TO ARRAY OF SHORTCHAR; by: BYTE; i, len: INTEGER;
+	BEGIN
+		NEW(p); f := Files.dir.Temp();
+		wr.ConnectTo(f); wr.WriteStore(p); f.Flush();
+		len := f.Length(); NEW(b, len);
+		rd := f.NewReader(NIL);
+		FOR i := 0 TO len - 1 DO rd.ReadByte(by); b[i] := S.VAL(SHORTCHAR, by) END;
+		UnitAssert.True(AsyncComputon.Deserialize(b^, len) = NIL, "not a computon gives NIL")
+	END TestDeserializeNotComputon;
+
+	(* --- поздний ответ после тайм-аута ------------------------------------ *)
+
+	PROCEDURE (t: LateTask) Run;
+		VAR c: AsyncComputon.Computon; s: Sleeper; q: Square;
+	BEGIN
+		NEW(s); s.ms := 300; s.y := -1;
+		AsyncComputon.Push(s, 0, 77);
+		c := AsyncComputon.PullTimeout(0, 77, 50);
+		t.first := c = NIL;
+		NEW(q); q.x := 3; q.y := -1;
+		AsyncComputon.Push(q, 0, 77);
+		c := AsyncComputon.Pull(0, 77);
+		t.y := -1;
+		IF c # NIL THEN WITH c: Square DO t.y := c.y ELSE t.y := -2 END END;
+		doneFlag := 1
+	END Run;
+
+	PROCEDURE TestLateReplyAfterTimeout*;
+	(** Ответ на запрос, брошенный по тайм-ауту, не достаётся новому
+		запросу с тем же tag. *)
+		VAR t: LateTask;
+	BEGIN
+		IF ~AsyncComputon.SetTransport("pipe") THEN ASSERT(FALSE, 20) END;
+		AsyncComputon.Start(1);
+		doneFlag := 0;
+		NEW(t); Tasks.Start(t);
+		UnitAssert.True(PumpUntil(20000, DoneCond), "both pulls finished");
+		UnitAssert.True(t.first, "first pull timed out");
+		UnitAssert.EqualInt(9, t.y, "second pull got its own result")
+	END TestLateReplyAfterTimeout;
 
 END Async_devComputons.

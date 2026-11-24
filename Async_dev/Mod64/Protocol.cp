@@ -118,6 +118,38 @@ MODULE Async_devProtocol;
 		UnitAssert.True(Length(msg) > 0, "parse error has text")
 	END TestParseError;
 
+	PROCEDURE TestSemicolonEndsStateName*;
+	(** «;» завершает имя состояния: пункт без «:» — ошибка разбора, а не
+		часть имени следующего пункта. *)
+		VAR p: AsyncProto.Protocol;
+	BEGIN
+		p := AsyncProto.New("start: RequestMsg > done; done; other: EndMsg > start");
+		UnitAssert.True(p = NIL, "state item without ':' rejected")
+	END TestSemicolonEndsStateName;
+
+	PROCEDURE TestLongNameRejected*;
+	(** Имя длиннее предела — ошибка разбора, а не молчаливое усечение. *)
+		VAR p: AsyncProto.Protocol; msg: AsyncProto.Message;
+	BEGIN
+		p := AsyncProto.New("start: ResponseMsgWithAVeryLongTypeNameThatDoesNotFit > done; done:");
+		UnitAssert.True(p = NIL, "long message name rejected");
+		AsyncProto.LastError(msg);
+		UnitAssert.True(Length(msg) > 0, "parse error has text");
+		p := AsyncProto.New("startStateWithAVeryLongNameThatDoesNotFitAtAll: RequestMsg > done; done:");
+		UnitAssert.True(p = NIL, "long state name rejected")
+	END TestLongNameRejected;
+
+	PROCEDURE IsFinalNil;
+	BEGIN
+		IF AsyncProto.IsFinal(NIL, 0) THEN END
+	END IsFinalNil;
+
+	PROCEDURE TestIsFinalNil*;
+	BEGIN
+		UnitAssert.Traps(IsFinalNil, "IsFinal(NIL) traps");
+		UnitAssert.EqualInt(20, Kernel.err, "precondition trap 20")
+	END TestIsFinalNil;
+
 	(* --- отправка через Select -------------------------------------------- *)
 
 	PROCEDURE (t: AltSendTask) Run;

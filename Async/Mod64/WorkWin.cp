@@ -47,7 +47,7 @@ MODULE AsyncWorkWin;
 			требует 8 байт. *)
 		Sync = POINTER TO RECORD
 			cs: A.RTL_CRITICAL_SECTION;
-			workEvent, readyEvent: A.HANDLE
+			workEvent: A.HANDLE
 		END;
 
 		PollAction = POINTER TO RECORD (Services.Action) END;
@@ -81,8 +81,7 @@ MODULE AsyncWorkWin;
 				p(slots[id].arg);
 				A.EnterCriticalSection(sync.cs);
 				slots[id].done := TRUE;
-				A.LeaveCriticalSection(sync.cs);
-				res := A.SetEvent(sync.readyEvent)
+				A.LeaveCriticalSection(sync.cs)
 			ELSE
 				ind := A.ResetEvent(sync.workEvent);
 				stop := stopping;
@@ -282,7 +281,6 @@ MODULE AsyncWorkWin;
 		NEW(impl); NEW(sync);
 		A.InitializeCriticalSection(sync.cs);
 		sync.workEvent := A.CreateEventA(NIL, 1, 0, NIL);	(* manual reset *)
-		sync.readyEvent := A.CreateEventA(NIL, 0, 0, NIL);	(* auto reset *)
 		qh := 0; qt := 0; qn := 0; stopping := FALSE;
 		FOR ind := 0 TO maxJobs - 1 DO
 			slots[ind].state := slotFree; slots[ind].done := FALSE; slots[ind].taskAdr := 0

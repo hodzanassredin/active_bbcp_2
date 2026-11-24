@@ -288,7 +288,8 @@ Checks:
 6. Without a protocol the check returns after one `NIL` test.
 7. Attaching a protocol resets the state to the start state.
 
-Limits: at most 32 states and 128 transitions; a state name and a label are at most 31 characters;
+Limits: at most 32 states and 128 transitions; a state name and a label are at most 31 characters, a
+longer name is the parse error `name too long`; an item without `:` is a parse error;
 a violation text is at most 255 characters. The machine is deterministic; there are no `*`, `+`,
 `?` or `|` operators.
 
@@ -313,7 +314,8 @@ Rules:
    `Tasks.Park`. Registration is one-shot: when readiness arrives the entry is removed, and the
    waiter registers again if readiness was not enough.
 3. `Accept` with `timeout < 0` waits indefinitely; with a non-negative timeout it returns `FALSE`
-   when the time expires. The deadline is checked between iterations; there is no separate timer.
+   when the time expires: the task waits for the descriptor in `Tasks.Sleep` for the rest of the
+   timeout.
 4. If a stream has no descriptor (`Handle() = -1`), waiting degenerates to `Tasks.Sleep(1)`. This is
    slow but does not block the main loop.
 5. `WaitFd` is called only from a task; otherwise trap 20.
@@ -413,7 +415,9 @@ The operations of `AsyncComputon` are listed in section 10. Rules:
    `.ocf`. It returns `FALSE` and `LastError = 20` if the module is busy. An unloaded module is a
    success. Over MPI unloading is not supported: `FALSE`, `LastError = -1`.
 9. `Stop` kills the executors (`SIGKILL`) and closes the channels; `waitpid` is not called. `Stop`
-   does not mark unfinished requests: after a stop they remain busy.
+   fails unfinished requests with code `-2`: `Pull`, `Try` and `Select` see them finished.
+10. A reply is matched to its request by a frame number of its own for every `Push`: a late reply to
+    a request abandoned by a `PullTimeout` timeout does not go to a new request with the same `tag`.
 
 Error codes: `-1` — no request, empty serialization or no slot; `-2` — no live executors left;
 `-3` — sending failed; `-4` — timeout; `-5` — response could not be parsed; `-6` — result does not
@@ -549,7 +553,7 @@ Rules:
 4. `Once` is a monitor: the methods are `[exclusive]`, waiting uses `ACTIVE.AWAIT`. Channels wait in
    `Tasks.Park` and respect the monitor of the channel object when a task holds it.
 5. Cancellation of a task during a wait traps it with code 127; `Select` offers are removed lazily, and unfinished
-   computon requests remain busy until `Stop`.
+   computon requests remain busy until `Pull`, `Try` or `Stop`.
 
 ## 10. Interface
 
@@ -750,7 +754,7 @@ DEFINITION AsyncOnce;
 
 	TYPE
 		Once = POINTER TO RECORD
-			done: BOOLEAN;
+			done-: BOOLEAN;
 			(o: Once) FillInt (x: INTEGER), NEW;
 			(o: Once) ReadInt (): INTEGER, NEW;
 			(o: Once) FillMsg (m: AsyncSelect.Msg), NEW;
@@ -762,8 +766,7 @@ DEFINITION AsyncOnce;
 END AsyncOnce.
 ```
 
-All four methods are exclusive procedures (`[exclusive]`). The field `done` is exported for reading
-and writing; an outside write breaks single assignment, and the code does not forbid it.
+All four methods are exclusive procedures (`[exclusive]`). The field `done` is exported read-only.
 
 **PROCEDURE New (): Once**
 Post: an unfilled variable, `done = FALSE`.
@@ -820,7 +823,7 @@ Post: the index of the start state; 0 when `p = NIL`.
 Post: `name` is the state name; `""` if `p = NIL` or the index does not exist.
 
 **PROCEDURE IsFinal (p: Protocol; state: INTEGER): BOOLEAN**
-Pre: `p # NIL` — not checked.
+Pre: `p # NIL` — trap 20.
 Post: `TRUE` if `state` has no outgoing transitions.
 
 **PROCEDURE Step (p: Protocol; VAR state: INTEGER; IN label: ARRAY OF CHAR; OUT ok: BOOLEAN)**
@@ -941,6 +944,7 @@ Post: `TRUE` if a delegate is installed.
 **PROCEDURE Submit (procAdr, arg: SYSTEM.ADDRESS): INTEGER**
 Queues a job; installs the delegate if needed.
 Pre: a delegate is found — trap 22.
+Pre: the pool has a worker thread (`Workers() > 0`) — trap 23.
 Post: the slot number; −1 — no free slot or the queue is full.
 
 **PROCEDURE Done (id: INTEGER): BOOLEAN**
@@ -957,7 +961,8 @@ Post: slot `id` is free.
 
 **PROCEDURE Execute (procAdr, arg: SYSTEM.ADDRESS): INTEGER**
 Runs a job in a worker thread and waits for it; a switch point.
-Pre: a delegate is found — trap 22; call from a task — trap 21 in the delegate.
+Pre: a delegate is found — trap 22; the pool has a worker thread — trap 23; call from a task — trap
+21 in the delegate.
 Post: the job status, the slot is freed; −1 — no free slot.
 
 **PROCEDURE Workers (): INTEGER**
@@ -1036,13 +1041,16 @@ Pre: `1 <= n <= 16` — trap 20; for the `mpi` transport an external transport i
 Post: `Size()` is the number of started executors.
 
 **PROCEDURE Stop**
-Post: the executors are killed, the channels are closed, `Size() = 0`.
+Post: the executors are killed, the channels are closed, `Size() = 0`; unfinished requests are
+finished with code `-2`.
 
 **PROCEDURE SetTransport (IN name: ARRAY OF CHAR): BOOLEAN**
 Post: `TRUE` — transport `"pipe"` (also `""`), `"tcp"` or `"mpi"` is chosen; `FALSE` — unknown name.
 
 **PROCEDURE Push (c: Computon; rank, tag: INTEGER)**
 Serializes `c` and sends it to executor `rank`.
+Pre: `tag >= 0` — trap 20 (negative numbers are internal).
+Pre: `0 <= rank < Size()` — trap 21.
 Post: request `tag` is queued; on error `LastError = -1`; on a failed send — a retry on a live one.
 
 **PROCEDURE PullTimeout (rank, tag: INTEGER; ms: LONGINT): Computon**

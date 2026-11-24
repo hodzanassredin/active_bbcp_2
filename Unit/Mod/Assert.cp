@@ -24,9 +24,20 @@ MODULE UnitAssert;
 		trapProc: PROCEDURE;
 		trapDone: BOOLEAN;
 
+	PROCEDURE Put (VAR s: Message; IN x: ARRAY OF CHAR);
+	(* Дописать x к s; не поместившееся отбрасывается: длинные строки в
+	   сообщении провала обрезаются, а не трапуют. *)
+		VAR i, j: INTEGER;
+	BEGIN
+		i := 0; WHILE s[i] # 0X DO INC(i) END;
+		j := 0;
+		WHILE (i < LEN(s) - 1) & (j < LEN(x)) & (x[j] # 0X) DO s[i] := x[j]; INC(i); INC(j) END;
+		s[i] := 0X
+	END Put;
+
 	PROCEDURE FailMsg (IN m: ARRAY OF CHAR);
 	BEGIN
-		msg := m$
+		msg := ""; Put(msg, m)
 	END FailMsg;
 
 	PROCEDURE AddFailure (IN m: ARRAY OF CHAR);
@@ -95,8 +106,8 @@ MODULE UnitAssert;
 		INC(checks);
 		IF expected # actual THEN
 			NumberInto(expected, a); NumberInto(actual, b);
-			s := "expected " + a$ + ", got " + b$;
-			IF m # "" THEN s := s + ": " + m END;
+			s := "expected "; Put(s, a); Put(s, ", got "); Put(s, b);
+			IF m # "" THEN Put(s, ": "); Put(s, m) END;
 			AddFailure(s)
 		END
 	END EqualInt;
@@ -110,8 +121,8 @@ MODULE UnitAssert;
 		END;
 		IF ~ok THEN
 			Strings.RealToString(expected, a); Strings.RealToString(actual, b);
-			s := "expected " + a$ + ", got " + b$;
-			IF m # "" THEN s := s + ": " + m END;
+			s := "expected "; Put(s, a); Put(s, ", got "); Put(s, b);
+			IF m # "" THEN Put(s, ": "); Put(s, m) END;
 			AddFailure(s)
 		END
 	END EqualReal;
@@ -121,8 +132,8 @@ MODULE UnitAssert;
 	BEGIN
 		INC(checks);
 		IF expected # actual THEN
-			s := "expected <" + expected$ + ">, got <" + actual$ + ">";
-			IF m # "" THEN s := s + ": " + m END;
+			s := "expected <"; Put(s, expected); Put(s, ">, got <"); Put(s, actual); Put(s, ">");
+			IF m # "" THEN Put(s, ": "); Put(s, m) END;
 			AddFailure(s)
 		END
 	END EqualStr;
@@ -134,22 +145,24 @@ MODULE UnitAssert;
 		IF expected # actual THEN
 			NumberInto(SYSTEM.VAL(INTEGER, expected), a);
 			NumberInto(SYSTEM.VAL(INTEGER, actual), b);
-			s := "expected set " + a$ + ", got " + b$;
-			IF m # "" THEN s := s + ": " + m END;
+			s := "expected set "; Put(s, a); Put(s, ", got "); Put(s, b);
+			IF m # "" THEN Put(s, ": "); Put(s, m) END;
 			AddFailure(s)
 		END
 	END EqualSet;
 
 	PROCEDURE NotNil* (p: ANYPTR; IN m: ARRAY OF CHAR);
+		VAR s: Message;
 	BEGIN
 		INC(checks);
-		IF p = NIL THEN AddFailure("expected non-NIL pointer" + ": " + m$) END
+		IF p = NIL THEN s := "expected non-NIL pointer: "; Put(s, m); AddFailure(s) END
 	END NotNil;
 
 	PROCEDURE Same* (expected, actual: ANYPTR; IN m: ARRAY OF CHAR);
+		VAR s: Message;
 	BEGIN
 		INC(checks);
-		IF expected # actual THEN AddFailure("expected the same reference" + ": " + m$) END
+		IF expected # actual THEN s := "expected the same reference: "; Put(s, m); AddFailure(s) END
 	END Same;
 
 	PROCEDURE TrapBody (a, b, c: SYSTEM.ADDRESS);
@@ -158,13 +171,14 @@ MODULE UnitAssert;
 	END TrapBody;
 
 	PROCEDURE Traps* (p: PROCEDURE; IN m: ARRAY OF CHAR);
+		VAR s: Message;
 	BEGIN
 		INC(checks);
 		IF p = NIL THEN AddFailure("Traps: procedure is NIL")
 		ELSE
 			trapProc := p; trapDone := FALSE;
 			Kernel.Try(SYSTEM.VAL(Kernel.TryHandler, SYSTEM.ADR(TrapBody)), 0, 0, 0);
-			IF trapDone THEN AddFailure("expected a trap, but none happened" + ": " + m$) END
+			IF trapDone THEN s := "expected a trap, but none happened: "; Put(s, m); AddFailure(s) END
 		END
 	END Traps;
 

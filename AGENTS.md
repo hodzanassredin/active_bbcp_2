@@ -286,7 +286,7 @@ mouse is not emulated.
 `WinKernel` provides `AllocateStackMem` (`VirtualAlloc` + `PAGE_NOACCESS`), `Get/SetTryContext`
 and dynamic loading of libraries of interface modules. `tools/test-win64.sh` builds `@Win`, links
 the console PE (`WinIntInit`, with the subsystem patched to console) and runs `Unit_devMain`
-4/4, `System_devWinTasks` 5/5 and `Async_devWinWorkers` 4/4 under wine.
+7/7, `System_devWinTasks` 5/5 and `Async_devWinWorkers` 4/4 under wine.
 
 ### Limitations
 

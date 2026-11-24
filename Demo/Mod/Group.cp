@@ -99,9 +99,7 @@ MODULE DemoGroup;
 				INC(Cancelled)
 			ELSIF Tasks.Failed(Workers[i]) THEN
 				INC(FailedWorker)
-			ELSIF st = Tasks.Finished THEN
-				INC(Completed)
-			END
+			END	(* дошедших до конца считает сам рабочий (Completed) *)
 		END;
 		Failed := ~ok OR ~GroupIsFailed OR (FailedWorker # 1) OR (GroupAlive # 0);
 		DemoSupport.LogInt("DemoGroup: entered=", Entered);

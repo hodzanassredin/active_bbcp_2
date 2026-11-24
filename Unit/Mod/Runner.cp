@@ -24,7 +24,7 @@ MODULE UnitRunner;
 		TextModels, UnitAssert;
 
 	CONST
-		maxResults = 1024; maxName = 96; maxText = 1600;
+		maxResults = 1024; maxName = 96;
 		normalMark = 0; slowMark = 1; guiMark = 2; procMark = 3;
 		stPass = 0; stFail = 1; stEmpty = 2; stSkip = 3;
 
@@ -213,7 +213,7 @@ MODULE UnitRunner;
 	PROCEDURE RunModuleCounts* (IN module: ARRAY OF CHAR; IN marks: ARRAY OF CHAR;
 		quietRun: BOOLEAN; OUT c: Counts);
 		VAR mi, setupMod, teardownMod: Meta.Item; s: Meta.Scanner; nm: Meta.Name;
-			setupOk, teardownOk, ok, trapped: BOOLEAN; mark: INTEGER;
+			setupOk, teardownOk, ok, trapped, moduleBroken: BOOLEAN; mark: INTEGER;
 			saved: UnitAssert.State; savedQuiet: BOOLEAN;
 			msg: UnitAssert.Message;
 	BEGIN
@@ -228,12 +228,14 @@ MODULE UnitRunner;
 		ELSE
 			setupOk := LookupProc(mi, "Setup", setupMod);
 			teardownOk := LookupProc(mi, "Teardown", teardownMod);
+			moduleBroken := FALSE;
 			IF LookupProc(mi, "SetupModule", setupMod) THEN
 				Exec(setupMod, ok, trapped);
 				IF trapped OR ~ok THEN
 					msg := "SetupModule trapped";
 					PrintResult(module, "SetupModule", stFail, 0, msg);
-					Add(module, "SetupModule", stFail, 0, msg); INC(c.failed)
+					Add(module, "SetupModule", stFail, 0, msg); INC(c.failed);
+					moduleBroken := TRUE	(* тесты модуля не идут: пропущены с причиной *)
 				END
 			END;
 			s.ConnectTo(mi); s.Scan;
@@ -246,7 +248,11 @@ MODULE UnitRunner;
 						ELSIF StartsWith(nm, "TestProc") THEN mark := procMark
 						ELSE mark := normalMark
 						END;
-						IF ((mark = slowMark) & ~Contains(marks, "slow"))
+						IF moduleBroken THEN
+							msg := "SetupModule trapped";
+							PrintResult(module, nm, stSkip, 0, msg);
+							Add(module, nm, stSkip, 0, msg); INC(c.skipped)
+						ELSIF ((mark = slowMark) & ~Contains(marks, "slow"))
 								OR ((mark = guiMark) & ~Contains(marks, "gui"))
 								OR ((mark = procMark) & ~Contains(marks, "proc")) THEN
 							msg := "mark";
@@ -361,19 +367,30 @@ MODULE UnitRunner;
 
 	(* --- JUnit и TAP ----------------------------------------------------- *)
 
+	PROCEDURE JwByte (x: INTEGER);
+	BEGIN
+		ju.WriteByte(SYSTEM.VAL(BYTE, SHORT(SHORT(x))))
+	END JwByte;
+
+	PROCEDURE JwCh (ch: CHAR);
+	(** Знак в UTF-8 (CHAR — 16 бит: один, два или три байта). *)
+		VAR x: INTEGER;
+	BEGIN
+		IF ju # NIL THEN
+			x := ORD(ch);
+			IF x < 80H THEN JwByte(x)
+			ELSIF x < 800H THEN JwByte(0C0H + x DIV 64); JwByte(80H + x MOD 64)
+			ELSE JwByte(0E0H + x DIV 4096); JwByte(80H + x DIV 64 MOD 64); JwByte(80H + x MOD 64)
+			END
+		END
+	END JwCh;
+
 	PROCEDURE Jw (IN s: ARRAY OF CHAR);
 		VAR i: INTEGER;
 	BEGIN
-		IF ju # NIL THEN
-			i := 0;
-			WHILE s[i] # 0X DO ju.WriteByte(SYSTEM.VAL(BYTE, ORD(s[i]))); INC(i) END
-		END
+		i := 0;
+		WHILE s[i] # 0X DO JwCh(s[i]); INC(i) END
 	END Jw;
-
-	PROCEDURE JwCh (ch: CHAR);
-	BEGIN
-		IF ju # NIL THEN ju.WriteByte(SYSTEM.VAL(BYTE, ORD(ch))) END
-	END JwCh;
 
 	PROCEDURE JwEsc (IN s: ARRAY OF CHAR);
 		VAR i: INTEGER;
@@ -384,7 +401,7 @@ MODULE UnitRunner;
 			ELSIF s[i] = ">" THEN Jw("&gt;")
 			ELSIF s[i] = "&" THEN Jw("&amp;")
 			ELSIF s[i] = 22X THEN Jw("&quot;")
-			ELSE ju.WriteByte(SYSTEM.VAL(BYTE, ORD(s[i])))
+			ELSE JwCh(s[i])
 			END;
 			INC(i)
 		END
@@ -421,7 +438,7 @@ MODULE UnitRunner;
 			Jw(" time="); JwCh(22X); JwTime(results[i].ms); JwCh(22X);
 			IF results[i].status = stPass THEN Jw("/>"); Jw(0DX)
 			ELSIF results[i].status = stSkip THEN
-				Jw("><skipped/></testcase>"); Jw(0DX)
+				Jw("><skipped message="); JwCh(22X); JwEsc(results[i].msg); JwCh(22X); Jw("/></testcase>"); Jw(0DX)
 			ELSE
 				Jw("><failure message="); JwCh(22X); JwEsc(results[i].msg); JwCh(22X); Jw("/></testcase>"); Jw(0DX)
 			END;

@@ -191,7 +191,7 @@ tools/test-win64.sh --rebuild          # пересобрать каркас @Wi
 Сценарий собирает подсистемы `@Win` в `build/BB64WIN`, компилирует `Unit`, `Tasks`,
 `AsyncWinSock`, `AsyncWork`, `AsyncWorkWin`, `WinIntInit`, `WinInit`, `WinKernel` и тесты,
 линкует консольный PE `Kernel+ WinKernel Files WinFiles StdLoader WinIntInit` и переключает
-подсистему PE с GUI на console. Под wine идут `Unit_devMain` (4/4), `System_devWinTasks` (5/5)
+подсистему PE с GUI на console. Под wine идут `Unit_devMain` (7/7), `System_devWinTasks` (5/5)
 и `Async_devWinWorkers` (4/4). Нет wine — `SKIP`.
 
 ### 6.4. GUI без экрана

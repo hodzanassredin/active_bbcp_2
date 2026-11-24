@@ -37,11 +37,13 @@ MODULE AsyncComputon;
 		Transport* = POINTER TO ABSTRACT RECORD END;
 
 		Req = POINTER TO RReq;
+		(* Запрос. tag — номер пользователя (Pull, Try); wire — номер кадра
+		   на проводе, свой у каждого запроса: поздний ответ на запрос,
+		   брошенный по тайм-ауту, не находит новый запрос с тем же tag. *)
 		RReq = RECORD
-			tag, rank, len, status: INTEGER;
+			tag, wire, rank, len, status: INTEGER;
 			buf: POINTER TO ARRAY OF SHORTCHAR;
 			c: Computon;
-			waiting: Tasks.Task;
 			wctx: AsyncSelect.Ctx;
 			widx: INTEGER;
 			used, done, unload: BOOLEAN
@@ -78,6 +80,7 @@ MODULE AsyncComputon;
 		lastErr: INTEGER;
 		hook: Hook;
 		nextWorker: INTEGER;
+		nextWire: INTEGER;	(* последний выданный номер кадра *)
 		extTransport: Transport;	(* MPI: объект, поставленный AsyncMpi *)
 		mpiPoll: MpiPoll;
 
@@ -163,9 +166,7 @@ MODULE AsyncComputon;
 		f.Flush();
 		rd.ConnectTo(f);
 		rd.ReadStore(st);
-		IF st # NIL THEN
-			WITH st: Computon DO RETURN st END
-		END;
+		IF (st # NIL) & (st IS Computon) THEN RETURN st(Computon) END;
 		RETURN NIL
 	END Deserialize;
 
@@ -402,13 +403,12 @@ MODULE AsyncComputon;
 	END ReqAt;
 
 	PROCEDURE WakeReq (req: Req);
-		VAR t: Tasks.Task; ctx: AsyncSelect.Ctx; idx: INTEGER;
+	(* Pull ждёт опросом (Sleep), будить нужно только Select. *)
+		VAR ctx: AsyncSelect.Ctx; idx: INTEGER;
 	BEGIN
 		IF req.wctx # NIL THEN
 			ctx := req.wctx; idx := req.widx; req.wctx := NIL;
 			AsyncSelect.SignalReady(ctx, idx)
-		ELSIF req.waiting # NIL THEN
-			t := req.waiting; req.waiting := NIL; Tasks.Unpark(t)
 		END
 	END WakeReq;
 
@@ -420,6 +420,15 @@ MODULE AsyncComputon;
 		END;
 		RETURN NIL
 	END FindReq;
+
+	PROCEDURE FindWire (wire: INTEGER): Req;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO maxReq - 1 DO
+			IF reqs[i].used & (reqs[i].wire = wire) THEN RETURN ReqAt(i) END
+		END;
+		RETURN NIL
+	END FindWire;
 
 	PROCEDURE (s: PullSignal) Arm (ctx: AsyncSelect.Ctx; idx: INTEGER): BOOLEAN;
 	BEGIN
@@ -451,9 +460,11 @@ MODULE AsyncComputon;
 		FOR i := 0 TO maxReq - 1 DO
 			IF ~reqs[i].used THEN
 				reqs[i].used := TRUE; reqs[i].tag := tag;
+				IF nextWire = MAX(INTEGER) THEN nextWire := 0 END;
+				INC(nextWire); reqs[i].wire := nextWire;
 				reqs[i].done := FALSE; reqs[i].c := NIL;
 				reqs[i].buf := NIL; reqs[i].len := 0; reqs[i].status := 0;
-				reqs[i].waiting := NIL; reqs[i].wctx := NIL; reqs[i].widx := 0;
+				reqs[i].wctx := NIL; reqs[i].widx := 0;
 				reqs[i].rank := -1; reqs[i].unload := FALSE;
 				RETURN ReqAt(i)
 			END
@@ -478,7 +489,6 @@ MODULE AsyncComputon;
 	END SendFrame;
 
 	PROCEDURE FailReq (req: Req; err: INTEGER);
-		VAR t: Tasks.Task;
 	BEGIN
 		IF (req # NIL) & ~req.done THEN
 			req.status := err; req.done := TRUE;
@@ -496,14 +506,19 @@ MODULE AsyncComputon;
 			IF hook # NIL THEN hook.Failed(req.rank, req.tag, -2) END
 		ELSE
 			req.rank := r;
-			IF ~SendFrame(r, req.tag, kindWork, req.buf, req.len) THEN FailReq(req, -3) END
+			IF ~SendFrame(r, req.wire, kindWork, req.buf, req.len) THEN FailReq(req, -3) END
 		END
 	END Resend;
 
 	PROCEDURE Push* (c: Computon; rank, tag: INTEGER);
-	(** Отправить компутон исполнителю rank (0..Size-1). *)
+	(** Пред: tag >= 0 (трап 20; отрицательные — служебные запросы Unload);
+		0 <= rank < Size() (21).
+		Пост: компутон отправлен исполнителю rank; -1 в LastError — нет
+		свободного слота запроса или компутон не сериализуется. *)
 		VAR req: Req;
 	BEGIN
+		ASSERT(tag >= 0, 20);
+		ASSERT((rank >= 0) & (rank < nworkers), 21);
 		req := NewReq(tag);
 		IF req = NIL THEN lastErr := -1; RETURN END;
 		Serialize(c, req.buf, req.len);
@@ -511,7 +526,7 @@ MODULE AsyncComputon;
 			req.used := FALSE; lastErr := -1; RETURN
 		END;
 		req.rank := rank;
-		IF ~SendFrame(rank, tag, kindWork, req.buf, req.len) THEN Resend(req) END
+		IF ~SendFrame(rank, req.wire, kindWork, req.buf, req.len) THEN Resend(req) END
 	END Push;
 
 	PROCEDURE PullTimeout* (rank, tag: INTEGER; ms: LONGINT): Computon;
@@ -595,7 +610,7 @@ MODULE AsyncComputon;
 				IF req = NIL THEN lastErr := -1; all := FALSE
 				ELSE
 					req.unload := TRUE; req.rank := i;
-					IF ~SendFrame(i, tag, kindUnload, buf, len) THEN FailReq(req, -3) END
+					IF ~SendFrame(i, req.wire, kindUnload, buf, len) THEN FailReq(req, -3) END
 				END
 			END
 		END;
@@ -649,6 +664,11 @@ MODULE AsyncComputon;
 		шлёт остановку рангам и завершает MPI. *)
 		VAR i, res: INTEGER; ok: BOOLEAN;
 	BEGIN
+		(* Висящие запросы проваливаются (-2): их ответов уже не будет, а
+		   ждущий Select не должен ждать до своего срока. *)
+		FOR i := 0 TO maxReq - 1 DO
+			IF reqs[i].used & ~reqs[i].done THEN FailReq(ReqAt(i), -2) END
+		END;
 		IF started & (transport = trMpi) & (extTransport # NIL) THEN
 			extTransport.Stop;
 			started := FALSE; nworkers := 0;
@@ -683,9 +703,12 @@ MODULE AsyncComputon;
 			END;
 			RETURN
 		END;
+		(* Ранги плотные: неудачный запуск не оставляет дыры, следующий
+		   исполнитель занимает тот же индекс. Инвариант: workers[0 ..
+		   nworkers) запущены. *)
 		nworkers := 0;
 		FOR i := 0 TO n - 1 DO
-			IF Spawn(i) THEN INC(nworkers) END
+			IF Spawn(nworkers) THEN INC(nworkers) END
 		END;
 		started := nworkers > 0;
 	END Start;
@@ -717,7 +740,7 @@ MODULE AsyncComputon;
 			st := GetInt(workers[idx].buf, off + 8);
 			IF (len < 0) OR (len > maxFrame) THEN MarkDead(idx); RETURN END;
 			IF workers[idx].inLen - off < 12 + len THEN EXIT END;
-			req := FindReq(tag);
+			req := FindWire(tag);
 			IF (req # NIL) & ~req.done THEN
 				IF req.unload THEN req.status := st	(* ответ без нагрузки *)
 				ELSIF st = 0 THEN
@@ -743,7 +766,7 @@ MODULE AsyncComputon;
 		pipe/TCP. Вызывается из главного цикла под действием Poll. *)
 		VAR req: Req; i: INTEGER;
 	BEGIN
-		req := FindReq(tag);
+		req := FindWire(tag);
 		IF (req # NIL) & ~req.done THEN
 			IF req.unload THEN req.status := status
 			ELSIF status = 0 THEN

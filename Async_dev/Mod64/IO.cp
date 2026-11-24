@@ -28,6 +28,9 @@ MODULE Async_devIO;
 		HClient = POINTER TO RECORD (Tasks.Task)
 			adr: ARRAY 64 OF CHAR; id: INTEGER
 		END;
+		Acceptor = POINTER TO RECORD (Tasks.Task)
+			l: CommStreams.Listener; ok: BOOLEAN; elapsed: LONGINT
+		END;
 
 	VAR
 		stopServer, release: BOOLEAN;
@@ -284,5 +287,27 @@ MODULE Async_devIO;
 		UnitAssert.True(PumpUntil(5000, NoTasks), "http tasks finish");
 		UnitAssert.EqualInt(3, httpOk, "three HTTP replies")
 	END TestHttp;
+
+	PROCEDURE (t: Acceptor) Run;
+		VAR s: CommStreams.Stream; t0: LONGINT;
+	BEGIN
+		t0 := Kernel.Time();
+		t.ok := AsyncIO.Accept(t.l, s, 100);
+		t.elapsed := Kernel.Time() - t0
+	END Run;
+
+	PROCEDURE TestAcceptTimeout*;
+	(** Accept без клиента возвращается по сроку. *)
+		VAR l: CommStreams.Listener; res: INTEGER; a: Acceptor;
+	BEGIN
+		CommTCP.NewListener("127.0.0.1:0", l, res);
+		UnitAssert.True((res = CommStreams.done) & (l # NIL), "listener");
+		NEW(a); a.l := l; a.ok := TRUE; a.elapsed := -1; Tasks.Start(a);
+		UnitAssert.True(PumpUntil(2000, NoTasks), "accept returned");
+		UnitAssert.True(~a.ok, "no connection accepted");
+		UnitAssert.True((a.elapsed >= 100) & (a.elapsed < 1000), "returned by the deadline");
+		Tasks.Cancel(a); IF PumpUntil(1000, NoTasks) THEN END;	(* уборка после провала *)
+		l.Close
+	END TestAcceptTimeout;
 
 END Async_devIO.
