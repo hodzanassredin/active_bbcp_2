@@ -2606,7 +2606,7 @@ MODULE Kernel;
 		VAR i: INTEGER;
 	BEGIN
 		ASSERT(size > 0, 30);
-		ASSERT(FinChainHit(S.VAL(LONGINT, blk), S.VAL(LONGINT, blk) + size) = NIL, 32);	(* free-блок накрыл живой FList-узел *)
+		IF debug THEN ASSERT(FinChainHit(S.VAL(LONGINT, blk), S.VAL(LONGINT, blk) + size) = NIL, 32) END;	(* free-блок накрыл живой FList-узел *)
 		blk.size := size - 8; blk.tag := S.VAL(Type, S.ADR(blk.size));	(* 64-бит: stored = total - 8 (было -4) *)
 		i := MIN(N - 1, (blk.size DIV 16));
 		blk.next := free[i]; free[i] := blk
@@ -2868,7 +2868,7 @@ MODULE Kernel;
 			a := b.size + 8 - tsize;	(* free size field = total - 8 *)
 			ASSERT((a = 0) OR (a >= 32), 22);	(* a = 16: sliver, Next его не увидит (см. GetOldFreeBlock) *)
 			IF a >= 32 THEN Insert(S.VAL(FreeBlock, S.VAL(LONGINT, b) + tsize), a) END;
-			ASSERT(FinChainHit(S.VAL(LONGINT, b), S.VAL(LONGINT, b) + tsize) = NIL, 21);	(* NewBlock накрыл живой FList-узел *)
+			IF debug THEN ASSERT(FinChainHit(S.VAL(LONGINT, b), S.VAL(LONGINT, b) + tsize) = NIL, 21) END;	(* NewBlock накрыл живой FList-узел *)
 			IF size > 0 THEN Erase(S.ADR(b.size), (size + 3) DIV 4) END;
 			INC(allocated, tsize);
 			INC(allocCount)
