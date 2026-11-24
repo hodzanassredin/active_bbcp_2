@@ -31,6 +31,7 @@ MODULE AsyncSelect;
 		Ctx* = POINTER TO RECORD
 			task: Tasks.Task;
 			decided: BOOLEAN;
+			ready: BOOLEAN;	(* регистрация окончена, можно будить *)
 			winner: INTEGER	(* индекс альтернативы; -1 — ещё нет *)
 		END;
 
@@ -99,11 +100,22 @@ MODULE AsyncSelect;
 		RETURN (o # NIL) & (o.ctx # NIL) & ~o.ctx.decided & ~TaskDone(o.ctx.task)
 	END OfferAlive;
 
+	PROCEDURE Wake (ctx: Ctx);
+	(** Будить, только когда регистрация альтернатив окончена и задача
+		действительно спит в Tasks.Park. Пока идёт регистрация, задача
+		может стоять в Kernel.Lock на мониторе другого канала; Tasks.Unpark
+		перевёл бы её в Ready без монитора, и Lock трапнул бы «woken
+		without the monitor». Такая задача сама увидит ctx.decided,
+		получив монитор. *)
+	BEGIN
+		IF (ctx # NIL) & ctx.ready THEN Tasks.Unpark(ctx.task) END
+	END Wake;
+
 	PROCEDURE Decide (ctx: Ctx; idx: INTEGER);
 	BEGIN
 		IF (ctx # NIL) & ~ctx.decided THEN
 			ctx.decided := TRUE; ctx.winner := idx;
-			Tasks.Unpark(ctx.task)
+			Wake(ctx)
 		END
 	END Decide;
 
@@ -411,7 +423,7 @@ MODULE AsyncSelect;
 	BEGIN
 		IF ~a.ctx.decided THEN
 			a.ctx.decided := TRUE; a.ctx.winner := a.idx;
-			Tasks.Unpark(a.ctx.task)
+			Wake(a.ctx)
 		END
 	END Do;
 
@@ -452,7 +464,8 @@ MODULE AsyncSelect;
 		ASSERT(Tasks.InTask(), 20);
 		n := LEN(ops); ASSERT(n <= maxAlt, 21);
 		tIdx := -1; tMs := -1;
-		NEW(ctx); ctx.task := Tasks.Current(); ctx.decided := FALSE; ctx.winner := -1;
+		NEW(ctx); ctx.task := Tasks.Current(); ctx.decided := FALSE;
+		ctx.ready := FALSE; ctx.winner := -1;
 		FOR i := 0 TO n - 1 DO offers[i] := NIL END;
 		i := 0;
 		WHILE (i < n) & ~ctx.decided DO
@@ -468,9 +481,13 @@ MODULE AsyncSelect;
 				offers[i].kind := ops[i].kind; offers[i].msg := ops[i].msg;
 				offers[i].got := NIL; offers[i].next := NIL;
 				Kernel.Lock(ops[i].core);
-				Prune(ops[i].core);
-				IF Register(ops[i].core, offers[i]) THEN
-					ctx.decided := TRUE; ctx.winner := i
+				(* решение могло быть принято, пока мы ждали монитор
+				   другого канала: второй альтернативы не исполняем *)
+				IF ~ctx.decided THEN
+					Prune(ops[i].core);
+					IF Register(ops[i].core, offers[i]) THEN
+						ctx.decided := TRUE; ctx.winner := i
+					END
 				END;
 				Kernel.Unlock(ops[i].core)
 			END;
@@ -485,6 +502,7 @@ MODULE AsyncSelect;
 				NEW(timer); timer.ctx := ctx; timer.idx := tIdx;
 				Services.DoLater(timer, Services.Ticks() + tMs)
 			END;
+			ctx.ready := TRUE;
 			WHILE ~ctx.decided DO Tasks.Park END;
 			IF timer # NIL THEN Services.RemoveAction(timer) END
 		END;
