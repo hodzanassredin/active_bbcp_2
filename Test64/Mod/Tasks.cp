@@ -15,6 +15,7 @@ MODULE Test64Tasks;
 
 	VAR
 		counter, ticks, eats, produced, consumed, buf, groupEats: INTEGER;
+		finalized: INTEGER;	(* сработали FINALIZE задач в тесте Reap *)
 		bufFull: BOOLEAN;
 		cons, prod: Tasks.Task;
 		waitFailed: BOOLEAN;
@@ -27,6 +28,7 @@ MODULE Test64Tasks;
 		Parent = POINTER TO RECORD (Tasks.Task) END;
 		ParentTrap = POINTER TO RECORD (Tasks.Task) END;
 		Once = POINTER TO RECORD (Tasks.Task) END;
+		Reaper = POINTER TO RECORD (Tasks.Task) END;
 		Probe = POINTER TO RECORD (Tasks.Task) END;
 		GroupChild = POINTER TO RECORD (Tasks.Task) END;
 		GroupTrapChild = POINTER TO RECORD (Tasks.Task) END;
@@ -104,6 +106,16 @@ MODULE Test64Tasks;
 	BEGIN
 		Tasks.Sleep(0); INC(counter)
 	END Run;
+
+	PROCEDURE (t: Reaper) Run;
+	BEGIN
+		Tasks.Sleep(0)
+	END Run;
+
+	PROCEDURE (t: Reaper) FINALIZE;
+	BEGIN
+		INC(finalized)
+	END FINALIZE;
 
 	PROCEDURE (t: Probe) Run;
 		VAR a: ProbeAction;
@@ -362,6 +374,34 @@ MODULE Test64Tasks;
 	BEGIN
 		LoadBench(10000, benchStack, "tasks10k")
 	END TestSlowLoadTenThousand;
+
+	PROCEDURE SpawnShort (n: INTEGER);
+	(* Создаём в отдельном кадре: после возврата его мёртвые слоты не
+	   сканируются консервативным ScanStack и не удерживают задачи. *)
+		VAR i: INTEGER; t: Reaper;
+	BEGIN
+		FOR i := 1 TO n DO
+			NEW(t); Tasks.SetStackSize(t, benchStack); Tasks.Start(t)
+		END;
+		t := NIL
+	END SpawnShort;
+
+	PROCEDURE TestSlowReap*;
+	(** Завершённые задачи должны уходить из списка `all` в Reap: иначе
+		каждая когда-либо запущенная задача и всё, на что она ссылается,
+		живёт до конца процесса. После 10 тыс. коротких задач список пуст,
+		а объекты задач собраны (об этом говорит их FINALIZE). *)
+	BEGIN
+		finalized := 0;
+		SpawnShort(10000);
+		UnitAssert.True(Pump(120000), "short tasks finished");
+		UnitAssert.EqualInt(0, Tasks.ListSize(), "finished tasks left the all list");
+		Kernel.Collect;
+		(* Консервативный ScanStack может удержать один объект, адрес
+		   которого остался в сохранённом регистре кадра; при старом
+		   поведении (список all) не собрался бы ни один. *)
+		UnitAssert.True(finalized >= 9999, "task objects were collected")
+	END TestSlowReap;
 
 	PROCEDURE TestProcList*;
 	(** Отладочный список задач печатается без трапа. *)

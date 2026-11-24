@@ -49,6 +49,7 @@ MODULE Tasks;
 	TYPE
 		Task* = POINTER TO ABSTRACT RECORD
 			next: Task;		(* список всех задач *)
+			prev: Task;		(* предыдущая в списке всех задач *)
 			rnext: Task;		(* очередь готовых *)
 			snext: Task;		(* список спящих *)
 			wnext: Task;		(* очередь ждущих эту задачу *)
@@ -83,6 +84,7 @@ MODULE Tasks;
 		alive: INTEGER;		(* незавершённых задач *)
 		slice: LONGINT;
 		lastPoll: LONGINT;	(* когда Kernel.RequestPoll поднимался последний раз *)
+		lastWake: LONGINT;	(* время последнего просмотра спящих в Step *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
 
@@ -341,7 +343,9 @@ MODULE Tasks;
 		IF t.timeSlice <= 0 THEN t.timeSlice := defaultSlice END;
 		IF g # NIL THEN t.group := g; INC(g.alive) END;
 		t.state := Ready; Enqueue(t); deadlocked := FALSE;
-		t.next := all; all := t;
+		t.prev := NIL; t.next := all;
+		IF all # NIL THEN all.prev := t END;
+		all := t;
 		INC(alive);
 		EnsureScheduled
 	END StartIn;
@@ -352,8 +356,13 @@ MODULE Tasks;
 	END Start;
 
 	PROCEDURE Reap (t: Task);
-	(** Освободить стек завершённой задачи (уже на главном стеке). *)
+	(** Освободить стек завершённой задачи (уже на главном стеке) и убрать
+		её из списка всех задач: иначе завершённые задачи и всё, на что они
+		ссылаются, живут до конца процесса. *)
 	BEGIN
+		IF t.prev = NIL THEN all := t.next ELSE t.prev.next := t.next END;
+		IF t.next # NIL THEN t.next.prev := t.prev END;
+		t.next := NIL; t.prev := NIL;
 		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL END;
 		Kernel.FreeStack(t.lo, t.hi);
 		t.lo := 0; t.hi := 0;
@@ -524,7 +533,12 @@ MODULE Tasks;
 			IF Kernel.Time() - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
 				Kernel.RequestPoll; lastPoll := Kernel.Time()
 			END;
-			WakeSleepers(Kernel.Time());
+			(* Спящих просматриваем не чаще раза на изменившееся время: при
+			   10 тыс. спящих линейный обход на каждой итерации Step дороже
+			   самих переключений. *)
+			IF Kernel.Time() # lastWake THEN
+				lastWake := Kernel.Time(); WakeSleepers(lastWake)
+			END;
 			t := Dequeue();
 			IF t = NIL THEN CheckDeadlock; EXIT END;
 			current := t; t.state := Running;
@@ -607,6 +621,16 @@ MODULE Tasks;
 		switches := 0
 	END ResetStats;
 
+	PROCEDURE ListSize* (): INTEGER;
+	(** Длина списка всех задач (диагностика: после Reap завершённых в нём
+		быть не должно). *)
+		VAR t: Task; n: INTEGER;
+	BEGIN
+		n := 0; t := all;
+		WHILE t # NIL DO INC(n); t := t.next END;
+		RETURN n
+	END ListSize;
+
 	PROCEDURE List*;
 	(** Список задач для отладки: имя, состояние, стек, срок. *)
 		VAR t: Task; s: ARRAY 16 OF CHAR; st: ARRAY 16 OF CHAR;
@@ -688,5 +712,19 @@ BEGIN
 	slice := defaultSlice;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
 	lastPoll := Kernel.Time();
+	lastWake := -1;	(* первый Step обязан просмотреть спящих *)
 	Kernel.SetScheduler(CurHook, Park, UnparkHook, ReadyHook, DeadlineHook, NameHook, StackHook, YieldHook)
+CLOSE
+	(* Выгрузка/завершение мира: в ядре не должно остаться указателей на
+	   процедуры этого модуля, а стеки живых задач надо вернуть платформе. *)
+	Services.RemoveAction(sched);
+	Kernel.SetScheduler(NIL, NIL, NIL, NIL, NIL, NIL, NIL, NIL);
+	WHILE all # NIL DO
+		IF all.stackRec # NIL THEN Kernel.UnregisterStack(all.stackRec); all.stackRec := NIL END;
+		Kernel.FreeStack(all.lo, all.hi);
+		all.lo := 0; all.hi := 0;
+		all := all.next
+	END;
+	readyHead := NIL; readyTail := NIL; sleepers := NIL; current := NIL;
+	scheduled := FALSE; inStep := FALSE
 END Tasks.
