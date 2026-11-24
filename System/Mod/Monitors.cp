@@ -20,7 +20,18 @@ MODULE Monitors;
 	Схема AWAIT — Мюллера: условие читает состояние в кадре ждущего,
 	перевычисляет уходящий (Unlock/Await) в кадрах ждущих. Трап в чужом
 	условии ловится Kernel.Try с подавлением уборки (Kernel.SetQuiet) и
-	переадресуется ждущей задаче. *)
+	переадресуется ждущей задаче.
+
+	Трапы (перед трапом в консоль пишется «Kernel: <текст>»):
+		20	Lock: объект NIL
+		21	Lock: монитор держит другая задача, а вызов — с главного стека
+		22	Unlock, Wait, Await: монитор не у вызывающего
+		23	Unlock: мониторы отпускаются не в порядке LIFO
+		24	Wait, Await: ожидание вне задачи
+		25	Await: условие NIL
+		60	Await: постусловие не достигнуто — условие трапнуло при
+			вычислении другой задачей; исходный номер — в консоли
+		100	Lock, Wait, Await: задача разбужена без монитора *)
 
 	IMPORT S := SYSTEM, Kernel;
 
@@ -137,11 +148,11 @@ MODULE Monitors;
 		MonStr(a)
 	END MonHex;
 
-	PROCEDURE MonFail (IN msg: ARRAY OF CHAR);
+	PROCEDURE MonErr (IN msg: ARRAY OF CHAR);
+	(* Текст нарушения перед трапом: номер трапа — у вызывающего. *)
 	BEGIN
-		MonStr("Kernel: "); MonStr(msg); MonLn;
-		HALT(20)
-	END MonFail;
+		MonStr("Kernel: "); MonStr(msg); MonLn
+	END MonErr;
 
 	(* -------------------- планировщик (через крючок ядра) ---------------- *)
 
@@ -168,7 +179,9 @@ MODULE Monitors;
 		VAR s: Kernel.Scheduler;
 	BEGIN
 		s := Kernel.sched;
-		IF s # NIL THEN s.park() ELSE MonFail("wait outside a task") END
+		IF s = NIL THEN MonErr("wait outside a task") END;
+		ASSERT(s # NIL, 24);
+		s.park()
 	END ParkNow;
 
 	PROCEDURE TaskName (t: S.ADDRESS; OUT s: ARRAY OF CHAR);
@@ -573,7 +586,8 @@ MODULE Monitors;
 		Tasks — трап. *)
 		VAR me: S.ADDRESS; m: Monitor; q: TaskRef;
 	BEGIN
-		IF obj = 0 THEN MonFail("Lock: NIL object") END;
+		IF obj = 0 THEN MonErr("Lock: NIL object") END;
+		ASSERT(obj # 0, 20);
 		me := curTok;	(* Sync в крючке уже прочитал токен *)
 		m := GetMon(obj);
 		IF m.owner = me THEN
@@ -583,11 +597,11 @@ MODULE Monitors;
 		ELSIF me # mainToken THEN
 			q := TakeTaskRef(me); AppendEnter(m, q);
 			ParkNow;
-			IF m.owner # me THEN MonFail("Lock: woken without the monitor") END;
+			IF m.owner # me THEN MonErr("Lock: woken without the monitor"); HALT(100) END;
 			FreeTaskRef(q)	(* HandOff снял её с очереди входа *)
 			(* запись о взятии уже добавлена PushTo при передаче *)
 		ELSE
-			MonFail("Lock: monitor is held by another task")
+			MonErr("Lock: monitor is held by another task"); HALT(21)
 		END
 	END DoLock;
 
@@ -599,12 +613,11 @@ MODULE Monitors;
 		me := curTok;
 		m := FindMon(obj);
 		IF (m = NIL) OR (m.owner # me) THEN
-			MonFail("Unlock: monitor is not held by the caller")
+			MonErr("Unlock: monitor is not held by the caller"); HALT(22)
 		END;
-		IF cur = NIL THEN MonFail("Unlock: monitors must be released in LIFO order") END;
-		r := cur.head;
+		IF cur # NIL THEN r := cur.head ELSE r := NIL END;
 		IF (r = NIL) OR (r.mon # m) THEN
-			MonFail("Unlock: monitors must be released in LIFO order")
+			MonErr("Unlock: monitors must be released in LIFO order"); HALT(23)
 		END;
 		cur.head := r.next; DEC(cur.depth); FreeLock(r);
 		DEC(m.count);
@@ -621,10 +634,10 @@ MODULE Monitors;
 		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
 	BEGIN
 		me := curTok;
-		IF me = mainToken THEN MonFail("Wait: wait outside a task") END;
+		IF me = mainToken THEN MonErr("Wait: wait outside a task"); HALT(24) END;
 		m := FindMon(obj);
 		IF (m = NIL) OR (m.owner # me) THEN
-			MonFail("Wait: monitor is not held by the caller")
+			MonErr("Wait: monitor is not held by the caller"); HALT(22)
 		END;
 		w := TakeWaitRef(me, NIL, 0);
 		AppendWait(m, w);
@@ -633,7 +646,7 @@ MODULE Monitors;
 		m.owner := 0;
 		HandOff(m, me);
 		ParkNow;
-		IF m.owner # me THEN MonFail("Wait: woken without the monitor") END;
+		IF m.owner # me THEN MonErr("Wait: woken without the monitor"); HALT(100) END;
 		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
 		m.count := saved
 	END DoWait;
@@ -647,11 +660,11 @@ MODULE Monitors;
 		VAR me: S.ADDRESS; m: Monitor; w: WaitRef; saved: INTEGER;
 	BEGIN
 		me := curTok;
-		IF me = mainToken THEN MonFail("Await: wait outside a task") END;
-		IF cond = NIL THEN MonFail("Await: NIL condition") END;
+		IF me = mainToken THEN MonErr("Await: wait outside a task"); HALT(24) END;
+		IF cond = NIL THEN MonErr("Await: NIL condition"); HALT(25) END;
 		m := FindMon(obj);
 		IF (m = NIL) OR (m.owner # me) THEN
-			MonFail("Await: monitor is not held by the caller")
+			MonErr("Await: monitor is not held by the caller"); HALT(22)
 		END;
 		IF Kernel.CallCond(cond, frame) THEN RETURN END;	(* компилятор тоже проверяет до вызова *)
 		w := TakeWaitRef(me, cond, frame);
@@ -666,9 +679,9 @@ MODULE Monitors;
 			   HALT требует константу, поэтому исходный код — в журнал. *)
 			MonStr("Kernel: Await: trap "); MonInt(w.trap);
 			MonStr(" in the condition"); MonLn;
-			HALT(121)
+			HALT(60)
 		END;
-		IF m.owner # me THEN MonFail("Await: woken without the monitor") END;
+		IF m.owner # me THEN MonErr("Await: woken without the monitor"); HALT(100) END;
 		FreeWaitRef(w);	(* HandOff снял её с очереди ожидания *)
 		m.count := saved
 	END DoAwait;
@@ -712,9 +725,10 @@ MODULE Monitors;
 		Sync; PurgeCurrent
 	END purge;
 
-	(* -------------------- запросы для тестов и отладки -------------------- *)
+	(* -------------------- рабочие запросы -------------------------------- *)
 
 	PROCEDURE IsLocked* (obj: ANYPTR): BOOLEAN;
+	(** Пост: TRUE — монитор obj кем-то взят; obj = NIL — FALSE. *)
 		VAR m: Monitor;
 	BEGIN
 		IF obj = NIL THEN RETURN FALSE END;
@@ -723,13 +737,17 @@ MODULE Monitors;
 	END IsLocked;
 
 	PROCEDURE LockDepth* (): INTEGER;
-	(** Глубина цепочки текущего токена: Kernel.Poll не уступает в мониторе. *)
+	(** Пост: число взятий мониторов текущей задачей (главным стеком);
+		планировщик не уступает в точке опроса, пока оно > 0. *)
 	BEGIN
 		Sync;
 		IF cur # NIL THEN RETURN cur.depth ELSE RETURN 0 END
 	END LockDepth;
 
+	(* -------------------- запросы для тестов и отладки -------------------- *)
+
 	PROCEDURE WaitersCount* (): INTEGER;
+	(** Пост: число записей во всех очередях входа и ожидания. *)
 		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef;
 	BEGIN
 		n := 0; i := 0;
@@ -746,7 +764,8 @@ MODULE Monitors;
 	END WaitersCount;
 
 	PROCEDURE DumpMonitors*;
-	(** Журнал «кто чего ждёт»: все занятые мониторы и их очереди. *)
+	(** Пост: в консоли — журнал «кто чего ждёт»: все мониторы таблицы и
+		их очереди. Зовёт и планировщик при тупике. *)
 		VAR i, n: INTEGER; m: Monitor; w: WaitRef; e: TaskRef; nm: ARRAY 64 OF CHAR;
 	BEGIN
 		MonStr("Kernel: monitor dump"); MonLn;

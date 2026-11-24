@@ -159,10 +159,11 @@ both in a window and in the console.
 
 `Tasks.CheckWait` checks three conditions and traps:
 
-1. there is no current task — `wait outside a task`;
-2. the task is cancelled — trap 21;
+1. there is no current task — `wait outside a task`, trap 20;
+2. the task is cancelled — trap 127 ("interrupted"): it differs from precondition traps, including
+   trap 21 of a channel protocol violation;
 3. an action handler is running (other than the scheduler's own action) or a domain broadcast is
-   running — `wait inside an action handler or domain broadcast`.
+   running — `wait inside an action handler or domain broadcast`, trap 21.
 
 `Yield`, `Sleep`, `Join` and `Park` pass this check. The kernel (`Kernel.Wait` and `Kernel.Await`)
 itself reports `wait outside a task` if no task is loaded.

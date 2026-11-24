@@ -159,10 +159,11 @@ Component Pascal исполняет одна нить операционной �
 
 `Tasks.CheckWait` проверяет три условия и трапает:
 
-1. текущей задачи нет — `wait outside a task`;
-2. задача отменена — трап 21;
+1. текущей задачи нет — `wait outside a task`, трап 20;
+2. задача отменена — трап 127 («прервано»): он не совпадает с трапами предусловий, в том числе с
+   трапом 21 нарушения протокола канала;
 3. идёт обработчик действия (кроме действия самого планировщика) или рассылка по домену —
-   `wait inside an action handler or domain broadcast`.
+   `wait inside an action handler or domain broadcast`, трап 21.
 
 Проверку проходят `Yield`, `Sleep`, `Join` и `Park`. Ядро (`Kernel.Wait` и `Kernel.Await`) само
 сообщает `wait outside a task`, если задача не загружена.

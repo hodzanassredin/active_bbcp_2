@@ -16,9 +16,10 @@ MODULE Tasks;
 	переключения. Трап в задаче ловится своим Kernel.Try в TaskBoot,
 	задача завершается, остальные живут.
 
-	Отмена — флаг; каждая точка ожидания проверяет его и трапает
-	(ASSERT(FALSE, 21)). Ожидание вне задачи, внутри действия или
-	рассылки домена — трап с текстом в Console.
+	Отмена — флаг; каждая точка ожидания проверяет его и прерывает
+	задачу трапом 127. Нарушение предусловия — трап 20–22 с текстом в
+	Console (номер — по порядку проверок в процедуре); 100 — нарушен
+	инвариант планировщика.
 
 	Ограничения (см. docs/stand.md, «Решения без владельца», §9):
 	- одна нить ОС; мониторов нет, философы используют Park/Unpark;
@@ -125,11 +126,6 @@ MODULE Tasks;
 	BEGIN
 		Console.WriteStr("Tasks: "); Console.WriteStr(s); Console.WriteLn
 	END Msg;
-
-	PROCEDURE Fail (IN s: ARRAY OF CHAR);
-	BEGIN
-		Msg(s); ASSERT(FALSE, 20)
-	END Fail;
 
 	PROCEDURE StateName (st: INTEGER; OUT s: ARRAY OF CHAR);
 	BEGIN
@@ -348,25 +344,20 @@ MODULE Tasks;
 
 	PROCEDURE CheckWait (IN what: ARRAY OF CHAR);
 	BEGIN
-		IF current = NIL THEN
-			Msg(what); Fail("wait outside a task")
-		END;
-		IF current.cancel THEN
-			Msg("cancelled"); ASSERT(FALSE, 21)
-		END;
-		IF InFramework() THEN
-			Msg(what); Fail("wait inside an action handler or domain broadcast")
-		END
+		IF current = NIL THEN Msg(what); Msg("wait outside a task") END;
+		ASSERT(current # NIL, 20);
+		IF current.cancel THEN Msg("cancelled"); HALT(127) END;
+		IF InFramework() THEN Msg(what); Msg("wait inside an action handler or domain broadcast") END;
+		ASSERT(~InFramework(), 21)
 	END CheckWait;
 
 	(* --- завершение и запуск ---------------------------------------------- *)
 
 	PROCEDURE Finish;
-	(** Вызывается сTaskBoot на стеке задачи: перейти на главный стек. *)
+	(** Вызывается из TaskBoot на стеке задачи: перейти на главный стек. *)
 	BEGIN
 		SwitchTo(current.sp, schedSP, current.stackRec);
-		(* сюда не возвращаемся: задача завершена *)
-		HALT(22)
+		HALT(100)	(* недостижимо: на стек завершённой задачи не переключаются *)
 	END Finish;
 
 	PROCEDURE TaskBody (a, b, c: S.ADDRESS);
@@ -500,15 +491,18 @@ MODULE Tasks;
 
 	PROCEDURE CheckTask (t: Task);
 	BEGIN
-		IF t = NIL THEN Fail("NIL task") END;
-		IF t.state # New THEN Fail("task already started or finished") END
+		IF t = NIL THEN Msg("NIL task") END;
+		ASSERT(t # NIL, 20);
+		IF t.state # New THEN Msg("task already started or finished") END;
+		ASSERT(t.state = New, 21)
 	END CheckTask;
 
 	PROCEDURE StartIn* (t: Task; g: Group);
-	(** Запустить задачу; если g # NIL — зарегистрировать её в группе. *)
+	(** Пред: t # NIL (трап 20), t ещё не запущена (21), платформа дала
+		стек (22). Пост: t готова к исполнению; g # NIL — t в группе g. *)
 	BEGIN
 		CheckTask(t);
-		IF ~InitStack(t) THEN Fail("no stack memory (platform does not support it)") END;
+		IF ~InitStack(t) THEN Msg("no stack memory (platform does not support it)"); HALT(22) END;
 		IF t.timeSlice <= 0 THEN t.timeSlice := defaultSlice END;
 		ReserveHeap(2 * (alive + 1) + heapMin);	(* PushSleeper не выделяет: heapN < 2 * nSleeping + heapMin *)
 		IF g # NIL THEN t.group := g; INC(g.alive) END;
@@ -567,10 +561,12 @@ MODULE Tasks;
 	END Sleep;
 
 	PROCEDURE Join* (t: Task);
-	(** Дождаться завершения задачи (или её отмены). *)
+	(** Пред: точка ожидания (трапы 20, 21, отмена — 127); t # NIL (22).
+		Пост: t завершена или отменена. *)
 	BEGIN
 		CheckWait("Join");
-		IF t = NIL THEN Fail("Join: NIL task") END;
+		IF t = NIL THEN Msg("Join: NIL task") END;
+		ASSERT(t # NIL, 22);
 		WHILE ~IsDone(t) DO
 			current.wnext := t.waiters; t.waiters := current;
 			current.state := Waiting;
@@ -595,16 +591,21 @@ MODULE Tasks;
 	END Park;
 
 	PROCEDURE Unpark* (t: Task);
+	(** Пред: t # NIL (трап 20). Пост: t разбужена, если ждёт; иначе
+		её следующий Park вернётся сразу. *)
 	BEGIN
-		IF t = NIL THEN Fail("Unpark: NIL task") END;
+		IF t = NIL THEN Msg("Unpark: NIL task") END;
+		ASSERT(t # NIL, 20);
 		t.wake := TRUE;
 		IF t.state IN {Sleeping, Waiting, Parked} THEN MakeReady(t) END
 	END Unpark;
 
 	PROCEDURE Cancel* (t: Task);
-	(** Отмена: флаг проверяется в точках ожидания; спящую/ждущую будим. *)
+	(** Пред: t # NIL (трап 20). Пост: t отмечена отменённой; спящая или
+		ждущая t разбужена и в точке ожидания прерывается трапом 127. *)
 	BEGIN
-		IF t = NIL THEN Fail("Cancel: NIL task") END;
+		IF t = NIL THEN Msg("Cancel: NIL task") END;
+		ASSERT(t # NIL, 20);
 		IF ~IsDone(t) THEN
 			t.cancel := TRUE;
 			IF t.state IN {Sleeping, Waiting, Parked} THEN MakeReady(t) END
@@ -695,8 +696,10 @@ MODULE Tasks;
 		главного цикла (действие планировщика) или тестом. *)
 		VAR t: Task; t0, now: LONGINT; schedStack: Kernel.Stack;
 	BEGIN
-		IF current # NIL THEN Fail("Step called from a task") END;
-		IF inStep THEN Fail("Step is not reentrant") END;
+		IF current # NIL THEN Msg("Step called from a task") END;
+		ASSERT(current = NIL, 20);
+		IF inStep THEN Msg("Step is not reentrant") END;
+		ASSERT(~inStep, 21);
 		Services.SetTrapGuardCleanup;	(* страховка от трапа в прошлом действии *)
 		inStep := TRUE;
 		(* Запись своего стека ищем один раз на шаг; задачи свои записи знают.
@@ -764,13 +767,19 @@ MODULE Tasks;
 	END Failed;
 
 	PROCEDURE SetStackSize* (t: Task; size: INTEGER);
+	(** Пред: t # NIL (трап 20), t ещё не запущена (21), size >= 0 (22).
+		Пост: стек t — size байт; 0 — размер по умолчанию. *)
 	BEGIN
-		IF (t # NIL) & (t.state = New) THEN t.stackSize := size END
+		ASSERT(t # NIL, 20); ASSERT(t.state = New, 21); ASSERT(size >= 0, 22);
+		t.stackSize := size
 	END SetStackSize;
 
 	PROCEDURE SetTimeSlice* (t: Task; ms: LONGINT);
+	(** Пред: t # NIL (трап 20), t ещё не запущена (21), ms >= 0 (22).
+		Пост: квант t — ms мс; 0 — квант по умолчанию. *)
 	BEGIN
-		IF (t # NIL) & (t.state = New) THEN t.timeSlice := ms END
+		ASSERT(t # NIL, 20); ASSERT(t.state = New, 21); ASSERT(ms >= 0, 22);
+		t.timeSlice := ms
 	END SetTimeSlice;
 
 	PROCEDURE Count* (): INTEGER;

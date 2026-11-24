@@ -271,6 +271,7 @@ MODULE System_devTasks;
 		Tasks.Cancel(t);
 		UnitAssert.True(Pump(3000), "cancelled and quick tasks finished");
 		UnitAssert.EqualInt(Tasks.Cancelled, Tasks.State(t), "cancelled task state");
+		UnitAssert.EqualInt(127, Kernel.err, "cancellation is trap 127, not a precondition trap");
 		UnitAssert.EqualInt(Tasks.Finished, Tasks.State(q), "other task finished");
 		UnitAssert.True(ticks >= 1, "looper ran before cancellation");
 		UnitAssert.True(~Tasks.Failed(q), "other task was not affected")
