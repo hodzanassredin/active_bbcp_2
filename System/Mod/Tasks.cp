@@ -352,7 +352,10 @@ MODULE Tasks;
 	   поднимает флаг Poll и отдаёт главный цикл по кванту. Задачу, которая
 	   ещё не исполнялась (t.sp = t.hi - stackHead), запускает Step: прямой
 	   первый запуск с холодного стека на холодный дороже на 15 % (замер
-	   10 тыс. задач, docs/stacks-study.md).
+	   10 тыс. задач, docs/stacks-study.md). Переключение встроено, а не
+	   вызвано через SwitchTo: после смены стека каждый возврат вверх по
+	   цепочке кадров задачи предсказатель возвратов угадывает неверно, и
+	   каждый лишний кадр над переключением — лишний промах.
 	   Инвариант: на стеке планировщика ждёт ровно один Step; задача, которая
 	   из него ушла, может вернуться в него с любой другой задачей в current. *)
 		VAR me, t: Task;
@@ -361,9 +364,15 @@ MODULE Tasks;
 		IF (readyHead # NIL) & (direct < directMax) & (readyHead.sp # readyHead.hi - stackHead) THEN
 			INC(direct);
 			t := Dequeue(); SetCurrent(t); t.state := Running;
-			IF t # me THEN SwitchTo(me.sp, t.sp, me.stackRec) END
+			IF t # me THEN
+				INC(switches); Kernel.SwitchSave(me.stackRec);
+				Taskarch.Switch(me.sp, t.sp);
+				Kernel.SwitchRestore(me.stackRec)
+			END
 		ELSE
-			SwitchTo(me.sp, schedSP, me.stackRec)
+			INC(switches); Kernel.SwitchSave(me.stackRec);
+			Taskarch.Switch(me.sp, schedSP);
+			Kernel.SwitchRestore(me.stackRec)
 		END
 	END Leave;
 
@@ -592,7 +601,7 @@ MODULE Tasks;
 	PROCEDURE Sleep* (ms: LONGINT);
 	BEGIN
 		CheckWait("Sleep");
-		IF ms <= 0 THEN Yield; RETURN END;
+		IF ms <= 0 THEN current.state := Ready; Enqueue(current); Leave; RETURN END;
 		current.deadline := Kernel.Time() + ms;
 		current.state := Sleeping; INC(current.sleepSeq);
 		PushSleeper(current);
