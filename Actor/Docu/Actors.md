@@ -613,8 +613,11 @@ one event.
 **Watching and node loss.** `c.Watch(r)` of a remote address sends a request to the owner node; the
 owner watches the actor itself and on stop sends an "ended" frame. If a node is gone (the transport
 reported `ActorNet.Lost`: in memory `ActorNetMem.Crash`, on TCP a broken connection), every watcher
-of an address on that node receives `Terminated` (`TestNodeLost`, `TestTcpLost`). A `Terminated` does
-not tell node loss from an actor stop: it carries no reason.
+of an address on that node receives `Terminated` (`TestNodeLost`, `TestTcpLost`). The field `reason` of
+`Terminated` tells the causes apart: `byStop` — the actor was stopped, `byFailure` — stopped by
+supervision after a failure, `byNodeLoss` — the node was lost (`TestReasonLocal`,
+`TestReasonRemoteStop`, `TestReasonRemoteFailure`, `TestReasonNodeLoss`). Code that does not read the
+field works as before.
 
 **Saga.** A money transfer between accounts on nodes A and B is led by a coordinator on node C, a
 persistent actor. The steps: withdraw from A, deposit to B, and if the deposit is refused, refund to
@@ -705,6 +708,7 @@ DEFINITION ActorCore;
 	CONST
 		Resume = 0; Restart = 1; Stop = 2; Escalate = 3;
 		ok = 0; timedOut = 1; dead = 2;
+		byStop = 0; byFailure = 1; byNodeLoss = 2;
 		nameLen = 128;
 
 	TYPE
@@ -766,7 +770,8 @@ DEFINITION ActorCore;
 		Restarting = POINTER TO RECORD (Msg) END;
 		ReceiveTimeout = POINTER TO RECORD (Msg) END;
 		Terminated = POINTER TO RECORD (Msg)
-			who-: Ref
+			who-: Ref;
+			reason-: INTEGER
 		END;
 
 		Context = POINTER TO LIMITED RECORD (Ref)
@@ -797,7 +802,7 @@ DEFINITION ActorCore;
 	PROCEDURE StopActor (r: Ref);
 	PROCEDURE Ask (to: Ref; m: Msg; ms: LONGINT; OUT reply: Msg): INTEGER;
 	PROCEDURE InitRef (r: Ref; IN node, name: ARRAY OF CHAR);
-	PROCEDURE Terminate (w, who: Ref);
+	PROCEDURE Terminate (w, who: Ref; reason: INTEGER);
 	PROCEDURE SetDispatcher (d: Dispatcher);
 	PROCEDURE SetDir (d: Directory);
 
@@ -949,11 +954,11 @@ For transport modules.
 Pre: `r # NIL` — trap 20; `node` and `name` shorter than `nameLen` — trap 21.
 Post: `r.node = node`, `r.name = name`.
 
-**PROCEDURE Terminate (w, who: Ref)**
+**PROCEDURE Terminate (w, who: Ref; reason: INTEGER)**
 For transport modules: tell the watcher `w` that the address `who`, which is not a local mailbox (a
 remote address), has ended.
-Pre: `w # NIL` — trap 20; `who # NIL` — 21.
-Post: `w` will receive `Terminated` with the field `who`.
+Pre: `w # NIL` — trap 20; `who # NIL` — 21; `reason` is `byStop`, `byFailure` or `byNodeLoss` — 22.
+Post: `w` will receive `Terminated` with the fields `who` and `reason`.
 
 **PROCEDURE SetDispatcher (d: Dispatcher)**
 For executor modules.

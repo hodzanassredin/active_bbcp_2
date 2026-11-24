@@ -71,7 +71,7 @@ MODULE Actor_devNet;
 		Trace = RECORD steps, delivered, lost, dup: LONGINT; a, b, crashes: INTEGER END;
 
 	VAR
-		terms, executed, replies: INTEGER; lastOk: BOOLEAN;
+		terms, executed, replies, lastReason: INTEGER; lastOk: BOOLEAN;
 		driverDone: BOOLEAN;
 		askRes, lastPong: INTEGER; askMs: LONGINT;
 		rootKind, gen: INTEGER;
@@ -228,7 +228,9 @@ MODULE Actor_devNet;
 	PROCEDURE (a: Echo) Receive (c: ActorCore.Context; m: Msg);
 		VAR p: Pong;
 	BEGIN
-		WITH m: Ping DO INC(executed); NEW(p); p.n := m.n + 1; c.Respond(p)
+		WITH m: Ping DO
+			IF m.n < 0 THEN HALT(77) END;	(* отказ по просьбе теста *)
+			INC(executed); NEW(p); p.n := m.n + 1; c.Respond(p)
 		ELSE
 		END
 	END Receive;
@@ -244,7 +246,7 @@ MODULE Actor_devNet;
 	PROCEDURE (w: Watcher) Receive (c: ActorCore.Context; m: Msg);
 	BEGIN
 		WITH m: ActorCore.Started DO c.Watch(watched)
-		| m: ActorCore.Terminated DO IF m.who = watched THEN INC(terms) END
+		| m: ActorCore.Terminated DO IF m.who = watched THEN INC(terms); lastReason := m.reason END
 		ELSE
 		END
 	END Receive;
@@ -416,7 +418,7 @@ MODULE Actor_devNet;
 
 	PROCEDURE Setup*;
 	BEGIN
-		terms := 0; executed := 0; replies := 0; lastOk := FALSE;
+		terms := 0; lastReason := -1; executed := 0; replies := 0; lastOk := FALSE;
 		askRes := -1; lastPong := 0; INC(gen); target := NIL; watched := NIL
 	END Setup;
 
@@ -584,6 +586,54 @@ MODULE Actor_devNet;
 		UnitAssert.True(UntilInt(terms, 1, 3000), "connection loss gives Terminated");
 		ActorNetTcp.Close(ta)
 	END TestTcpLost;
+
+	(* --- причина в Terminated ---------------------------------------------------- *)
+
+	PROCEDURE TestReasonLocal*;
+	(* Локально: остановка — byStop, отказ (трап, супервизор остановил) — byFailure. *)
+		VAR s: Name;
+	BEGIN
+		ActorRun.Start(2);
+		NodeName("L", s); StartRoot(3, s); WaitTarget; watched := target;
+		NodeName("M", s); StartRoot(5, s); WaitTarget; Idle(20);
+		ActorCore.StopActor(watched);
+		UnitAssert.True(UntilInt(terms, 1, 2000), "stopped");
+		UnitAssert.EqualInt(ActorCore.byStop, lastReason, "reason stop");
+		NodeName("N", s); StartRoot(3, s); WaitTarget; watched := target;
+		NodeName("O", s); StartRoot(5, s); WaitTarget; Idle(20);
+		ActorCore.Tell(watched, NewPing(-1));
+		UnitAssert.True(UntilInt(terms, 2, 2000), "failed");
+		UnitAssert.EqualInt(ActorCore.byFailure, lastReason, "reason failure")
+	END TestReasonLocal;
+
+	PROCEDURE TestReasonRemoteStop*;
+	(* Через узел: остановка актора — byStop. *)
+		VAR echo: ActorCore.Ref;
+	BEGIN
+		Pair(3, TRUE); WaitTarget; echo := target; ActorNet.Export(nb, echo, capB);
+		WatchFromA;
+		ActorCore.StopActor(echo);
+		UnitAssert.True(UntilInt(terms, 1, 2000), "stopped");
+		UnitAssert.EqualInt(ActorCore.byStop, lastReason, "remote stop")
+	END TestReasonRemoteStop;
+
+	PROCEDURE TestReasonRemoteFailure*;
+	(* Через узел: отказ актора — byFailure. *)
+	BEGIN
+		Pair(3, TRUE); WaitTarget; ActorNet.Export(nb, target, capB); WatchFromA;
+		ActorCore.Tell(ActorNet.Import(na, capB), NewPing(-1));
+		UnitAssert.True(UntilInt(terms, 1, 2000), "failed");
+		UnitAssert.EqualInt(ActorCore.byFailure, lastReason, "remote failure")
+	END TestReasonRemoteFailure;
+
+	PROCEDURE TestReasonNodeLoss*;
+	(* Потеря узла — byNodeLoss. *)
+	BEGIN
+		Pair(3, TRUE); WaitTarget; ActorNet.Export(nb, target, capB); WatchFromA;
+		ActorNetMem.Crash(net, nb.name);
+		UnitAssert.True(UntilInt(terms, 1, 2000), "lost");
+		UnitAssert.EqualInt(ActorCore.byNodeLoss, lastReason, "node loss")
+	END TestReasonNodeLoss;
 
 	(* --- повтор после потерянного ответа (детерминированно) ------------------------ *)
 

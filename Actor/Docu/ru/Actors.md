@@ -591,8 +591,10 @@ res := ActorCore.Ask(r, q, 1000, reply)
 **Наблюдение и потеря узла.** `c.Watch(r)` удалённого адреса посылает узлу-владельцу просьбу; тот
 наблюдает за актором сам и при остановке шлёт кадр «кончился». Если узел пропал (транспорт сообщил
 `ActorNet.Lost`: в памяти — `ActorNetMem.Crash`, на TCP — обрыв соединения), каждый наблюдатель
-адреса этого узла получает `Terminated` (`TestNodeLost`, `TestTcpLost`). Отличить потерю узла от
-остановки актора по `Terminated` нельзя: причина в нём не передаётся.
+адреса этого узла получает `Terminated` (`TestNodeLost`, `TestTcpLost`). Поле `reason` в `Terminated`
+различает причины: `byStop` — актор остановлен, `byFailure` — остановлен надзором после отказа,
+`byNodeLoss` — узел потерян (`TestReasonLocal`, `TestReasonRemoteStop`, `TestReasonRemoteFailure`,
+`TestReasonNodeLoss`). Код, который поле не читает, работает как раньше.
 
 **Сага.** Перевод денег между счетами на узлах A и B ведёт координатор на узле C — персистентный
 актор. Шаги перевода: списать с A, зачислить на B, при отказе зачисления — вернуть на A. Каждый шаг
@@ -682,6 +684,7 @@ DEFINITION ActorCore;
 	CONST
 		Resume = 0; Restart = 1; Stop = 2; Escalate = 3;
 		ok = 0; timedOut = 1; dead = 2;
+		byStop = 0; byFailure = 1; byNodeLoss = 2;
 		nameLen = 128;
 
 	TYPE
@@ -743,7 +746,8 @@ DEFINITION ActorCore;
 		Restarting = POINTER TO RECORD (Msg) END;
 		ReceiveTimeout = POINTER TO RECORD (Msg) END;
 		Terminated = POINTER TO RECORD (Msg)
-			who-: Ref
+			who-: Ref;
+			reason-: INTEGER
 		END;
 
 		Context = POINTER TO LIMITED RECORD (Ref)
@@ -774,7 +778,7 @@ DEFINITION ActorCore;
 	PROCEDURE StopActor (r: Ref);
 	PROCEDURE Ask (to: Ref; m: Msg; ms: LONGINT; OUT reply: Msg): INTEGER;
 	PROCEDURE InitRef (r: Ref; IN node, name: ARRAY OF CHAR);
-	PROCEDURE Terminate (w, who: Ref);
+	PROCEDURE Terminate (w, who: Ref; reason: INTEGER);
 	PROCEDURE SetDispatcher (d: Dispatcher);
 	PROCEDURE SetDir (d: Directory);
 
@@ -924,11 +928,11 @@ name», пустое `name` — `"$номер"`; первым обработчи
 Пред: `r # NIL` — трап 20; `node` и `name` короче `nameLen` — трап 21.
 Пост: `r.node = node`, `r.name = name`.
 
-**PROCEDURE Terminate (w, who: Ref)**
+**PROCEDURE Terminate (w, who: Ref; reason: INTEGER)**
 Для модулей транспорта: известить наблюдателя `w` о конце адреса `who`, который не является
 локальным ящиком (удалённый адрес).
-Пред: `w # NIL` — трап 20; `who # NIL` — 21.
-Пост: `w` получит `Terminated` с полем `who`.
+Пред: `w # NIL` — трап 20; `who # NIL` — 21; `reason` — `byStop`, `byFailure` или `byNodeLoss` — 22.
+Пост: `w` получит `Terminated` с полями `who` и `reason`.
 
 **PROCEDURE SetDispatcher (d: Dispatcher)**
 Для модулей исполнителей.

@@ -38,6 +38,8 @@ MODULE ActorCore;
 		Resume* = 0; Restart* = 1; Stop* = 2; Escalate* = 3;
 		(** результат Ask **)
 		ok* = 0; timedOut* = 1; dead* = 2;
+		(** причина в Terminated **)
+		byStop* = 0; byFailure* = 1; byNodeLoss* = 2;
 		nameLen* = 128;
 
 		(* состояние ящика *)
@@ -99,7 +101,8 @@ MODULE ActorCore;
 		Restarting* = POINTER TO RECORD (Msg) END;
 		ReceiveTimeout* = POINTER TO RECORD (Msg) END;
 		Terminated* = POINTER TO RECORD (Msg)
-			who-: Ref
+			who-: Ref;
+			reason-: INTEGER	(** byStop — остановлен, byFailure — остановлен после отказа, byNodeLoss — узел потерян *)
 		END;
 
 		(* Конверт: сообщение и отправитель (NIL — без отправителя). *)
@@ -130,6 +133,7 @@ MODULE ActorCore;
 			held: Queue;	(* отказы детей, отложенные, пока актор приостановлен *)
 			state: INTEGER;
 			suspended, scheduled, running: BOOLEAN;
+			failed: BOOLEAN;	(* остановка — решение надзора после отказа *)
 			interrupted: BOOLEAN;	(* шаг прерван отменой задачи, см. Invoke *)
 			task: Tasks.Task;	(* задача, исполняющая Process; NIL вне Process *)
 			stats: Stats;
@@ -315,10 +319,11 @@ MODULE ActorCore;
 	PROCEDURE^ PostSys (c: Context; m: Msg);
 
 	PROCEDURE Gone (w: Ref; who: Context);
-	(* Пост: наблюдатель w получил Terminated с who. *)
+	(* Пост: наблюдатель w получил Terminated с who и причиной остановки who. *)
 		VAR t: Terminated;
 	BEGIN
 		NEW(t); t.who := who;
+		IF who.failed THEN t.reason := byFailure ELSE t.reason := byStop END;
 		IF w IS Context THEN PostSys(w(Context), t) ELSE w.Post(t, NIL) END
 	END Gone;
 
@@ -412,7 +417,7 @@ MODULE ActorCore;
 			Strings.IntToString(reason, s);
 			Console.WriteStr("Actor: root stops "); Console.WriteStr(c.name);
 			Console.WriteStr(" after trap "); Console.WriteStr(s); Console.WriteLn;
-			PostSys(c, stopS)
+			c.failed := TRUE; PostSys(c, stopS)
 		END
 	END Fail;
 
@@ -442,7 +447,7 @@ MODULE ActorCore;
 		| Resume: PostSys(ch, resumeS)
 		| Restart: PostSys(ch, restartS)
 		| Escalate: Fail(p, f.reason)	(* ребёнок ждёт судьбы родителя *)
-		ELSE PostSys(ch, stopS)
+		ELSE ch.failed := TRUE; PostSys(ch, stopS)
 		END
 	END Supervise;
 
@@ -1039,16 +1044,17 @@ MODULE ActorCore;
 		r.node := nd$; r.name := name$
 	END InitRef;
 
-	PROCEDURE Terminate* (w, who: Ref);
+	PROCEDURE Terminate* (w, who: Ref; reason: INTEGER);
 	(** Для модулей транспорта: адрес who, не локальный ящик, кончился
 		(остановлен на своём узле или узел потерян).
-		Пред: w # NIL (трап 20), who # NIL (21).
-		Пост: w получил Terminated с этим who, как от остановки локального
-		актора; обработчик w получит его, только если наблюдает who. *)
+		Пред: w # NIL (трап 20), who # NIL (21), reason — byStop, byFailure
+		или byNodeLoss (22).
+		Пост: w получил Terminated с этим who и reason, как от остановки
+		локального актора; обработчик w получит его, только если наблюдает who. *)
 		VAR t: Terminated;
 	BEGIN
-		ASSERT(w # NIL, 20); ASSERT(who # NIL, 21);
-		NEW(t); t.who := who;
+		ASSERT(w # NIL, 20); ASSERT(who # NIL, 21); ASSERT((reason >= byStop) & (reason <= byNodeLoss), 22);
+		NEW(t); t.who := who; t.reason := reason;
 		IF w IS Context THEN PostSys(w(Context), t) ELSE w.Post(t, NIL) END
 	END Terminate;
 

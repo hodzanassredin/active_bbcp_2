@@ -180,12 +180,12 @@ MODULE ActorNet;
 	END Intern;
 
 	PROCEDURE^ (n: Node) Send (kind: INTEGER; IN to, name: ARRAY OF CHAR; IN mac: Mac;
-		sender: ActorCore.Ref; m: Msg), NEW;
+		sender: ActorCore.Ref; m: Msg; reason: INTEGER), NEW;
 
 	PROCEDURE (r: Remote) Post (m: ActorCore.Msg; sender: ActorCore.Ref);
 	BEGIN
 		ASSERT(m # NIL, 20);
-		IF m IS Msg THEN r.owner.Send(kMsg, r.node, r.name, r.mac, sender, m(Msg))
+		IF m IS Msg THEN r.owner.Send(kMsg, r.node, r.name, r.mac, sender, m(Msg), 0)
 		ELSIF m IS ActorCore.Terminated THEN	(* Ask через узел: конец адреса ответа не пересылается *)
 		ELSE HALT(notNetMsg)
 		END
@@ -203,7 +203,7 @@ MODULE ActorNet;
 		ASSERT(w # NIL, 20);
 		IF ~Find(r.watchers, w) THEN
 			NEW(x); x.r := w; x.next := r.watchers;
-			IF r.watchers = NIL THEN r.owner.Send(kWatch, r.node, r.name, r.mac, NIL, NIL) END;
+			IF r.watchers = NIL THEN r.owner.Send(kWatch, r.node, r.name, r.mac, NIL, NIL, 0) END;
 			r.watchers := x
 		END
 	END AddWatcher;
@@ -216,21 +216,21 @@ MODULE ActorNet;
 		WHILE (x # NIL) & (x.r # w) DO p := x; x := x.next END;
 		IF x # NIL THEN
 			IF p = NIL THEN r.watchers := x.next ELSE p.next := x.next END;
-			IF r.watchers = NIL THEN r.owner.Send(kUnwatch, r.node, r.name, r.mac, NIL, NIL) END
+			IF r.watchers = NIL THEN r.owner.Send(kUnwatch, r.node, r.name, r.mac, NIL, NIL, 0) END
 		END
 	END RemoveWatcher;
 
 	PROCEDURE (r: Remote) Stop;
 	BEGIN
-		r.owner.Send(kStop, r.node, r.name, r.mac, NIL, NIL)
+		r.owner.Send(kStop, r.node, r.name, r.mac, NIL, NIL, 0)
 	END Stop;
 
-	PROCEDURE (r: Remote) Ended, NEW;
-	(* Пост: каждый наблюдатель r получил Terminated с who = r; наблюдателей нет. *)
+	PROCEDURE (r: Remote) Ended (reason: INTEGER), NEW;
+	(* Пост: каждый наблюдатель r получил Terminated с who = r и reason; наблюдателей нет. *)
 		VAR w: Watcher;
 	BEGIN
 		w := r.watchers; r.watchers := NIL;
-		WHILE w # NIL DO ActorCore.Terminate(w.r, r); w := w.next END
+		WHILE w # NIL DO ActorCore.Terminate(w.r, r, reason); w := w.next END
 	END Ended;
 
 	(* --- посредник наблюдения ------------------------------------------------- *)
@@ -238,7 +238,7 @@ MODULE ActorNet;
 	PROCEDURE (p: Proxy) Post (m: ActorCore.Msg; sender: ActorCore.Ref);
 	BEGIN
 		IF (m IS ActorCore.Terminated) & (m(ActorCore.Terminated).who = p.target) THEN
-			p.owner.Send(kTerm, p.peer, p.target.name, p.mac, NIL, NIL)
+			p.owner.Send(kTerm, p.peer, p.target.name, p.mac, NIL, NIL, m(ActorCore.Terminated).reason)
 		END
 	END Post;
 
@@ -332,13 +332,13 @@ MODULE ActorNet;
 	END Resolve;
 
 	PROCEDURE (n: Node) Send (kind: INTEGER; IN to, name: ARRAY OF CHAR; IN mac: Mac;
-		sender: ActorCore.Ref; m: Msg), NEW;
+		sender: ActorCore.Ref; m: Msg; reason: INTEGER), NEW;
 		VAR f: Buf; i, len: INTEGER; b: Box; data: Bytes; smac: Mac; save: Node;
 	BEGIN
 		IF ~n.up THEN RETURN END;
 		INC(n.seq); f.n := 0;
 		Put(f, kind, 1); PutName(f, n.name); Put(f, n.incarnation, 8); Put(f, n.seq, 8);
-		PutName(f, name); PutBytes(f, mac, macLen);
+		PutName(f, name); PutBytes(f, mac, macLen); Put(f, reason, 1);
 		save := cur; cur := n;
 		IF sender = NIL THEN Put(f, 0, 1)
 		ELSE
@@ -404,7 +404,7 @@ MODULE ActorNet;
 	PROCEDURE Deliver* (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER);
 	(** Для транспорта: кадр пришёл узлу n. Повтор, чужая метка и битый
 		кадр отбрасываются и считаются; иначе письмо в ящике адресата. *)
-		VAR pos, kind, blen: INTEGER; ok, has: BOOLEAN; from, name, snode, sname: Name;
+		VAR pos, kind, blen, reason: INTEGER; ok, has: BOOLEAN; from, name, snode, sname: Name;
 			inc, seq: LONGINT; mac, smac: Mac; to, sender: ActorCore.Ref; s: Stores.Store;
 			body: Bytes; i, res: INTEGER; save: Node; r: Remote; mine: Mac;
 	BEGIN
@@ -415,6 +415,8 @@ MODULE ActorNet;
 		GetName(frame, pos, len, ok, from);
 		inc := Get(frame, pos, len, 8, ok); seq := Get(frame, pos, len, 8, ok);
 		GetName(frame, pos, len, ok, name); GetMac(frame, pos, len, ok, mac);
+		reason := SHORT(Get(frame, pos, len, 1, ok));
+		IF (reason < ActorCore.byStop) OR (reason > ActorCore.byNodeLoss) THEN ok := FALSE END;
 		has := Get(frame, pos, len, 1, ok) = 1;
 		IF has THEN GetName(frame, pos, len, ok, snode); GetName(frame, pos, len, ok, sname); GetMac(frame, pos, len, ok, smac) END;
 		blen := SHORT(Get(frame, pos, len, 4, ok));
@@ -425,7 +427,7 @@ MODULE ActorNet;
 			WHILE (r # NIL) & ((r.node # from) OR (r.name # name)) DO r := r.next END;
 			IF (r = NIL) OR ~SameMac(r.mac, mac) THEN INC(n.refused); RETURN END;
 			IF ~n.Fresh(from, inc, seq) THEN INC(n.duplicates); RETURN END;
-			INC(n.received); r.Ended;
+			INC(n.received); r.Ended(reason);
 			RETURN
 		END;
 		n.Mac(name, mine);
@@ -434,7 +436,7 @@ MODULE ActorNet;
 		INC(n.received);
 		to := ActorCore.dir.Lookup(ActorCore.node, name);
 		IF kind = kWatch THEN
-			IF to # NIL THEN n.Watch(from, to, mac) ELSE n.Send(kTerm, from, name, mac, NIL, NIL) END
+			IF to # NIL THEN n.Watch(from, to, mac) ELSE n.Send(kTerm, from, name, mac, NIL, NIL, ActorCore.byStop) END
 		ELSIF kind = kUnwatch THEN
 			IF to # NIL THEN n.Unwatch(from, to) END
 		ELSIF kind = kStop THEN
@@ -464,7 +466,7 @@ MODULE ActorNet;
 		ASSERT(n # NIL, 20);
 		r := n.remotes;
 		WHILE r # NIL DO
-			IF r.node = node THEN r.Ended END;
+			IF r.node = node THEN r.Ended(ActorCore.byNodeLoss) END;
 			r := r.next
 		END;
 		p := n.proxies;
