@@ -571,17 +571,12 @@ END ObxWork0.
 The command prints:
 
 ```
-Tasks: deadlock: no ready tasks and no wake-up deadlines
-Kernel: monitor dump
-  (no monitors)
 ObxWork0: status=0
 ```
 
-The first three lines are a false alarm. While the worker thread resolves the name, the task sleeps in
-`Tasks.Park` without a deadline, there are no other tasks, and the scheduler takes this for a
-deadlock. It does not know that the wake-up will come from the worker thread through `Poller`. The
-deadlock report is printed once and does not interrupt the work. A program bothered by this line only
-needs to keep a task with a deadline alongside.
+While the worker thread resolves the name, the task waits in `Tasks.ParkExternal`: the wake-up will
+come from the worker thread through `Poller`, not from another task. The scheduler does not take this
+wait for a deadlock, and no report is printed.
 
 The record `req` is a global variable of the module, not a heap object, and this is mandatory. A
 worker thread runs code outside the scheduler and outside the garbage collector. It must not touch the
@@ -686,7 +681,7 @@ frame number on the wire. So a late reply to a request abandoned on timeout does
 request with the same `tag`.
 
 `Pull` waits no longer than 10 s (`PullTimeout` takes its own term) and waits in `Tasks.Sleep(10)`,
-so the task sleeps with a deadline and the deadlock report does not fire falsely. Outside a task
+so the task sleeps with a deadline and the scheduler does not declare a deadlock. Outside a task
 `Pull` traps with code 21. On timeout it returns `NIL`, and `LastError()` returns −4. `Try` does not
 wait: it returns `TRUE` if the reply is there, together with the reply itself or `NIL` with an error
 code.

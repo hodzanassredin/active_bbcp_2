@@ -209,7 +209,7 @@ MODULE AsyncWorkWin;
 		id := i.Submit(procAdr, arg);
 		IF id < 0 THEN RETURN -1 END;
 		SetTask(id, Tasks.Current());
-		WHILE ~i.Done(id) DO Tasks.Park END;
+		WHILE ~i.Done(id) DO Tasks.ParkExternal END;	(* будит рабочая нить *)
 		status := i.Result(id);
 		i.Release(id);
 		RETURN status

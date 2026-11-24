@@ -208,7 +208,9 @@ condition` и выполняет `HALT(60)`: постусловие `Await` не
 
 `EnsureScheduled` при пустой очереди готовых регистрирует действие планировщика на ближайший срок
 спящей задачи (`NextDeadline`). Если очередь пуста, сроков нет, а живые задачи есть, все они ждут друг
-друга или внешнего события. `CheckDeadlock` в этом случае один раз печатает `deadlock: no ready tasks
+друга или внешнего события. Задача, ждущая внешнего события (таймера, ввода, рабочей нити), стоит в
+`ParkExternal`, и счётчик `nExternal` считает такие задачи; его уменьшает `MakeReady`. `CheckDeadlock`
+при пустой очереди, без сроков и при `nExternal = 0` один раз печатает `deadlock: no ready tasks
 and no wake-up deadlines` и таблицу мониторов (`Monitors.DumpMonitors`).
 
 ## 6. Сборка мусора со многими стеками
@@ -406,7 +408,7 @@ interface-модулей загружает `WinKernel.WkResolve` (`GetModuleHan
 `Time()`.
 
 `Tasks` экспортирует тип `Task` с абстрактным `Run`, тип `Group`, константы состояний и операции
-`Start`, `StartIn`, `Yield`, `Sleep`, `Join`, `Park`, `Unpark`, `Cancel`, `NewGroup`, `GroupFailed`,
+`Start`, `StartIn`, `Yield`, `Sleep`, `Join`, `Park`, `ParkExternal`, `Unpark`, `Cancel`, `NewGroup`, `GroupFailed`,
 `GroupCount`, `OwnGroup`, `NextDeadline`, `Step`, `Current`, `InTask`, `State`, `GetName`, `SetName`,
 `Failed`, `SetStackSize`, `Count`, `Deadlocked`, `Switches`, `ResetStats`, `ListSize`, `List`.
 `Monitors` экспортирует `IsLocked`, `LockDepth`, `WaitersCount`, `DumpMonitors`; его таблицы — обычные

@@ -51,6 +51,7 @@ MODULE System_devTasks;
 		TrapParent = POINTER TO RECORD (Tasks.Task) child: LongSleeper END;
 		TwoGroups = POINTER TO RECORD (Tasks.Task) long: LongSleeper; same: BOOLEAN END;
 		Parker = POINTER TO RECORD (Tasks.Task) done: BOOLEAN END;
+		ExtParker = POINTER TO RECORD (Tasks.Task) done: BOOLEAN END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -592,6 +593,40 @@ MODULE System_devTasks;
 	BEGIN
 		Tasks.Park; t.done := TRUE
 	END Run;
+
+	PROCEDURE (t: ExtParker) Run;
+	BEGIN
+		Tasks.ParkExternal; t.done := TRUE
+	END Run;
+
+	PROCEDURE StepUntilParked (t: Tasks.Task);
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE (Tasks.State(t) # Tasks.Parked) & (i < 50) DO Tasks.Step; INC(i) END;
+		Tasks.Step
+	END StepUntilParked;
+
+	PROCEDURE TestProcParkExternalIsNotDeadlock*;
+	(** Задача ждёт события извне: планировщик тупик не объявляет, Unpark
+		её будит. Такая же задача в простом Park — тупик. *)
+		VAR e: ExtParker; p: Parker;
+	BEGIN
+		NEW(e); e.done := FALSE; Tasks.Start(e);
+		StepUntilParked(e);
+		UnitAssert.True(Tasks.State(e) = Tasks.Parked, "task waits");
+		UnitAssert.True(~Tasks.Deadlocked(), "waiting for an external event is not a deadlock");
+		NEW(p); p.done := FALSE; Tasks.Start(p);
+		StepUntilParked(p);
+		UnitAssert.True(~Tasks.Deadlocked(), "still not a deadlock while one task waits outside");
+		Tasks.Unpark(e);
+		Tasks.Step;
+		UnitAssert.True(e.done, "external waiter finished");
+		Tasks.Step;
+		UnitAssert.True(Tasks.Deadlocked(), "plain Park with nobody to wake is a deadlock");
+		Tasks.Unpark(p);
+		UnitAssert.True(Pump(1000), "tasks finished")
+	END TestProcParkExternalIsNotDeadlock;
 
 	PROCEDURE TestProcUnparkOutsideTaskReschedules*;
 	(** Планировщик назначил свой шаг на срок спящей задачи. Unpark с

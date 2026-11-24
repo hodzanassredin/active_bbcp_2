@@ -71,6 +71,7 @@ MODULE Tasks;
 			deadline: LONGINT;	(* до какого Kernel.Time спать *)
 			stackSize: INTEGER;
 			cancel, wake, failed, bodyOk: BOOLEAN;
+			external: BOOLEAN;	(* ждёт в ParkExternal; учтена в nExternal *)
 			group: Group;
 			own: Group;
 			name: ARRAY nameLen OF CHAR
@@ -118,6 +119,7 @@ MODULE Tasks;
 		lastWake: LONGINT;	(* время последнего просмотра спящих в Step *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
 		deadlocked: BOOLEAN;	(* все ждут, сроков нет; журнал уже напечатан *)
+		nExternal: INTEGER;	(* инвариант: число задач с external = TRUE *)
 		(* Пул свободных стеков: односвязный список через верхние слова самого
 		   стека. Инвариант: poolHead = 0 равносильно poolCount = 0; иначе poolHead —
 		   верх hi свободного стека, в [hi - word] — верх следующего, в [hi - 2*word] —
@@ -188,6 +190,7 @@ MODULE Tasks;
 	BEGIN
 		IF (t.state IN {Sleeping, Waiting, Parked}) THEN
 			IF t.state = Sleeping THEN DEC(nSleeping) END;	(* запись кучи устарела *)
+			IF t.external THEN t.external := FALSE; DEC(nExternal) END;
 			t.state := Ready; Enqueue(t); deadlocked := FALSE; EnsureScheduled
 		END
 	END MakeReady;
@@ -590,6 +593,20 @@ MODULE Tasks;
 		CheckWait("Park")
 	END Park;
 
+	PROCEDURE ParkExternal*;
+	(** Park для ожидания события извне: таймера, ввода, рабочей нити,
+		вызова с главного стека. Пока такая задача ждёт, планировщик не
+		считает общее ожидание тупиком. В остальном — как Park. *)
+	BEGIN
+		CheckWait("Park");
+		IF current.wake THEN current.wake := FALSE; RETURN END;
+		current.external := TRUE; INC(nExternal);
+		current.state := Parked;
+		SwitchTo(current.sp, schedSP, current.stackRec);
+		current.wake := FALSE;
+		CheckWait("Park")
+	END ParkExternal;
+
 	PROCEDURE ParkMonitor;
 	(** Ожидание монитора (крючок Kernel.Scheduler.park): до пробуждения
 		передачей монитора, отмены или постороннего Unpark. Флаг wake не
@@ -693,10 +710,11 @@ MODULE Tasks;
 	END EnsureScheduled;
 
 	PROCEDURE CheckDeadlock;
-	(** Все живые задачи ждут, будить их нечем и сроков нет: печатаем
-		журнал ядра «кто чего ждёт» один раз до следующего пробуждения. *)
+	(** Все живые задачи ждут, сроков нет и ни одна не ждёт события извне
+		(ParkExternal): печатаем журнал ядра «кто чего ждёт» один раз до
+		следующего пробуждения. *)
 	BEGIN
-		IF (alive > 0) & (readyHead = NIL) & (NextDeadline() < 0) THEN
+		IF (alive > 0) & (readyHead = NIL) & (nExternal = 0) & (NextDeadline() < 0) THEN
 			IF ~deadlocked THEN
 				deadlocked := TRUE;
 				Msg("deadlock: no ready tasks and no wake-up deadlines");
@@ -856,8 +874,8 @@ MODULE Tasks;
 
 	PROCEDURE (s: Sched) unpark (a: S.ADDRESS);
 	(** Пробуждение ядром (передача монитора): НЕ трогать пользовательский
-		флаг wake — иначе следующий Tasks.Park вернулся бы сразу и Wait
-		стал бы холостым циклом. *)
+		флаг wake — иначе следующий Tasks.Park вернулся бы сразу, не дождавшись
+		своего события. *)
 		VAR t: Task;
 	BEGIN
 		IF a # 0 THEN
@@ -915,6 +933,6 @@ CLOSE
 		all := all.next
 	END;
 	DrainPool;
-	readyHead := NIL; readyTail := NIL; heap := NIL; heapN := 0; nSleeping := 0; current := NIL;
+	readyHead := NIL; readyTail := NIL; heap := NIL; heapN := 0; nSleeping := 0; nExternal := 0; current := NIL;
 	scheduled := FALSE; inStep := FALSE
 END Tasks.

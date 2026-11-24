@@ -31,7 +31,7 @@ MODULE AsyncIO;
 		IF fd < 0 THEN Tasks.Sleep(1); RETURN END;
 		NEW(w); w.task := Tasks.Current();
 		Poller.Add(fd, events, w);
-		Tasks.Park;
+		Tasks.ParkExternal;	(* будит опрос дескрипторов главного цикла *)
 		Poller.Remove(w)
 	END WaitFd;
 

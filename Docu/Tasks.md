@@ -444,6 +444,15 @@ The scheduler detects only a complete deadlock. If even one task sleeps with a t
 loop with `Yield`, some tasks may stand forever and no log appears. A task that never yields is
 not detected either: the scheduler simply does not get control.
 
+A wait for an event from outside the tasks is not a deadlock: a timer, a ready descriptor, a worker
+thread, a call from the main stack. A task woken by such events waits in `ParkExternal`, not in
+`Park`. While even one task waits in `ParkExternal`, the scheduler declares no deadlock and prints
+no log. `AsyncChan.Select` with a timeout, `AsyncIO.WaitFd` and `AsyncWork.Execute` wait this way. A
+primitive of one's own that is woken from outside the tasks must wait in `ParkExternal`: in `Park`
+the scheduler prints the log although the wake-up will come. The opposite mistake is worse:
+`ParkExternal` where nobody will wake the task hides a real deadlock as long as at least one such
+task waits. Neither the compiler nor `Tasks` can tell the two cases apart.
+
 ## 7. Cost
 
 A task's stack is 256 KB by default; `SetStackSize` sets another size before the start. The
@@ -513,6 +522,7 @@ DEFINITION Tasks;
 	PROCEDURE NextDeadline (): LONGINT;
 	PROCEDURE OwnGroup (t: Task): Group;
 	PROCEDURE Park;
+	PROCEDURE ParkExternal;
 	PROCEDURE ResetStats;
 	PROCEDURE SetName (t: Task; IN s: ARRAY OF CHAR);
 	PROCEDURE SetStackSize (t: Task; size: INTEGER);
@@ -598,6 +608,15 @@ Post: State(t) IN {Finished, Cancelled}; the wake-up flag is untouched
 
 **PROCEDURE Park**
 Puts the task to sleep until `Unpark`; if the wake-up flag is already set, returns at once.
+
+```
+Pre: the wait check, before and after the sleep
+Post: the wake-up flag is cleared
+```
+
+**PROCEDURE ParkExternal**
+The same as `Park`, but for a wait for an event from outside the tasks (section 6): while a task waits
+this way, the scheduler declares no deadlock. `Unpark` wakes it as usual.
 
 ```
 Pre: the wait check, before and after the sleep

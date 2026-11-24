@@ -136,8 +136,9 @@ MODULE AsyncSelect;
 		END
 	END Decide;
 
-	PROCEDURE ParkUntilDecided (ctx: Ctx);
-	(* Пред: ctx.ready. Пост: ctx.decided. Пробуждение без решения —
+	PROCEDURE ParkUntilDecided (ctx: Ctx; external: BOOLEAN);
+	(* Пред: ctx.ready. Пост: ctx.decided. external — решение может прийти
+	   извне задач (таймер): такое ожидание планировщик тупиком не считает. Пробуждение без решения —
 	   посторонний Tasks.Unpark: Select ждёт дальше, а пробуждение
 	   возвращается задаче (Unpark себе), чтобы её следующий Park его
 	   не потерял. *)
@@ -145,7 +146,7 @@ MODULE AsyncSelect;
 	BEGIN
 		foreign := FALSE;
 		WHILE ~ctx.decided DO
-			Tasks.Park;
+			IF external THEN Tasks.ParkExternal ELSE Tasks.Park END;
 			IF ~ctx.decided THEN foreign := TRUE END
 		END;
 		IF foreign THEN Tasks.Unpark(Tasks.Current()) END
@@ -496,7 +497,7 @@ MODULE AsyncSelect;
 		IF o.kind = SendKind THEN Enqueue(c.waitS, c.waitST, o) ELSE Enqueue(c.waitR, c.waitRT, o) END;
 		Leave(c, locked);
 		o.ctx.ready := TRUE;
-		ParkUntilDecided(o.ctx)
+		ParkUntilDecided(o.ctx, FALSE)
 	END WaitOne;
 
 	PROCEDURE QueueSend* (c: Core; m: Msg);
@@ -584,7 +585,7 @@ MODULE AsyncSelect;
 				Services.DoLater(timer, Services.Ticks() + tMs)
 			END;
 			ctx.ready := TRUE;
-			ParkUntilDecided(ctx);
+			ParkUntilDecided(ctx, timer # NIL);
 			(* RemoveAction убирает действие из обоих списков Services:
 			   отложенный Do после него не вызывается *)
 			IF timer # NIL THEN Services.RemoveAction(timer); timer.ctx := NIL END

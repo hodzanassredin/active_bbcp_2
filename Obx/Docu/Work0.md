@@ -44,9 +44,6 @@ echo 'ObxWork0.Do' | tools/run64.sh
 The log shows:
 
 ```
-Tasks: deadlock: no ready tasks and no wake-up deadlines
-Kernel: monitor dump
-  (no monitors)
 ObxWork0: status=0
 ```
 
@@ -54,11 +51,11 @@ ObxWork0: status=0
 
 1. The task fills the global record `req` and calls `AsyncWork.Execute` with the address of the job `ResolveJob`.
 2. On the first call the pool installs the delegate `AsyncWorkLin` and gives the job to a free thread; the task falls asleep in `Tasks.Park`.
-3. The task sleeps without a deadline, and the scheduler prints the deadlock report — the first three lines of the output. It is a false alarm: the wake-up will come from the worker thread.
+3. The task waits for an event from outside (`Tasks.ParkExternal`): the wake-up will come from the worker thread, not from another task. So the scheduler does not take this wait for a deadlock and prints no report.
 4. The thread finishes and writes a byte into an OS pipe; `AsyncIO.Poll(1)` in the loop of `Do` sees it, and the pool wakes the task.
 5. Status 0 means that the name `localhost` was resolved.
 6. The record `req` is global rather than allocated with `NEW`: a worker thread must not touch the heap.
 
 More in `Docu/Async.md`.
 
-In this example we have seen how to move a blocking call into a worker thread, why its argument lies outside the heap, and why the scheduler may print a false deadlock report.
+In this example we have seen how to move a blocking call into a worker thread, why its argument lies outside the heap, and why the scheduler does not take the wait for a worker thread for a deadlock.
