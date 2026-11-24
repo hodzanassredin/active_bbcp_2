@@ -75,31 +75,28 @@ MODULE AsyncChan;
 
 	(* --- ограниченный канал ----------------------------------------------- *)
 
-	PROCEDURE [exclusive] (c: Buffer) Send* (m: AsyncSelect.Msg), NEW;
+	PROCEDURE (c: Buffer) Send* (m: AsyncSelect.Msg), NEW;
+	(** Монитор берётся на время операции; ждущий отправитель — предложение
+		в очереди канала, монитор во время ожидания свободен. *)
 	BEGIN
-		IF c.proto # NIL THEN AsyncSelect.CheckSend(c, m) END;
-		ACTIVE.AWAIT(c.count < c.capacity);
-		AsyncSelect.PutItem(c, m)
+		AsyncSelect.QueueSend(c, m)
 	END Send;
 
-	PROCEDURE [exclusive] (c: Buffer) Recv* (OUT m: AsyncSelect.Msg), NEW;
+	PROCEDURE (c: Buffer) Recv* (OUT m: AsyncSelect.Msg), NEW;
 	BEGIN
-		ACTIVE.AWAIT(c.count > 0);
-		IF ~AsyncSelect.TakeItem(c, m) THEN m := NIL END
+		AsyncSelect.QueueRecv(c, m)
 	END Recv;
 
 	(* --- почтовый ящик ---------------------------------------------------- *)
 
-	PROCEDURE [exclusive] (c: Mailbox) Send* (m: AsyncSelect.Msg), NEW;
+	PROCEDURE (c: Mailbox) Send* (m: AsyncSelect.Msg), NEW;
 	BEGIN
-		IF c.proto # NIL THEN AsyncSelect.CheckSend(c, m) END;
-		AsyncSelect.PutItem(c, m)
+		AsyncSelect.QueueSend(c, m)
 	END Send;
 
-	PROCEDURE [exclusive] (c: Mailbox) Recv* (OUT m: AsyncSelect.Msg), NEW;
+	PROCEDURE (c: Mailbox) Recv* (OUT m: AsyncSelect.Msg), NEW;
 	BEGIN
-		ACTIVE.AWAIT(c.count > 0);
-		IF ~AsyncSelect.TakeItem(c, m) THEN m := NIL END
+		AsyncSelect.QueueRecv(c, m)
 	END Recv;
 
 	(* --- протокол -------------------------------------------------------- *)

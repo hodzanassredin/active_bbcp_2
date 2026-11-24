@@ -37,6 +37,8 @@ MODULE Async_devChannels;
 		WaitMux = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan END;
 		RaceSender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
 		Echo = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
+		Filler64 = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; n: INTEGER END;
+		Drainer64 = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; n: INTEGER END;
 		EchoBack = POINTER TO RECORD (Tasks.Task) a, b: AsyncChan.Chan; n: INTEGER END;
 
 	VAR
@@ -59,7 +61,8 @@ MODULE Async_devChannels;
 
 		holderLocked, muxDone: BOOLEAN;
 		muxIdx, muxVal: INTEGER;
-		echoAllocs: LONGINT;	(* выделений за вторую сотню обменов Echo *)
+		echoAllocs: LONGINT;
+		drained: INTEGER;	(* выделений за вторую сотню обменов Echo *)
 
 	PROCEDURE Pump (ms: LONGINT): BOOLEAN;
 		(** Главный цикл без окна: действия Services (планировщик и
@@ -429,5 +432,39 @@ MODULE Async_devChannels;
 		UnitAssert.True(Pump(5000), "exchange finished");
 		UnitAssert.EqualInt(0, SHORT(echoAllocs), "no allocations per blocking exchange")
 	END TestProcRendezvousNoAlloc;
+
+	(* --- буфер: пачки без переключений и без выделений ------------------- *)
+
+	PROCEDURE (t: Filler64) Run;
+		VAR i: INTEGER; m: NumMsg;
+	BEGIN
+		NEW(m); m.n := 1;
+		FOR i := 1 TO t.n DO t.c.Send(m) END
+	END Run;
+
+	PROCEDURE (t: Drainer64) Run;
+		VAR i: INTEGER; x: AsyncSelect.Msg;
+	BEGIN
+		FOR i := 1 TO t.n DO t.c.Recv(x); INC(drained, x(NumMsg).n) END
+	END Run;
+
+	PROCEDURE TestProcBufferBatches*;
+	(* Отправитель кладёт в буфер, пока есть место, и не ждёт монитора,
+	   отданного разбуженному получателю: на 6400 сообщений через буфер 64
+	   приходится порядка 2 * 6400 / 64 переключений, а не по два на
+	   сообщение. Сообщения лежат в кольце: обмен не выделяет памяти. *)
+		CONST total = 6400;
+		VAR p: Filler64; q: Drainer64; sw, a: LONGINT;
+	BEGIN
+		NEW(p); NEW(q); p.c := AsyncChan.NewBuffer(64); q.c := p.c; p.n := total; q.n := total;
+		drained := 0;
+		sw := Tasks.Switches(); a := Kernel.AllocCount();
+		Tasks.Start(p); Tasks.Start(q);
+		UnitAssert.True(Pump(5000), "buffer exchange finished");
+		UnitAssert.EqualInt(total, drained, "every message received");
+		UnitAssert.True(Tasks.Switches() - sw < total DIV 16, "switches in batches, not per message");
+		(* кольцо и первые записи ожидания; на сообщение — ничего *)
+		UnitAssert.True(Kernel.AllocCount() - a < 16, "no allocations per message")
+	END TestProcBufferBatches;
 
 END Async_devChannels.
