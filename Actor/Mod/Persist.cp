@@ -125,15 +125,18 @@ MODULE ActorPersist;
 	PROCEDURE (a: Actor) Persist* (c: ActorCore.Context; e: Event; cause: LONGINT), NEW;
 	(** Записать событие и применить его.
 		Пред: вызов из обработчика a (не проверяется); e # NIL — 20.
-		Пост: e записано в поток c.name с номером seq + 1, автором c.name,
+		Пост: e записано в поток c.name с номером seq + 1, автором — отправителем
+		команды (c.Sender(); без отправителя — сам c.name),
 		причиной cause и временем записи; затем a.Apply(e); seq увеличен;
 		снимок, если seq делится на snapEvery. Поток дописан другим — трап
 		conflictTrap, ошибка хранилища — storeTrap; в обоих случаях e не
 		применено. Точек переключения нет. *)
-		VAR data: ActorJournal.Bytes; len, res: INTEGER; m: ActorJournal.Meta;
+		VAR data: ActorJournal.Bytes; len, res: INTEGER; m: ActorJournal.Meta; from: ActorCore.Ref;
 	BEGIN
 		ASSERT(e # NIL, 20);
-		m.seq := a.seq + 1; m.time := ActorJournal.Now(); m.cause := cause; m.author := c.name$;
+		m.seq := a.seq + 1; m.time := ActorJournal.Now(); m.cause := cause;
+		from := c.Sender();
+		IF from # NIL THEN m.author := from.name$ ELSE m.author := c.name$ END;
 		ActorCodec.dir.Encode(e, data, len);
 		a.J().Append(c.name, a.seq, m, data, len, res);
 		IF res = ActorJournal.conflict THEN HALT(conflictTrap)

@@ -33,6 +33,7 @@ MODULE Actor_devPersist;
 		END;
 
 		Bank = POINTER TO RECORD (ActorCore.Actor) END;
+		Clerk = POINTER TO RECORD (ActorCore.Actor) END;	(* пересылает команды от своего имени *)
 		Strategy = POINTER TO RECORD (ActorCore.Strategy) END;
 
 		Sum = POINTER TO RECORD (ActorPersist.Visitor)
@@ -203,6 +204,17 @@ MODULE Actor_devPersist;
 	BEGIN
 		IF m IS ActorCore.Started THEN acct := ActorCore.Spawn(c, ActorCore.NewProps(NewAccount), "acct") END
 	END Receive;
+
+	PROCEDURE (k: Clerk) Receive (c: ActorCore.Context; m: Msg);
+	BEGIN
+		IF m IS Withdraw THEN c.Tell(acct, m) END
+	END Receive;
+
+	PROCEDURE NewClerk (): ActorCore.Actor;
+		VAR k: Clerk;
+	BEGIN
+		NEW(k); RETURN k
+	END NewClerk;
 
 	PROCEDURE NewBank (): ActorCore.Actor;
 		VAR b: Bank;
@@ -510,6 +522,17 @@ MODULE Actor_devPersist;
 		UnitAssert.EqualInt(1, sum.lastSeq, "seq");
 		UnitAssert.True(sum.time > 20000101000000, "time written")
 	END TestMetadataReadable;
+
+	PROCEDURE TestAuthorIsSender*;
+		VAR res: INTEGER; sum: Sum; last: LONGINT; k: ActorCore.Ref; w: Withdraw;
+	BEGIN
+		StartBank;
+		k := ActorCore.Spawn(NIL, ActorCore.NewProps(NewClerk), "clerk");
+		NEW(w); w.sum := 1; w.op := 5; ActorCore.Tell(k, w);
+		UnitAssert.True(UntilInt(handled, 2, 2000), "command handled");
+		NEW(sum); ActorPersist.Read(jr, stream, 1, sum, last, res);
+		UnitAssert.EqualStr("clerk", sum.author, "author is the sender of the command")
+	END TestAuthorIsSender;
 
 	(* --- файл ---------------------------------------------------------------- *)
 
