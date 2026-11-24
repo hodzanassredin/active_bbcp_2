@@ -28,8 +28,8 @@ Modules, documentation and compilation results are organized as follows:
 ## How to Find Module Sources
 
 A module name can be one word starting with an upper-case letter. In that case the sources are in
-subsystem `System`. For example, module `Files` is in `System/Mod/Files.cp` or
-`System/Mod64/Files.cp` (for the AMD64 target).
+subsystem `System`. For example, module `Tasks` is in `System/Mod/Tasks.cp` or
+`System/Mod64/Tasks.cp` (for the AMD64 target).
 
 A module name can also consist of several words, each starting with an upper-case letter. The first
 word is the subsystem name; the remaining words define the source file name. For example, module
@@ -237,9 +237,11 @@ allowed for `Dev_dev*` modules: `FrameworkModule` compares the subsystem name ex
   `poll`).
 - `System/Mod64/Tasks.cp` implements tasks for amd64; `System/Mod/Tasks.cp` — for i386. Task
   stacks come from `Kernel.AllocStack/FreeStack` (`mmap` with a guard page in `LinKernel` and
-  `VirtualAlloc` with `PAGE_NOACCESS` in `WinKernel`).
+  `VirtualAlloc` with `PAGE_NOACCESS` in `WinKernel`). A finished task returns its stack to the
+  `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool` frees stacks above `poolMax`, at most
+  `trimStep` per scheduler step. `Kernel.AllocStack` returns FALSE for a size above `maxStackScan`.
 - The stack registry is in the kernel: `RegisterStack`, `RegisterSignalStack`,
-  `UnregisterStack`, `StackOf`, `SwitchSave`, `SwitchRestore`. `MarkLocals` scans sleeping stacks;
+  `UnregisterStack`, `StackOf` (a linear search of the list), `SwitchSave`, `SwitchRestore`. `MarkLocals` scans sleeping stacks;
   an unknown current stack cancels the collection.
 - A trap inside `Kernel.Try` is not fatal in the console without a `trapViewer`:
   `Kernel.HandleTrap` calls `platform.FatalError` only when `tryCount = 0`. The framework does not

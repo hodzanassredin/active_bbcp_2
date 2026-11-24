@@ -16,7 +16,7 @@ BEGIN {EXCLUSIVE} AWAIT ((in + 1) MOD BufLen # out);
 
 ## Перевод
 
-`{EXCLUSIVE}` стал `[exclusive]`, `AWAIT` — `ACTIVE.AWAIT`. Инициализатор `& Init` не нужен:
+`{EXCLUSIVE}` соответствует `[exclusive]`, `AWAIT` — `ACTIVE.AWAIT`. Инициализатор `& Init` не нужен:
 `NEW` обнуляет `in` и `out`. `BufLen` равна 8, как в оригинале; демонстрация использует трех
 производителей и трех потребителей по 40 элементов.
 

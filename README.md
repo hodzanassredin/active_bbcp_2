@@ -73,7 +73,8 @@ tools/test32.sh                                   # i386: сборка и тес
 | `docs/measurements.md` | замеры и команды их воспроизведения |
 | `docs/kernel-plan.md` | план будущих правок ядра |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
-| `Demo/Docu/Sys-Map.md` | карта примеров |
+| `Demo/Docu/Sys-Map.md` | карта примеров; описание каждого примера — `Demo/Docu/<Имя>.md` (`Ants`, `Barber`, `Boring`, `Buffer`, `Group`, `ModuleMonitor`, `Philo`, `PingPong`, `Pipeline`, `ReaderWriter`, `SelectTimeout`, `Sieve`, `WorkerPool`, `Support`) |
+| `AGENTS.md` | правила работы с репозиторием для агентов |
 
 ## Лицензия
 
