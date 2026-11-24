@@ -34,6 +34,7 @@ Cas_devBench|slow|300|CasHash CasChunk
 Actor_devMain|proc|300|ActorCore ActorSup ActorRun
 Actor_devPersist|proc|300|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal
 Actor_devNet|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorNetTcp AsyncIO
+Actor_devGrain|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorGrain
 Actor_devBench|proc slow|900|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal System_devCRaw System_devClock
 # Хранилище Kv: страницы, дерево против эталона, обрыв питания в каждой точке фиксации.
 Kv_devBasic|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
