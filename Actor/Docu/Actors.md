@@ -405,11 +405,107 @@ stop. The mailbox is taken off the task, and on the next work `ActorRun` gives t
 the actor answers the next question). Only a stop (`StopActor`) stops an actor: cancelling a task is
 a tool of the executor, not of the actor's owner.
 
-## 8. The Actor and the Store
+## 8. State That Survives a Restart
 
-`ActorCore.Actor` extends `Stores.Store`. The subsystem calls no store methods: letters are not
-serialized, an instance is not saved, `Restart` creates it anew with the factory. The factory
-creates an instance with an ordinary `NEW`.
+`ActorCore.Actor` extends `Stores.Store`, but the core of the subsystem does not call the store
+methods: messages are not serialized, and `Restart` makes a new instance with the factory (section 6,
+`ObxActor1`). State that must survive a trap, a restart and a process crash is kept by the module
+`ActorPersist`.
+
+**Reason.** A restart cures a failure by throwing the broken state away. An account whose balance is
+thrown away together with the error cannot be cured that way, and `Resume` (`ObxActor2`) keeps the
+state but does not save it from a process crash.
+
+**Reasoning.** Saving the whole state after each message is expensive and loses the cause of the
+change. So what is saved is not the state but an *event*, a record of what has already happened
+("30 withdrawn by operation 1"). The state is a fold of the events by one pure procedure `Apply`.
+Then:
+
+- recovery is the same fold: read the events and apply them in order;
+- the event journal is a ready history of changes: who, when and for what cause;
+- to avoid folding a million events, a *snapshot* is saved every `snapEvery` events: the frame of the
+  state after event number `seq`; recovery takes the snapshot and applies only the tail.
+
+The command handler of a persistent actor takes three steps: it checks the command against the
+current state, calls `Persist(c, e, cause)` and does not touch the state any more. `Persist` encodes
+the event, appends it to the stream named after the actor, expecting number `seq`, and only after a
+successful write calls `Apply(e)`. Recovery runs while `Started` is handled, both at creation and
+after a restart: the snapshot, then the events after it, then the handler gets `ReplayComplete`. The
+store is synchronous, and recovery has no switch points; messages that arrive meanwhile wait in the
+mailbox and come after `ReplayComplete` (`TestCommandsWaitForReplay`).
+
+Each event has metadata that the journal keeps next to the frame and returns without parsing the
+body: the number `seq`, the write time `time` (UTC, `YYYYMMDDhhmmss`), the cause `cause`, a number the
+handler passed (an operation number, a command number), and the author `author`, the sender of the
+command, or the actor itself when there is no sender. The operation number also serves retries: if
+the operation is already in the state, the handler writes no event, and a repeated command does not
+withdraw twice. The table of done operations is part of the state; the same `Apply` restores it.
+
+**Example.** The account from `ObxActor3` (a file journal):
+
+```
+	PROCEDURE (a: Account) Apply (e: ActorPersist.Event);
+	BEGIN
+		WITH e: Deposited DO INC(a.balance, e.sum)
+		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps] := e.op; INC(a.nOps)
+		ELSE
+		END
+	END Apply;
+
+	PROCEDURE (a: Account) Handle (c: ActorCore.Context; m: Msg);
+		VAR d: Deposited; w: Withdrawn; b: Balance;
+	BEGIN
+		WITH m: ActorPersist.ReplayComplete DO INC(starts)
+		| m: Deposit DO NEW(d); d.sum := m.sum; a.Persist(c, d, 0)
+		| m: Withdraw DO
+			IF ~a.Done(m.op) THEN NEW(w); w.sum := m.sum; w.op := m.op; a.Persist(c, w, m.op) END
+		| m: Crash DO HALT(42)
+		| m: GetBalance DO NEW(b); b.n := a.balance; c.Respond(b)
+		ELSE
+		END
+	END Handle;
+```
+
+After a trap, after a restart and after reopening the file the balance is the same, and a repeat of
+operation 1 withdraws nothing. `ObxActor4` shows snapshots and a history with author and cause;
+`ObxActor5` shows a report of account turnover that reads the same streams apart from the accounts
+(CQRS) and catches up with the journal by the number of the last event read.
+
+**Violation.** A handler that changes the state itself, bypassing `Apply`, loses the change on a
+restart: recovery does not repeat it. An `Apply` that sends messages or writes to the journal
+repeats them on every recovery. A trap between the write and `Apply` does not lose the event: it is
+already in the journal and is applied on recovery (`TestTrapAfterPersistKeepsEvent`); a trap before
+`Persist` leaves no trace (`TestTrapBeforePersistLosesEvent`).
+
+Failure rules:
+
+| Case | What happens |
+|---|---|
+| another writer appended to the stream (the number does not match) | `Append` writes nothing and answers `conflict`; `Persist` traps `conflictTrap` (70), the event is not applied; on `Restart` the actor reads the stream again with the foreign event (`TestConflictFailsActor`) |
+| a store error on write or read | trap `storeTrap` (71); the supervisor decides: retry (`Restart`) or stop |
+| a frame cannot be read (type not found, version out of range) | the codec answers `unknown` and does not trap; recovery traps `decodeTrap` (72), the reader `ActorPersist.Read` gets `res = corrupt` (`TestUnknownEventType`) |
+
+Waiting: `Persist` is synchronous and has no switch points, so while it writes the executor is busy.
+A slow store delays the whole pool; an actor for which this matters is created with
+`Props.dedicated` (section 3).
+
+Event versions. `Stores.Writer.WriteStore` writes the frame: the type name, then the fields from
+`Externalize`. The type reads its version number with `ReadVersion(min, max, v)` and parses the
+fields by `v`. A new field is a new version: `max` grows, old frames are read with the old layout,
+and the new field gets its default. A frame from a future version and a frame of an unknown type are
+`unknown` (`TestVersionRule`). An event type must not be renamed or removed while journals hold its
+frames.
+
+**Cost.** Each change is the encoding of a frame through `Stores` and a write to the journal;
+recovery without a snapshot goes through all events of the stream (measurements in section 10). The
+journal grows without bound: events before a snapshot are not deleted, because the audit needs the
+history. The file journal (`ActorFileJournal`) is a temporary store until an ordered key-value
+store: one process per file, `Flush` without `fsync` (a power failure can take the last records; on
+open they are dropped as a torn tail), the stream index in memory, and opening reads the whole file.
+
+The journal follows the pattern of `Files.Directory`: the abstract `ActorJournal.Journal`, the
+variables `dir` and `stdDir` and `SetDir`, an implementation in memory (`NewMem`) and in a file
+(`ActorFileJournal.Open`). The codec (`ActorCodec`) is replaceable the same way.
 
 ## 9. Address and Directory
 
@@ -448,11 +544,19 @@ actor, delivering one letter to each takes 2.8–4.3 µs per letter. The profile
 gives more than 70 % of the samples to the garbage collector: each mailbox has its own queue rings,
 and an address keeps two names of 128 characters.
 
+Persistence (`TestSlowPersist`, one executor, 100 000 events with 4 bytes of payload, three runs):
+`Persist` to a memory journal takes 4.7–4.9 µs per event (about 200 000 events per second), to a
+file 6.4–7.0 µs (about 150 000 per second; `Flush` after each write, no `fsync`). Recovery of
+100 000 events without a snapshot takes 0.38–0.51 s from memory and 0.38–0.41 s from the file; with
+a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and
+`recover-*`.
+
 ## 11. Limitations
 
 - One OS thread: actors run in turn, and computation in one actor delays the others until the next
   switch point of the executor (an executor yields every 64 mailboxes).
-- No persistence: `Restart` creates an instance with the initial state.
+- Persistence only for `ActorPersist.Actor`; the disk journal is a file of one process without
+  `fsync` (section 8); there is no key-value store yet.
 - No transport: a `Ref` of another node can be described, but nobody delivers to it.
 - One strategy, `OneForOne`; "all for one" is not implemented.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
@@ -776,3 +880,245 @@ Post: every actor without a parent has received a stop, all actors are stopped (
 parents); the pool tasks ended by themselves, without cancellation; the own tasks of actors end
 together with the actors; `n = 0`. An actor that has not stopped within 5 s remains, and the pool
 tasks are then cancelled.
+
+### 12.4. ActorJournal
+
+```
+DEFINITION ActorJournal;
+
+	CONST
+		ok = 0; conflict = 1; absent = 2; failed = 3; corrupt = 4;
+		nameLen = 128;
+
+	TYPE
+		Bytes = POINTER TO ARRAY OF BYTE;
+		Name = ARRAY 128 OF CHAR;
+
+		Meta = RECORD
+			seq, time, cause: LONGINT;
+			author: Name
+		END;
+
+		Sink = POINTER TO ABSTRACT RECORD
+			(s: Sink) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, NEW, ABSTRACT
+		END;
+
+		Journal = POINTER TO ABSTRACT RECORD
+			(j: Journal) Last (IN stream: ARRAY OF CHAR): LONGINT, NEW, ABSTRACT;
+			(j: Journal) Append (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: Meta;
+				IN body: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) Read (IN stream: ARRAY OF CHAR; from: LONGINT; s: Sink; OUT res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) SaveSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
+				IN data: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) LoadSnapshot (IN stream: ARRAY OF CHAR; OUT seq: LONGINT;
+				OUT data: Bytes; OUT len, res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) Close, NEW, EMPTY
+		END;
+
+	VAR
+		dir-, stdDir-: Journal;
+
+	PROCEDURE NewMem (): Journal;
+	PROCEDURE SetDir (j: Journal);
+	PROCEDURE Now (): LONGINT;
+
+END ActorJournal.
+```
+
+A journal is a set of streams; a stream is events numbered 1, 2, 3 … without gaps. `res`: `ok`;
+`conflict`, the expected number does not match; `absent`, there is no snapshot; `failed`, an
+environment error; `corrupt`, the data cannot be read.
+
+`Meta` is the event metadata: the number `seq`, the write time `time` (UTC, `YYYYMMDDhhmmss`), the
+cause `cause`, the author `author`. The journal keeps them apart from the body and returns them
+without parsing the body.
+
+**PROCEDURE (s: Sink) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN**
+The receiver of `Read`. `body[0 .. len-1]` is the event frame. Post: `FALSE` stops reading.
+
+**PROCEDURE (j: Journal) Last (IN stream: ARRAY OF CHAR): LONGINT**
+Post: the number of the last event of the stream; 0 for an empty stream.
+
+**PROCEDURE (j: Journal) Append (IN stream; expected: LONGINT; IN m: Meta; IN body; len: INTEGER; OUT res: INTEGER)**
+Pre: `stream # ""`, trap 20; `m.seq = expected + 1`, 21; `0 <= len <= LEN(body)`, 22.
+Post: `res = ok`, the event is written with number `m.seq`; `res = conflict`,
+`Last(stream) # expected`, nothing is written; otherwise `failed`.
+
+**PROCEDURE (j: Journal) Read (IN stream; from: LONGINT; s: Sink; OUT res: INTEGER)**
+Pre: `s # NIL`, trap 20. Post: the events numbered `>= from` are given to `s.Event` in ascending
+order while `s.Event` answers `TRUE`; `res = ok` or a journal error.
+
+**PROCEDURE (j: Journal) SaveSnapshot (IN stream; seq: LONGINT; IN data; len: INTEGER; OUT res: INTEGER)**
+Pre: `0 < seq <= Last(stream)`, trap 20; `0 <= len <= LEN(data)`, 21.
+Post: `res = ok`, the snapshot `data[0 .. len-1]` after event `seq` replaced the previous snapshot
+of the stream. The events before the snapshot stay.
+
+**PROCEDURE (j: Journal) LoadSnapshot (IN stream; OUT seq: LONGINT; OUT data: Bytes; OUT len, res: INTEGER)**
+Post: `res = ok`, the last snapshot of the stream; `seq` is the number of the event after which it
+was taken; `res = absent`, there is no snapshot, `seq = 0`.
+
+**PROCEDURE (j: Journal) Close**
+Post: the journal resources are released; the journal is not used after `Close`.
+
+**PROCEDURE NewMem (): Journal**
+Post: a new empty journal in memory.
+
+**PROCEDURE SetDir (j: Journal)**
+Pre: `j # NIL`, trap 20. Post: `dir = j`; the first journal installed stays in `stdDir`. When the
+module is loaded, `dir` is a memory journal.
+
+**PROCEDURE Now (): LONGINT**
+Post: the current UTC time as `YYYYMMDDhhmmss`.
+
+### 12.5. ActorCodec
+
+```
+DEFINITION ActorCodec;
+
+	IMPORT Stores, ActorJournal;
+
+	CONST
+		ok = 0; unknown = 1;
+
+	TYPE
+		Codec = POINTER TO ABSTRACT RECORD
+			(c: Codec) Encode (s: Stores.Store; OUT data: ActorJournal.Bytes; OUT len: INTEGER), NEW, ABSTRACT;
+			(c: Codec) Decode (IN data: ARRAY OF BYTE; len: INTEGER; OUT s: Stores.Store;
+				OUT res: INTEGER), NEW, ABSTRACT
+		END;
+
+	VAR
+		dir-, stdDir-: Codec;
+
+	PROCEDURE SetDir (c: Codec);
+
+END ActorCodec.
+```
+
+The standard codec writes an object with `Stores.Writer.WriteStore` (the type name, then the fields
+from `Externalize`) and reads it with `Stores.Reader.ReadStore`.
+
+**PROCEDURE (c: Codec) Encode (s: Stores.Store; OUT data: ActorJournal.Bytes; OUT len: INTEGER)**
+Pre: `s # NIL`, trap 20. Post: `data[0 .. len-1]` is the frame of `s`.
+
+**PROCEDURE (c: Codec) Decode (IN data; len: INTEGER; OUT s: Stores.Store; OUT res: INTEGER)**
+Pre: `0 < len <= LEN(data)`, trap 20.
+Post: `res = ok`, `s` is a new object from the frame; `res = unknown`, the type is not found or the
+version is out of range, `s = NIL`.
+
+**PROCEDURE SetDir (c: Codec)**
+Pre: `c # NIL`, trap 20. Post: `dir = c`; the first codec installed stays in `stdDir`.
+
+### 12.6. ActorPersist
+
+```
+DEFINITION ActorPersist;
+
+	IMPORT Stores, ActorCore, ActorJournal;
+
+	CONST
+		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
+
+	TYPE
+		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
+			meta-: ActorJournal.Meta
+		END;
+
+		ReplayComplete = POINTER TO RECORD (ActorCore.Msg) END;
+
+		Actor = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
+			seq-: LONGINT;
+			snapEvery: INTEGER;
+			journal: ActorJournal.Journal;
+			(a: Actor) Apply (e: Event), NEW, ABSTRACT;
+			(a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg), NEW, ABSTRACT;
+			(a: Actor) Snapshot (): Stores.Store, NEW, EXTENSIBLE;
+			(a: Actor) Restore (s: Stores.Store), NEW, EMPTY;
+			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+			(a: Actor) SaveSnapshot (c: ActorCore.Context), NEW;
+			(a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT), NEW
+		END;
+
+		Visitor = POINTER TO ABSTRACT RECORD
+			(v: Visitor) Visit (e: Event), NEW, ABSTRACT
+		END;
+
+	PROCEDURE Read (j: ActorJournal.Journal; IN stream: ARRAY OF CHAR; from: LONGINT; v: Visitor;
+		OUT last: LONGINT; OUT res: INTEGER);
+
+END ActorPersist.
+```
+
+The stream of an actor is its name (`c.name`). `journal = NIL` means `ActorJournal.dir`. `seq` is the
+number of the last applied event. `snapEvery > 0` takes a snapshot after each event whose number is
+a multiple of `snapEvery`; 0 only on `SaveSnapshot`.
+
+**PROCEDURE (a: Actor) Apply (e: Event)**
+Post: the state of `a` is changed by event `e`. No messages, no writes, no traps.
+
+**PROCEDURE (a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg)**
+The command handler. It gets `ReplayComplete` first and does not get `Started`.
+
+**PROCEDURE (a: Actor) Snapshot (): Stores.Store**
+Post: the object whose frame is the snapshot of the state. By default the actor itself (its
+`Externalize`).
+
+**PROCEDURE (a: Actor) Restore (s: Stores.Store)**
+Post: the state of `a` is taken from `s`, the object read from the snapshot. Called during recovery
+when `seq` already equals the snapshot number.
+
+**PROCEDURE (a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg)**
+On `Started`: the snapshot of the stream, if any, goes to `Restore`, then the events after it go to
+`Apply`, then `Handle(c, ReplayComplete)`. A journal error traps `storeTrap`, an unreadable frame
+traps `decodeTrap`. Other messages go to `Handle`.
+
+**PROCEDURE (a: Actor) SaveSnapshot (c: ActorCore.Context)**
+Pre: called from the handler of `a` (not checked); `a.seq > 0`, trap 20.
+Post: the snapshot of the state after event `seq` is saved; an error traps `storeTrap`.
+
+**PROCEDURE (a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT)**
+Pre: called from the handler of `a` (not checked); `e # NIL`, trap 20.
+Post: `e` is written to the stream with number `seq + 1`, with the sender of the command as author
+(the actor itself when there is no sender), cause `cause` and the write time; then `e.meta` is
+filled, `Apply(e)` runs and `seq` grows; a snapshot is taken if `seq` is a multiple of `snapEvery`.
+Another writer appended to the stream: trap `conflictTrap`; a store error: `storeTrap`; in both
+cases `e` is not applied. No switch points.
+
+**PROCEDURE (v: Visitor) Visit (e: Event)**
+Post: event `e` (its metadata in `e.meta`) is taken into account.
+
+**PROCEDURE Read (j; IN stream; from: LONGINT; v: Visitor; OUT last: LONGINT; OUT res: INTEGER)**
+Reads a stream for the read side (CQRS).
+Pre: `j # NIL`, trap 20; `v # NIL`, 21.
+Post: the events numbered `>= from` are parsed and given to `v.Visit` in order; `res = ok`, `last`
+is the number of the last one given (`from - 1` if there are no new ones); otherwise `res` is a
+journal error or `corrupt` (a frame cannot be read), and `last` is the number of the last good one.
+
+### 12.7. ActorFileJournal
+
+```
+DEFINITION ActorFileJournal;
+
+	IMPORT Files, CasStore, ActorJournal;
+
+	PROCEDURE Open (loc: Files.Locator; IN name: Files.Name; snaps: CasStore.Store;
+		OUT res: INTEGER): ActorJournal.Journal;
+
+END ActorFileJournal.
+```
+
+A journal in one append-only file: a record is the byte `0A5X`, the body length (4 bytes), the body
+(stream, `seq`, `time`, `cause`, author, frame) and an FNV-1a checksum (4 bytes). Snapshots are
+blocks of `snaps`: the ref `"s"` plus 40 characters of the hash of the stream name points to the
+block "`seq` (8 bytes), frame".
+
+**PROCEDURE Open (loc; IN name; snaps: CasStore.Store; OUT res: INTEGER): ActorJournal.Journal**
+Pre: `loc # NIL`, trap 20; `name # ""`, 21; `snaps # NIL`, 22.
+Post: `res = ActorJournal.ok`, a journal with the events of all whole records of the file (no file
+gives a new empty one); the first unfinished record or record with a wrong checksum and everything
+after it are dropped, and the next record takes their place. `res = failed`, the file is not
+opened, the result is `NIL`. The file stays open exclusively until `Close`.
+
+Limits: `Flush` without `fsync`; one process per file; the stream index in memory (one entry per
+event); opening reads the whole file; the checksum catches a tear and accidental damage, not a
+deliberate change.

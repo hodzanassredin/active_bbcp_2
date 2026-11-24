@@ -395,11 +395,104 @@ END ObxActor1.
 отвечает на следующий вопрос). Остановить актор можно только остановкой (`StopActor`): отмена
 задачи — средство исполнителя, а не владельца актора.
 
-## 8. Актор и хранилище
+## 8. Состояние, которое переживает перезапуск
 
-`ActorCore.Actor` расширяет `Stores.Store`. Подсистема методов хранилища не вызывает: письма не
-сериализуются, экземпляр не сохраняется, `Restart` создаёт его фабрикой заново. Фабрика создаёт
-экземпляр обычным `NEW`.
+`ActorCore.Actor` расширяет `Stores.Store`, но ядро подсистемы методов хранилища не вызывает: письма
+не сериализуются, а `Restart` создаёт экземпляр фабрикой заново (раздел 6, `ObxActor1`). Состояние,
+которое должно пережить трап, перезапуск и падение процесса, хранит модуль `ActorPersist`.
+
+**Причина.** Перезапуск лечит отказ тем, что выбрасывает испорченное состояние. Счёт, остаток
+которого выброшен вместе с ошибкой, лечить так нельзя, а `Resume` (`ObxActor2`) оставляет
+состояние, но не спасает от падения процесса.
+
+**Рассуждение.** Сохранять всё состояние после каждого письма дорого и теряет причину изменения.
+Поэтому сохраняется не состояние, а *событие* — запись о том, что уже случилось («списано 30 по
+операции 1»). Состояние — свёртка событий одной чистой процедурой `Apply`. Тогда:
+
+- восстановление — та же свёртка: прочитать события и применить их по порядку;
+- журнал событий — готовая история изменений: кто, когда и по какой причине;
+- чтобы не сворачивать миллион событий, раз в `snapEvery` событий сохраняется *снимок* — кадр
+  состояния после события с номером `seq`; восстановление берёт снимок и применяет только хвост.
+
+Обработчик команды персистентного актора делает три шага: проверяет команду по текущему состоянию,
+зовёт `Persist(c, e, cause)` и больше состояние не трогает. `Persist` кодирует событие, дописывает
+его в поток с именем актора, ожидая номер `seq`, и только после удачной записи зовёт `Apply(e)`.
+Восстановление идёт при обработке `Started` — и при создании, и после перезапуска: снимок, затем
+события после него, затем обработчик получает `ReplayComplete`. Хранилище синхронное, точек
+переключения в восстановлении нет; письма, пришедшие тем временем, ждут в ящике и приходят после
+`ReplayComplete` (`TestCommandsWaitForReplay`).
+
+У каждого события метаданные, которые журнал хранит рядом с кадром и отдаёт без разбора тела:
+номер `seq`, время записи `time` (UTC, `ГГГГММДДччммсс`), причина `cause` — номер, который передал
+обработчик (номер операции, номер команды), и автор `author` — отправитель команды, а без
+отправителя — сам актор. Номер операции служит и повтору: если операция уже есть в состоянии,
+обработчик событие не пишет, и повторная команда второй раз не списывает. Таблица выполненных
+операций — часть состояния, её восстанавливает тот же `Apply`.
+
+**Пример.** Счёт из `ObxActor3` (журнал в файле):
+
+```
+	PROCEDURE (a: Account) Apply (e: ActorPersist.Event);
+	BEGIN
+		WITH e: Deposited DO INC(a.balance, e.sum)
+		| e: Withdrawn DO DEC(a.balance, e.sum); a.ops[a.nOps] := e.op; INC(a.nOps)
+		ELSE
+		END
+	END Apply;
+
+	PROCEDURE (a: Account) Handle (c: ActorCore.Context; m: Msg);
+		VAR d: Deposited; w: Withdrawn; b: Balance;
+	BEGIN
+		WITH m: ActorPersist.ReplayComplete DO INC(starts)
+		| m: Deposit DO NEW(d); d.sum := m.sum; a.Persist(c, d, 0)
+		| m: Withdraw DO
+			IF ~a.Done(m.op) THEN NEW(w); w.sum := m.sum; w.op := m.op; a.Persist(c, w, m.op) END
+		| m: Crash DO HALT(42)
+		| m: GetBalance DO NEW(b); b.n := a.balance; c.Respond(b)
+		ELSE
+		END
+	END Handle;
+```
+
+После трапа, после перезапуска и после повторного открытия файла остаток тот же, а повтор операции 1
+ничего не списывает. `ObxActor4` показывает снимки и историю с автором и причиной, `ObxActor5` —
+отчёт «обороты по счетам», который читает те же потоки отдельно от счетов (CQRS) и догоняет журнал
+по номеру последнего прочитанного события.
+
+**Нарушение.** Обработчик, который меняет состояние сам, мимо `Apply`, теряет изменение при
+перезапуске: восстановление его не повторит. `Apply`, который шлёт письма или пишет в журнал,
+повторит их при каждом восстановлении. Трап между записью и `Apply` событие не теряет: оно уже в
+журнале и применится при восстановлении (`TestTrapAfterPersistKeepsEvent`); трап до `Persist` не
+оставляет следа (`TestTrapBeforePersistLosesEvent`).
+
+Правила отказов:
+
+| Случай | Что происходит |
+|---|---|
+| поток дописан другим писателем (номер не совпал) | `Append` ничего не пишет и отвечает `conflict`; `Persist` трапует `conflictTrap` (70), событие не применено; при `Restart` актор перечитывает поток вместе с чужим событием (`TestConflictFailsActor`) |
+| ошибка хранилища при записи или чтении | трап `storeTrap` (71); судьбу решает супервизор — повторить (`Restart`) или остановить |
+| кадр не читается (тип не найден, версия вне допустимых) | кодек отвечает `unknown`, не трапует; восстановление трапует `decodeTrap` (72), читатель `ActorPersist.Read` получает `res = corrupt` (`TestUnknownEventType`) |
+
+Ожидание: `Persist` синхронный и точек переключения не имеет, поэтому пока он пишет, исполнитель
+занят. Медленное хранилище задерживает весь пул; актор, которому это важно, создаётся с
+`Props.dedicated` (раздел 3).
+
+Версии событий. Кадр пишет `Stores.Writer.WriteStore`: имя типа, затем поля из `Externalize`. Тип
+читает свой номер версии `ReadVersion(min, max, v)` и разбирает поля по `v`. Новое поле — новая
+версия: `max` растёт, старые кадры читаются по старой раскладке, а у нового поля — значение по
+умолчанию. Кадр из будущей версии и кадр неизвестного типа — `unknown` (`TestVersionRule`). Тип
+события нельзя переименовывать и удалять, пока в журналах есть его кадры.
+
+**Цена.** Каждое изменение — кодирование кадра через `Stores` и запись в журнал; восстановление без
+снимка проходит все события потока (замеры — раздел 10). Журнал растёт без предела: события до
+снимка не удаляются, потому что история нужна аудиту. Журнал в файле (`ActorFileJournal`) —
+временное хранилище до упорядоченного «ключ — значение»: один процесс на файл, `Flush` без `fsync`
+(сбой питания может унести последние записи — при открытии они отбросятся как оборванный хвост),
+указатель потоков в памяти, открытие читает весь файл.
+
+Журнал устроен по образцу `Files.Directory`: абстрактный `ActorJournal.Journal`, переменные `dir`,
+`stdDir` и `SetDir`, реализация в памяти (`NewMem`) и в файле (`ActorFileJournal.Open`). Кодек
+(`ActorCodec`) сменный тем же способом.
 
 ## 9. Адрес и каталог
 
@@ -437,11 +530,18 @@ END ObxActor1.
 (`tools/prof.sh`) отдаёт сборщику мусора больше 70 % выборок: у каждого ящика свои кольца очередей,
 а адрес хранит два имени по 128 знаков.
 
+Персистентность (`TestSlowPersist`, один исполнитель, 100 000 событий по 4 байта полезных данных,
+три прогона): `Persist` в журнал в памяти — 4,7–4,9 мкс на событие (около 200 000 событий в
+секунду), в файл — 6,4–7,0 мкс (около 150 000 в секунду; `Flush` после каждой записи, без `fsync`).
+Восстановление 100 000 событий без снимка — 0,38–0,51 с из памяти и 0,38–0,41 с из файла; со
+снимком после последнего события — 6–12 мкс. Строки `BENCH persist-*` и `recover-*`.
+
 ## 11. Ограничения
 
 - Одна нить ОС: акторы исполняются по очереди, вычислительная работа одного актора задерживает
   остальных до точки переключения исполнителя (исполнитель уступает каждые 64 ящика).
-- Нет персистентности: `Restart` создаёт экземпляр с начальным состоянием.
+- Персистентность — только у `ActorPersist.Actor`; журнал на диске — файл одного процесса без
+  `fsync` (раздел 8); хранилища «ключ — значение» пока нет.
 - Нет транспорта: `Ref` другого узла можно описать, но доставлять ему некому.
 - Стратегия одна — `OneForOne`; «все за одного» не реализована.
 - Пока пул жив, планировщик не объявляет тупик прочих задач (раздел 3).
@@ -761,3 +861,240 @@ END ActorRun.
 Пост: каждый актор без родителя получил остановку, все акторы остановлены (дети раньше родителей);
 задачи пула завершились сами, без отмены; собственные задачи акторов завершаются вместе с
 акторами; `n = 0`. Актор, не остановившийся за 5 с, остаётся, а задачи пула тогда отменяются.
+
+### 12.4. ActorJournal
+
+```
+DEFINITION ActorJournal;
+
+	CONST
+		ok = 0; conflict = 1; absent = 2; failed = 3; corrupt = 4;
+		nameLen = 128;
+
+	TYPE
+		Bytes = POINTER TO ARRAY OF BYTE;
+		Name = ARRAY 128 OF CHAR;
+
+		Meta = RECORD
+			seq, time, cause: LONGINT;
+			author: Name
+		END;
+
+		Sink = POINTER TO ABSTRACT RECORD
+			(s: Sink) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, NEW, ABSTRACT
+		END;
+
+		Journal = POINTER TO ABSTRACT RECORD
+			(j: Journal) Last (IN stream: ARRAY OF CHAR): LONGINT, NEW, ABSTRACT;
+			(j: Journal) Append (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: Meta;
+				IN body: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) Read (IN stream: ARRAY OF CHAR; from: LONGINT; s: Sink; OUT res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) SaveSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
+				IN data: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) LoadSnapshot (IN stream: ARRAY OF CHAR; OUT seq: LONGINT;
+				OUT data: Bytes; OUT len, res: INTEGER), NEW, ABSTRACT;
+			(j: Journal) Close, NEW, EMPTY
+		END;
+
+	VAR
+		dir-, stdDir-: Journal;
+
+	PROCEDURE NewMem (): Journal;
+	PROCEDURE SetDir (j: Journal);
+	PROCEDURE Now (): LONGINT;
+
+END ActorJournal.
+```
+
+Журнал — набор потоков; поток — события с номерами 1, 2, 3 … без пропусков. `res`: `ok`; `conflict`
+— ожидаемый номер не совпал; `absent` — снимка нет; `failed` — ошибка среды; `corrupt` — данные не
+читаются.
+
+`Meta` — метаданные события: номер `seq`, время записи `time` (UTC, `ГГГГММДДччммсс`), причина
+`cause`, автор `author`. Журнал хранит их отдельно от тела и отдаёт без разбора тела.
+
+**PROCEDURE (s: Sink) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN**
+Получатель событий `Read`. `body[0 .. len-1]` — кадр события. Пост: `FALSE` — чтение прекращается.
+
+**PROCEDURE (j: Journal) Last (IN stream: ARRAY OF CHAR): LONGINT**
+Пост: номер последнего события потока; 0 — поток пуст.
+
+**PROCEDURE (j: Journal) Append (IN stream; expected: LONGINT; IN m: Meta; IN body; len: INTEGER; OUT res: INTEGER)**
+Пред: `stream # ""` — трап 20; `m.seq = expected + 1` — 21; `0 <= len <= LEN(body)` — 22.
+Пост: `res = ok` — событие записано с номером `m.seq`; `res = conflict` — `Last(stream) # expected`,
+ничего не записано; иначе `failed`.
+
+**PROCEDURE (j: Journal) Read (IN stream; from: LONGINT; s: Sink; OUT res: INTEGER)**
+Пред: `s # NIL` — трап 20. Пост: события с номерами `>= from` отданы `s.Event` по возрастанию номера,
+пока `s.Event` отвечает `TRUE`; `res = ok` или ошибка журнала.
+
+**PROCEDURE (j: Journal) SaveSnapshot (IN stream; seq: LONGINT; IN data; len: INTEGER; OUT res: INTEGER)**
+Пред: `0 < seq <= Last(stream)` — трап 20; `0 <= len <= LEN(data)` — 21.
+Пост: `res = ok` — снимок `data[0 .. len-1]` после события `seq` заменил прежний снимок потока.
+События до снимка остаются.
+
+**PROCEDURE (j: Journal) LoadSnapshot (IN stream; OUT seq: LONGINT; OUT data: Bytes; OUT len, res: INTEGER)**
+Пост: `res = ok` — последний снимок потока, `seq` — номер события, после которого он снят;
+`res = absent` — снимка нет, `seq = 0`.
+
+**PROCEDURE (j: Journal) Close**
+Пост: ресурсы журнала освобождены; после `Close` журнал не используется.
+
+**PROCEDURE NewMem (): Journal**
+Пост: новый пустой журнал в памяти.
+
+**PROCEDURE SetDir (j: Journal)**
+Пред: `j # NIL` — трап 20. Пост: `dir = j`; первый установленный журнал остаётся в `stdDir`. При
+загрузке модуля `dir` — журнал в памяти.
+
+**PROCEDURE Now (): LONGINT**
+Пост: текущее время UTC в виде `ГГГГММДДччммсс`.
+
+### 12.5. ActorCodec
+
+```
+DEFINITION ActorCodec;
+
+	IMPORT Stores, ActorJournal;
+
+	CONST
+		ok = 0; unknown = 1;
+
+	TYPE
+		Codec = POINTER TO ABSTRACT RECORD
+			(c: Codec) Encode (s: Stores.Store; OUT data: ActorJournal.Bytes; OUT len: INTEGER), NEW, ABSTRACT;
+			(c: Codec) Decode (IN data: ARRAY OF BYTE; len: INTEGER; OUT s: Stores.Store;
+				OUT res: INTEGER), NEW, ABSTRACT
+		END;
+
+	VAR
+		dir-, stdDir-: Codec;
+
+	PROCEDURE SetDir (c: Codec);
+
+END ActorCodec.
+```
+
+Стандартный кодек пишет объект `Stores.Writer.WriteStore` (имя типа, затем поля из `Externalize`) и
+читает `Stores.Reader.ReadStore`.
+
+**PROCEDURE (c: Codec) Encode (s: Stores.Store; OUT data: ActorJournal.Bytes; OUT len: INTEGER)**
+Пред: `s # NIL` — трап 20. Пост: `data[0 .. len-1]` — кадр `s`.
+
+**PROCEDURE (c: Codec) Decode (IN data; len: INTEGER; OUT s: Stores.Store; OUT res: INTEGER)**
+Пред: `0 < len <= LEN(data)` — трап 20.
+Пост: `res = ok` — `s` — новый объект из кадра; `res = unknown` — тип не найден или версия вне
+допустимых, `s = NIL`.
+
+**PROCEDURE SetDir (c: Codec)**
+Пред: `c # NIL` — трап 20. Пост: `dir = c`; первый установленный кодек остаётся в `stdDir`.
+
+### 12.6. ActorPersist
+
+```
+DEFINITION ActorPersist;
+
+	IMPORT Stores, ActorCore, ActorJournal;
+
+	CONST
+		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
+
+	TYPE
+		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
+			meta-: ActorJournal.Meta
+		END;
+
+		ReplayComplete = POINTER TO RECORD (ActorCore.Msg) END;
+
+		Actor = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
+			seq-: LONGINT;
+			snapEvery: INTEGER;
+			journal: ActorJournal.Journal;
+			(a: Actor) Apply (e: Event), NEW, ABSTRACT;
+			(a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg), NEW, ABSTRACT;
+			(a: Actor) Snapshot (): Stores.Store, NEW, EXTENSIBLE;
+			(a: Actor) Restore (s: Stores.Store), NEW, EMPTY;
+			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+			(a: Actor) SaveSnapshot (c: ActorCore.Context), NEW;
+			(a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT), NEW
+		END;
+
+		Visitor = POINTER TO ABSTRACT RECORD
+			(v: Visitor) Visit (e: Event), NEW, ABSTRACT
+		END;
+
+	PROCEDURE Read (j: ActorJournal.Journal; IN stream: ARRAY OF CHAR; from: LONGINT; v: Visitor;
+		OUT last: LONGINT; OUT res: INTEGER);
+
+END ActorPersist.
+```
+
+Поток актора — его имя (`c.name`). `journal = NIL` — `ActorJournal.dir`. `seq` — номер последнего
+применённого события. `snapEvery > 0` — снимок после каждого события с номером, кратным `snapEvery`;
+0 — только по `SaveSnapshot`.
+
+**PROCEDURE (a: Actor) Apply (e: Event)**
+Пост: состояние `a` изменено событием `e`. Без писем, записей и трапов.
+
+**PROCEDURE (a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg)**
+Обработчик команд. Первым получает `ReplayComplete`; `Started` не получает.
+
+**PROCEDURE (a: Actor) Snapshot (): Stores.Store**
+Пост: объект, кадр которого — снимок состояния. По умолчанию — сам актор (его `Externalize`).
+
+**PROCEDURE (a: Actor) Restore (s: Stores.Store)**
+Пост: состояние `a` взято из `s` — объекта, прочитанного из снимка. Вызывается при восстановлении,
+когда `seq` уже равен номеру снимка.
+
+**PROCEDURE (a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg)**
+На `Started`: снимок потока (если есть) — `Restore`, затем события после него — `Apply`, затем
+`Handle(c, ReplayComplete)`. Ошибка журнала — трап `storeTrap`, нечитаемый кадр — `decodeTrap`.
+Остальные письма — `Handle`.
+
+**PROCEDURE (a: Actor) SaveSnapshot (c: ActorCore.Context)**
+Пред: вызов из обработчика `a` (не проверяется); `a.seq > 0` — трап 20.
+Пост: снимок состояния после события `seq` сохранён; ошибка — трап `storeTrap`.
+
+**PROCEDURE (a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT)**
+Пред: вызов из обработчика `a` (не проверяется); `e # NIL` — трап 20.
+Пост: `e` записано в поток с номером `seq + 1`, автором — отправителем команды (без отправителя — сам
+актор), причиной `cause` и временем записи; затем `e.meta` заполнено, `Apply(e)`, `seq` увеличен;
+снимок, если `seq` кратен `snapEvery`. Поток дописан другим — трап `conflictTrap`; ошибка хранилища
+— `storeTrap`; в обоих случаях `e` не применено. Точек переключения нет.
+
+**PROCEDURE (v: Visitor) Visit (e: Event)**
+Пост: событие `e` (метаданные — в `e.meta`) учтено.
+
+**PROCEDURE Read (j; IN stream; from: LONGINT; v: Visitor; OUT last: LONGINT; OUT res: INTEGER)**
+Чтение потока для стороны чтения (CQRS).
+Пред: `j # NIL` — трап 20; `v # NIL` — 21.
+Пост: события с номерами `>= from` разобраны и отданы `v.Visit` по порядку; `res = ok` — `last` —
+номер последнего отданного (`from - 1`, если новых нет); иначе `res` — ошибка журнала или `corrupt`
+(кадр не читается), `last` — номер последнего удачного.
+
+### 12.7. ActorFileJournal
+
+```
+DEFINITION ActorFileJournal;
+
+	IMPORT Files, CasStore, ActorJournal;
+
+	PROCEDURE Open (loc: Files.Locator; IN name: Files.Name; snaps: CasStore.Store;
+		OUT res: INTEGER): ActorJournal.Journal;
+
+END ActorFileJournal.
+```
+
+Журнал в одном файле «только дозапись»: запись — байт `0A5X`, длина тела (4 байта), тело
+(поток, `seq`, `time`, `cause`, автор, кадр), контрольная сумма FNV-1a (4 байта). Снимки — блоки
+`snaps`: ссылка `"s"` + 40 знаков хеша имени потока указывает на блок «`seq` (8 байт), кадр».
+
+**PROCEDURE Open (loc; IN name; snaps: CasStore.Store; OUT res: INTEGER): ActorJournal.Journal**
+Пред: `loc # NIL` — трап 20; `name # ""` — 21; `snaps # NIL` — 22.
+Пост: `res = ActorJournal.ok` — журнал с событиями всех целых записей файла (нет файла — новый
+пустой); первая недописанная запись или запись с неверной суммой и всё после неё отброшены,
+следующая запись ляжет на их место. `res = failed` — файл не открыт, результат `NIL`. Файл
+открыт исключительно до `Close`.
+
+Границы: `Flush` без `fsync`; один процесс на файл; указатель потоков в памяти (одна запись на
+событие); открытие читает весь файл; сумма ловит обрыв и случайную порчу, но не подмену.
