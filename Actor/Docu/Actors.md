@@ -704,7 +704,7 @@ number check (`Append` with the expected `seq`), the second activation gets `con
 (`ActorPersist.conflictTrap`), and the next letter brings it up with the other's event already in
 (`TestSplitBrainOneWriter`). Before writing, the second activation may read stale state. A replicated
 log is the `Raft` subsystem (`Raft/Docu/Raft.md`, decision record 0025); an `ActorPersist` journal on top
-of it is not done yet, and the limit stays.
+of it is `RaftJournal` (example `ObxRaft1`); `ActorGrain` was not tested on it, and the limit stays.
 
 `TestSeeds` runs 100 seeds: three nodes, five keys, twenty operations; the network loses and
 duplicates frames, nodes crash and come back, and the client repeats unacknowledged operations.

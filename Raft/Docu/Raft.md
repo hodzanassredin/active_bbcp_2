@@ -98,6 +98,45 @@ for tests. `RaftKvStorage.New(db)` keeps it in a Kv database: one write transact
 (group commit). An interrupted commit is invisible: after a power cut `Load` sees the previous state
 whole.
 
+### Node actor
+
+`RaftNode` drives the state machine on top of actors: a Raft node is the root actor of an `ActorNet` node
+(`RaftNode.Start(cfg)`) with its own executor task. The `Config` gives the node number and the cluster
+size, the `ActorNet` node, the storage, the state-machine factory and the peers' capabilities
+(`ActorNet.Export`, the array `peers` by number). Raft messages between nodes are `ActorNet` frames: term,
+indexes, entries and the snapshot are encoded in the frame body.
+
+The actor's inputs are a tick (`RaftNode.Tick`; with `tickMs > 0` its own main-loop clock sends it,
+otherwise the owner does), a peer's message, a `Propose` command and a `Query` read. After every input
+the driver executes `Ready` in the order "save (`RaftStorage.Save`) → send → apply (`RaftSm.Sessions`) →
+`Advance`". The client receives a `Reply`:
+
+- to `Propose` — after the entry is committed and applied on this node: `res = ok`, the result of the
+  state machine and the entry index;
+- to `Query` — after ReadIndex is confirmed: the answer of `StateMachine.Query` (by default the snapshot);
+- `notLeader` with the leader's number in `leader` — the node is not the leader, ask the one named;
+- `lost` — another entry ended up at the command's index (the leader changed): repeat the same operation
+  with the same number, the session will not apply it twice. A lost answer is cured by the same retry.
+
+A storage failure breaks the node: it stops answering and stops itself; it is brought back by a new
+`Start` after `ActorNet.Up`, with the state from the storage. Example: `ObxRaft0`.
+
+### Journal of persistent actors
+
+`RaftJournal` turns Raft into an `ActorJournal.Journal`. The state machine `RaftJournal.Machine` keeps a
+copy of the journal (`ActorJournal.NewMem`) on every node; the commands "append an event" and "save a
+snapshot" go through the Raft log, and the check of the expected number (`expected`) runs when the
+command is applied — one check for the whole cluster. `RaftJournal.Client` goes into
+`ActorPersist.Actor.journal`: `Append` and `SaveSnapshot` send a `Propose` to the leader and wait for the
+answer with `ActorCore.Ask` — the persistent actor's task waits in `AsyncChan.Select` without polling;
+`Append` returns after a majority has committed. `Last`, `Read`, `LoadSnapshot` are `Query` reads.
+
+Conditions: calls come from a task (the `ActorRun` pool), the `RaftNode` nodes have their own clocks, and
+the journal client number is new for every `Client` incarnation. Under `ActorSim` the journal does not
+work: there is one driver task there, and `Append` would wait for itself. `failed` from `Append` means
+"unknown" (no answer within `giveUpMs`): `ActorPersist` traps, and the actor's restart re-reads the
+journal. Example: `ObxRaft1`.
+
 ## Testing
 
 `Raft_devSim` is a deterministic simulation of 3 and 5 nodes. Messages are lost, duplicated and
@@ -127,6 +166,22 @@ a vote without the up-to-date check, committing an old-term entry by counting re
 saving, keeping a conflicting tail, two votes in a term, applying uncommitted entries, reading without
 confirming leadership, retrying without a session.
 
+`Raft_devNode` tests the driver: `RaftNode` nodes on `ActorNetMem` with lost, duplicated, delayed and
+reordered frames, network cuts (islands and one-way), node crashes (the leader more often) and storage
+failures in the middle of a `Ready`; clients are actors on a separate node and retry and read. The
+executor is `ActorSim`, so a run is a function of the seed. The invariants are those of `Raft_devSim`
+plus one more: a command the client got "yes" for is among the committed entries. The regular run is
+200 seeds on 3 nodes and 60 on 5, 3000 moves each; the long one is `Raft_devNode.Long` (1000 + 300 seeds
+and a mutation search). The driver mutations `RaftNode.mutations` are caught: sending before saving
+(`mutSendFirst`) — "a new leader without a committed entry", answering the client before commit
+(`mutEarlyReply`) — "a confirmed command is lost".
+
+`Raft_devJournal` tests `RaftJournal` on the `ActorRun` pool in real time: a persistent counter writes and
+recovers from the Raft journal, the leader's death loses nothing confirmed, and a leader cut off from the
+majority does not confirm a write (Append returns through the new leader once the entry is on a
+majority). The mutation `RaftJournal.mutNoWait` (answering "written" without waiting) is caught by this
+scenario.
+
 ## Cost
 
 `Raft_devBench.Run` (3 nodes in one process, a FIFO network without faults; measured, amd64 Linux): in
@@ -139,9 +194,11 @@ and 11 thousand with 64, because 64 commands go in one commit per node (0.05 sav
 
 ## What is missing
 
-- No network nodes and no actors yet: the core runs under the simulation and the benchmark; a
-  transport over `ActorNetMem` and `ActorNetTcp` and an `ActorPersist` journal over Raft are the next
-  parts of the stage.
+- The `RaftNode` actor is tested on `ActorNetMem` (with faults) and in the examples; it was not run on
+  `ActorNetTcp` between processes.
+- The `RaftJournal` journal works only on the `ActorRun` pool (not under `ActorSim`, see above); its tests
+  are real-time scenarios, not seeds. `ActorGrain` was not tested on it. The journal state machine's
+  snapshot is all accepted commands in a row; there is no separate truncation for it.
 - No membership change: the cluster size is fixed at creation.
 - No PreVote and no CheckQuorum: a node behind a partition raises its term and deposes the leader when it
   returns; an old leader in a minority believes it leads until it hears a higher term (it can neither
@@ -156,3 +213,7 @@ and 11 thousand with 64, because 64 commands go in one commit per node (0.05 sav
 `RaftSm`: `StateMachine` (`Apply`, `Snapshot`, `Restore`), `Sessions` (`Apply`, `Snapshot`, `Restore`),
 `New`, `Encode`, `Decode`.
 `RaftStorage`: `Storage` (`Save`, `Compact`, `Load`), `NewMem`. `RaftKvStorage`: `New(db)`.
+`RaftNode`: `NewConfig`, `Start`, `Config` (`peers`, `tickMs`, `electionTicks`, `compactEvery`, `seed`,
+`actor`), messages `Tick`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`), `Caps`.
+`RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`timeoutMs`, `giveUpMs`).
+`RaftSm.StateMachine.Query` is the read for `RaftNode.Query`.
