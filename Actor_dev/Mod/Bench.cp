@@ -5,12 +5,14 @@ MODULE Actor_devBench;
 	исполнителя без задержки планировщика. *)
 
 	IMPORT Kernel, Services, Tasks, Console, Strings, Stores, Files, CasStore, ActorCore, ActorRun,
-		ActorJournal, ActorPersist, ActorFileJournal, UnitAssert, System_devClock;
+		ActorJournal, ActorPersist, ActorFileJournal, KvStore, KvDb, KvLin, ActorKvJournal,
+		UnitAssert, System_devClock;
 
 	CONST
 		actors = 10000;
 		exchanges = 100000;
 		events = 100000;
+		kvEvents = 2000;	(* с Sync на каждое событие *)
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -178,7 +180,7 @@ MODULE Actor_devBench;
 		WHILE ActorCore.dir.Lookup(ActorCore.node, "saver") # NIL DO Tasks.Yield END
 	END StopSaver;
 
-	PROCEDURE PersistRun (IN kind: ARRAY OF CHAR);
+	PROCEDURE PersistRun (IN kind: ARRAY OF CHAR; events: INTEGER);
 	(* Пост: events событий записаны в jr, восстановлены без снимка и со снимком; строки BENCH. *)
 		VAR t0: LONGINT;
 	BEGIN
@@ -193,7 +195,7 @@ MODULE Actor_devBench;
 
 	PROCEDURE PersistMem;
 	BEGIN
-		jr := ActorJournal.NewMem(); PersistRun("mem")
+		jr := ActorJournal.NewMem(); PersistRun("mem", events)
 	END PersistMem;
 
 	PROCEDURE PersistFile;
@@ -201,9 +203,21 @@ MODULE Actor_devBench;
 	BEGIN
 		loc := Files.dir.This("/tmp/actor_dev_bench"); Files.dir.Delete(loc, "bench.jrn");
 		jr := ActorFileJournal.Open(loc, "bench.jrn", CasStore.NewMem(), res);
-		PersistRun("file");
+		PersistRun("file", events);
 		jr.Close
 	END PersistFile;
+
+	PROCEDURE PersistKv;
+	(* Файл базы — в текущем каталоге процесса, а не в /tmp: там Sync
+	   ничего не стоит, если /tmp в памяти. *)
+		VAR st: KvStore.Store; db: KvDb.Db; res: INTEGER;
+	BEGIN
+		KvLin.Delete("actor_dev_bench.kv");
+		KvLin.Open("actor_dev_bench.kv", st, res); KvDb.Open(st, db, res);
+		jr := ActorKvJournal.New(db);
+		PersistRun("kv", kvEvents);
+		jr.Close; KvLin.Delete("actor_dev_bench.kv")
+	END PersistKv;
 
 	PROCEDURE TestSlowPersist*;
 	BEGIN
@@ -212,6 +226,8 @@ MODULE Actor_devBench;
 		UnitAssert.EqualInt(events, total, "file: state recovered");
 		UnitAssert.True(Drive(PersistMem, 120000), "memory journal finished");
 		UnitAssert.EqualInt(events, total, "memory: state recovered");
+		UnitAssert.True(Drive(PersistKv, 300000), "kv journal finished");
+		UnitAssert.EqualInt(kvEvents, total, "kv: state recovered");
 		ActorRun.Stop
 	END TestSlowPersist;
 

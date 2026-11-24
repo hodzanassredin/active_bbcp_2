@@ -7,11 +7,12 @@ MODULE Actor_devPersist;
 	шлются Tell, ответы — через глобальные переменные. *)
 
 	IMPORT Kernel, Services, Files, Stores, CasStore,
-		ActorCore, ActorRun, ActorJournal, ActorCodec, ActorPersist, ActorFileJournal, UnitAssert;
+		ActorCore, ActorRun, ActorJournal, ActorCodec, ActorPersist, ActorFileJournal,
+		KvStore, KvDb, KvFault, KvLin, ActorKvJournal, UnitAssert;
 
 	CONST
 		stream = "bank/acct";
-		maxOps = 64;
+		maxOps = 8;	(* помнятся последние maxOps номеров операций *)
 
 	TYPE
 		Msg = ActorCore.Msg;
@@ -132,8 +133,8 @@ MODULE Actor_devPersist;
 	PROCEDURE (a: Account) Done (op: LONGINT): BOOLEAN, NEW;
 		VAR i: INTEGER;
 	BEGIN
-		i := 0; WHILE (i < a.nOps) & (a.ops[i] # op) DO INC(i) END;
-		RETURN i < a.nOps
+		i := 0; WHILE (i < MIN(a.nOps, maxOps)) & (a.ops[i] # op) DO INC(i) END;
+		RETURN i < MIN(a.nOps, maxOps)
 	END Done;
 
 	PROCEDURE (a: Account) Apply (e: ActorPersist.Event);
@@ -142,7 +143,7 @@ MODULE Actor_devPersist;
 		WITH e: Deposited DO INC(a.balance, e.sum)
 		| e: Withdrawn DO
 			DEC(a.balance, e.sum);
-			IF a.nOps < maxOps THEN a.ops[a.nOps] := e.op; INC(a.nOps) END
+			a.ops[a.nOps MOD maxOps] := e.op; INC(a.nOps)	(* отсечение: новый номер вытесняет самый старый *)
 		ELSE
 		END
 	END Apply;
@@ -152,7 +153,7 @@ MODULE Actor_devPersist;
 	BEGIN
 		a.Externalize^(wr); wr.WriteVersion(0);
 		wr.WriteInt(a.balance); wr.WriteInt(a.nOps);
-		FOR i := 0 TO a.nOps - 1 DO wr.WriteLong(a.ops[i]) END
+		FOR i := 0 TO MIN(a.nOps, maxOps) - 1 DO wr.WriteLong(a.ops[i]) END
 	END Externalize;
 
 	PROCEDURE (a: Account) Internalize- (VAR rd: Stores.Reader);
@@ -161,7 +162,7 @@ MODULE Actor_devPersist;
 		a.Internalize^(rd); IF rd.cancelled THEN RETURN END;
 		rd.ReadVersion(0, 0, v); IF rd.cancelled THEN RETURN END;
 		rd.ReadInt(a.balance); rd.ReadInt(a.nOps);
-		FOR i := 0 TO a.nOps - 1 DO rd.ReadLong(a.ops[i]) END
+		FOR i := 0 TO MIN(a.nOps, maxOps) - 1 DO rd.ReadLong(a.ops[i]) END
 	END Internalize;
 
 	PROCEDURE (a: Account) Restore (s: Stores.Store);
@@ -170,7 +171,7 @@ MODULE Actor_devPersist;
 		INC(restores);
 		WITH s: Account DO
 			a.balance := s.balance; a.nOps := s.nOps;
-			FOR i := 0 TO a.nOps - 1 DO a.ops[i] := s.ops[i] END
+			FOR i := 0 TO MIN(a.nOps, maxOps) - 1 DO a.ops[i] := s.ops[i] END
 		END
 	END Restore;
 
@@ -619,5 +620,136 @@ MODULE Actor_devPersist;
 		UnitAssert.EqualInt(1, restores, "snapshot from the Cas store");
 		UnitAssert.EqualInt(1, applied, "tail after the snapshot")
 	END TestFileActorRecovers;
+
+	PROCEDURE TestOldOperationsForgotten*;
+	(* Таблица повторов помнит последние maxOps номеров: повтор свежей
+	   операции не списывает, повтор вытесненной — списывает снова. *)
+		VAR i: INTEGER;
+	BEGIN
+		snapEvery := 3; StartBank;
+		Dep(1000, FALSE, FALSE);
+		FOR i := 1 TO maxOps + 1 DO Wd(1, i) END;
+		UnitAssert.EqualInt(1000 - maxOps - 1, Balance(), "each operation once");
+		Restart;
+		Wd(1, maxOps + 1);
+		UnitAssert.EqualInt(1000 - maxOps - 1, Balance(), "recent retry withdraws nothing");
+		Wd(1, 1);
+		UnitAssert.EqualInt(1000 - maxOps - 2, Balance(), "forgotten operation withdraws again")
+	END TestOldOperationsForgotten;
+
+	(* --- журнал в Kv ------------------------------------------------------------ *)
+
+	PROCEDURE KvOn (st: KvStore.Store): ActorJournal.Journal;
+		VAR db: KvDb.Db; res: INTEGER;
+	BEGIN
+		KvDb.Open(st, db, res);
+		UnitAssert.EqualInt(KvDb.ok, res, "kv opened");
+		RETURN ActorKvJournal.New(db)
+	END KvOn;
+
+	PROCEDURE TestKvConflictWritesNothing*;
+		VAR res: INTEGER; m: ActorJournal.Meta; d: ActorJournal.Bytes; len: INTEGER; r: Raw;
+	BEGIN
+		jr := KvOn(KvFault.New());
+		AppendRaw(jr, "s", NewDeposited(1), res);
+		UnitAssert.EqualInt(ActorJournal.ok, res, "first append");
+		Frame(NewDeposited(2), d, len); m.seq := 1; m.author := "other";
+		jr.Append("s", 0, m, d, len, res);
+		UnitAssert.EqualInt(ActorJournal.conflict, res, "stale expected gives conflict");
+		UnitAssert.EqualInt(1, jr.Last("s"), "nothing written on conflict");
+		AppendRaw(jr, "s2", NewDeposited(5), res);	(* поток, чьё имя продолжает имя "s" *)
+		UnitAssert.EqualInt(1, jr.Last("s"), "neighbour stream does not move the last number");
+		NEW(r); jr.Read("s", 1, r, res);
+		UnitAssert.EqualInt(1, r.n, "one event in the stream")
+	END TestKvConflictWritesNothing;
+
+	PROCEDURE TestKvActorRecovers*;
+		VAR st: KvFault.Store; i: INTEGER;
+	BEGIN
+		st := KvFault.New(); jr := KvOn(st); snapEvery := 3;
+		StartBank;
+		FOR i := 1 TO 7 DO Dep(i, FALSE, FALSE) END;
+		Wd(5, 1); Wd(5, 1);
+		UnitAssert.EqualInt(23, Balance(), "balance");
+		StopBank; jr.Close; st.PowerOff(0); jr := KvOn(st);
+		restores := 0; applied := 0;
+		StartBank;
+		UnitAssert.EqualInt(23, Balance(), "same balance after power off and reopen");
+		UnitAssert.EqualInt(1, restores, "snapshot from Kv");
+		UnitAssert.EqualInt(2, applied, "tail after the snapshot");
+		Wd(5, 1);
+		UnitAssert.EqualInt(23, Balance(), "retry after reopen withdraws nothing")
+	END TestKvActorRecovers;
+
+	PROCEDURE TestKvConflictFailsActor*;
+		VAR res: INTEGER;
+	BEGIN
+		jr := KvOn(KvFault.New());
+		StartBank;
+		Dep(10, FALSE, FALSE);
+		UnitAssert.EqualInt(10, Balance(), "balance");
+		AppendRaw(jr, stream, NewDeposited(100), res);
+		replays := 0; Dep(1, FALSE, FALSE);
+		UnitAssert.True(UntilInt(replays, 1, 2000), "restarted after conflict");
+		UnitAssert.EqualInt(ActorPersist.conflictTrap, reason, "conflict is the failure reason");
+		UnitAssert.EqualInt(110, Balance(), "recovery sees the foreign event")
+	END TestKvConflictFailsActor;
+
+	PROCEDURE TestKvTwoActorsOneBase*;
+		VAR solo, bank: ActorCore.Ref; sum: Sum; last: LONGINT; res: INTEGER;
+	BEGIN
+		jr := KvOn(KvFault.New());
+		StartBank; bank := acct;
+		replays := 0;
+		solo := ActorCore.Spawn(NIL, ActorCore.NewProps(NewAccount), "solo");
+		UnitAssert.True(UntilInt(replays, 1, 2000), "solo recovered");
+		acct := solo; Dep(7, FALSE, FALSE); Dep(8, FALSE, FALSE);
+		acct := bank; Dep(100, FALSE, FALSE);
+		UnitAssert.EqualInt(100, Balance(), "bank account");
+		acct := solo; UnitAssert.EqualInt(15, Balance(), "solo account");
+		UnitAssert.EqualInt(2, jr.Last("solo"), "solo stream");
+		UnitAssert.EqualInt(1, jr.Last(stream), "bank stream");
+		NEW(sum); ActorPersist.Read(jr, "solo", 1, sum, last, res);
+		UnitAssert.EqualInt(15, sum.deposits, "streams do not mix")
+	END TestKvTwoActorsOneBase;
+
+	PROCEDURE TestKvTornAppend*;
+	(* Обрыв питания в каждой точке записи третьего события: после открытия
+	   поток равен «до» (2 события) или «после» (3), и все события читаются. *)
+		VAR st: KvFault.Store; k, res, before, after: INTEGER; sum: Sum; last: LONGINT; done: BOOLEAN;
+	BEGIN
+		k := 0; before := 0; after := 0; done := FALSE;
+		WHILE ~done & (k < 200) DO
+			st := KvFault.New(); jr := KvOn(st);
+			AppendRaw(jr, "a", NewDeposited(1), res); AppendRaw(jr, "a", NewDeposited(2), res);
+			st.Arm(k, k MOD 100);
+			AppendRaw(jr, "a", NewDeposited(4), res);
+			done := res = ActorJournal.ok;	(* ok — событие зафиксировано: оно обязано пережить питание *)
+			jr.Close; st.PowerOff(k + 1); jr := KvOn(st);
+			NEW(sum); ActorPersist.Read(jr, "a", 1, sum, last, res);
+			UnitAssert.EqualInt(ActorJournal.ok, res, "stream readable");
+			IF done THEN UnitAssert.EqualInt(3, last, "append answered ok: the event survived") END;
+			IF last = 2 THEN INC(before); UnitAssert.EqualInt(3, sum.deposits, "before")
+			ELSE INC(after); UnitAssert.EqualInt(3, last, "after"); UnitAssert.EqualInt(7, sum.deposits, "after")
+			END;
+			jr.Close; jr := NIL; INC(k)
+		END;
+		UnitAssert.True(done, "write finished without a fault in the end");
+		UnitAssert.True(before > 0, "some faults leave the stream as before")
+	END TestKvTornAppend;
+
+	PROCEDURE TestKvFileReopen*;
+		VAR st: KvStore.Store; res, i: INTEGER; sum: Sum; last: LONGINT;
+	BEGIN
+		KvLin.Delete("/tmp/actor_dev_kv.db");
+		KvLin.Open("/tmp/actor_dev_kv.db", st, res); jr := KvOn(st);
+		FOR i := 1 TO 3 DO AppendRaw(jr, "a", NewDeposited(i), res) END;
+		jr.Close;
+		KvLin.Open("/tmp/actor_dev_kv.db", st, res); jr := KvOn(st);
+		UnitAssert.EqualInt(3, jr.Last("a"), "events kept in the file");
+		NEW(sum); ActorPersist.Read(jr, "a", 1, sum, last, res);
+		UnitAssert.EqualInt(6, sum.deposits, "events read back");
+		UnitAssert.EqualStr("test", sum.author, "metadata read back")
+	END TestKvFileReopen;
 
 END Actor_devPersist.
