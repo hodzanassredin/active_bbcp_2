@@ -1,9 +1,11 @@
 MODULE CasHash;
 (** SHA-256 (FIPS 180-4) и имя блока хранилища Cas.
 
-	Id — 32 байта хеша. Слова — INTEGER (32 бита на i386 и amd64);
-	сложение по модулю 2^32 идёт в LONGINT, сдвиги — через LONGINT,
-	поэтому результат не зависит от разрядности регистров. *)
+	Id — 32 байта хеша. Слова — INTEGER (32 бита на i386 и amd64).
+	Сложение INTEGER в BlackBox не проверяет переполнение и отбрасывает
+	старшие биты — это и есть сложение по модулю 2^32; повороты и сдвиги —
+	SYSTEM.ROT и SYSTEM.LSH над 32-битным словом. Векторы NIST в
+	Cas_devHash проверяют это на обеих платформах. *)
 
 	IMPORT SYSTEM;
 
@@ -33,15 +35,14 @@ MODULE CasHash;
 	END U;
 
 	PROCEDURE Rotr (x: INTEGER; n: INTEGER): INTEGER;
-		VAR u, p: LONGINT;
+	(* ROT для INTEGER — машинный поворот 32-битного слова и на i386, и на amd64 *)
 	BEGIN
-		u := U(x); p := ASH(1L, n);
-		RETURN Fold(u DIV p + (u MOD p) * ASH(1L, 32 - n))
+		RETURN SYSTEM.ROT(x, -n)
 	END Rotr;
 
 	PROCEDURE Shr (x: INTEGER; n: INTEGER): INTEGER;
 	BEGIN
-		RETURN Fold(U(x) DIV ASH(1L, n))
+		RETURN SYSTEM.LSH(x, -n)
 	END Shr;
 
 	PROCEDURE Xor3 (a, b, c: INTEGER): INTEGER;
@@ -59,27 +60,27 @@ MODULE CasHash;
 			INC(beg, 4)
 		END;
 		FOR i := 16 TO 63 DO
-			w[i] := Fold(LONG(Xor3(Rotr(w[i - 2], 17), Rotr(w[i - 2], 19), Shr(w[i - 2], 10)))
+			w[i] := Xor3(Rotr(w[i - 2], 17), Rotr(w[i - 2], 19), Shr(w[i - 2], 10))
 				+ w[i - 7] + Xor3(Rotr(w[i - 15], 7), Rotr(w[i - 15], 18), Shr(w[i - 15], 3))
-				+ w[i - 16])
+				+ w[i - 16]
 		END;
 		a := h[0]; b := h[1]; c := h[2]; d := h[3]; e := h[4]; f := h[5]; g := h[6]; hh := h[7];
 		FOR i := 0 TO 63 DO
 			se := SYSTEM.VAL(SET, e);
-			t1 := Fold(LONG(hh) + Xor3(Rotr(e, 6), Rotr(e, 11), Rotr(e, 25))
+			t1 := hh + Xor3(Rotr(e, 6), Rotr(e, 11), Rotr(e, 25))
 				+ SYSTEM.VAL(INTEGER, (se * SYSTEM.VAL(SET, f)) / ((-se) * SYSTEM.VAL(SET, g)))
-				+ k[i] + w[i]);
+				+ k[i] + w[i];
 			sa := SYSTEM.VAL(SET, a);
-			t2 := Fold(LONG(Xor3(Rotr(a, 2), Rotr(a, 13), Rotr(a, 22)))
+			t2 := Xor3(Rotr(a, 2), Rotr(a, 13), Rotr(a, 22))
 				+ SYSTEM.VAL(INTEGER, (sa * SYSTEM.VAL(SET, b)) / (sa * SYSTEM.VAL(SET, c))
-					/ (SYSTEM.VAL(SET, b) * SYSTEM.VAL(SET, c))));
-			hh := g; g := f; f := e; e := Fold(LONG(d) + t1);
-			d := c; c := b; b := a; a := Fold(LONG(t1) + t2)
+					/ (SYSTEM.VAL(SET, b) * SYSTEM.VAL(SET, c)));
+			hh := g; g := f; f := e; e := d + t1;
+			d := c; c := b; b := a; a := t1 + t2
 		END;
-		h[0] := Fold(LONG(h[0]) + a); h[1] := Fold(LONG(h[1]) + b);
-		h[2] := Fold(LONG(h[2]) + c); h[3] := Fold(LONG(h[3]) + d);
-		h[4] := Fold(LONG(h[4]) + e); h[5] := Fold(LONG(h[5]) + f);
-		h[6] := Fold(LONG(h[6]) + g); h[7] := Fold(LONG(h[7]) + hh)
+		h[0] := h[0] + a; h[1] := h[1] + b;
+		h[2] := h[2] + c; h[3] := h[3] + d;
+		h[4] := h[4] + e; h[5] := h[5] + f;
+		h[6] := h[6] + g; h[7] := h[7] + hh
 	END Compress;
 
 	PROCEDURE PutByte (VAR b: ARRAY OF BYTE; i: INTEGER; v: LONGINT);
