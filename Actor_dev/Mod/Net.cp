@@ -81,6 +81,7 @@ MODULE Actor_devNet;
 		ja, jb, jc: ActorJournal.Journal;
 		capA, capB: ARRAY 256 OF CHAR;
 		states: ARRAY maxT OF INTEGER; nStates: INTEGER;
+		crashAt, crashNode, point: INTEGER; dropAll: BOOLEAN;	(* падение в заданной точке саги *)
 		seed: LONGINT; trace: Trace; sagaOk: BOOLEAN; sagaMsg: ARRAY 256 OF CHAR;
 
 	(* --- обвязка ---------------------------------------------------------- *)
@@ -418,7 +419,7 @@ MODULE Actor_devNet;
 
 	PROCEDURE Setup*;
 	BEGIN
-		terms := 0; lastReason := -1; executed := 0; replies := 0; lastOk := FALSE;
+		terms := 0; crashAt := -1; lastReason := -1; executed := 0; replies := 0; lastOk := FALSE;
 		askRes := -1; lastPong := 0; INC(gen); target := NIL; watched := NIL
 	END Setup;
 
@@ -862,11 +863,13 @@ MODULE Actor_devNet;
 	(* Один прогон саги от зерна seed; итог — trace, sagaOk и sagaMsg.
 		Узел падает в случайный шаг (жребий от зерна) и поднимается через
 		случайное число шагов: падение приходится на любую точку саги. *)
-		VAR s: Name; i, round, down, upAt: INTEGER; st: Start; tick: Tick;
+		VAR s: Name; i, j, round, down, upAt: INTEGER; st: Start; tick: Tick; act: BOOLEAN; d0: LONGINT;
 			sums: ARRAY maxT OF INTEGER; rev: ARRAY maxT OF BOOLEAN;
 	BEGIN
-		ActorSim.Install; net := ActorNetMem.New(seed);
-		net.plan.loss := 100; net.plan.dup := 100; net.plan.delay := 3; net.plan.reorder := TRUE;
+		ActorSim.Install; net := ActorNetMem.New(seed); point := 0;
+		IF crashAt < 0 THEN	(* случайные сбои; в режиме точки сеть без сбоев: точки повторяемы *)
+			net.plan.loss := 100; net.plan.dup := 100; net.plan.delay := 3; net.plan.reorder := TRUE
+		END;
 		ja := ActorJournal.NewMem(); jb := ActorJournal.NewMem(); jc := ActorJournal.NewMem();
 		INC(gen);
 		NodeName("A", s); na := ActorNet.New(s, net, 101); ActorNetMem.Add(net, na);
@@ -886,15 +889,26 @@ MODULE Actor_devNet;
 				END
 			END;
 			IF (round MOD 8 = 0) & (down # 2) THEN ActorCore.Tell(coordRef, tick) END;
-			IF (round < 2000) & (down < 0) & (ActorNetMem.Rand(net, 1000) < 15) THEN
+			IF (crashAt < 0) & (round < 2000) & (down < 0) & (ActorNetMem.Rand(net, 1000) < 15) THEN
 				down := ActorNetMem.Rand(net, 3); upAt := round + 1 + ActorNetMem.Rand(net, 40);
 				CrashNode(down)
 			ELSIF (down >= 0) & (round >= upAt) THEN
 				IF down = 0 THEN Restart(na) ELSIF down = 1 THEN Restart(nb) ELSE Restart(nc) END;
 				down := -1
 			END;
-			IF ActorSim.Step() THEN END; IF ActorSim.Step() THEN END;
-			IF ActorNetMem.Pump(net) THEN END
+			FOR j := 0 TO 2 DO	(* точка — обработанное письмо ящика или доставленный кадр *)
+				IF j < 2 THEN act := ActorSim.Step()
+				ELSE d0 := net.delivered; IF ActorNetMem.Pump(net) THEN END; act := net.delivered > d0
+				END;
+				IF act THEN
+					INC(point);
+					IF (point = crashAt) & (down < 0) THEN
+						down := crashNode; upAt := round + 5;
+						IF dropAll THEN ActorNetMem.Drop(net) END;	(* записано, но кадры пропали *)
+						CrashNode(down)
+					END
+				END
+			END
 		END;
 		IF ActorSim.Drain(100000) THEN END;
 		IF ~AllTerminal() THEN Fail("transfers not finished") END;
@@ -937,6 +951,41 @@ MODULE Actor_devNet;
 		RETURN TRUE
 	END Seeds;
 
+	PROCEDURE Points (step: INTEGER; OUT runs: INTEGER): BOOLEAN;
+	(* Пост: для каждой step-й точки k прогона без сбоев сети, каждого узла и с
+		потерей кадров в пути и без неё — прогон «упасть в точке k, подняться,
+		довести до конца»; FALSE — провал, sagaMsg называет точку. *)
+		VAR k, total, nd, dr: INTEGER; t: Trace; d, nm: ARRAY 64 OF CHAR;
+	BEGIN
+		runs := 0; crashAt := MAX(INTEGER);
+		IF ~RunSeed(1, t) THEN crashAt := -1; RETURN FALSE END;
+		total := point; k := 1;
+		WHILE k <= total DO
+			FOR nd := 0 TO 2 DO
+				FOR dr := 0 TO 1 DO
+					crashAt := k; crashNode := nd; dropAll := dr = 1; INC(runs);
+					IF ~RunSeed(1, t) THEN
+						Strings.IntToString(k, d); nm := "node A: "; nm[5] := CHR(ORD("A") + nd); sagaMsg := "point " + d$ + ", " + nm$ + sagaMsg$;
+						crashAt := -1; RETURN FALSE
+					END;
+					IF t.crashes # 1 THEN Strings.IntToString(k, d); sagaMsg := "point " + d$ + ": no crash"; crashAt := -1; RETURN FALSE END
+				END
+			END;
+			INC(k, step)
+		END;
+		crashAt := -1;
+		RETURN runs > 0
+	END Points;
+
+	PROCEDURE TestSagaEveryPoint*;
+	(* Падение каждого узла в каждой 3-й точке саги (с потерей кадров в пути и
+		без): все переводы закончены, сумма сохранена. Все точки — Long. *)
+		VAR runs: INTEGER;
+	BEGIN
+		UnitAssert.True(Points(3, runs), sagaMsg);
+		UnitAssert.True(runs >= 60, "enough points")
+	END TestSagaEveryPoint;
+
 	PROCEDURE TestSagaSeeds*;
 	(* Сага на quickSeeds зёрнах с потерями, дублями, задержкой, перестановкой
 		и падениями узлов: все переводы закончены, сумма сохранена, повтор
@@ -962,11 +1011,12 @@ MODULE Actor_devNet;
 
 	PROCEDURE Long*;
 	(** Долгий прогон саги на longSeeds зёрнах (вне обычного test.sh). *)
-		VAR crashes: INTEGER; d: ARRAY 32 OF CHAR;
+		VAR crashes, runs: INTEGER; d: ARRAY 32 OF CHAR;
 	BEGIN
 		Setup;
-		IF Seeds(1, longSeeds, FALSE, crashes) THEN
-			Strings.IntToString(crashes, d); Log.String("Actor_devNet.Long ok, crashes " + d$)
+		IF Seeds(1, longSeeds, FALSE, crashes) & Points(1, runs) THEN
+			Strings.IntToString(crashes, d); Log.String("Actor_devNet.Long ok, crashes " + d$);
+			Strings.IntToString(runs, d); Log.String(", point runs " + d$)
 		ELSE Log.String(sagaMsg)
 		END;
 		Log.Ln

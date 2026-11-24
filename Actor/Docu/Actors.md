@@ -632,7 +632,13 @@ frames by the plan `Plan`, and draws its lots from the seed. The executor `Actor
 mailboxes in one task in arrival order, without real time. Together they make a run a function of
 the seed: `TestSagaSeeds` runs the saga on 200 seeds with node crashes, checks that all transfers
 ended and the sum is conserved, and runs every seed a second time, comparing the step and frame
-counts and the balances. A failure prints the seed; `Actor_devNet.Rerun` repeats the last one. A
+counts and the balances. A failure prints the seed; `Actor_devNet.Rerun` repeats the last one.
+
+An exhaustive sweep complements the random crashes. A point of the saga is a letter processed by a
+mailbox (receiving a command or a reply, writing the journal, sending) or a delivered frame; a run
+without network faults has 187 of them. `TestSagaEveryPoint` crashes each of the three nodes at every
+third point, with and without losing all frames in flight, brings it up five steps later and runs
+the saga to the end; the full sweep (1122 runs) is part of `Actor_devNet.Long`. A
 long run on 3000 seeds is the command `Actor_devNet.Long`.
 
 ```sh
