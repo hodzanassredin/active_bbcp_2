@@ -5,7 +5,7 @@
 #
 # Собирает @Win-подсистемы в build/BB64WIN, линкует консольный PE
 # (WinIntInit), переключает подсистему PE с GUI на console (линкер
-# пишет 2, правим заголовок на 3) и гоняет UnitTests + Test64WinTasks.
+# пишет 2, правим заголовок на 3) и гоняет UnitTests + SystemTestsWinTasks.
 # Каталог wine — .work/wine64 (WINEARCH=win64), экран пользователя не
 # используется. Нет wine — тест пропускается с причиной.
 set -u
@@ -24,7 +24,7 @@ for a in "$@"; do
 done
 
 skip() {
-	echo "SKIP Test64Win64: $*"
+	echo "SKIP Win64: $*"
 	exit 0
 }
 
@@ -48,7 +48,7 @@ if [ "$rebuild" -eq 1 ] || [ ! -f "$OUT/System/Code/Kernel.ocf" ]; then
 fi
 
 # 2. Unit, Tasks (System/Mod64), пул нитей и Win-тесты задач.
-printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis AsyncWinSock\nDevCompiler64.CompileThis AsyncWork\nDevCompiler64.CompileThis AsyncWorkWin\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis Test64WinTasks\nDevCompiler64.CompileThis Test64WinWorkers\nDevLibrarian.DisableDevLib\n" \
+printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis UnitTestsProbe\nDevCompiler64.CompileThis UnitTests\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis AsyncWinSock\nDevCompiler64.CompileThis AsyncWork\nDevCompiler64.CompileThis AsyncWorkWin\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis SystemTestsWinTasks\nDevCompiler64.CompileThis AsyncTestsWinWorkers\nDevLibrarian.DisableDevLib\n" \
 	| timeout 600 "$DEV0" >"$OUT/unit-build.log" 2>&1 || {
 		echo "test-win64: компиляция Unit/Tasks не удалась:" >&2
 		tail -30 "$OUT/unit-build.log" >&2; exit 1; }
@@ -83,7 +83,7 @@ run() {
 	(cd "$OUT" && printf 'UnitRunner.Run %s %s\n' "$mod" "$marks" \
 		| timeout 180 wine ./blackbox-console.exe) >"$out" 2>&1
 	rc=$?
-	grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|Test64WinTasks:)' "$out" || true
+	grep -E '^(PASS|FAIL|EMPTY|SKIP|== Unit|SystemTestsWinTasks:)' "$out" || true
 	if [ $rc -ne 0 ] || ! grep -q 'failed 0,' "$out" || ! grep -q "$expect" "$out"; then
 		echo "test-win64: $mod — провал (код $rc)" >&2
 		tail -25 "$out" >&2; exit 1
@@ -91,6 +91,6 @@ run() {
 }
 
 run UnitTests "" "passed 4"
-run Test64WinTasks proc "passed 5"
-run Test64WinWorkers proc "passed 4"
+run SystemTestsWinTasks proc "passed 5"
+run AsyncTestsWinWorkers proc "passed 4"
 exit 0

@@ -34,9 +34,8 @@ fi
 LOG="${TMPDIR:-/tmp}/build64-$$.log"
 trap 'rm -f "$LOG" "$LOG.cmd"' EXIT
 
-# Demo собирается отдельно: её модули используют ACTIVE и Async, а Demo
-# в общем списке CompileSubs мешает псевдомодуль ACTIVE. Из общего
-# списка её имя убираем.
+# Demo собирается отдельно: её модули импортируют Async, а Async идёт
+# после основного списка. Из общего списка её имя убираем.
 core=""
 for s in $subs; do
 	[ "$s" = Demo ] || core="$core $s"
@@ -47,15 +46,19 @@ echo "build64: компиляция подсистем:$subs"
 	echo 'DevCompiler64.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
 	[ -n "$core" ] && echo "DevCompiler64.CompileSubs @Lin $core"
+	# Тестовые модули (Tests*.cp) CompileSubs пропускает. В установке Unit
+	# нужен для ручного UnitRunner.Run: самопроверку собираем явно.
+	echo "DevCompiler64.CompileThis UnitTestsProbe"
+	echo "DevCompiler64.CompileThis UnitTests"
 	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
 	# LinThreads нужны самой подсистеме Async (AsyncSelect, AsyncComputon),
 	# поэтому идут до неё.
 	echo "DevCompiler64.CompileThis Tasks"
 	echo "DevCompiler64.CompileThis LinThreads"
 	echo "DevCompiler64.CompileThis LinNative"
-	# Async — отдельным вызовом: в общем списке CompileSubs спотыкается
-	# о псевдомодуль ACTIVE («sourcefile for ACTIVE not found»), хотя
-	# по отдельности подсистема собирается.
+	# Async — отдельным вызовом: ей нужны Tasks, LinNative и LinThreads,
+	# которые собираются выше, а в общий список их не добавить (там
+	# CompileSubs идёт до отдельных CompileThis).
 	if [ -d "$BB/Async/Mod" ] || [ -d "$BB/Async/Mod64" ]; then
 		echo "DevCompiler64.CompileSubs @Lin Async"
 		# Модули Mod64 подсистемы Async: их нет в обходе CompileSubs.

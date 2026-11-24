@@ -25,12 +25,12 @@ done
 [ -n "$MOD" ] || { echo "unit: укажите модуль тестов" >&2; exit 2; }
 [ -x "$INTERP" ] || { echo "unit: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
-# libtest64.so нужен Test64Co (GcStack/TrapStack) и замеру.
+# libtest64.so нужен SystemTestsCo (GcStack/TrapStack) и замеру.
 if command -v cc >/dev/null 2>&1; then
 	cc -shared -fPIC -O2 -o "$INSTALL/libtest64.so" "$BB/tools/test64.c" 2>/dev/null || true
 fi
 
-# Unit — первым: от него зависят адаптеры Test64Support и тесты.
+# Unit — первым: от него зависят адаптеры SystemTestsSupport и тесты.
 # Тестируемый модуль компилируется отдельно: у него могут быть свои опции
 # (например, ^ — ключ точек уступки).
 mods="UnitAssert UnitRunner UnitTestsProbe UnitTests $DEPS"

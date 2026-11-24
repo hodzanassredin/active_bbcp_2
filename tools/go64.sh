@@ -1,7 +1,7 @@
 #!/bin/sh
 # Быстрый цикл: скомпилировать модули amd64-компилятором в каталог установки.
 #
-#   tools/go64.sh Test64Gc Kernel
+#   tools/go64.sh SystemTestsGc Kernel
 #   tools/go64.sh                 # имена из /tmp/compile1.txt
 #
 # Источник — <Sub>/Mod64/*.cp (приоритет), иначе <Sub>/Mod/*.cp.
@@ -28,7 +28,7 @@ trap 'rm -f "$MARK" "$LOG" "$LOG.cmd"' EXIT
 echo 'DevCompiler64.InitLogMarks' >> "$LOG.cmd"
 echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')" >> "$LOG.cmd"
 for m in "$@"; do
-	# Модуль с суффиксом опций: Test64Yield^ -> CompileThis Test64Yield ^
+	# Модуль с суффиксом опций: DevTestsYield^ -> CompileThis DevTestsYield ^
 	opt=""
 	case "$m" in *\^) opt="^"; m="${m%^}";; esac
 	echo "DevCompiler64.CompileThis $m $opt" >> "$LOG.cmd"

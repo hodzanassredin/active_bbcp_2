@@ -549,6 +549,17 @@ MODULE DevCompiler64;
 		END
 	END MakeFile;
 
+	PROCEDURE IsTestsFile (IN name: ARRAY OF CHAR): BOOLEAN;
+		(* <Подсистема>/Mod/Tests*.cp — тестовые модули. Их собирает
+		   tools/unit.sh (и явные CompileThis в build32.sh/test-win64.sh);
+		   в поставочную сборку они не входят. Для System имя такого файла
+		   (TestsBasic.cp) не совпадает с именем модуля SystemTestsBasic,
+		   поэтому предварительный обход CompileSubs его пропускает. *)
+		BEGIN
+			RETURN (name[0] = "T") & (name[1] = "e") & (name[2] = "s")
+				& (name[3] = "t") & (name[4] = "s")
+		END IsTestsFile;
+
 	PROCEDURE MakeSubsystem(subList: NameNode; VAR fileList: NameNode;
 												IN sub: ARRAY OF CHAR);
 		VAR loc: Files.Locator; files: Files.FileInfo; importPath: NameNode;
@@ -560,20 +571,22 @@ MODULE DevCompiler64;
 			IF (files.type = Files.docType) OR (files.type = "cp") THEN
 				(* strip off extension, note: file name may differ from module name *)
 				files.name[LEN(files.name$) - LEN(files.type$) - 1] := 0X;
-				importPath := NIL;
-				IF select = "" THEN
-					MakeFile(subList, importPath, fileList, loc, sub, files.name)
-				ELSE
-					Strings.Find(files.name, "__", 1, pos1);
-					IF pos1 > 0 THEN
-						Strings.Find(files.name, select, pos1 + 2, pos2);
-						IF pos2 = pos1 + 2 THEN
+				IF ~IsTestsFile(files.name) THEN
+					importPath := NIL;
+					IF select = "" THEN
+						MakeFile(subList, importPath, fileList, loc, sub, files.name)
+					ELSE
+						Strings.Find(files.name, "__", 1, pos1);
+						IF pos1 > 0 THEN
+							Strings.Find(files.name, select, pos1 + 2, pos2);
+							IF pos2 = pos1 + 2 THEN
+								MakeFile(subList, importPath, fileList, loc, sub, files.name)
+							END
+						ELSE
 							MakeFile(subList, importPath, fileList, loc, sub, files.name)
 						END
-					ELSE
-						MakeFile(subList, importPath, fileList, loc, sub, files.name)
-					END
-				END;
+					END;
+				END
 			(* ELSE ignore e.g. temporary files *)
 			END;
 			files := files.next

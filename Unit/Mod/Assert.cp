@@ -68,7 +68,7 @@ MODULE UnitAssert;
 
 	PROCEDURE Checked*;
 	(** Учесть одну проверку без условия (для адаптеров, которые сами
-		печатают сообщение, например Test64Support). *)
+		печатают сообщение, например SystemTestsSupport). *)
 	BEGIN
 		INC(checks)
 	END Checked;

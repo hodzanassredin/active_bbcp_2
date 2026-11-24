@@ -103,7 +103,7 @@ MODULE LinInit;
 		Dialog.Call("LinConfig.SetupAfter", "Failed to call LinConfig.SetupAfter", res_);
 
 		(* Тестовый хук: команда до главного цикла (например,
-		   --BB_RUN=Test64Gui.Run). Она только заводит задачи и действия;
+		   --BB_RUN=DemoTestsGui.Run). Она только заводит задачи и действия;
 		   дальше работает Loop.Start. *)
 		Dialog.GetPar("BB_RUN", runCmd, res_);
 		IF res_ = 0 THEN

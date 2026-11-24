@@ -305,9 +305,21 @@ MODULE UnitRunner;
 		RunModuleCounts(module, marks, FALSE, c); CountsAdd(total, c)
 	END RunModule;
 
+	PROCEDURE IsTestModule (IN nm, prefix: ARRAY OF CHAR): BOOLEAN;
+	(* Модуль тестов подсистемы: <prefix>Tests или <prefix>Tests<Тема>.
+	   Для prefix = "" (all) — прежнее правило: имя оканчивается на Tests. *)
+		VAR i: INTEGER;
+	BEGIN
+		IF prefix = "" THEN RETURN EndsWith(nm, "Tests") END;
+		IF ~StartsWith(nm, prefix) THEN RETURN FALSE END;
+		i := StrLen(prefix);
+		RETURN (nm[i] = "T") & (nm[i + 1] = "e") & (nm[i + 2] = "s")
+			& (nm[i + 3] = "t") & (nm[i + 4] = "s")
+	END IsTestModule;
+
 	PROCEDURE RunMatching (IN prefix, marks: ARRAY OF CHAR; VAR total: Counts);
-	(* Модули уже загруженного мира, чьё имя начинается с prefix и
-	   оканчивается на "Tests": Run('Text') и Run('all'). *)
+	(* Модули уже загруженного мира: Run('all') — имена, оканчивающиеся
+	   на Tests; Run('System') — SystemTests и SystemTests<Тема>. *)
 		VAR s: Meta.Scanner; nm: Meta.Name; c: Counts; any: BOOLEAN;
 	BEGIN
 		any := FALSE;
@@ -315,7 +327,7 @@ MODULE UnitRunner;
 		WHILE ~s.eos DO
 			IF s.this.obj = Meta.modObj THEN
 				s.GetObjName(nm);
-				IF ((prefix = "") OR StartsWith(nm, prefix)) & EndsWith(nm, "Tests") THEN
+				IF IsTestModule(nm, prefix) THEN
 					any := TRUE; RunModule(nm, marks, total)
 				END
 			END;
