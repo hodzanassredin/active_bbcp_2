@@ -1,68 +1,487 @@
 # Tasks
 
-A guide to the `Tasks` module for the Component Pascal programmer. It describes a task, its states,
-the module interface, groups, the scheduler and the cost. The language extension — exclusive
-procedures, `ACTIVE.AWAIT` and yield points — is defined in `Docu/Active-CP-Lang.md`; the channel
-and worker-thread library is described in `Docu/Async.md`.
+A guide to module `Tasks`. It is for the programmer who writes in Component Pascal and wants one
+program to do several things at once. The language extension — exclusive procedures,
+`ACTIVE.AWAIT` and yield points — is defined in the language report `Docu/Active-CP-Lang.md`;
+channels, selection and worker threads are described in `Docu/Async.md`. The complete examples of
+this guide are modules `ObxTasks0`–`ObxTasks4` of subsystem `Obx`; each has a page in `Obx/Docu/`
+that walks through it step by step.
 
-A task is an extensible record with a `Run` method and its own stack. Tasks are cooperative: one
-operating-system thread executes Component Pascal code, and a task yields it only at an explicit
-switch point.
+## 1. Why a task
 
-## 1. Task and Switch Point
+A program serves a hundred clients. Each client sends a request and waits for the answer; the
+server takes requests one at a time and answers them. Written as a single sequential procedure,
+the program must itself remember where each client stopped: the programmer keeps a table of
+states and writes a loop that walks it. The client's code — "send a request, wait, add up the
+result" — is scattered across the branches of that loop.
 
-A *task* is the sequential execution of a program on its own stack. The module `Tasks` creates and
-starts a task; at most one task runs at any moment.
+A *task* gives such code back its natural form. A task is the sequential execution of a
+procedure on its own stack. While a task waits, its local variables and its place in the code
+stay on its stack, and the programmer need not save them. A hundred clients are a hundred tasks,
+and each is written as straight text of three lines.
 
-A *switch point* is a place where the running task may yield the processor. There are three kinds
-of switch point:
+A task is declared by extending record `Tasks.Task` and implementing method `Run`;
+`Tasks.Start` starts it. All tasks are executed by one operating system thread, and at any moment
+at most one task executes. Nobody interrupts a task: it gives up the processor itself, and only
+at known places. These places are called *switch points*:
 
-1. a call to a `Tasks` operation that suspends the task: `Yield`, `Sleep`, `Join`, `Park`;
-2. entering an occupied monitor and `ACTIVE.AWAIT` with a false condition;
-3. a yield point, if the module was compiled with the `^` key (sections 7 and 9.2 of the language report).
+1. a call of `Yield`, `Sleep`, `Park` or `Join`;
+2. entering a monitor held by another task, and `ACTIVE.AWAIT` with a false condition;
+3. a yield point in a module compiled with option `^` (section 5).
 
-Between two switch points a task executes indivisibly with respect to the other tasks. It follows
-that a sequence of statements without switch points needs no protection.
+The main property of tasks follows from this. Two tasks increment a shared counter: each reads
+it, adds one and writes it back. In a system with OS threads one increment is sometimes lost,
+because a thread can be interrupted between the read and the write. Here there is no switch point
+between the read and the write, and everything a task does between two switch points is seen by
+other tasks as one indivisible action. That is why the counter needs no monitor:
 
-Code outside a task — a module body, a command, an event handler — behaves like a task that never
-waits. Waiting in it is an abnormal termination (section 6).
+```
+MODULE ObxTasks0;
+	IMPORT Tasks, Console, Strings;
 
-## 2. States
+	TYPE Counter = POINTER TO RECORD (Tasks.Task) END;
 
-`State(t)` returns the state of a task; the state constants are exported by `Tasks`.
+	VAR count: INTEGER;
 
-| State | Value | Meaning |
-|---|---:|---|
-| `New` | 0 | created but not started |
-| `Ready` | 1 | ready to run, in the queue |
-| `Running` | 2 | running |
-| `Sleeping` | 3 | sleeping until the `Sleep` deadline |
-| `Waiting` | 4 | waiting for another task to finish in `Join` |
-| `Parked` | 5 | waiting for `Unpark` or a monitor handover |
-| `Finished` | 6 | the body of `Run` has returned |
-| `Cancelled` | 7 | the task is cancelled |
+	PROCEDURE (c: Counter) Run;
+		VAR i, x: INTEGER;
+	BEGIN
+		FOR i := 1 TO 1000 DO
+			x := count; count := x + 1;	(* чтение и запись без точки переключения между ними *)
+			IF i MOD 10 = 0 THEN Tasks.Yield END
+		END
+	END Run;
 
-Transitions:
+	PROCEDURE Do*;
+		VAR a, b: Counter; s: ARRAY 16 OF CHAR;
+	BEGIN
+		count := 0;
+		NEW(a); NEW(b); Tasks.Start(a); Tasks.Start(b);
+		WHILE Tasks.Count() > 0 DO Tasks.Step END;
+		Strings.IntToString(count, s);
+		Console.WriteStr("count = "); Console.WriteStr(s); Console.WriteLn
+	END Do;
 
-| From | To | Cause |
+END ObxTasks0.
+```
+
+Command `ObxTasks0.Do` prints `count = 2000` on every run. The tasks alternate after every ten
+increments, but no increment is torn apart.
+
+The property holds as long as there is no switch point between the read and the write. Put
+`Tasks.Yield` between `x := count` and `count := x + 1`, and the second task will read the old
+value in time, and the result will be less than 2000. The compiler does not check this. When
+shared state is changed across a wait, it is protected by a monitor: an exclusive procedure does
+not admit a second task until the first has left.
+
+The server with a hundred clients is built exactly so. The request queue is the module's shared
+state, and three exclusive procedures change it. A client enqueues a request and waits in
+`ACTIVE.AWAIT` until the server marks it done; the server waits until the queue is not empty:
+
+```
+MODULE ObxTasks2;
+	IMPORT ACTIVE, Tasks, Console, Strings;
+
+	CONST clients = 100;
+
+	TYPE
+		Request = POINTER TO RECORD
+			arg, res: INTEGER;
+			done: BOOLEAN;
+			next: Request
+		END;
+		Client = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Server = POINTER TO RECORD (Tasks.Task) END;
+
+	VAR head, tail: Request; sum: INTEGER;
+
+	PROCEDURE [exclusive] Submit (r: Request);
+	BEGIN
+		r.next := NIL;
+		IF tail = NIL THEN head := r ELSE tail.next := r END;
+		tail := r;
+		ACTIVE.AWAIT(r.done)
+	END Submit;
+
+	PROCEDURE [exclusive] Take (VAR r: Request);
+	BEGIN
+		ACTIVE.AWAIT(head # NIL);
+		r := head; head := r.next;
+		IF head = NIL THEN tail := NIL END
+	END Take;
+
+	PROCEDURE [exclusive] Answer (r: Request; res: INTEGER);
+	BEGIN
+		r.res := res; r.done := TRUE
+	END Answer;
+
+	PROCEDURE (c: Client) Run;
+		VAR r: Request;
+	BEGIN
+		NEW(r); r.arg := c.n;
+		Submit(r);
+		sum := sum + r.res
+	END Run;
+
+	PROCEDURE (s: Server) Run;
+		VAR i: INTEGER; r: Request;
+	BEGIN
+		FOR i := 1 TO clients DO Take(r); Answer(r, r.arg * r.arg) END
+	END Run;
+
+	PROCEDURE Do*;
+		VAR i: INTEGER; c: Client; s: Server; str: ARRAY 16 OF CHAR;
+	BEGIN
+		sum := 0; head := NIL; tail := NIL;
+		NEW(s); Tasks.Start(s);
+		FOR i := 1 TO clients DO NEW(c); c.n := i; Tasks.Start(c) END;
+		WHILE Tasks.Count() > 0 DO Tasks.Step END;
+		Strings.IntToString(sum, str);
+		Console.WriteStr("sum = "); Console.WriteStr(str); Console.WriteLn
+	END Do;
+
+END ObxTasks2.
+```
+
+The command prints `sum = 338350`, the sum of the squares from 1 to 100. The client's text stays
+straight: put the request, wait, add the answer. Condition `r.done` refers to the client's
+parameter; it is evaluated on the frame of the waiting task, so every client has its own
+condition. Line `sum := sum + r.res` stands outside the monitor and is still correct, for the
+same reason as the counter above.
+
+Command `Do` executes outside a task and drives the scheduler itself by calling `Tasks.Step`
+while tasks are alive. In the BlackBox window this is not needed: the scheduler is built into
+the main loop (section 5).
+
+## 2. The life of a task
+
+`NEW` creates a task, and it is in state `New`. Until the task is started, it may be given a name
+(`SetName`) and a stack size (`SetStackSize`). `Start` takes a stack for the task, puts it at the
+end of the ready queue and makes it `Ready`. The scheduler takes the task from the head of the
+queue, switches to its stack, and the task becomes `Running`.
+
+A running task leaves this state in three ways. It may yield and queue up at once (`Yield`) — then
+it is `Ready` again. It may wait: `Sleep` makes it `Sleeping`, `Join` makes it `Waiting`, `Park`
+and waiting for a monitor make it `Parked`. Finally, the body `Run` may end: by a normal return, by
+a trap or by cancellation. A waiting task is woken by the event it waits for, by `Unpark` or by
+`Cancel`; the woken task enters the ready queue again.
+
+There are eight states; the module exports their values, and `State(t)` returns the current one:
+
+| From | To | What happens |
 |---|---|---|
-| `New` | `Ready` | `Start` or `StartIn` |
-| `Ready` | `Running` | the scheduler took the task from the queue |
-| `Running` | `Ready` | `Yield`; `Sleep` with a non-positive delay |
-| `Running` | `Sleeping` | `Sleep` with a positive delay |
-| `Running` | `Waiting` | `Join`, the target has not finished |
-| `Running` | `Parked` | `Park`; waiting for one's group to empty |
-| `Running` | `Finished` | the body of `Run` has returned |
-| `Running` | `Cancelled` | cancellation detected at a switch point or at task entry |
-| `Sleeping` | `Ready` | the deadline expired; `Unpark`; `Cancel` |
-| `Waiting` | `Ready` | the target finished; `Unpark`; `Cancel` |
-| `Parked` | `Ready` | `Unpark`; `Cancel`; a monitor was handed over |
-| `Finished`, `Cancelled` | — | terminal states |
+| `New` (0) | `Ready` (1) | `Start` or `StartIn` |
+| `Ready` | `Running` (2) | the scheduler took the task from the queue |
+| `Running` | `Ready` | `Yield`; `Sleep` with a time not above zero; a yield point |
+| `Running` | `Sleeping` (3) | `Sleep` with a positive time |
+| `Running` | `Waiting` (4) | `Join` while the target is alive |
+| `Running` | `Parked` (5) | `Park`; a busy monitor; a false `AWAIT` condition; waiting for its group |
+| `Sleeping` | `Ready` | the time is up; `Unpark`; `Cancel` |
+| `Waiting` | `Ready` | the target ended; `Unpark`; `Cancel` |
+| `Parked` | `Ready` | `Unpark`; `Cancel`; a monitor was handed to the task |
+| `Running` | `Finished` (6) | body `Run` returned or trapped |
+| `Running` | `Cancelled` (7) | the task was cancelled |
 
-`Cancel` on a task in `New`, `Ready` or `Running` does not change the state: it only sets the flag.
-A task in `New` goes directly to `Cancelled` when started, and its body does not run.
+`Finished` and `Cancelled` are final states. A task whose body ended in a trap is also
+`Finished`; `Failed(t)` tells it apart. Cancelling a task in state `New`, `Ready` or `Running` does
+not change its state but only sets a flag: a running task notices it at its next switch point, a
+task not yet started notices it when started, and then its body does not execute at all.
 
-## 3. Interface
+A finished task returns to the main stack, and the scheduler removes it: unregisters it from the
+kernel's stack registry, gives the stack to the pool, wakes the tasks waiting for it in `Join` and
+decrements the count of live tasks. `Count()` no longer counts the task after that. The task
+object stays with the program, and `State`, `Failed` and `GetName` keep working on it.
+
+## 3. Waiting
+
+A task waits when it has nothing to do: a pause runs out, the result of another task is needed, a
+signal is needed. The module has an operation for each of these reasons.
+
+`Yield` waits for nothing. The task goes to the end of the ready queue, and the tasks that were
+ready earlier get to execute. It is called in a long computation so as not to hold the
+processor: without `Yield` and without yield points a task that computes for a minute stops all
+other tasks and the BlackBox window for a minute.
+
+`Sleep(ms)` puts the task to sleep for at least `ms` milliseconds by the clock `Kernel.Time`. The
+task wakes when the scheduler sees in one of its steps that the time is up, so a sleep may last
+longer than ordered by the length of a step. `Sleep` with a non-positive time equals `Yield`.
+
+`Park` and `Unpark` are a pair for signalling. A task calls `Park` and sleeps until another task
+calls `Unpark` for it. A signal is not lost: if `Unpark` came before `Park`, the wake-up flag is
+already set, and `Park` returns at once, clearing it. There is one flag, so two `Unpark` in a row
+give one wake-up. `Join(t)` waits until task `t` ends or is cancelled; if it has already ended,
+`Join` returns at once.
+
+The example combines all three operations. The main task starts a sleeper and a waker and waits
+for both:
+
+```
+MODULE ObxTasks1;
+	IMPORT Tasks, Console;
+
+	TYPE
+		Sleeper = POINTER TO RECORD (Tasks.Task) END;
+		Waker = POINTER TO RECORD (Tasks.Task) who: Tasks.Task END;
+		Main = POINTER TO RECORD (Tasks.Task) END;
+
+	PROCEDURE (s: Sleeper) Run;
+	BEGIN
+		Console.WriteStr("sleeper: park"); Console.WriteLn;
+		Tasks.Park;
+		Console.WriteStr("sleeper: woken"); Console.WriteLn
+	END Run;
+
+	PROCEDURE (w: Waker) Run;
+	BEGIN
+		Tasks.Sleep(20);
+		Console.WriteStr("waker: unpark"); Console.WriteLn;
+		Tasks.Unpark(w.who)
+	END Run;
+
+	PROCEDURE (m: Main) Run;
+		VAR s: Sleeper; w: Waker;
+	BEGIN
+		NEW(s); Tasks.Start(s);
+		NEW(w); w.who := s; Tasks.Start(w);
+		Tasks.Join(s); Tasks.Join(w);
+		Console.WriteStr("main: both finished"); Console.WriteLn
+	END Run;
+
+	PROCEDURE Do*;
+		VAR m: Main;
+	BEGIN
+		NEW(m); Tasks.Start(m);
+		WHILE Tasks.Count() > 0 DO Tasks.Step END
+	END Do;
+
+END ObxTasks1.
+```
+
+Output:
+
+```
+sleeper: park
+waker: unpark
+sleeper: woken
+main: both finished
+```
+
+Wake-ups of different kinds do not mix. `Unpark` wakes a task in any wait, but `Join` and waiting
+for a monitor treat such a wake-up as spurious and wait on, and the flag stays for the next
+`Park`. That is why a stray `Unpark` neither brings a task into a monitor too early nor breaks a
+`Join`. `Sleep` consumes the wake-up: woken by `Unpark` before its time, the task clears the flag,
+and its next `Park` will wait.
+
+Waiting is allowed only in a task. `Join` called from a command traps 20 and prints
+`Tasks: wait outside a task` to the console: a command has no stack of its own and nowhere to give
+the processor. That is why in the example the main task waits, while the command only starts it
+and drives `Step`. `Join` on itself traps 23 — the task would wait for its own end forever — and
+`Join` on a task not started traps 24.
+
+## 4. Cancellation and groups
+
+A task started three helpers, and one of them failed. The other two keep working on a result
+nobody needs any more. The parent task finished `Run`, while the helpers are still alive and
+hold resources the parent believes it released. One rule cures both troubles: children do not
+outlive their parent, and the failure of one child cancels the others. This rule is called
+structured concurrency.
+
+Cancellation in this module is a request, not a blow. `Cancel(t)` sets a flag in the task and
+wakes it if it sleeps or waits. The task notices the flag at its next switch point: every waiting
+operation checks it before and after the wait and interrupts the task with trap 127. The trap
+unwinds the stack the usual way, so the monitors the task held are released and its entries in
+monitor queues are removed. The task becomes `Cancelled`. A task that computes without switch
+points does not see the flag until it reaches one.
+
+Cancelling one task does not touch others. To make cancellation travel down a tree, tasks are
+joined into a *group*. `NewGroup` called in a task creates the task's own group (a repeated call
+returns the same one; a task has one group), and `StartIn(t, g)` starts `t` as a member of group
+`g`. The owner of a group is the task that created it. Four rules apply to a group:
+
+1. An owner that returned from `Run` does not end while the group has live members: it becomes
+   `Parked` and waits for the last one.
+2. A trap in a member marks the group failed (`GroupFailed`) and cancels the other members.
+3. A trap or cancellation of the owner cancels all members of its group. The owner does not wait
+   for their end; each child ends at its next switch point.
+4. Cancelling the owner while it waits for the group cancels the members, and the owner becomes
+   `Cancelled`.
+
+The example shows the second rule. The parent starts three children and leaves `Run`; the second
+child traps after 10 ms, the two others sleep in an endless loop:
+
+```
+MODULE ObxTasks3;
+	IMPORT Tasks, Console, Strings;
+
+	TYPE
+		Child = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Parent = POINTER TO RECORD (Tasks.Task) g: Tasks.Group END;
+
+	VAR kids: ARRAY 3 OF Child;
+
+	PROCEDURE (c: Child) Run;
+	BEGIN
+		IF c.n = 1 THEN Tasks.Sleep(10); HALT(30) END;
+		LOOP Tasks.Sleep(1000) END
+	END Run;
+
+	PROCEDURE (p: Parent) Run;
+		VAR i: INTEGER;
+	BEGIN
+		p.g := Tasks.NewGroup();
+		FOR i := 0 TO 2 DO NEW(kids[i]); kids[i].n := i; Tasks.StartIn(kids[i], p.g) END
+	END Run;
+
+	PROCEDURE Do*;
+		VAR p: Parent; i: INTEGER; s: ARRAY 8 OF CHAR;
+	BEGIN
+		NEW(p); Tasks.Start(p);
+		WHILE Tasks.Count() > 0 DO Tasks.Step END;
+		IF Tasks.GroupFailed(p.g) THEN Console.WriteStr("group failed") ELSE Console.WriteStr("group ok") END;
+		Console.WriteLn;
+		FOR i := 0 TO 2 DO
+			Strings.IntToString(Tasks.State(kids[i]), s);
+			Console.WriteStr("child state "); Console.WriteStr(s); Console.WriteLn
+		END
+	END Do;
+
+END ObxTasks3.
+```
+
+Output:
+
+```
+Tasks: cancelled
+Tasks: cancelled
+group failed
+child state 7
+child state 6
+child state 7
+```
+
+Without the group the two sleeping children would live forever, and loop
+`WHILE Tasks.Count() > 0` would never end. With the group the trap of the second child (state 6,
+`Finished` with `Failed`) wakes its siblings, they catch trap 127 in `Sleep` and become `Cancelled`
+(7); the lines `Tasks: cancelled` are printed by their cancellation. All this time the parent was
+waiting for the group by rule 1 and ended last.
+
+A trap in a task does not bring the program down. Every body `Run` executes under `Kernel.Try`: a
+trap ends only this task, the others go on. So a failure is learned from `Failed(t)` and
+`GroupFailed(g)`, not from BlackBox stopping.
+
+## 5. The scheduler and the main loop
+
+Tasks are executed by the *scheduler*, a `Services.Action` that the BlackBox main loop calls
+between window events. Each call is one `Step`. A step wakes the sleepers whose time has come and
+executes ready tasks in turn until the queue is empty or a quantum of 5 ms has passed, then
+returns control to the main loop. So the window stays alive while tasks work. Console BlackBox
+calls the same action between commands and while waiting for input.
+
+The quantum is checked only when a task has given control back by itself. There is no
+preemption: a task computing without switch points holds both the scheduler and the window until
+it is done. Compiler option `^` guards against this: a module compiled with it gets a *yield
+point* at the end of every repetition of `WHILE`, `REPEAT`, `LOOP` and `FOR`. A yield point is a
+call of `Kernel.Poll`; every 5 ms the scheduler raises a flag, and the next yield point does a
+`Yield`. A task holding a monitor and code outside a task do not switch at a yield point;
+otherwise the monitor would stay busy during someone else's work.
+
+Where waiting is forbidden. An event handler, a broadcast over a document's domain, a menu
+command are code of the BlackBox framework. That code expects to run to the end before the next
+event starts, and all tasks see it as one action. If a task called `Sleep` inside such a handler,
+the framework would be stopped halfway. Therefore waiting inside a `Services` action (other than
+the scheduler's own) or inside a `Models.Domain` broadcast traps 21 with the text
+`Tasks: wait inside an action handler or domain broadcast`. A task talks to the framework through
+actions and the event loop: it did its work, posted an action, and waits again at home.
+
+`Step` must not be called from a task (trap 20), nor again from inside a step (trap 21). Commands
+and tests that want to wait for tasks without the main loop call `Step` in a loop, as the
+examples of this guide do.
+
+## 6. Deadlock
+
+Tasks wait for each other in a circle, or the only task waits for an `Unpark` nobody will send.
+An OS thread in such a position would just hang. The scheduler sees it: there are live tasks, no
+ready ones, and no sleeper waits for a time. Then a step prints once a log of "who waits for
+what" and raises flag `Deadlocked()`:
+
+```
+MODULE ObxTasks4;
+	IMPORT Tasks;
+
+	TYPE Lonely = POINTER TO RECORD (Tasks.Task) END;
+
+	PROCEDURE (l: Lonely) Run;
+	BEGIN
+		Tasks.Park	(* разбудить некому *)
+	END Run;
+
+	PROCEDURE Do*;
+		VAR l: Lonely;
+	BEGIN
+		NEW(l); Tasks.SetName(l, "lonely"); Tasks.Start(l);
+		Tasks.Step;
+		IF Tasks.Deadlocked() THEN Tasks.Cancel(l); Tasks.Step END
+	END Do;
+
+END ObxTasks4.
+```
+
+Output:
+
+```
+Tasks: deadlock: no ready tasks and no wake-up deadlines
+Kernel: monitor dump
+  (no monitors)
+Tasks: cancelled
+```
+
+The log is a diagnosis, not a crash. When monitors form the deadlock, the dump shows every busy
+monitor, its owner's name and the queues of entering tasks and of tasks waiting for a condition.
+The program can get out of the deadlock: `Unpark` or `Cancel` make a task ready again, and the
+flag is cleared. In the example the command cancels the lonely task, and it ends with trap 127.
+
+The scheduler detects only a complete deadlock. If even one task sleeps with a time or spins in a
+loop with `Yield`, some tasks may stand forever and no log appears. A task that never yields is
+not detected either: the scheduler simply does not get control.
+
+## 7. Cost
+
+A task's stack is 256 KB by default; `SetStackSize` sets another size before the start. The
+kernel allocates the stack with `mmap` and closes its lowest page: an overflow hits the guard page
+and traps instead of spoiling neighbouring memory. Physical pages are allocated on touch, so 10
+thousand tasks with 64 KB stacks take 640 MB of address space and tens of megabytes of memory. The
+size limit is 64 MB: the kernel does not allocate a larger stack, and `StartIn` traps 22, leaving
+the task in state `New`. A program gets the same trap and text
+`no stack memory (platform does not support it)` when the platform gave no memory.
+
+Creating a task the first time is expensive: a system call per stack and, most often, a garbage
+collection that scans all live stacks. In the measurements of `docs/measurements.md` (section 2;
+Linux x86-64, one thread, three runs at load average 15.2–15.9) 10 thousand tasks with 64 KB
+stacks are created in 60–70 ms, while Go with `GOMAXPROCS=1` does it in 18.6–20.2 ms. Therefore
+the stack of a finished task is not returned to the platform but goes to a pool, and the next
+task of the same size takes it without a system call. The same 10 thousand tasks with stacks
+from the pool are created in 2.3–3.1 ms, and creating and finishing one task costs 822–911 ns —
+as much as in Go (868–1,032 ns). The pool keeps up to 1024 free stacks; the scheduler returns the
+surplus to the kernel little by little, no more than 16 stacks per step, so that a mass end of
+tasks does not cost a mass of system calls at once.
+
+A switch between two tasks costs 84–113 ns per `Yield` against 35–60 ns in Go under the same
+conditions: the switcher saves all registers, and around it the kernel carries the `Kernel.Try`
+context. Sleeping thousands of tasks is cheap: sleepers lie in a heap ordered by time, and 10
+thousand tasks with 20 sleeps each give 684–723 ns per wake-up, less than Go (831–931 ns). The
+numbers are reproduced by the commands
+
+```sh
+printf 'UnitRunner.Run System_devTasks proc slow quit\n' | tools/run64.sh
+printf 'Async_devBench.All\n' | tools/run64.sh
+```
+
+The limits of the model follow from the single thread. Tasks give no parallel work on several
+cores; worker threads and computons exist for that (`Docu/Async.md`). OS worker threads do not
+touch module `Tasks` or the heap. Without module `Monitors` loaded every monitor entry traps 20:
+the kernel calls `Monitors` through a hook, and there is no hook.
+
+## 8. Interface
 
 ```
 DEFINITION Tasks;
@@ -109,14 +528,18 @@ DEFINITION Tasks;
 END Tasks.
 ```
 
-Before each trap `Tasks` writes the line `Tasks: <text>` to the console. The procedures that suspend
-a task (`Yield`, `Sleep`, `Join`, `Park`) start with the same check `CheckWait`; below it is written
-as "the wait check":
+Before every trap the module writes a line `Tasks: <text>` to the console. The operations that
+suspend a task (`Yield`, `Sleep`, `Join`, `Park`) begin with one check; below it is called "the
+wait check":
 
-Pre: the procedure is called from a task — trap 20.
-Pre: the task is not cancelled — trap 127.
-Pre: no `Services` action handler (other than the scheduler's action) and no domain broadcast is
-running — trap 21.
+```
+Pre: called from a task — 20
+Pre: the task is not cancelled — 127
+Pre: no Services action (other than the scheduler) and no domain broadcast is running — 21
+```
+
+`Sleep`, `Join` and `Park` repeat the check after waking, so cancelling a sleeping or waiting task
+interrupts it with trap 127.
 
 **CONST New, Ready, Running, Sleeping, Waiting, Parked, Finished, Cancelled**
 Task states (section 2).
@@ -127,329 +550,147 @@ A task. The program extends the record and implements `Run`.
 
 **PROCEDURE (t: Task) Run**
 NEW, ABSTRACT
-The task body. `TaskBoot` executes it on the task's stack under `Kernel.Try`.
+The task body. Executes on the task's stack under `Kernel.Try`.
 
 **TYPE Group**
-A group of tasks (section 4). The fields are not exported; `GroupCount` and `GroupFailed` read the
-state.
-
-**PROCEDURE Start (t: Task)**
-Equivalent to `StartIn(t, NIL)`.
+A group of tasks (section 4). Its state is read by `GroupCount` and `GroupFailed`.
 
 **PROCEDURE StartIn (t: Task; g: Group)**
-Allocates a stack for the task and puts it at the tail of the ready queue. With `g # NIL` it records
-the task in group `g`.
+Allocates a stack for the task and puts it at the end of the ready queue; with `g # NIL` enters
+it into group `g`.
 
-Pre: `t # NIL` — trap 20.
-Pre: `State(t) = New` — trap 21.
-Pre: the stack is allocated — trap 22, the console shows `no stack memory (platform does not support
-it)`. The stack is not allocated if the size exceeds 64 MB or the platform gave no memory
-(section 9).
-Post: `State(t) = Ready`; with `g # NIL` `GroupCount(g)` is incremented by 1.
+```
+Pre: t # NIL — 20
+Pre: State(t) = New — 21
+Pre: a stack was allocated (size at most 64 MB, the platform gave memory) — 22
+Post: State(t) = Ready; with g # NIL GroupCount(g) increased by 1
+```
+
+**PROCEDURE Start (t: Task)**
+`StartIn(t, NIL)`.
 
 **PROCEDURE Yield**
-Puts the current task at the tail of the ready queue and switches to the scheduler.
+Puts the current task at the end of the ready queue and gives up the processor.
 
-Pre: the wait check.
-Post: the task runs again; the tasks that were ready earlier ran before it.
+```
+Pre: the wait check
+Post: the tasks ready earlier have executed
+```
 
 **PROCEDURE Sleep (ms: LONGINT)**
-Suspends the task for at least `ms` milliseconds. With `ms <= 0` it is equivalent to `Yield`.
+Puts the task to sleep for at least `ms` ms; with `ms <= 0` equals `Yield`.
 
-Pre: the wait check; after waking the check is repeated (cancelling a sleeping task — trap 127).
-Post: the deadline expired, or `Unpark` woke the task; the `Unpark` wake-up is consumed.
+```
+Pre: the wait check, before and after the sleep
+Post: the time is up or Unpark came; the wake-up flag is cleared
+```
 
 **PROCEDURE Join (t: Task)**
-Waits until `t` finishes or is cancelled. If `t` has already finished, it returns at once.
+Waits for the end of task `t`.
 
-Pre: the wait check (traps 20, 127, 21); after waking the check is repeated.
-Pre: `t # NIL` — trap 22.
-Pre: `t # Current()` — trap 23.
-Pre: `State(t) # New` — trap 24.
-Post: `State(t) IN {Finished, Cancelled}`. `Unpark` of the waiting task does not end the wait and
-stays for its next `Park`.
+```
+Pre: the wait check, before and after every wake-up
+Pre: t # NIL — 22
+Pre: t # Current() — 23
+Pre: State(t) # New — 24
+Post: State(t) IN {Finished, Cancelled}; the wake-up flag is untouched
+```
 
 **PROCEDURE Park**
-Suspends the task until `Unpark`. A wake-up that arrived before the call is not lost: `Park` returns
-at once and consumes it.
+Puts the task to sleep until `Unpark`; if the wake-up flag is already set, returns at once.
 
-Pre: the wait check; after waking the check is repeated.
-Post: the wake-up is consumed.
+```
+Pre: the wait check, before and after the sleep
+Post: the wake-up flag is cleared
+```
 
 **PROCEDURE Unpark (t: Task)**
-Records the wake-up for the next `Park` of task `t` and wakes `t` if it sleeps, waits in `Join`, is
-suspended in `Park` or waits for a monitor. `Sleep` and `Park` consume the wake-up. `Join`, a monitor
-wait and `AsyncSelect.Select` do not consume it: they keep waiting, and the wake-up goes to the next
-`Park`.
+Sets the wake-up flag and wakes `t` if it sleeps or waits.
 
-Pre: `t # NIL` — trap 20.
-Post: `t` is ready, or its next `Park` returns at once.
+```
+Pre: t # NIL — 20
+Post: t is ready, or its next Park returns at once
+```
 
 **PROCEDURE Cancel (t: Task)**
-Marks an unfinished task as cancelled and wakes it if it sleeps or waits. A cancelled task traps 127
-at its nearest switch point.
+Marks an unfinished task cancelled and wakes it if it sleeps or waits.
 
-Pre: `t # NIL` — trap 20.
-Post: `t` is marked cancelled; the state of `t` does not change until its switch point.
+```
+Pre: t # NIL — 20
+Post: t is marked; at its next switch point it gets trap 127
+```
 
 **PROCEDURE NewGroup (): Group**
-In a task returns its own group: the first call creates an empty group owned by the current task,
-a repeated call returns the same group. Outside a task creates a new group without an owner.
+In a task, the task's own group (created on the first call); outside a task, a new group without
+an owner.
 
 **PROCEDURE GroupCount (g: Group): INTEGER**
-The number of live members of the group; `0` for `g = NIL`.
+The number of live members; 0 when `g = NIL`.
 
 **PROCEDURE GroupFailed (g: Group): BOOLEAN**
-`TRUE` if at least one member trapped; `FALSE` for `g = NIL`.
+`TRUE` if at least one member trapped; `FALSE` when `g = NIL`.
 
 **PROCEDURE OwnGroup (t: Task): Group**
-The own group of task `t` (`NewGroup` in `t`); `NIL` if `t` has not created it, and for `t = NIL`.
+The own group of `t`; `NIL` if it has none or `t = NIL`.
 
 **PROCEDURE Step**
-Runs ready tasks until the 5 ms quantum expires or the queue is empty (section 5).
+One scheduler step: wakes sleepers, executes ready tasks for at most 5 ms.
 
-Pre: called outside a task — trap 20.
-Pre: `Step` is not executing at this moment — trap 21.
+```
+Pre: called outside a task — 20
+Pre: Step is not executing now — 21
+```
 
 **PROCEDURE NextDeadline (): LONGINT**
-The nearest deadline of a sleeping task by the clock `Kernel.Time`; `-1` if no task sleeps.
+The nearest time of a sleeping task by `Kernel.Time`; −1 if no task sleeps.
 
 **PROCEDURE Current (): Task**
-The current task; `NIL` outside a task.
+The running task; `NIL` outside a task.
 
 **PROCEDURE InTask (): BOOLEAN**
 `Current() # NIL`.
 
 **PROCEDURE State (t: Task): INTEGER**
-The state of the task; `New` for `t = NIL`.
+The state of the task; `New` when `t = NIL`.
 
 **PROCEDURE Failed (t: Task): BOOLEAN**
-`TRUE` if the body of `t` ended with a trap; `FALSE` for `t = NIL`.
+`TRUE` if the body of `t` ended in a trap; `FALSE` when `t = NIL`.
 
 **PROCEDURE GetName (t: Task; OUT s: ARRAY OF CHAR)**
-The name of the task; the empty string for `t = NIL`.
+The name of the task; the empty string when `t = NIL`.
 
 **PROCEDURE SetName (t: Task; IN s: ARRAY OF CHAR)**
-Sets the name of the task, up to 63 characters. For `t = NIL` it does nothing. The procedure does
-not check the length of `s`: a longer name traps on copying.
+Sets a name of up to 63 characters; does nothing when `t = NIL`. The length of `s` is not
+checked: a longer name traps when copied.
 
 **PROCEDURE SetStackSize (t: Task; size: INTEGER)**
-Sets the stack size in bytes; `0` means 256 KB.
+The stack size in bytes; 0 means 256 KB.
 
-Pre: `t # NIL` — trap 20.
-Pre: `State(t) = New` — trap 21.
-Pre: `size >= 0` — trap 22. The upper limit is not checked here; `StartIn` rejects a size above
-64 MB (trap 22).
+```
+Pre: t # NIL — 20
+Pre: State(t) = New — 21
+Pre: size >= 0 — 22
+```
+
+The upper limit is not checked here; a stack above 64 MB is rejected by `StartIn`.
 
 **PROCEDURE Count (): INTEGER**
-The number of tasks started and not yet removed in `Reap`.
+The number of tasks started and not yet removed.
 
 **PROCEDURE Deadlocked (): BOOLEAN**
-`TRUE` if `Step` detected a deadlock and printed the journal (section 7).
+`TRUE` if the last step found a deadlock and printed the log (section 6).
 
 **PROCEDURE Switches (): LONGINT**
 The number of stack switches since the last `ResetStats`.
 
 **PROCEDURE ResetStats**
-Resets the counter `Switches` to zero.
+Resets the `Switches` counter.
 
 **PROCEDURE ListSize (): INTEGER**
-The length of the list of all tasks. A task removed in `Reap` is not in the list.
+The length of the list of live tasks.
 
 **PROCEDURE List**
-Prints a line per task to the console: name, state, stack bounds, sleep deadline.
+Prints a line per task to the console: name, state, stack bounds, sleep time.
 
-## 4. Groups and Cancellation
-
-A *group* keeps the number of live members (`GroupCount`), the flag of a trap in at least one
-member (`GroupFailed`) and the owner — the task that created the group. `NewGroup` remembers the
-current task as the owner; outside a task the owner is `NIL`.
-
-Group rules:
-
-1. `StartIn(t, g)` registers a member; `GroupCount(g)` is incremented.
-2. After returning from `Run` the owner does not finish while `GroupCount(g) > 0`. It sets itself to
-   `Parked` and waits until the last member is removed in `Reap`.
-3. A trap in a member marks the group `failed` and cancels the other members. A member's
-   cancellation takes effect at its nearest switch point.
-4. Cancellation of the owner while it waits for the group cancels all members; the owner gets the
-   state `Cancelled`.
-5. A trap or cancellation of the owner in `Run` cancels all members of its group: members do not
-   outlive the owner. The owner does not wait for them; each finishes at its nearest switch point.
-6. A task owns one group: a repeated `NewGroup` returns the same group (`OwnGroup`).
-
-`Cancel(t)` cancels one task. Group cancellation is performed by the internal `CancelGroup`; it is
-not exported.
-
-## 5. Scheduler and Main Loop
-
-The scheduler is an ordinary `Services.Action`. `Start`, `Yield`, `Sleep`, `Unpark` and a monitor
-handover request it through `EnsureScheduled`: if the action is not yet registered, it is scheduled
-for the nearest `Services` step (`Services.DoLater`). If there are no ready tasks, the action is
-scheduled for the nearest sleeping deadline.
-
-`Step` runs ready tasks:
-
-1. Every 5 ms it raises the flag `Kernel.RequestPoll`; the yield point `Kernel.Poll` yields on that
-   flag.
-2. It scans sleepers at most once per changed value of `Kernel.Time` and moves those whose deadline
-   has arrived to ready.
-3. It takes a task from the head of the ready queue, switches to its stack and waits for the return.
-4. It removes a finished task in `Reap`: takes it off the all-task list, returns its stack to the
-   pool, wakes `Join` waiters, decrements the live counter and accounts for the group.
-5. It returns control to the main loop when the 5 ms quantum has expired or the queue is empty.
-   Before returning it gives pool stacks above 1024 back to the kernel, at most 16 per step
-   (section 10).
-
-`Step` is called only from the bottom of the main loop: from the scheduler action or from a test.
-Calling it from a task and re-entering it are traps. A task is not preempted by the quantum: the
-quantum is checked only after the task has returned control itself.
-
-The main loop (`System/Mod/Loop.cp`) calls `Services.actionHook.Step`; the console loop
-(`Cons/Mod/Interp.cp`) calls it between commands and while waiting for input. Tasks therefore run
-both in a window and in the console.
-
-## 6. Where Waiting Is Forbidden
-
-The wait check (`CheckWait`, section 3) traps in three cases:
-
-1. there is no current task — `wait outside a task`, trap 20;
-2. the task is cancelled — trap 127 ("interrupted"): it differs from precondition traps, including
-   trap 21 of a channel protocol violation;
-3. an action handler is running (other than the scheduler's own action) or a domain broadcast is
-   running — `wait inside an action handler or domain broadcast`, trap 21.
-
-`Yield`, `Sleep`, `Join` and `Park` pass this check. Waiting in a monitor outside a task
-(`Kernel.Await`) traps 24 in the module `Monitors` (language report, section 8).
-
-The rule: a task waits only in its own code, not in a framework callback. Framework code is atomic
-with respect to other tasks; a task talks to the framework through actions and the event loop.
-
-## 7. Deadlock
-
-When there are no ready tasks, no sleeping tasks with a deadline, and live tasks remain, `Step`
-prints the journal once:
-
-```
-Tasks: deadlock: no ready tasks and no wake-up deadlines
-Kernel: monitor dump
-  monitor 7F...: held by "t1" count=1
-    enters "t2"
-  ...
-```
-
-`Tasks.Deadlocked()` reports this state to tests. The journal is a diagnostic, not an abnormal
-termination: a later `Unpark` or `Cancel` may make progress. A task that never yields is not
-detected.
-
-## 8. Example
-
-```
-MODULE ObxTasks;
-	IMPORT ACTIVE, Tasks, Console, Strings;
-
-	VAR count: INTEGER; s: ARRAY 16 OF CHAR;
-
-	TYPE Worker = POINTER TO RECORD (Tasks.Task) END;
-
-	PROCEDURE [exclusive] Tick*;
-	BEGIN INC(count) END Tick;
-
-	PROCEDURE (w: Worker) Run;
-		VAR i: INTEGER;
-	BEGIN
-		FOR i := 1 TO 10 DO Tick; Tasks.Yield END;
-		Tick
-	END Run;
-
-	PROCEDURE Run*;
-		VAR a, b: Worker;
-	BEGIN
-		NEW(a); NEW(b); count := 0;
-		Tasks.Start(a); Tasks.Start(b);
-		WHILE Tasks.Count() > 0 DO Tasks.Step END;
-		Strings.IntToString(count, s);
-		Console.WriteStr("ObxTasks: count="); Console.WriteStr(s); Console.WriteLn
-	END Run;
-
-END ObxTasks.
-```
-
-Two tasks call the module's exclusive procedure and yield after each call. The command `Run`
-executes outside a task, so it calls `Tasks.Step` itself until the tasks finish. The result is
-`ObxTasks: count=22`.
-
-## 9. Cost and Limits
-
-**Stack.** The default size is 256 KB. `SetStackSize` sets another size before start. The kernel sets
-the limit: `Kernel.AllocStack` refuses a size above 64 MB (`maxStackScan`). Then `StartIn` traps 22,
-and the task stays in the state `New`. The platform allocates memory with `mmap` and turns the lowest
-page into `PROT_NONE`: a stack overflow hits the guard page. Physical pages are allocated on touch.
-Therefore 10 thousand tasks with 64 KB stacks take 640 MB of virtual memory and tens of megabytes of
-physical memory.
-
-After a task finishes, `Reap` returns its stack to the pool. The next task of the same size takes a
-stack from the pool without a system call. The pool keeps up to 1024 free stacks; the scheduler
-returns the surplus to the kernel (`munmap`), at most 16 stacks per step.
-
-**Cost.** Numbers, conditions and reproduction commands are collected in `docs/measurements.md`,
-section 2. At load average 15.2–15.9 (24.11.2026), 64 KB stacks:
-
-| Measurement | BlackBox | Go, `GOMAXPROCS=1` |
-|---|---:|---:|
-| creating 10 thousand tasks | 60–70 ms | 18.6–20.2 ms |
-| creating 10 thousand tasks, stacks from the pool | 2.3–3.1 ms | — |
-| running 10 thousand tasks (`Yield` and exit) | 6.9–9.3 ms | 1.8–2.5 ms |
-| `Yield` of two tasks | 84–113 ns | 35–60 ns |
-| creating and finishing a task, stacks from the pool | 822–911 ns | 868–1,032 ns |
-
-```sh
-printf 'UnitRunner.Run System_devTasks proc slow quit\n' | tools/run64.sh
-printf 'Async_devBench.All\n' | tools/run64.sh
-```
-
-**Limits.**
-
-1. One operating-system thread, no preemption. A task yields the processor only at a switch point
-   (section 1). Procedures with the wait check and yield points detect cancellation. A task in a
-   module without the key `^` that calls no suspending procedures is not interrupted.
-2. A yield point does not switch a task that owns a monitor, nor code outside a task.
-3. If the platform did not allocate a stack, the task does not start, and `StartIn` traps 22 with
-   the text `no stack memory (platform does not support it)`.
-4. Operating-system worker threads (`AsyncWork`) do not access the heap or the module `Tasks`; the
-   exception is jobs that allocate no memory themselves. See `Docu/Async.md`.
-5. Without `Tasks` loaded, the kernel takes and releases free monitors, but waiting in them traps:
-   nobody can wake the task.
-
-## 10. Implementation Scheme
-
-This section does not define behaviour; it describes how the behaviour is obtained. Details are in
-`docs/implementation.md`, sections 2–4.
-
-`Taskarch.Switch` is a `[code]` procedure inlined into the caller (module `Taskarch` has one file per target; `Tasks` is a single file). On amd64 it saves 13 registers
-(`rax`, `rbx`, `rbp`, `rsi`, `rdi`, `r8`–`r15`) and `rsp`, on i386 five (`eax`, `ebx`, `ebp`,
-`esi`, `edi`) and `esp`. The synthetic return address points to the continuation right after the
-bytes of `Switch`; for a fresh task the return slot holds the address of `TaskBoot`. Around the raw
-switch stand `Kernel.SwitchSave` and `Kernel.SwitchRestore`: they move the `Kernel.Try` context,
-`trapStack` and `tryCount` into the stack record and restore them on return.
-
-`Kernel.RegisterStack` enters a stack into the registry — a doubly linked list of records.
-`MarkLocals` scans the current stack from the frame pointer, sleeping stacks from the saved stack
-pointer. `SwitchSave` records the stack pointer with a slack of 256 bytes on amd64 (64 on i386), so
-that the registers saved by the switcher fall into the scan. `Kernel.StackOf` finds a record by a
-linear walk of the list. A switch does not call it: a task remembers its record, and `Step` looks up
-its own once per step.
-
-`TaskBoot` is the entry point of a new stack. It calls `Run` under `Kernel.Try`; a normal return
-gives `Finished`, a trap gives `Failed(t)` and `Finished`, cancellation gives `Cancelled`. After the
-body `TaskBoot` waits for its group to empty. Then `Finish` switches to the main stack, where `Step`
-removes the task in `Reap`.
-
-The scheduler keeps ready tasks in a FIFO queue and sleeping tasks in a 4-ary heap ordered by
-deadline: the top of the heap is the nearest deadline. The pool of free stacks is a singly linked
-list threaded through the top words of the stacks themselves (`TakeStack`, `GiveStack`); `TrimPool`
-returns the surplus above `poolMax` = 1024 to the kernel in portions of up to `trimStep` = 16 stacks
-per step. `Reap` unlinks the task from the doubly linked list of all tasks in O(1): otherwise
-finished tasks would keep their objects until the end of the process. The module's `CLOSE` removes
-the scheduler (`Kernel.SetScheduler(NIL)`), removes the action from `Services` and returns the stacks
-of live tasks and of the pool to the kernel.
+The inside of the module — switcher `Taskarch.Switch`, the stack registry, the sleepers' heap, the
+pool — is described in `docs/implementation.md`.
