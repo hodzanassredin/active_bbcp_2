@@ -64,6 +64,7 @@ MODULE LinKernel;
 
 		loopContext: Libc.sigjmp_buf; (* trap return context, if no Kernel.Try has been used. *)
 		currentTryContext: POINTER TO Libc.sigjmp_buf; (* trap return context, if Kernel.Try has been used. *)
+		sharedContext: Libc.sigjmp_buf;	(* контекст TryShared: один на процесс, задачи хранят его адрес *)
 		isReadableContext: Libc.sigjmp_buf; (* for IsReadable *)
 		isReadableCheck: BOOLEAN;
 		
@@ -380,6 +381,25 @@ MODULE LinKernel;
 		END;
 		currentTryContext := oldContext;
 	END Try;
+
+	PROCEDURE (VAR p: Platform) TryShared (h: Kernel.TryHandler; a, b, c: S.ADDRESS): BOOLEAN;
+	(* Как Try, но контекст — sharedContext модуля: стеки задач хранят его адрес,
+	   и он годен в любом проходе планировщика. Вложенный TryShared не допускается
+	   (Kernel.TryTasks). *)
+		VAR res: INTEGER; oldContext: POINTER TO Libc.sigjmp_buf;
+	BEGIN
+		oldContext := currentTryContext;
+		res := Libc.sigsetjmp(sharedContext, Libc.FALSE);
+		currentTryContext := S.ADR(sharedContext);
+		IF res = 0 THEN
+			h(a, b, c)
+		ELSIF res = trapReturn THEN
+		ELSE
+			HALT(100)
+		END;
+		currentTryContext := oldContext;
+		RETURN TRUE
+	END TryShared;
 
 	PROCEDURE SigToErr (pc, sig, fpe: INTEGER; VAR err, val: INTEGER);
 	(** Translate Linux signal number sig and fpe error code into BB err number and, if applicable - program trap number val. pc is only relevant in case of SIGILL to retrieve trap/runtime error number *)
