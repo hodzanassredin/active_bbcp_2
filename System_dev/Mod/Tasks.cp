@@ -58,6 +58,11 @@ MODULE System_devTasks;
 		CountYielder = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 		Room = POINTER TO RECORD inside, overlaps, visits: INTEGER END;
 		Visitor = POINTER TO RECORD (Tasks.Task) room: Room END;
+		(* Семантика Kernel.Try задачи (docs/stacks-study.md, Э1). *)
+		TryYielder = POINTER TO RECORD (Tasks.Task) caught, after, entered, leaked: INTEGER END;
+		MonTrapper = POINTER TO RECORD (Tasks.Task) box: ProbeBox END;
+		MonTaker = POINTER TO RECORD (Tasks.Task) box: ProbeBox; got: BOOLEAN END;
+		LateBad = POINTER TO RECORD (Tasks.Task) yields: INTEGER; calm: BOOLEAN END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
 
@@ -888,5 +893,143 @@ MODULE System_devTasks;
 		UnitAssert.EqualInt(60, r.visits, "all visits done");
 		UnitAssert.EqualInt(0, Monitors.LockDepth(), "main stack holds no monitor")
 	END TestProcDirectMonitorToken;
+
+	(* --- семантика Kernel.Try задачи (Э1) ---------------------------------- *)
+
+	PROCEDURE YieldAndTrap (a, b, c: S.ADDRESS);
+		VAR t: TryYielder;
+	BEGIN
+		t := S.VAL(TryYielder, a);
+		Tasks.Yield; Tasks.Yield; Tasks.Yield;
+		INC(t.entered);
+		NilCrash;
+		INC(t.leaked)
+	END YieldAndTrap;
+
+	PROCEDURE (t: TryYielder) Run;
+	(* Свой Kernel.Try с переключениями внутри: трап ловит этот Try, а не
+	   планировщик; после него задача живёт, переключается и снова ловит. *)
+		VAR i, e: INTEGER;
+	BEGIN
+		FOR i := 1 TO 2 DO
+			e := t.entered;
+			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(YieldAndTrap)), S.VAL(S.ADDRESS, t), 0, 0);
+			IF (t.entered = e + 1) & (t.leaked = 0) & (Tasks.Current() = t) THEN INC(t.caught) END;
+			Tasks.Yield; INC(t.after)
+		END
+	END Run;
+
+	PROCEDURE (t: MonTrapper) Run;
+	BEGIN
+		Kernel.Lock(t.box); Tasks.Yield; Tasks.Yield;
+		NilCrash
+	END Run;
+
+	PROCEDURE (t: MonTaker) Run;
+	BEGIN
+		Tasks.Yield;
+		Kernel.Lock(t.box); t.got := TRUE; Kernel.Unlock(t.box)
+	END Run;
+
+	PROCEDURE (t: LateBad) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO t.yields DO Tasks.Yield END;
+		IF ~t.calm THEN NilCrash END
+	END Run;
+
+	PROCEDURE MainTrap (a, b, c: S.ADDRESS);
+	BEGIN
+		NilCrash
+	END MainTrap;
+
+	PROCEDURE TestProcTrapReportedOnce*;
+	(** Трап в теле задачи: задача Finished и Failed, отчёт о трапе один
+		(Kernel.trapCount + 1), err — код трапа. *)
+		VAR b: Bad; n: INTEGER;
+	BEGIN
+		n := Kernel.trapCount;
+		NEW(b); Tasks.Start(b);
+		UnitAssert.True(Pump(2000), "finished");
+		UnitAssert.True(Tasks.Failed(b), "failed");
+		UnitAssert.EqualInt(n + 1, Kernel.trapCount, "one trap report");
+		UnitAssert.EqualInt(Tasks.Finished, Tasks.State(b), "state Finished")
+	END TestProcTrapReportedOnce;
+
+	PROCEDURE TestProcTrapReleasesTaskMonitor*;
+	(** Монитор, взятый в теле трапнувшей задачи, освобождён: ждущая его
+		задача входит, главный стек мониторов не держит. *)
+		VAR m: MonTrapper; k: MonTaker; box: ProbeBox;
+	BEGIN
+		NEW(box);
+		NEW(m); m.box := box; Tasks.Start(m);
+		NEW(k); k.box := box; Tasks.Start(k);
+		UnitAssert.True(Pump(2000), "finished");
+		UnitAssert.True(Tasks.Failed(m), "holder trapped");
+		UnitAssert.True(k.got & ~Tasks.Failed(k), "waiter entered after the trap");
+		UnitAssert.True(~Monitors.IsLocked(box), "monitor free");
+		UnitAssert.EqualInt(0, Monitors.LockDepth(), "main stack holds no monitor")
+	END TestProcTrapReleasesTaskMonitor;
+
+	PROCEDURE TestProcUserTryAcrossSwitches*;
+	(** Свой Kernel.Try в двух задачах, переключения внутри Try; рядом
+		задача без Try трапает. Каждый Try ловит свой трап; tryCount и
+		контекст Try не путаются между стеками. *)
+		VAR a, c: TryYielder; b: LateBad;
+	BEGIN
+		NEW(a); Tasks.Start(a);
+		NEW(b); b.yields := 4; Tasks.Start(b);
+		NEW(c); Tasks.Start(c);
+		UnitAssert.True(Pump(2000), "finished");
+		UnitAssert.EqualInt(2, a.caught, "first task caught both traps");
+		UnitAssert.EqualInt(2, c.caught, "third task caught both traps");
+		UnitAssert.EqualInt(2, a.after, "first task ran past its Try");
+		UnitAssert.EqualInt(2, c.after, "third task ran past its Try");
+		UnitAssert.True(~Tasks.Failed(a) & ~Tasks.Failed(c), "Try tasks not failed");
+		UnitAssert.True(Tasks.Failed(b), "plain task failed")
+	END TestProcUserTryAcrossSwitches;
+
+	PROCEDURE TestProcTrapAfterDirectChain*;
+	(** Трап после цепочки прямых переключений длиннее directMax. *)
+		VAR a, c, b: LateBad;
+	BEGIN
+		NEW(a); a.yields := 300; a.calm := TRUE; Tasks.Start(a);
+		NEW(b); b.yields := 200; Tasks.Start(b);
+		NEW(c); c.yields := 300; c.calm := TRUE; Tasks.Start(c);
+		UnitAssert.True(Pump(3000), "finished");
+		UnitAssert.True(Tasks.Failed(b), "late trap failed the task");
+		UnitAssert.True(~Tasks.Failed(a) & ~Tasks.Failed(c), "neighbours not failed")
+	END TestProcTrapAfterDirectChain;
+
+	PROCEDURE TestProcPoolStackAfterTrap*;
+	(** Стек трапнувшей задачи уходит в пул; задача на нём ловит свой трап
+		и завершается нормально, а следующий трап снова убивает только свою. *)
+		VAR b: Bad; t: TryYielder; b2: Bad;
+	BEGIN
+		NEW(b); Tasks.SetStackSize(b, smallStack); Tasks.Start(b);
+		UnitAssert.True(Pump(2000), "first finished");
+		NEW(t); Tasks.SetStackSize(t, smallStack); Tasks.Start(t);
+		NEW(b2); Tasks.SetStackSize(b2, smallStack); Tasks.Start(b2);
+		UnitAssert.True(Pump(2000), "second finished");
+		UnitAssert.EqualInt(2, t.caught, "Try on a reused stack works");
+		UnitAssert.True(~Tasks.Failed(t), "reused stack task not failed");
+		UnitAssert.True(Tasks.Failed(b2), "next trap kills its own task")
+	END TestProcPoolStackAfterTrap;
+
+	PROCEDURE TestProcMainTryAfterTaskTrap*;
+	(** После трапа в задаче Kernel.Try главного стека ловит свой трап и
+		возвращает управление сюда. *)
+		VAR b: Bad; n: INTEGER;
+	BEGIN
+		NEW(b); Tasks.Start(b);
+		UnitAssert.True(Pump(2000), "finished");
+		n := Kernel.trapCount;
+		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(MainTrap)), 0, 0, 0);
+		UnitAssert.EqualInt(n + 1, Kernel.trapCount, "main Try caught");
+		UnitAssert.True(~Tasks.InTask(), "back on the main stack");
+		NEW(b); Tasks.Start(b);
+		UnitAssert.True(Pump(2000), "next task trap handled");
+		UnitAssert.True(Tasks.Failed(b), "failed")
+	END TestProcMainTryAfterTaskTrap;
 
 END System_devTasks.
