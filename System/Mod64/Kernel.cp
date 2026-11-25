@@ -52,6 +52,15 @@ MODULE Kernel;
 		   удерживают объекты, но не теряют их. *)
 		switchSaveSlack = 256;
 
+		(* Сегментированный стек пробы: кусок несёт свой StackDesc и запись
+		   возврата в верху; снизу остаётся запас segReserve, выше него
+		   действует та же проверка пролога с stackReserve = 1024. *)
+		segHdr = 128;		(* StackDesc в верху куска *)
+		segMeta = 64;		(* запись возврата (SegMeta) под ним *)
+		segSlack = 1024;	(* запас под проверкой пролога над низом куска *)
+		segPoolMax = 256;	(* кусков в пуле *)
+		segPendingMax = 1024;	(* отложенных освобождений без запасного куска *)
+
 		nameLen* = 256;
 
 		littleEndian* = TRUE;
@@ -291,9 +300,21 @@ MODULE Kernel;
 			tryContext: S.ADDRESS;	(* платформенный контекст последнего Kernel.Try *)
 			trapStack: TrapCleaner;	(* цепочка уборщиков на этом стеке *)
 			tryCount: INTEGER;
+			stkLo*: S.ADDRESS;		(* низ текущего куска + запас; переносится переключателем *)
+			seg*: BOOLEAN;			(* кусок сегментированного стека растёт дальше *)
+			owner*: Stack;			(* для куска роста — запись стартового стека задачи *)
 			signal: BOOLEAN;		(* сигнальный стек: сканировать прерванный стек по Kernel.sp *)
 			main: BOOLEAN			(* главный стек процесса *)
 		END;
+
+		(* Кусок сегментированного стека: запись возврата лежит в его верху,
+		   смещения связаны с кодом трамплина в DevCPCamd64.EmitTrampoline. *)
+		SegMeta = POINTER TO RECORD [untagged]
+			oldRsp, oldRet, oldStkLo, segHi, segLo: S.ADDRESS;
+			segSize, pad: INTEGER;
+			doneProc: S.ADDRESS
+		END;
+		SegEnt = RECORD lo, hi: S.ADDRESS; size: INTEGER END;
 
 		PtrType = RECORD v: S.PTR END;	(* used for array of pointer *)
 		Char8Type = RECORD v: SHORTCHAR END;
@@ -427,6 +448,17 @@ MODULE Kernel;
 		stacks: Stack;		(* реестр стеков; первый — главный *)
 		mainStack: Stack;
 		mainStackRec: StackDesc;	(* статическая запись: регистрация до кучи *)
+
+		(* Пул кусков сегментированного стека (проба). segKeep: кусок
+		   возвращается в пул; FALSE — копится в segPending и освобождается
+		   ядру при следующем росте. *)
+		segEnabled, segKeep: BOOLEAN;
+		segSize, segReserve: INTEGER;
+		segPool: ARRAY segPoolMax OF SegEnt;
+		segPoolN: INTEGER;
+		segPending: ARRAY segPendingMax OF SegEnt;
+		segPendingN: INTEGER;
+		segGrows: LONGINT;
 
 		(* Крючки: мониторы ставит Monitors, планировщик — Tasks.
 		   Ядро не импортирует эти модули (циклическая зависимость). *)
@@ -1659,6 +1691,7 @@ MODULE Kernel;
 		NEW(s);
 		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
 		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
+		s.stkLo := 0; s.seg := FALSE; s.owner := NIL;
 		s.signal := signal; s.main := FALSE;
 		s.prev := NIL; s.next := stacks;
 		IF stacks # NIL THEN stacks.prev := s END;
@@ -1698,14 +1731,180 @@ MODULE Kernel;
 
 	PROCEDURE [code] Trap137 8DH, 0F0H, 89H;	(* LEA с mod=11 недопустим: SIGILL, номер трапа 137 *)
 
+	PROCEDURE [code] EnterSegment (newRbp, cont: S.ADDRESS)
+	(* CProc: первый параметр приходит в RAX, второй лежит на стеке [rsp].
+	   Перейти на новый кусок и продолжить пролог; старый стек брошен. *)
+		4CH, 8BH, 1CH, 24H,		(* mov r11,[rsp] — адрес продолжения *)
+		48H, 89H, 0C4H,			(* mov rsp,rax *)
+		48H, 89H, 0C5H,			(* mov rbp,rax *)
+		41H, 0FFH, 0E3H;		(* jmp r11 *)
+
+	PROCEDURE^ SegmentDone (adr: S.ADDRESS);
+	PROCEDURE^ UnregisterStack* (s: Stack);
+
+	PROCEDURE FlushPending;
+	(* Освободить ядру куски, отложенные возвратом без запасного куска. *)
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE i < segPendingN DO
+			platform.DeallocateStackMem(segPending[i].lo, segPending[i].hi); INC(i)
+		END;
+		segPendingN := 0
+	END FlushPending;
+
+	PROCEDURE TakeSegment (need: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(* Кусок не меньше need: из пула (последний подходящий) или новый mmap. *)
+		VAR i, sz, page: INTEGER;
+	BEGIN
+		lo := 0; hi := 0;
+		IF ~segKeep THEN FlushPending END;
+		IF segPoolN > 0 THEN
+			i := segPoolN - 1;
+			WHILE (i >= 0) & (segPool[i].size < need) DO DEC(i) END;
+			IF i >= 0 THEN
+				lo := segPool[i].lo; hi := segPool[i].hi;
+				DEC(segPoolN); segPool[i] := segPool[segPoolN];
+				RETURN TRUE
+			END
+		END;
+		sz := segSize;
+		IF sz < need THEN
+			page := platform.PageSize();
+			sz := (need + page - 1) DIV page * page
+		END;
+		platform.AllocateStackMem(sz, lo, hi);
+		RETURN lo # 0
+	END TakeSegment;
+
+	PROCEDURE ReturnSegment (lo, hi: S.ADDRESS; size: INTEGER);
+	(* segKeep — в пул; иначе отложить до следующего роста (на этом куске
+	   ещё исполняется SegmentDone, munmap сейчас недопустим). *)
+	BEGIN
+		IF segKeep THEN
+			IF segPoolN < segPoolMax THEN
+				segPool[segPoolN].lo := lo; segPool[segPoolN].hi := hi; segPool[segPoolN].size := size;
+				INC(segPoolN)
+			ELSE platform.DeallocateStackMem(lo, hi)
+			END
+		ELSE
+			IF segPendingN < segPendingMax THEN
+				segPending[segPendingN].lo := lo; segPending[segPendingN].hi := hi; segPending[segPendingN].size := size;
+				INC(segPendingN)
+			ELSE platform.DeallocateStackMem(lo, hi)
+			END
+		END
+	END ReturnSegment;
+
 	PROCEDURE GrowStack* (paramSize, frameSize: INTEGER; frameAdr, cont: S.ADDRESS);
 	(** Пролог процедуры с ключом "%" при нехватке места (см. DevCPCamd64.StackCheck).
 		paramSize — размер параметров (число из ret n), frameSize — кадр,
 		frameAdr — rsp после push rbp, cont — продолжение пролога.
-		Пока сегментированный режим выключен — трап 137, как у прежней проверки. *)
+		Кусок несёт свой StackDesc и запись возврата в верху; параметры
+		копируются на него, [rbp] получает адрес кадра вызывающего, [rbp+8] —
+		продолжение. Режим выключен — трап 137, как у прежней проверки. *)
+		VAR old: Stack; lo, hi, rbp, tp, a: S.ADDRESS; need: INTEGER; t: SegMeta; rec: Stack;
 	BEGIN
-		Trap137
+		IF ~segEnabled THEN Trap137 END;
+		old := StackOf(frameAdr);
+		IF (old = NIL) OR ~old.seg OR old.signal OR old.main THEN Trap137 END;
+		IF paramSize < 0 THEN Trap137 END;
+		need := segReserve + frameSize + segSlack + paramSize + segHdr + segMeta + 32;
+		IF ~TakeSegment(need, lo, hi) THEN Trap137 END;
+		tp := hi - segHdr - segMeta - 8;	(* слот указателя на запись возврата *)
+		rbp := tp - 16 - paramSize;
+		IF rbp - frameSize - segSlack < lo + segReserve THEN
+			ReturnSegment(lo, hi, SHORT(hi - lo)); Trap137
+		END;
+		S.GET(frameAdr, a); S.PUT(rbp, a);	(* сохранённый rbp вызывающего *)
+		S.PUT(rbp + 8, cont);			(* продолжение пролога *)
+		IF paramSize > 0 THEN S.MOVE(frameAdr + 16, rbp + 16, paramSize) END;
+		t := S.VAL(SegMeta, hi - segHdr - segMeta);
+		t.oldRsp := frameAdr + 16 + paramSize;
+		S.GET(frameAdr + 8, a); t.oldRet := a;
+		t.oldStkLo := stkLo; t.segHi := hi; t.segLo := lo; t.segSize := SHORT(hi - lo); t.pad := 0;
+		t.doneProc := S.ADR(SegmentDone);
+		S.PUT(tp, S.VAL(S.ADDRESS, t));		(* [rsp] при возврате процедуры *)
+		(* Запись куска: StackDesc лежит в верху куска, отдельных NEW нет. *)
+		rec := S.VAL(Stack, hi - segHdr);
+		rec.lo := lo; rec.hi := hi; rec.sp := rbp; rec.fp := 0;
+		rec.tryContext := 0; rec.trapStack := NIL; rec.tryCount := 0; rec.stkLo := 0;
+		rec.seg := TRUE; rec.signal := FALSE; rec.main := FALSE;
+		IF old.owner # NIL THEN rec.owner := old.owner ELSE rec.owner := old END;
+		rec.prev := NIL; rec.next := stacks; IF stacks # NIL THEN stacks.prev := rec END; stacks := rec;
+		(* Старый кусок спят: сборщик сканирует его от кадра F, включая
+		   исходные параметры, пока новый кусок не стал текущим. *)
+		old.sp := frameAdr;
+		stkLo := lo + segReserve;
+		INC(segGrows);
+		EnterSegment(rbp, cont)
 	END GrowStack;
+
+	PROCEDURE SegmentDone (adr: S.ADDRESS);
+	(* Зовётся трамплином на возвращаемом куске. Снять запись из реестра,
+	   вернуть stkLo и отдать кусок; поля записи читаются до возврата. *)
+		VAR t: SegMeta; rec: Stack; lo, hi: S.ADDRESS; size: INTEGER; olds: S.ADDRESS;
+	BEGIN
+		t := S.VAL(SegMeta, adr);
+		lo := t.segLo; hi := t.segHi; size := t.segSize; olds := t.oldStkLo;
+		rec := S.VAL(Stack, hi - segHdr);
+		UnregisterStack(rec);
+		stkLo := olds;
+		ReturnSegment(lo, hi, size)
+	END SegmentDone;
+
+	PROCEDURE ReleaseSegments* (base: Stack);
+	(** Снять с реестра и вернуть все куски роста задачи base. Зовётся при
+		уборке завершённой или трапнувшей задачи: siglongjmp через границу
+		кусков оставляет более новые куски зарегистрированными. *)
+		VAR s, next: Stack;
+	BEGIN
+		s := stacks;
+		WHILE s # NIL DO
+			next := s.next;
+			IF (s # base) & (s.owner = base) THEN
+				UnregisterStack(s);
+				ReturnSegment(s.lo, s.hi, SHORT(s.hi - s.lo))
+			END;
+			s := next
+		END
+	END ReleaseSegments;
+
+	PROCEDURE SetSegmentedStacks* (on: BOOLEAN; size, reserve: INTEGER);
+	(** Включить/выключить сегментированный стек задач (проба). size — размер
+		куска роста, reserve — запас ниже Kernel.stkLo. *)
+	BEGIN
+		IF ~on THEN FlushPending END;
+		segEnabled := on; segSize := size; segReserve := reserve
+	END SetSegmentedStacks;
+
+	PROCEDURE SetSegmentKeep* (keep: BOOLEAN);
+	(** TRUE — возвращённый кусок остаётся в пуле (запасной), FALSE — куски
+		кучкуются до следующего роста и освобождаются ядру. *)
+	BEGIN
+		segKeep := keep
+	END SetSegmentKeep;
+
+	PROCEDURE SegmentPoolCount* (): INTEGER;
+	BEGIN
+		RETURN segPoolN
+	END SegmentPoolCount;
+
+	PROCEDURE SegmentPendingCount* (): INTEGER;
+	BEGIN
+		RETURN segPendingN
+	END SegmentPendingCount;
+
+	PROCEDURE GrowCount* (): LONGINT;
+	(** Сколько раз задачи переходили на новый кусок (проба). *)
+	BEGIN
+		RETURN segGrows
+	END GrowCount;
+
+	PROCEDURE ResetGrowCount*;
+	BEGIN
+		segGrows := 0
+	END ResetGrowCount;
 
 	PROCEDURE AllocStacks* (size, n: INTEGER; OUT base: S.ADDRESS; OUT step, guard: INTEGER): BOOLEAN;
 	(** Пред: n > 0. Пост: TRUE — плита из n стеков по size со сторожевыми страницами
@@ -1740,17 +1939,23 @@ MODULE Kernel;
 		состояние исполнения в запись стека и очистить глобальное, чтобы
 		следующий стек начал со своего. s — запись текущего стека; NIL —
 		найти её по указателю стека. *)
-		VAR sp, fpp: S.ADDRESS; ar: AdrRef;
+		VAR sp, fpp: S.ADDRESS; ar: AdrRef; cs: Stack;
 	BEGIN
 		IF monTop # monBase THEN FlushMonitors END;	(* взятия быстрым путём — этого стека *)
 		S.GETREG(SP, sp);
 		IF s = NIL THEN s := StackOf(sp) END;
 		IF s # NIL THEN
-			(* Скан спящего стека идёт от s.sp; сохраняемые переключателем
-			   регистры лежат ниже SP на момент вызова. Опускаем границу
-			   на запас, чтобы они попали в скан (но не ниже дна стека). *)
-			s.sp := sp - switchSaveSlack;
-			IF S.VAL(LONGINT, s.sp) < S.VAL(LONGINT, s.lo) THEN s.sp := s.lo END;
+			(* Граница скана — у того куска, на котором стоим. Обычный стек
+			   (в том числе плотный) содержит SP сам: поиск в реестре не нужен.
+			   Он нужен только на куске роста, а это редкий путь. Контекст
+			   Kernel.Try — у s: задачи передают запись своего основного
+			   стека, а кусок роста меняется. *)
+			IF (s.lo <= sp) & (sp < s.hi) THEN cs := s
+			ELSE
+				cs := StackOf(sp); IF cs = NIL THEN cs := s END
+			END;
+			cs.sp := sp - switchSaveSlack;
+			IF S.VAL(LONGINT, cs.sp) < S.VAL(LONGINT, cs.lo) THEN cs.sp := cs.lo END;
 			(* FP нужен, чтобы обойти кадры спящего стека. Берём кадр
 			   ВЫЗЫВАЮЩЕГО SwitchSave, а не свой: свой кадр умирает по
 			   возврате из SwitchSave, ещё до сырого переключения, и
@@ -1759,7 +1964,8 @@ MODULE Kernel;
 			   переключения. *)
 			S.GETREG(FP, fpp);
 			ar := S.VAL(AdrRef, fpp);
-			s.fp := ar.a;
+			cs.fp := ar.a;
+			s.stkLo := stkLo;	(* низ куска, на котором стоим *)
 			IF platform # NIL THEN s.tryContext := platform.GetTryContext() END;
 			s.trapStack := trapStack;
 			s.tryCount := tryCount
@@ -1776,10 +1982,12 @@ MODULE Kernel;
 	BEGIN
 		IF s = NIL THEN S.GETREG(SP, sp); s := StackOf(sp) END;
 		IF s # NIL THEN
+			stkLo := s.stkLo;
 			IF platform # NIL THEN platform.SetTryContext(s.tryContext) END;
 			trapStack := s.trapStack;
 			tryCount := s.tryCount
 		ELSE
+			stkLo := 0;
 			IF platform # NIL THEN platform.SetTryContext(0) END;
 			trapStack := NIL; tryCount := 0
 		END
@@ -3049,13 +3257,15 @@ MODULE Kernel;
 	(** Мониторы реализует модуль Monitors: крючок запоминает глубину цепочки
 		взятий и при трапе снимает всё, взятое внутри h.
 		Нормальный выход оставляет сбалансированную цепочку. *)
-		VAR mark: INTEGER;
+		VAR mark: INTEGER; oldStk: S.ADDRESS;
 	BEGIN
 		IF ~platform.initialized THEN
 			BString('Fatal: No Platform hook installed into Kernel'); BLn; Quit(1)
 		ELSE
 			IF monitorHook # NIL THEN mark := monitorHook.beginTry() ELSE mark := 0 END;
+			oldStk := stkLo;
 			INC(tryCount); platform.Try(h, a, b, c); DEC(tryCount);
+			stkLo := oldStk;	(* трап мог вернуться с более нового куска *)
 			IF monitorHook # NIL THEN monitorHook.endTry(mark) END
 		END
 	END Try;
@@ -3069,14 +3279,15 @@ MODULE Kernel;
 		вызывающего и зовётся after(a, b, c) — до снятия мониторов этого Try.
 		Пред: TryTasks не открыт (20).
 		Пост: FALSE — платформа не поддерживает TryShared, h и after не вызваны. *)
-		VAR mark, cnt: INTEGER; ts: TrapCleaner; ok: BOOLEAN;
+		VAR mark, cnt: INTEGER; ts: TrapCleaner; ok: BOOLEAN; oldStk: S.ADDRESS;
 	BEGIN
 		ASSERT(~inTryTasks, 20);
 		IF monitorHook # NIL THEN mark := monitorHook.beginTry() ELSE mark := 0 END;
-		ts := trapStack; INC(tryCount); cnt := tryCount;
+		ts := trapStack; INC(tryCount); cnt := tryCount; oldStk := stkLo;
 		inTryTasks := TRUE;
 		ok := platform.TryShared(h, a, b, c);
 		inTryTasks := FALSE;
+		stkLo := oldStk;	(* трап задачи вернулся сюда со своего стека *)
 		trapStack := ts; tryCount := cnt;
 		IF ok THEN after(a, b, c) END;
 		DEC(tryCount);

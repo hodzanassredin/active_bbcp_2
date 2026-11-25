@@ -52,6 +52,9 @@ MODULE Tasks;
 			DevCPE пишет в объектный файл биты опций 0..15) *)
 		denseReserve = 8 * 1024;	(* запас UseDenseStacks: глубина кода без проверки по замеру
 			(docs/stacks-study.md, 6.5) — не больше 7,8 КБ на всех тестах *)
+		segReserve = 2 * 1024;	(* запас куска и стартового стека пробы: рост и код без проверки *)
+		segBase = 4 * 1024;		(* стартовый кусок (стек задачи) *)
+		segGrowth = 8 * 1024;	(* кусок роста *)
 		word = Taskarch.word;
 		defaultSlice = 5;	(* мс на шаг планировщика *)
 		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
@@ -115,6 +118,7 @@ MODULE Tasks;
 			live: INTEGER;		(* стеков у задач *)
 			reserve: INTEGER;	(* 0 — сторож под стеком; иначе запас ниже Kernel.stkLo *)
 			checked: BOOLEAN;	(* код задачи должен быть собран с ключом % *)
+			segmented: BOOLEAN;	(* стеки растут кусками (проба): пролог зовёт GrowStack *)
 			keep: BOOLEAN;		(* стеки не возвращаются ядру по одному (FreeStack не зовётся) *)
 			listed: BOOLEAN;	(* в списке dirs *)
 			nextDir: StackDir
@@ -128,13 +132,14 @@ MODULE Tasks;
 			slabStep, slabGuard, slabSize: INTEGER
 		END;
 		DenseSlab = POINTER TO RECORD lo, hi: S.ADDRESS; next: DenseSlab END;
-		DenseDir = POINTER TO RECORD (StackDir)
+		DenseDir = POINTER TO EXTENSIBLE RECORD (StackDir)
 			(* Плотная плита: стеки вплотную, одна сторожевая страница под плитой.
 			   Невыданные — [next, end) снизу вверх, шаг step. *)
 			next, end: S.ADDRESS;
 			step: INTEGER;
 			slabs: DenseSlab
 		END;
+		SegDir = POINTER TO RECORD (DenseDir) END;	(* плотные стартовые стеки, растут кусками *)
 
 		ProbeA = POINTER TO RECORD (Task) END;	(* два Run: по разнице таблиц методов — номер Run *)
 		ProbeB = POINTER TO RECORD (Task) END;
@@ -294,7 +299,7 @@ MODULE Tasks;
 	BEGIN
 		IF Kernel.monTop # Kernel.monBase THEN Kernel.FlushMonitors END;
 		current := t;
-		IF t # NIL THEN Kernel.monTok := S.ADR(t^); Kernel.stkLo := t.lo + t.dir.reserve
+		IF t # NIL THEN Kernel.monTok := S.ADR(t^)
 		ELSE Kernel.monTok := Kernel.mainToken; Kernel.stkLo := 0
 		END
 	END SetCurrent;
@@ -716,6 +721,17 @@ MODULE Tasks;
 		NEW(d); d.reserve := reserve; d.checked := TRUE; d.keep := TRUE; RETURN d
 	END NewDenseDir;
 
+	PROCEDURE NewSegDir* (reserve: INTEGER): StackDir;
+	(** Поставщик пробы: стартовые стеки — плотные плиты (как NewDenseDir),
+		при нехватке места задача растёт кусками Kernel.GrowStack. Пред:
+		reserve >= word (трап 20). *)
+		VAR d: SegDir;
+	BEGIN
+		ASSERT(reserve >= word, 20);
+		NEW(d); d.reserve := reserve; d.checked := TRUE; d.keep := TRUE; d.segmented := TRUE;
+		RETURN d
+	END NewSegDir;
+
 	PROCEDURE InitStackDir* (d: StackDir; reserve: INTEGER; checked, keep: BOOLEAN);
 	(** Для поставщика вне модуля, до первой выдачи. Пред: d # NIL (20), стеков
 		ещё не выдавал (21), reserve = 0 или reserve >= word (22). *)
@@ -762,6 +778,40 @@ MODULE Tasks;
 	BEGIN
 		SetStackDir(NewDenseDir(denseReserve))
 	END UseDenseStacks;
+
+	PROCEDURE SetSegmentParams* (reserve, base, growth: INTEGER);
+	(** Проба сегментированного стека: новые проверенные задачи начинают со
+		стека base байт (поставщик NewSegDir с запасом reserve) и растут
+		кусками growth. Пред: reserve >= word (20), base > 0 (21), growth > 0 (22). *)
+	BEGIN
+		ASSERT(reserve >= word, 20); ASSERT(base > 0, 21); ASSERT(growth > 0, 22);
+		Kernel.SetSegmentedStacks(TRUE, growth, reserve);
+		Kernel.SetSegmentKeep(TRUE);	(* по умолчанию кусок остаётся запасным *)
+		SetStackDir(NewSegDir(reserve));
+		stackDefault := base
+	END SetSegmentParams;
+
+	PROCEDURE UseSegmentedStacks*;
+	(** Команда: проба сегментированного стека с параметрами по умолчанию
+		(стартовый кусок segBase, рост segGrowth, запас segReserve). *)
+	BEGIN
+		SetSegmentParams(segReserve, segBase, segGrowth)
+	END UseSegmentedStacks;
+
+	PROCEDURE SegmentKeep* (keep: BOOLEAN);
+	(** Запасной кусок: TRUE — возвращённый кусок остаётся в пуле задач,
+		FALSE — освобождается ядру при следующем росте (замер горячей границы). *)
+	BEGIN
+		Kernel.SetSegmentKeep(keep)
+	END SegmentKeep;
+
+	PROCEDURE StopSegmentedStacks*;
+	(** Выключить рост кусками; новые задачи снова берут стеки у поставщика
+		со сторожем. *)
+	BEGIN
+		Kernel.SetSegmentedStacks(FALSE, 0, 0);
+		SetStackDir(guardDir)
+	END StopSegmentedStacks;
 
 	PROCEDURE TakeStack (d: StackDir; size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
 	(* Пред: size > 0. Пост: TRUE — [lo, hi) пригоден под стек, запрошенный у d
@@ -865,6 +915,8 @@ MODULE Tasks;
 		IF ~d.listed THEN d.listed := TRUE; d.nextDir := dirs; dirs := d END;
 		INC(d.live); t.dir := d;
 		t.lo := lo; t.hi := hi;
+		t.stackRec.stkLo := lo + d.reserve;	(* граница для проверки в прологе; переключатель переносит *)
+		t.stackRec.seg := d.segmented;		(* растёт кусками только проверенный стартовый стек *)
 		IF d.reserve # 0 THEN S.PUT(lo, canaryCell) END;	(* канарейка у дна плотного стека *)
 		(* 13 нулевых слотов регистров (обнуляются ниже: стек из пула не пуст), адрес входа,
 		   8 байт запаса: sp % 16 = 8, после 13 pop и ret rsp % 16 = 8 *)
@@ -914,7 +966,10 @@ MODULE Tasks;
 		IF t.prev = NIL THEN all := t.next ELSE t.prev.next := t.next END;
 		IF t.next # NIL THEN t.next.prev := t.prev END;
 		t.next := NIL; t.prev := NIL;
-		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL END;
+		IF t.stackRec # NIL THEN
+			IF t.stackRec.seg THEN Kernel.ReleaseSegments(t.stackRec) END;
+			Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL
+		END;
 		IF t.lo # 0 THEN
 			IF t.dir.reserve # 0 THEN
 				S.GET(t.lo, c); IF c # canaryCell THEN StackBroken(t, FALSE) END
@@ -1360,7 +1415,10 @@ CLOSE
 	Services.RemoveAction(sched);
 	Kernel.SetScheduler(NIL);
 	WHILE all # NIL DO
-		IF all.stackRec # NIL THEN Kernel.UnregisterStack(all.stackRec); all.stackRec := NIL END;
+		IF all.stackRec # NIL THEN
+			IF all.stackRec.seg THEN Kernel.ReleaseSegments(all.stackRec) END;
+			Kernel.UnregisterStack(all.stackRec); all.stackRec := NIL
+		END;
 		IF all.lo # 0 THEN GiveStack(all.dir, StackSizeOf(all), all.lo, all.hi); DEC(all.dir.live) END;
 		all.lo := 0; all.hi := 0;
 		all := all.next

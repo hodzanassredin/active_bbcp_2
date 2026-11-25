@@ -27,3 +27,5 @@ Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer 
 System_devStackChk|proc|300||%
 System_devSchedTrap|proc|300||
 System_devStackDirs|proc|300|System_devStackPlain|%
+# Проба сегментированного стека: рост кусками из пролога ключа %.
+System_devSegStacks|proc|600||%

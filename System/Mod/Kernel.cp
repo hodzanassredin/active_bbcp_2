@@ -268,6 +268,8 @@ MODULE Kernel;
 			tryContext: S.ADDRESS;	(* платформенный контекст последнего Kernel.Try *)
 			trapStack: TrapCleaner;
 			tryCount: INTEGER;
+			stkLo*: S.ADDRESS;		(* низ стека + запас; переносится переключателем *)
+			seg*: BOOLEAN;			(* признак куска роста (на i386 не используется) *)
 			signal: BOOLEAN;		(* сигнальный стек *)
 			main: BOOLEAN			(* главный стек процесса *)
 		END;
@@ -1954,6 +1956,7 @@ MODULE Kernel;
 		s := S.VAL(Stack, NewRec(S.TYP(Stack)));
 		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
 		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
+		s.stkLo := 0; s.seg := FALSE;
 		s.signal := signal; s.main := FALSE;
 		s.prev := NIL; s.next := stacks;
 		IF stacks # NIL THEN stacks.prev := s END;
@@ -1998,6 +2001,20 @@ MODULE Kernel;
 		Trap137
 	END GrowStack;
 
+	PROCEDURE SetSegmentedStacks* (on: BOOLEAN; size, reserve: INTEGER);
+	(** Сегментированный стек — только amd64; на i386 ничего не меняет. *)
+	BEGIN
+	END SetSegmentedStacks;
+
+	PROCEDURE SetSegmentKeep* (keep: BOOLEAN);
+	BEGIN
+	END SetSegmentKeep;
+
+	PROCEDURE ReleaseSegments* (base: Stack);
+	(** На i386 кусков роста нет. *)
+	BEGIN
+	END ReleaseSegments;
+
 	PROCEDURE AllocStacks* (size, n: INTEGER; OUT base: S.ADDRESS; OUT step, guard: INTEGER): BOOLEAN;
 	(** Пред: n > 0. Пост: TRUE — плита из n стеков по size со сторожевыми страницами
 		размером guard (AllocateStackSlab); FALSE — платформа плит не даёт или памяти нет. *)
@@ -2029,7 +2046,7 @@ MODULE Kernel;
 	PROCEDURE SwitchSave* (s: Stack);
 	(** Сохранить состояние исполнения текущего стека перед переключением.
 		s — запись текущего стека; NIL — найти её по указателю стека. *)
-		VAR sp, fpp: S.ADDRESS; ar: AdrRef;
+		VAR sp, fpp: S.ADDRESS; ar: AdrRef; cs: Stack;
 	BEGIN
 		IF monTop # monBase THEN FlushMonitors END;	(* взятия быстрым путём — этого стека *)
 		S.GETREG(SP, sp);
@@ -2038,11 +2055,16 @@ MODULE Kernel;
 			(* Скан спящего стека идёт от s.sp; сохраняемые переключателем
 			   регистры лежат ниже SP на момент вызова. Опускаем границу
 			   на запас, чтобы они попали в скан (но не ниже дна стека). *)
-			s.sp := sp - switchSaveSlack;
-			IF S.VAL(INTEGER, s.sp) < S.VAL(INTEGER, s.lo) THEN s.sp := s.lo END;
+			IF (s.lo <= sp) & (sp < s.hi) THEN cs := s
+			ELSE
+				cs := StackOf(sp); IF cs = NIL THEN cs := s END
+			END;
+			cs.sp := sp - switchSaveSlack;
+			IF S.VAL(INTEGER, cs.sp) < S.VAL(INTEGER, cs.lo) THEN cs.sp := cs.lo END;
 			S.GETREG(FP, fpp);
 			ar := S.VAL(AdrRef, fpp);
-			s.fp := ar.a;
+			cs.fp := ar.a;
+			s.stkLo := stkLo;
 			IF platform # NIL THEN s.tryContext := platform.GetTryContext() END;
 			s.trapStack := trapStack;
 			s.tryCount := tryCount
@@ -2058,10 +2080,12 @@ MODULE Kernel;
 	BEGIN
 		IF s = NIL THEN S.GETREG(SP, sp); s := StackOf(sp) END;
 		IF s # NIL THEN
+			stkLo := s.stkLo;
 			IF platform # NIL THEN platform.SetTryContext(s.tryContext) END;
 			trapStack := s.trapStack;
 			tryCount := s.tryCount
 		ELSE
+			stkLo := 0;
 			IF platform # NIL THEN platform.SetTryContext(0) END;
 			trapStack := NIL; tryCount := 0
 		END
