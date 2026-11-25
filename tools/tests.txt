@@ -44,6 +44,8 @@ Raft_devSim||300|RaftCore RaftSm RaftStorage KvPages KvStore KvFault KvTree KvDb
 Raft_devNode|proc|900|ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim RaftCore RaftSm RaftStorage RaftNode
 # Журнал стойких акторов поверх Raft: пул ActorRun, свои часы узлов, гибель и разрыв лидера.
 Raft_devJournal|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem RaftCore RaftSm RaftStorage RaftNode RaftJournal
+# Стойкие акторы на RaftJournal под ActorSim по зёрнам: запись с ответом позже, сбои, два воплощения, мутации.
+Raft_devPersist|proc|900|ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim RaftCore RaftSm RaftStorage RaftNode RaftJournal
 # Хранилище Kv: страницы, дерево против эталона, обрыв питания в каждой точке фиксации.
 Kv_devBasic|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
