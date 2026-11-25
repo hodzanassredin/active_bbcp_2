@@ -1,27 +1,46 @@
-# Active BlackBox
+# BlackBox с задачами
 
-BlackBox Component Builder 2.0 для Linux x86-64 с расширением языка Active Component Pascal:
-задачами на собственных стеках, мониторами и библиотекой `Async`. Исходники — UTF-8 `.cp`,
-документация — `.md`, окно — GTK4. Проект продолжает BlackBox Cross-Platform и сохраняет его
-каркас, компилятор и консоль.
+BlackBox Component Builder 2.0 для Linux x86-64 с модулем `Tasks`: кооперативные задачи на
+собственных стеках, монитор-объект `Tasks.Object`, пропуск `Tasks.Ctx`, группы и `Spawn`.
+Исходники — UTF-8 `.cp`, документация — `.md`, окно — GTK4. Проект продолжает BlackBox
+Cross-Platform и сохраняет его каркас, компилятор и консоль.
 
-Язык не получает новых ключевых слов: исключающая процедура помечается системным флагом
-`[exclusive]`, ожидание условия — процедурой `ACTIVE.AWAIT`. Задачи создаёт библиотечный модуль
-`Tasks`; программа, не импортирующая `ACTIVE`, остаётся программой на Component Pascal.
+Язык Component Pascal не расширяется: новых ключевых слов, флагов процедур и псевдомодулей нет.
+Задачи и мониторы — обычные модули на Component Pascal; программа, не импортирующая `Tasks`,
+остаётся программой на Component Pascal.
 
 ```
-MODULE ObxBuffer;
-	IMPORT ACTIVE;
+MODULE Buffer;
+	IMPORT Tasks;
 
-	TYPE Buffer* = POINTER TO RECORD n: INTEGER; data: ARRAY 8 OF INTEGER END;
+	TYPE
+		Buffer* = POINTER TO RECORD (Tasks.Object)
+			n: INTEGER; data: ARRAY 8 OF INTEGER
+		END;
+		PutOp* = RECORD (Tasks.Op) x: INTEGER END;
+		GetOp* = RECORD (Tasks.Op) x: INTEGER END;
 
-	PROCEDURE [exclusive] (b: Buffer) Put* (x: INTEGER), NEW;
+	PROCEDURE (b: Buffer) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
-		ACTIVE.AWAIT(b.n < LEN(b.data));
-		b.data[b.n] := x; INC(b.n)
-	END Put;
+		WITH op: PutOp DO
+			WHILE b.n = LEN(b.data) DO IF ~b.Await(ctx, {0}) THEN RETURN END END;
+			b.data[b.n] := op.x; INC(b.n)
+		| op: GetOp DO
+			WHILE b.n = 0 DO IF ~b.Await(ctx, {1}) THEN RETURN END END;
+			DEC(b.n); op.x := b.data[b.n]
+		END
+	END Exclusive;
 
-END ObxBuffer.
+	PROCEDURE (b: Buffer) Ready (): SET;
+		VAR s: SET;
+	BEGIN
+		s := {};
+		IF b.n < LEN(b.data) THEN INCL(s, 0) END;
+		IF b.n > 0 THEN INCL(s, 1) END;
+		RETURN s
+	END Ready;
+
+END Buffer.
 ```
 
 ## Отличия от исходной системы
@@ -31,34 +50,22 @@ END ObxBuffer.
 
 Модуль `Tasks` даёт кооперативные задачи с собственным стеком. Планировщик работает в главном
 цикле BlackBox; задачи можно отменять, объединять в группы, а тупик попадает в журнал. Код Component
-Pascal исполняет одна нить ОС, поэтому задача отдаёт процессор только в точках
-переключения. В точке ожидания задача переключается прямо на следующую готовую, без стека
-планировщика — до 64 раз подряд, после чего управление возвращается в `Step`.
+Pascal исполняет одна нить ОС, поэтому задача отдаёт процессор только в точках переключения. В точке
+ожидания задача переключается прямо на следующую готовую, без стека планировщика — до 64 раз
+подряд, после чего управление возвращается в `Step`.
 
-Монитор задаётся флагом `[exclusive]` у метода или процедуры модуля, ожидание условия —
-`ACTIVE.AWAIT(условие)`. Процедуры модуля разделяют монитор модуля, повторный вход допустим, при
-трапе монитор снимается. Запись, у которой объявлен исключающий метод, получает скрытое поле
-владельца `@mon`, и компилятор ставит вход и выход свободного монитора прямо в исключающую
-процедуру — 2–3 нс на пару против 64 (Go `sync.Mutex` — 3). Занятый монитор, ожидание и трап идут
-прежним путём через обычный модуль `Monitors`; в ядре остаются заглушки, которые зовёт
-сгенерированный код. Токен текущей задачи лежит в `Kernel.monTok`. Ключ компиляции `^` вставляет
-точку уступки `Kernel.Poll` в конец тела каждого цикла.
+Монитор-объект `Tasks.Object` — обычная запись-наследник с методом `Exclusive-`; его зовёт
+`Do`, передавая пропуск `Tasks.Ctx` и запрос `Tasks.Op`. Повторный вход и ожидание условия
+(`Await`, `AwaitCond`) — в самом объекте; при трапе занятые мониторы отпускаются. Задание
+(`Tasks.Job`) исполняет тело за один запуск, задачу (`Tasks.Task`) можно запускать повторно.
 
 Ядро регистрирует стеки задач и сканирует их при сборке мусора; модуль, код которого есть в
 каком-либо кадре, не выгружается. Периодическая сборка пропускается, если с прошлой не было
 выделений. Ядро собирает мусор, когда с прошлой сборки выделено не меньше выжившего в ней и не
-меньше 4 МБ, а не при каждой нехватке свободного блока; первое создание задачи стоит 7,9 мкс
-против 48 мкс, `Yield` — 51 нс против 88, пиковая память замера растёт на 4 %. Каждый объект типа
-с исключающими методами занимает на слово больше, и у типа меняется отпечаток.
+меньше 4 МБ, а не при каждой нехватке свободного блока.
 
-Библиотека `Async` содержит канал-встречу, ограниченный буфер, почтовый ящик, однократную
-переменную, транзакции `AsyncStm`, выбор `Select`, протокол диалога, ввод-вывод без блокировки, пул рабочих нитей и
-компутоны с транспортами `pipe`, `tcp` и MPI. Тесты лежат в подсистеме `Unit` и в
-`<Подсистема>_dev`; примеры `Demo` переводят задачи Active Oberon и Go, `DemoAnts` моделирует
-муравейник.
-
-Ядро расширения работает на Linux AMD64 и i386. `Async` и примеры собираются для AMD64; транзакции
-`AsyncStm` — и для i386. Windows x64 поддерживает задачи, мониторы, транзакции и пул рабочих нитей.
+Тесты лежат в подсистеме `Unit` и в `<Подсистема>_dev`. Ядро работает на Linux AMD64 и i386;
+Windows x64 поддерживает задачи.
 
 ## Сборка и запуск
 
@@ -67,38 +74,31 @@ GTK4; консоль работает без него.
 
 ```sh
 tools/build64.sh                                  # мир в .work/BB64LIN
-echo 'DemoBuffer.Run' | tools/run64.sh            # пример в консоли
+echo 'System_devTasksObj.TestMutualExclusion' | tools/run64.sh
 tools/test.sh                                     # модульные тесты
 tools/test32.sh                                   # i386: сборка и тесты
 ```
 
-Дополнительно: `tools/test-win64.sh` — Windows x64 под wine, `tools/test-gui.sh` — GUI без
-экрана под `gtk4-broadwayd`. Подробности и условия — `docs/building.md`.
+Дополнительно: `tools/test-win64.sh` — Windows x64 под wine. Подробности и условия —
+`docs/building.md`.
 
 ## Документация
 
 | Файл | О чём |
 |---|---|
-| `Docu/ru/Active-CP-Lang.md`, `Docu/Active-CP-Lang.md` | сообщение о языке: задачи, мониторы, `ACTIVE.AWAIT`, точки уступки |
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | руководство по модулю `Tasks` |
-| `Docu/ru/Async.md`, `Docu/Async.md` | библиотека `Async` |
-| `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | подсистема `Actor`: акторы, ящики, исполнители, супервизор; примеры `ObxActor0`–`ObxActor2` |
-| `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | учебник «несколько дел в одной программе»: когда брать действие, задачу, монитор, транзакцию, канал, выбор, рабочую нить, компутон; сквозной пример — касса и счета (`ObxBank0`–`ObxBank6`) |
-| `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | хранилище «ключ → значение» `Kv` с транзакциями (по образцу LMDB/BoltDB) |
-| `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | согласованный журнал `Raft`: выборы, репликация, чтение ReadIndex, сеансы клиентов, снимки, хранилище на Kv, узел-актор `RaftNode`, журнал стойких акторов `RaftJournal`; проверка симуляцией по зёрнам |
-| `docs/implementation.md` | устройство ядра, мониторов, планировщика и компилятора |
+| `docs/implementation.md` | устройство ядра, `Tasks` и компилятора |
 | `docs/building.md` | сборка, запуск, тесты, самосборка, возврат к исходному ядру |
 | `docs/measurements.md` | замеры и команды их воспроизведения |
 | `docs/gc-many-stacks.md` | сборка мусора при многих спящих задачах: причина квадратичного роста, общий буфер кандидатов, замеры до и после |
 | `docs/kernel-plan.md` | план будущих правок ядра |
-| `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | хранилище по содержимому `Cas`: SHA-256, блоки, нарезка, деревья, наборы изменений |
 | `docs/stacks-study.md` | стеки задач: где уходит время, глубина стека, переключение и счётчики процессора |
-| `docs/speed-main.md` | скорость задач в основной ветке: опись ускорений ветки `active2-fast`, поставщики стеков, замеры до и после |
+| `docs/speed-main.md` | скорость задач в основной ветке: поставщики стеков, замеры до и после |
 | `docs/object-form-study.md` | монитор в базовом классе без слов языка: форма, примеры, замеры, границы |
+| `docs/monitor-object.md` | монитор-объект и пропуск в `Tasks`: сигнатуры, правила, примеры, замеры, расхождения |
 | `docs/adr/README.md` | записи решений: что рассматривали, что отвергли и почему |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
-| `Demo/Docu/Sys-Map.md` | карта примеров; описание каждого примера — `Demo/Docu/<Имя>.md` (`Ants`, `Barber`, `Boring`, `Buffer`, `Group`, `ModuleMonitor`, `Philo`, `PingPong`, `Pipeline`, `ReaderWriter`, `SelectTimeout`, `Sieve`, `WorkerPool`, `Support`) |
-| `Obx/Docu/ru/Sys-Map.md`, `Obx/Docu/Sys-Map.md` | раздел «Обзора на примерах» о задачах, мониторах и каналах: `ObxTasks0`–`ObxTasks4`, `ObxChan0`–`ObxChan2`, `ObxSelect0`, `ObxProto0`, `ObxOnce`, `ObxStm0`–`ObxStm2`, `ObxWork0`, `ObxComputon`, `ObxBank0`–`ObxBank6`, и о хранилище по содержимому: `ObxCas0`–`ObxCas2`, хранилище `ObxKv0`–`ObxKv2`; у каждого страница `Obx/Docu/ru/<Имя>.md` |
+| `Obx/Docu/Sys-Map.md` | карта примеров |
 | `AGENTS.md` | правила работы с репозиторием для агентов |
 
 ## Лицензия

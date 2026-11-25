@@ -1,7 +1,7 @@
 # Сборка и запуск
 
 Практическое руководство: как собрать мир, запустить команду, прогнать тесты, пересобрать
-компилятор, подготовить 32-битный тулчейн и вернуться к ядру без расширения. Все команды
+компилятор, подготовить 32-битный тулчейн и вернуться к ядру без задач. Все команды
 выполняются из корня репозитория.
 
 ## 1. Что нужно
@@ -12,14 +12,8 @@
 | `dev0Linux` в корне | загрузочный компилятор и линковщик | сборка невозможна |
 | `cc`, `python3` | `libtest64.so`, сравнение бутстрапа | часть тестов и самосборка |
 | GTK4 | окно `blackbox` | работает только консоль |
-| `gtk4-broadwayd` | GUI-прогон без экрана | GUI-тесты печатают `SKIP` |
 | `wine` | Windows x64 | `tools/test-win64.sh` печатает `SKIP` |
-| `unshare`, `ip`, `mount` | тест резолвера без сети | `Comm_devResolver` печатает `SKIP` |
-| MPICH в `.work/venv` | MPI-транспорт | `Async_devMpi` печатает `SKIP` |
 | 32-битный C-тулчейн | `libtest32.so` | сопрограммы i386 пропускаются |
-
-Системный `broadwayd` — от GTK3 и с клиентом GTK4 падает; нужен `gtk4-broadwayd` (пакет
-`libgtk-4-bin`).
 
 ## 2. Каталоги
 
@@ -31,8 +25,6 @@
 | `build/BB64WIN` | мир Windows x64 (под wine) | — |
 | `.work/wine64` | префикс wine | — |
 | `.work/i386dev` | распакованный 32-битный C-тулчейн | `BB_I386DEV` |
-| `.work/gtk4-bin` | распакованный `gtk4-broadwayd` | — |
-| `.work/venv` | MPICH (`uv pip install mpich`) | — |
 
 `tools/env.sh` задаёт `BB` (корень), `INSTALL` (`.work/BB64LIN`), `INTERP`
 (`blackbox-console`) и `DEV0` (`dev0Linux`).
@@ -52,8 +44,7 @@ tools/build64.sh System Lin       # выборочно, поверх готов�
    `<Sub>/Mod64`, иначе из `<Sub>/Mod`; `Code` и `Sym` пишутся в установку.
 2. Компилирует подсистемы `Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit`
    через `DevCompiler64.CompileSubs @Lin`.
-3. Отдельно компилирует `Tasks`, `LinThreads`, `LinNative`, подсистему `Async` и её
-   `Mod64`-модули, фасад `Robust`, подсистему `Actor`, примеры задач и каналов `Obx/Mod64` и примеры `Demo`.
+3. Отдельно компилирует `Taskarch` и `Tasks`.
 4. Проверяет журнал на `error:`, `N error(s) detected`, `~TRAP`, `syntax error`, `not found`.
 5. Линкует консоль `Kernel+ LinKernel Files LinFiles StdLoader LinIntInit` и, если не указан
    `--console-only`, окно `Kernel+ LinKernel Files LinFiles StdLoader LinLoader`.
@@ -66,7 +57,7 @@ tools/build64.sh System Lin       # выборочно, поверх готов�
 
 ```sh
 echo 'StdLog.String("hi"); StdLog.Ln' | tools/run64.sh
-echo 'DemoAnts.Run' | tools/run64.sh
+echo 'System_devTasksObj.TestMutualExclusion' | tools/run64.sh
 printf 'UnitRunner.Run System_devMain proc quit\n' | tools/run64.sh
 tools/run64.sh commands.txt
 ```
@@ -79,12 +70,7 @@ tools/run64.sh commands.txt
 
 | Переменная | Смысл |
 |---|---|
-| `BB_RUN=Модуль.Процедура` | команда, которую GUI-хост `LinInit` зовёт до `Loop.Start` |
 | `BB_COMPILE_TIME=ГГГГ-ММ-ДД ЧЧ:ММ:СС` | фиксированная метка времени в `.ocf` |
-| `ROBUST_SIZE=n` | число локальных исполнителей `RobustParallel` вместе с управляющим |
-| `ASYNC_TRANSPORT=pipe\|tcp\|mpi` | транспорт компутонов |
-| `ASYNC_IN=fd`, `ASYNC_OUT=fd` | каналы процесса-исполнителя |
-| `ASYNC_TCP=адрес` | адрес управляющего для TCP-транспорта |
 
 Параметры команде читаются из `DevCommanders.par`; пример — `DemoParameters.Do`:
 
@@ -95,7 +81,7 @@ echo 'DemoParameters.Do some parameters' | tools/run64.sh
 Окно запускается только с GTK4:
 
 ```sh
-cd .work/BB64LIN && LD_LIBRARY_PATH=. ./blackbox --BB_RUN=DemoAnts.Open
+cd .work/BB64LIN && LD_LIBRARY_PATH=. ./blackbox
 ```
 
 `blackbox --console` консольный режим не выбирает: консоль — отдельный бинарник
@@ -113,7 +99,7 @@ tools/go32.sh DevCPE DevCPT            # i386: DevCompiler.CompileThis
 (`DevCompiler.CompileSubs @Lin`), если её нет.
 
 Модули, которые линкуются в `blackbox-console` (`Kernel`, `LinKernel` и их импорты, в том числе
-`Monitors`), загрузчик берёт из исполняемого файла, а не из `Code`: после `go64.sh` такого модуля
+`Tasks`), загрузчик берёт из исполняемого файла, а не из `Code`: после `go64.sh` такого модуля
 нужна перелинковка (`tools/build64.sh --console-only`). Какие модули грузятся с диска, показывает
 `strace -e trace=openat` вокруг `tools/run64.sh`.
 
@@ -136,17 +122,6 @@ tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat6
 компилирует `Unit` и зависимости (до трёх проходов), запускает отдельный `blackbox-console`
 командой `UnitRunner.Run <модуль> <marks> quit` и требует итог `failed 0` и код 0.
 
-Отдельные сценарии, которые `tools/test.sh` добавляет к манифесту:
-
-| Сценарий | Что проверяет | Без условия |
-|---|---|---|
-| `Comm_devResolver` | `getaddrinfo` в рабочей нити в `unshare -rmn` | `SKIP` |
-| `Robust_devParallel` | `RobustParallel` на 1, 4 и 16 процессах | — |
-| `Async_devMpi` | MPI-транспорт под `mpiexec -n 5` | `SKIP` |
-| `Demo_devGui` | GUI под `gtk4-broadwayd` | `SKIP` |
-| `DemoAntsGui` | окно `DemoAnts` под `gtk4-broadwayd` | `SKIP` |
-| `Examples` | примеры документации (раздел 6.7) | — |
-
 Правила тестов — `Unit/Docu/ru/Testing.md`. Тесты лежат в подсистемах `<Sub>_dev`; поставочная
 сборка их не включает.
 
@@ -154,7 +129,7 @@ tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat6
 
 ```sh
 tools/build32.sh              # мир и консоль в build/BB32LIN
-tools/test32.sh               # Unit_devMain, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard, Cas, Kv
+tools/test32.sh               # Unit_devMain, Files, Tasks, CoTests, UnloadGuard, OpenArr, PtrInit
 tools/test32.sh --list
 tools/test32.sh System_devTasks   # только указанные модули (мир не собирается)
 ```
@@ -189,21 +164,11 @@ tools/test-win64.sh                    # сборка @Win и прогоны
 tools/test-win64.sh --rebuild          # пересобрать каркас @Win
 ```
 
-Сценарий собирает подсистемы `@Win` в `build/BB64WIN`, компилирует `Unit`, `Tasks`,
-`AsyncWinSock`, `AsyncWork`, `AsyncWorkWin`, `WinIntInit`, `WinInit`, `WinKernel` и тесты,
-линкует консольный PE `Kernel+ WinKernel Files WinFiles StdLoader WinIntInit` и переключает
-подсистему PE с GUI на console. Под wine идут `Unit_devMain` (7/7), `System_devWinTasks` (5/5)
-и `Async_devWinWorkers` (4/4). Нет wine — `SKIP`.
-
-### 6.4. GUI без экрана
-
-```sh
-tools/test-gui.sh              # Demo_devGui
-tools/test-demo-gui.sh         # окно DemoAnts
-```
-
-Оба сценария поднимают `gtk4-broadwayd` в своём `XDG_RUNTIME_DIR`, снимают `DISPLAY` и
-запускают `blackbox --BB_RUN=...`. Мышь не эмулируется. Нет `gtk4-broadwayd` — `SKIP`.
+Сценарий собирает подсистемы `@Win` в `build/BB64WIN`, компилирует `Unit`, `Taskarch`, `Tasks`,
+`WinIntInit`, `WinInit`, `WinKernel` и тесты, линкует консольный PE
+`Kernel+ WinKernel Files WinFiles StdLoader WinIntInit` и переключает подсистему PE с GUI на
+console. Под wine идут `Unit_devMain` (7/7), `System_devWinTasks` (5/5), `Dev_devOpenArr` (8/8)
+и `Dev_devPtrInit` (7/7). Нет wine — `SKIP`.
 
 ### 6.5. Негативные проверки компилятора
 
@@ -212,10 +177,8 @@ tools/check-reject.sh
 ```
 
 Сценарий по очереди кладёт фикстуры `Dev_dev/Reject/*.cp` на путь, который выберет
-`DevLibrarian`, компилирует их и ждёт `error:`. Проверяются: `AWAIT` вне исключающей процедуры,
-вызов в условии, исключающая вложенная процедура, `[exclusive]` без `IMPORT ACTIVE`,
-`[exclusive, code]`, ключ у каркасного модуля (amd64 и i386), `[guarded]` на amd64 и
-положительный контроль: однословный пользовательский модуль с ключом компилируется.
+`DevLibrarian`, компилирует их и ждёт `error:`. Проверяются обычные правила языка на `Tasks.Ctx`:
+переменная `Ctx` вне `Tasks`, копия пропуска и вызов `Exclusive` снаружи.
 
 ### 6.6. Замер сборщика
 
@@ -226,20 +189,6 @@ tools/bench-gc.sh System_devGcBench.Do        # с 50 млн
 
 Сценарий собирает `libtest64.so` и `System_devGcBench`, запускает команду под `/usr/bin/time -v`
 и печатает строки `BENCH`, RSS и время. Тайм-аут — `BENCH_TIMEOUT`, по умолчанию 1800 с.
-
-### 6.7. Примеры документации
-
-```sh
-tools/check-examples.sh          # тексты примеров в *.md против файлов модулей
-tools/check-examples.sh --run    # и вывод команд страниц примеров против их журнала
-```
-
-Полный пример в руководстве или на странице примера — блок кода, начинающийся строкой
-`MODULE Имя;`. Сценарий находит файл
-модуля с той же первой строкой в `<Sub>/Mod64` или `<Sub>/Mod` и требует совпадения знак в знак;
-пример без файла — ошибка. С `--run` он исполняет команду каждой страницы примера (`Obx/Docu`,
-`Obx/Docu/ru`, `Demo/Docu`) и сравнивает вывод с блоком после строки «В журнале появится:» или
-«The log shows:». `tools/test.sh` запускает его последним сценарием, `Examples`.
 
 ## 7. Самосборка компилятора
 
@@ -264,14 +213,13 @@ tools/bootstrap.sh
 Две задачи удобно вести в двух копиях репозитория: в одной идёт долгая сборка или замер, в другой
 правится код. Копию делает `git worktree add`; она делит с основной историю git, но не каталог
 `.work`. Собранного компилятора в новой копии нет: `Dev/Code` в git не хранится. Если сразу
-запустить `tools/build64.sh`, хост соберёт мир загрузочным компилятором из `dev0Linux`, а тот не
-знает `[exclusive]`, и модули с исключающими процедурами не скомпилируются. Поэтому первой идёт
-самосборка `tools/bootstrap.sh` (раздел 7), и только за ней — `tools/build64.sh`.
+запустить `tools/build64.sh`, мир соберёт загрузочный компилятор из `dev0Linux` без исправлений
+генератора. Поэтому первой идёт самосборка `tools/bootstrap.sh` (раздел 7), и только за ней —
+`tools/build64.sh`.
 
-Большие общие инструменты — Go для замеров, база i386, 32-битный C-тулчейн, `gtk4-broadwayd`,
-окружение с MPICH — копировать незачем. Новая копия ссылается на каталоги основной:
-`.work/go`, `.work/i386`, `.work/i386dev`, `.work/gtk4-bin`, `.work/venv`, `.work/mpi`. Мир
-`.work/BB64LIN` у каждой копии свой.
+Большие общие инструменты — база i386 и 32-битный C-тулчейн — копировать незачем. Новая копия
+ссылается на каталоги основной: `.work/i386`, `.work/i386dev`. Мир `.work/BB64LIN` у каждой копии
+свой.
 
 Все шаги делает один сценарий:
 
@@ -294,7 +242,7 @@ tools/worktree.sh ../active_bb-x feature-x active2  # от другой базы
 
 ```sh
 tools/iso.sh tools/build64.sh
-tools/iso.sh sh -c "echo 'ObxTasks0.Do' | tools/run64.sh"
+tools/iso.sh sh -c "echo 'System_devTasksObj.TestMutualExclusion' | tools/run64.sh"
 ```
 
 `tools/iso.sh` — то же, что `unshare -rm sh -c 'mount -t tmpfs tmpfs /tmp && …'`: команда
@@ -302,34 +250,25 @@ tools/iso.sh sh -c "echo 'ObxTasks0.Do' | tools/run64.sh"
 нужно, а по окончании команды её `/tmp` исчезает вместе с мусором хоста. `tools/worktree.sh` сам
 запускает самосборку и сборку через `tools/iso.sh`.
 
-## 9. Возврат к ядру без расширения
+## 9. Возврат к ядру без задач
 
-Расширение затрагивает ядро, инициализационные модули, консольный цикл и добавляет новые
-модули. Чтобы получить мир без него:
+Мир без задач получается из снимка `f03eaab7`. Порядок:
 
-1. Создайте отдельное дерево: `git worktree add --detach .work/rollback HEAD`.
-2. В нём соберите компилятор: `tools/go32.sh DevCPE`, затем `tools/bootstrap.sh`.
-3. Замените файлы исходной версией из ветки `blackbox20` (`git checkout blackbox20 -- <файл>`):
-
-```
-System/Mod64/Kernel.cp      System/Mod/Kernel.cp
-Lin/Mod64/Kernel.cp         Lin/Mod/Kernel.cp
-System/Mod/Loop.cp          System/Mod/Services.cp
-System/Mod/Console.cp       Lin/Mod/Console.cp
-Cons/Mod/Interp.cp
-Lin/Mod/Init.cp             Lin/Mod/IntInit.cp
-Win/Mod/Init.cp             Win/Mod/IntInit.cp
-```
-
-4. Удалите `Async/`, `Robust/`, `Actor/`, `System/Mod/Tasks.cp`, `System/Mod/Taskarch.cp`, `System/Mod64/Taskarch.cp`,
-   `System/Mod/Monitors.cp` и тестовые подсистемы `*_dev`, `Unit`.
-5. Соберите базовый мир:
+1. Создайте отдельное дерево: `git worktree add --detach .work/rollback f03eaab7`.
+2. Соберите его обычным способом: `tools/build64.sh`.
+3. Либо в текущем дереве верните файлы снимка: `git checkout f03eaab7 -- Dev/Mod`, `System/Mod64/Kernel.cp`,
+   `System/Mod/Kernel.cp`, `Lin/Mod64/Kernel.cp`, `Lin/Mod/Kernel.cp`, `Win/Mod64/Kernel.cp`,
+   `System/Mod/Loop.cp`, `System/Mod/Services.cp`, `System/Mod/Console.cp`, `Lin/Mod/Console.cp`,
+   `Cons/Mod/Interp.cp`; удалите `System/Mod/Tasks.cp`, `System/Mod/Taskarch.cp`,
+   `System/Mod64/Taskarch.cp`, `System/Mod/Poller.cp` и тестовые подсистемы `*_dev`, `Unit`.
+4. Проведите `tools/bootstrap.sh` и соберите мир списком без `Unit`:
 
 ```
 DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket
 DevLinker1.LinkElfExe64 '<каталог>/blackbox-console' := Kernel+ LinKernel Files LinFiles StdLoader LinIntInit
 ```
 
-`Cons/Interp.cp` заменяется вместе с остальными: он зовёт `Console.WaitInput`, которой в исходной
-консоли нет. `Monitors` и `Tasks` удаляются: новые `Kernel.cp` не содержат крючков, а init-модули
-не импортируют `Monitors`. Формат `.ocf`/`.osf` и структура ядра при этом не меняются.
+`Cons/Interp.cp` возвращается к снимку вместе с остальными: он зовёт `Console.WaitInput`, которой
+в исходной консоли нет. Формат `.ocf`/`.osf` при этом не меняется; правки компилятора (слоты
+указателей и длины открытых массивов) можно оставить — они исправляют ошибки генератора, а не
+добавляют язык.

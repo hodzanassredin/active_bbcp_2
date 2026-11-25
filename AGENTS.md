@@ -1,8 +1,9 @@
 # BlackBox Component Builder - Agent Guidelines
 
 BlackBox Component Builder 2.0 (bbcb2) is a development framework for Component Pascal
-(description in `Docu/CP-Lang.md`). Sources are UTF-8 `.cp` files; the Active Component Pascal
-extension is described in `Docu/ru/Active-CP-Lang.md`.
+(description in `Docu/CP-Lang.md`). Sources are UTF-8 `.cp` files. This fork adds module `Tasks`:
+cooperative tasks on their own stacks, the monitor object `Tasks.Object`, the pass `Tasks.Ctx`,
+groups and `Spawn`. The language itself is not extended.
 
 `OLD/` is an archived checkout. Do not compile sources or run tests from it.
 
@@ -79,9 +80,11 @@ enable the librarian again.
 
 ```sh
 echo "DevLibrarian.EnableDevLib('build/BB64LIN', 'Mod64');
-DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket;
+DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit;
+DevCompiler64.CompileThis Taskarch;
+DevCompiler64.CompileThis Tasks;
 DevLinker1.LinkElfExe64 'build/BB64LIN/blackbox' := Kernel+ LinKernel Files LinFiles StdLoader LinLoader" | ./dev0Linux
-for subsystem in Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket; do
+for subsystem in Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit; do
 	if [ -d "$subsystem/Rsrc" ]; then
 		mkdir -p "build/BB64LIN/$subsystem"
 		cp -R "$subsystem/Rsrc" "build/BB64LIN/$subsystem/"
@@ -96,7 +99,9 @@ The repository script `tools/build64.sh` does this and more; see below.
 
 ```sh
 echo "DevLibrarian.EnableDevLib('build/BB64WIN', 'Mod64');
-DevCompiler64.CompileSubs @Win Win System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Mdi;
+DevCompiler64.CompileSubs @Win Win System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket;
+DevCompiler64.CompileThis Taskarch;
+DevCompiler64.CompileThis Tasks;
 DevLinker1.LinkPeExe64 'build/BB64WIN/blackbox.exe' := Kernel+ WinKernel Files WinFiles StdLoader WinLoader 1 Applogo.ico 1 BlackBox.res
 DevLinker1.LinkPeExe64 'build/BB64WIN/blackboxMDI.exe' := Kernel+ WinKernel Files WinFiles StdLoader MdiLoader 1 Applogo.ico 1 BlackBox.res" | ./dev0Linux
 for subsystem in Win System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Mdi; do
@@ -169,9 +174,8 @@ Do not use spaces for indentation. Put an empty line before each new source bloc
   (not in git); `BB64INSTALL` overrides it. The console is `blackbox-console` (`LinIntInit`), the
   GUI is `blackbox` (`LinLoader`); `blackbox --console` does not select console mode.
 - No sudo and no `apt install`. The 32-bit C toolchain is downloaded with `apt-get download` into
-  `.work/i386dev`. Do not use the user's display (`DISPLAY=:0`); GUI tests use
-  `gtk4-broadwayd`. Do not emulate the mouse.
-- Do not push. Do not touch branches `active` and `ivan-dia261123`.
+  `.work/i386dev`. Do not use the user's display (`DISPLAY=:0`). Do not emulate the mouse.
+- Do not push.
 
 ### Build and Run
 
@@ -191,126 +195,79 @@ tools/worktree.sh ../active_bb-x x    # parallel worktree: links, bootstrap, bui
 ```
 
 `tools/build64.sh` compiles `Mod64` when present, writes `Code`/`Sym` to the installation, then
-compiles `Tasks`, `LinThreads`, `LinNative`, `Async` (separately, because it needs those modules),
-`Robust`, `Actor` and `Demo`. It links `blackbox-console` and, unless `--console-only` is given, `blackbox`.
+compiles `Taskarch` and `Tasks`. It links `blackbox-console` and, unless `--console-only` is given,
+`blackbox`.
 
-`tools/env.sh:clean_host_temp` removes `odc` names with five digits from `/tmp` before starting
-`dev0Linux`: the packaged host still creates such names and probes at most 200 of them.
+`tools/env.sh:clean_host_temp` removes `odc` names with 5 or 9 digits from `/tmp` before starting
+`dev0Linux`.
 
 ### Tests
 
 Tests use subsystem `Unit` (`UnitAssert`, `UnitRunner`; rules in
 `Unit/Docu/ru/Testing.md`). The manifest `tools/tests.txt` has the format
 `<module>|<marks>|<timeout>|<extra modules>|<options>`. The fifth field is passed to
-`CompileThis` (for example `^` for the yield-point key; `tools/unit.sh --opts '^'`).
-`tools/test.sh` calls `tools/unit.sh` for each module: a separate process, success only with
-`failed 0`. Tests live in separate subsystems next to the one under test: `<Sub>_dev`
-(`Comm_dev` next to `Comm`), file `<Sub>_dev/Mod[64]/<Theme>.cp`, module `<Sub>_dev<Theme>`
-(`System_dev/Mod/Tasks.cp` — `System_devTasks`; `Dev_dev/Mod/Yield.cp` — `Dev_devYield`); the
-entry point without a theme is `<Sub>_devMain`, for example `System_devMain`. `UnitRunner.Run
-System` selects loaded `System_dev*`; `all` selects every module whose name contains `_dev`.
+`CompileThis`. `tools/test.sh` calls `tools/unit.sh` for each module: a separate process, success
+only with `failed 0`. Tests live in separate subsystems next to the one under test: `<Sub>_dev`,
+file `<Sub>_dev/Mod[64]/<Theme>.cp`, module `<Sub>_dev<Theme>` (`System_dev/Mod/Tasks.cp` —
+`System_devTasks`); the entry point without a theme is `<Sub>_devMain`, for example
+`System_devMain`. `UnitRunner.Run System` selects loaded `System_dev*`; `all` selects every module
+whose name contains `_dev`.
 
 ```sh
 tools/test.sh                 # all modules from tools/tests.txt
 tools/test.sh --list
 tools/test.sh System_devMain  # selected modules
-tools/test32.sh               # i386: Unit, Files, Tasks, Monitors, Active, Yield, CoTests, UnloadGuard, Cas, Kv
+tools/test32.sh               # i386: Unit, Files, Tasks, CoTests, UnloadGuard, OpenArr, PtrInit
 tools/test-win64.sh           # Windows x64 under wine
-tools/test-resolver.sh        # resolver in unshare -rmn
-tools/test-robust.sh          # RobustParallel on 1/4/16 processes
-tools/test-mpi.sh             # MPI transport, mpiexec -n 5
-tools/test-gui.sh             # GUI under gtk4-broadwayd, no display
-tools/check-reject.sh         # compiler rejection cases
-tools/check-examples.sh --run # doc examples equal their module files; example pages' output
+tools/check-reject.sh         # negative checks of ordinary language rules on Tasks
 tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
 Production builds (`build64.sh`, `build32.sh`, `test-win64.sh`) do not include `*_dev`
 subsystems: they are not in `CompileSubs`. Tests are built on demand by `tools/unit.sh` and
-`tools/go64.sh` (x64), `tools/test32.sh` (i386), and `tools/test-win64.sh` (wine). The key `^` is
-allowed for `Dev_dev*` modules: `FrameworkModule` compares the subsystem name exactly.
+`tools/go64.sh` (x64), `tools/test32.sh` (i386), and `tools/test-win64.sh` (wine).
 
-### Kernel and Language
+### Kernel and Tasks
 
-- The extension adds tasks with their own stacks, monitors, `[exclusive]`, `ACTIVE.AWAIT` and the
-  yield-point key `^`. The language report is `Docu/ru/Active-CP-Lang.md`.
-- `System/Mod/Monitors.cp` implements monitors; the kernel keeps only `Kernel.Lock`, `LockAt`, `Unlock`,
-  `Await` and `FlushMonitors` as stubs over `Kernel.MonitorHook`. The scheduler is set with
-  `Kernel.SetScheduler` and is a `Kernel.Scheduler` object (`park`, `unpark`, `name`, `poll`); the
-  current task token is `Kernel.monTok`, written by `Tasks.SetCurrent`.
 - `System/Mod/Tasks.cp` implements tasks for both amd64 and i386; the machine part (word size,
   frame layout, `[code] Switch`) is module `Taskarch`, one file per target in `System/Mod` and
-  `System/Mod64`; `Switch` is inlined at the call site. Task
-  stacks come from `Kernel.AllocStack/FreeStack` (`mmap` with a guard page in `LinKernel` and
-  `VirtualAlloc` with `PAGE_NOACCESS` in `WinKernel`). A finished task returns its stack to the
-  `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool` frees stacks above `poolMax`, at most
-  `trimStep` per scheduler step. `Kernel.AllocStack` returns FALSE for a size above `maxStackScan`.
-- The stack registry is in the kernel: `RegisterStack`, `RegisterSignalStack`,
-  `UnregisterStack`, `StackOf` (a linear search of the list), `SwitchSave`, `SwitchRestore`. `MarkLocals` scans sleeping stacks;
-  an unknown current stack cancels the collection.
+  `System/Mod64`; `Switch` is inlined at the call site. Task stacks come from
+  `Kernel.AllocStack/FreeStack` (`mmap` with a guard page in `LinKernel` and `VirtualAlloc` with
+  `PAGE_NOACCESS` in `WinKernel`).
+- `Tasks.Object` is a monitor object: `Do` passes `Tasks.Ctx` and a `Tasks.Op` request to the
+  method `Exclusive-`; `Await`/`AwaitCond` wait for flags or a condition object. A `Tasks.Job`
+  runs its body once, a `Tasks.Task` can be started again.
+- A finished task returns its stack to the `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool`
+  frees stacks above `poolMax`, at most `trimStep` per scheduler step. `Kernel.AllocStack`
+  returns FALSE for a size above `maxStackScan`.
+- The stack registry is in the kernel: `RegisterStack`, `RegisterSignalStack`, `UnregisterStack`,
+  `StackOf` (a linear search of the list), `SwitchSave`, `SwitchRestore`. `MarkLocals` scans
+  sleeping stacks; an unknown current stack cancels the collection.
 - A trap inside `Kernel.Try` is not fatal in the console without a `trapViewer`:
   `Kernel.HandleTrap` calls `platform.FatalError` only when `tryCount = 0`. The framework does not
   replace the trap viewer; the console launcher passes the `quit` key to `UnitRunner.Run` to get
   an exit code. `Kernel.GetTrapViewer` is not exported.
-- The compiler (`Dev/Mod`) recognizes the pseudo-module `ACTIVE` and `ACTIVE.AWAIT`, the flag
-  `[exclusive]`, the hidden import `"$$"` and the yield-point key `^`. The flag is not written to
-  the symbol file. `DevCPE` reads `BB_COMPILE_TIME` for deterministic `.ocf` files.
-- `System/Mod/Services.cp` provides `Post`, `Wake`, `NextDeadline` and the action hook;
-  `Cons/Mod/Interp.cp` steps the action hook between commands and while waiting for input.
+- The compiler (`Dev/Mod`) is the snapshot `f03eaab7` plus three fixes: 8-byte slots for local
+  pointers and OUT-parameters on amd64, exact OUT-parameter offsets, and 8-byte lengths of a
+  multidimensional open array. `DevCPE` reads `BB_COMPILE_TIME` for deterministic `.ocf` files.
+- `System/Mod/Services.cp` provides the action hook; `Cons/Mod/Interp.cp` steps it between
+  commands and while waiting for input (via `Console.WaitInput`).
 - `System/Mod/Loop.cp` skips a periodic collection when `Kernel.AllocCount` has not changed since
   the previous one and no finalizer is pending.
 
-### Async Library
-
-The `Async` subsystem is built for AMD64 only, except `AsyncStm`, which is also built for i386
-(`tools/build32.sh`); the core language extension works on i386.
-
-- `Async/Mod`: `AsyncOnce`, `AsyncChan` (`Chan`, `Buffer`, `Mailbox`), `AsyncSelect`
-  (`AltSend`/`AltRecv`/`AltTimeout`, `Select`), `AsyncProto`, `AsyncIO`, `AsyncStm`
-  (transactions: `Atomically`, `Retry`, `OrElse`; it relies on `Tasks.BeginAtomic`).
-- `System/Mod/Poller.cp` is a readiness registry; `LinConsole.WaitInput` polls stdin and the
-  registered descriptors with one `poll`.
-- `Async/Mod64/Work.cp` is the worker-pool facade; `AsyncWorkLin` (pthread, result pipe,
-  `Poller`) and `AsyncWorkWin` (`CreateThread`, `CRITICAL_SECTION`, `Services` action) are the
-  delegates. The delegate is installed lazily by `AsyncWork.Ensure` through `Dialog.Call`; the
-  base init does not start a pool.
-- `Async/Mod64/Computon.cp` runs computons in separate BlackBox processes over `pipe`, `tcp` or
-  the external MPI transport (`Async/Mod64/Mpi.cp`); `Robust/Mod64/Parallel.cp` is the
-  `RobustParallel` facade. `ROBUST_SIZE` sets the number of local executors plus the controller.
-- Worker threads and computon processes must not allocate from the shared heap. A blocking OS
-  call made directly from a task still freezes the framework; move it to `AsyncWork`.
-
-### Cas Store
-
-`Cas/Mod` (amd64 and i386): `CasHash` (SHA-256, `Id`), `CasStore` (abstract block store, in-memory
-`Mem`, references with compare-and-swap `CasRef`), `CasFiles` (directory store: temp file and rename,
-hash checked on read), `CasChunk` (content-defined cutting, Buzhash), `CasTree` (Merkle tree of a
-stream), `CasChange` (change sets: `Commit`, `Rebase`, `Log`). Tests — `Cas_dev`; build lists `Cas`
-before `Obx` (examples `ObxCas0..2` import it).
-
-### GUI
-
-`LinInit` reads the external variable `BB_RUN=Модуль.Процедура` and calls the command before
-`Loop.Start`. `tools/test-gui.sh` and `tools/test-demo-gui.sh` start `gtk4-broadwayd` in their
-own `XDG_RUNTIME_DIR` and unset `DISPLAY`. The system `broadwayd` is from GTK3 and crashes with a
-GTK4 client; use `gtk4-broadwayd` (package `libgtk-4-bin`, unpacked into `.work/gtk4-bin`). The
-mouse is not emulated.
-
 ### Windows x64
 
-`WinKernel` provides `AllocateStackMem` (`VirtualAlloc` + `PAGE_NOACCESS`), `Get/SetTryContext`
-and dynamic loading of libraries of interface modules. `tools/test-win64.sh` builds `@Win`, links
-the console PE (`WinIntInit`, with the subsystem patched to console) and runs `Unit_devMain`
-7/7, `System_devWinTasks` 5/5, `Async_devWinWorkers` 4/4 and `Async_devStm` 20/20 under wine.
+`WinKernel` provides `AllocateStackMem` (`VirtualAlloc` + `PAGE_NOACCESS`) and
+`Get/SetTryContext`. `tools/test-win64.sh` builds `@Win`, links the console PE (`WinIntInit`, with
+the subsystem patched to console) and runs `Unit_devMain` 7/7, `System_devWinTasks` 5/5,
+`Dev_devOpenArr` 8/8 and `Dev_devPtrInit` 7/7 under wine.
 
 ### Limitations
 
 - `pack-dev0-linux` is absent from the snapshot; `dev0Linux` is a binary and is not rebuilt.
   `tools/bootstrap.sh` rebuilds only the `Dev` subsystem.
-- MPI: a rank death is not retried (mpiexec kills the world); `Unload` over MPI is refused; no
-  GUI test for Windows under wine.
-- `Async/Mod64` (channels, workers, computons) is not built for i386. The cluster index of the
-  collector exists only in `Mod64`.
+- No GUI test for Windows under wine.
+- The cluster index of the collector exists only in `Mod64`.
 - Deferred finalizers, preemption by signal, OS threads executing Component Pascal code, and a
   load test of "1000 tasks for an hour" are not implemented.
 
@@ -323,24 +280,16 @@ code, and the checks to run before a commit.
 
 | File | Content |
 |---|---|
-| `Docu/ru/Active-CP-Lang.md`, `Docu/Active-CP-Lang.md` | language report |
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | `Tasks` module |
-| `Docu/ru/Async.md`, `Docu/Async.md` | `Async` library |
-| `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | `Cas` content-addressed store |
-| `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | `Actor` subsystem: actors and supervision |
-| `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | tutorial: when to use actions, tasks, monitors, transactions, channels, selection, workers, computons (`ObxBank0`–`ObxBank6`) |
-| `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | `Kv` key-value store with transactions |
-| `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | `Raft` replicated log: core automaton, simulation, sessions, snapshots, node actor `RaftNode`, persistent-actor journal `RaftJournal` |
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
 | `docs/gc-many-stacks.md` | GC with many sleeping tasks: cause of the quadratic cost, shared candidate buffer, before/after measurements |
 | `docs/kernel-plan.md` | future kernel work |
 | `docs/stacks-study.md` | task stacks: where time goes, stack depth, switching and CPU counters |
-| `docs/speed-main.md` | task speed in the main branch: inventory of `active2-fast` gains, stack providers, before/after measurements |
+| `docs/speed-main.md` | task speed in the main branch: stack providers, before/after measurements |
 | `docs/object-form-study.md` | monitor in a base class without language words: form, examples, measurements, limits |
 | `docs/monitor-object.md` | monitor object and pass in `Tasks`: signatures, rules, examples, measurements, divergences |
 | `docs/adr/README.md` | decision records (Russian only): options considered and why rejected |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
-| `Demo/Docu/Sys-Map.md` | examples |
-| `Obx/Docu/Sys-Map.md`, `Obx/Docu/ru/Sys-Map.md` | Overview by Example, sections Tasks, Monitors and Channels; Content-Addressed Store |
+| `Obx/Docu/Sys-Map.md` | Overview by Example |

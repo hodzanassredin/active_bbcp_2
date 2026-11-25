@@ -1,11 +1,10 @@
 # Tasks
 
 A guide to module `Tasks`. It is for the programmer who writes in Component Pascal and wants one
-program to do several things at once. The language extension — exclusive procedures,
-`ACTIVE.AWAIT` and yield points — is defined in the language report `Docu/Active-CP-Lang.md`;
-channels, selection and worker threads are described in `Docu/Async.md`. The complete examples of
-this guide are modules `ObxTasks0`–`ObxTasks4` of subsystem `Obx`; each has a page in `Obx/Docu/`
-that walks through it step by step.
+program to do several things at once. The language stays plain Component Pascal: tasks and
+monitors are library types `Task`, `Job` and `Object`. The monitor object and the pass are
+described in more detail in `docs/monitor-object.md`. The examples of this guide are inline;
+there is no separate example subsystem.
 
 ## 1. Why a task
 
@@ -26,8 +25,8 @@ at most one task executes. Nobody interrupts a task: it gives up the processor i
 at known places. These places are called *switch points*:
 
 1. a call of `Yield`, `Sleep`, `Park` or `Join`;
-2. entering a monitor held by another task, and `ACTIVE.AWAIT` with a false condition;
-3. a yield point in a module compiled with option `^` (section 5).
+2. entering a monitor object held by another task;
+3. waiting for a condition in `Await` or `AwaitCond`.
 
 The main property of tasks follows from this. Two tasks increment a shared counter: each reads
 it, adds one and writes it back. In a system with OS threads one increment is sometimes lost,
@@ -36,7 +35,7 @@ between the read and the write, and everything a task does between two switch po
 other tasks as one indivisible action. That is why the counter needs no monitor:
 
 ```
-MODULE ObxTasks0;
+MODULE TasksSample0;
 	IMPORT Tasks, Console, Strings;
 
 	TYPE Counter = POINTER TO RECORD (Tasks.Task) END;
@@ -62,10 +61,10 @@ MODULE ObxTasks0;
 		Console.WriteStr("count = "); Console.WriteStr(s); Console.WriteLn
 	END Do;
 
-END ObxTasks0.
+END TasksSample0.
 ```
 
-Command `ObxTasks0.Do` prints `count = 2000` on every run. The tasks alternate after every ten
+Command `TasksSample0.Do` prints `count = 2000` on every run. The tasks alternate after every ten
 increments, but no increment is torn apart.
 
 The property holds as long as there is no switch point between the read and the write. Put
@@ -74,80 +73,88 @@ value in time, and the result will be less than 2000. The compiler does not chec
 shared state is changed across a wait, it is protected by a monitor: an exclusive procedure does
 not admit a second task until the first has left.
 
-The server with a hundred clients is built exactly so. The request queue is the module's shared
-state, and three exclusive procedures change it. A client enqueues a request and waits in
-`ACTIVE.AWAIT` until the server marks it done; the server waits until the queue is not empty:
+The server with a hundred clients is built exactly so. The request queue is a monitor object:
+a client enters it through `Do` and waits until the queue has room; the server takes a request
+with the same `Do` and computes the square.
 
 ```
-MODULE ObxTasks2;
-	IMPORT ACTIVE, Tasks, Console, Strings;
+MODULE TasksSample2;
+	IMPORT Tasks, Console, Strings;
 
-	CONST clients = 100;
+	CONST clients = 100; cap = 8;
 
 	TYPE
-		Request = POINTER TO RECORD
-			arg, res: INTEGER;
-			done: BOOLEAN;
-			next: Request
+		Request = POINTER TO RECORD arg, res: INTEGER END;
+		SubmitOp = RECORD (Tasks.Op) r: Request END;
+		TakeOp = RECORD (Tasks.Op) r: Request END;
+		Queue = POINTER TO RECORD (Tasks.Object)
+			ring: ARRAY cap OF Request; head, tail, count: INTEGER
 		END;
-		Client = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
-		Server = POINTER TO RECORD (Tasks.Task) END;
+		Client = POINTER TO RECORD (Tasks.Job) n: INTEGER; q: Queue END;
+		Server = POINTER TO RECORD (Tasks.Job) q: Queue END;
 
-	VAR head, tail: Request; sum: INTEGER;
+	VAR sum: INTEGER;
 
-	PROCEDURE [exclusive] Submit (r: Request);
+	PROCEDURE (q: Queue) Ready (): SET;
+		VAR s: SET;
 	BEGIN
-		r.next := NIL;
-		IF tail = NIL THEN head := r ELSE tail.next := r END;
-		tail := r;
-		ACTIVE.AWAIT(r.done)
-	END Submit;
+		s := {};
+		IF q.count < cap THEN INCL(s, 0) END;
+		IF q.count > 0 THEN INCL(s, 1) END;
+		RETURN s
+	END Ready;
 
-	PROCEDURE [exclusive] Take (VAR r: Request);
+	PROCEDURE (q: Queue) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
-		ACTIVE.AWAIT(head # NIL);
-		r := head; head := r.next;
-		IF head = NIL THEN tail := NIL END
-	END Take;
+		WITH op: SubmitOp DO
+			WHILE q.count = cap DO
+				IF ~q.Await(ctx, {0}) THEN RETURN END
+			END;
+			q.ring[q.tail] := op.r;
+			q.tail := (q.tail + 1) MOD cap; INC(q.count)
+		| op: TakeOp DO
+			WHILE q.count = 0 DO
+				IF ~q.Await(ctx, {1}) THEN RETURN END
+			END;
+			op.r := q.ring[q.head];
+			q.head := (q.head + 1) MOD cap; DEC(q.count)
+		END
+	END Exclusive;
 
-	PROCEDURE [exclusive] Answer (r: Request; res: INTEGER);
-	BEGIN
-		r.res := res; r.done := TRUE
-	END Answer;
-
-	PROCEDURE (c: Client) Run;
-		VAR r: Request;
+	PROCEDURE (c: Client) Body- (VAR ctx: Tasks.Ctx);
+		VAR r: Request; op: SubmitOp;
 	BEGIN
 		NEW(r); r.arg := c.n;
-		Submit(r);
-		sum := sum + r.res
-	END Run;
+		op.r := r; c.q.Do(ctx, op)
+	END Body;
 
-	PROCEDURE (s: Server) Run;
-		VAR i: INTEGER; r: Request;
+	PROCEDURE (s: Server) Body- (VAR ctx: Tasks.Ctx);
+		VAR i: INTEGER; op: TakeOp;
 	BEGIN
-		FOR i := 1 TO clients DO Take(r); Answer(r, r.arg * r.arg) END
-	END Run;
+		FOR i := 1 TO clients DO
+			s.q.Do(ctx, op);
+			INC(sum, op.r.arg * op.r.arg)
+		END
+	END Body;
 
 	PROCEDURE Do*;
-		VAR i: INTEGER; c: Client; s: Server; str: ARRAY 16 OF CHAR;
+		VAR i: INTEGER; c: Client; s: Server; q: Queue; str: ARRAY 16 OF CHAR;
 	BEGIN
-		sum := 0; head := NIL; tail := NIL;
-		NEW(s); Tasks.Start(s);
-		FOR i := 1 TO clients DO NEW(c); c.n := i; Tasks.Start(c) END;
+		sum := 0; NEW(q);
+		NEW(s); s.q := q; Tasks.Start(s);
+		FOR i := 1 TO clients DO NEW(c); c.n := i; c.q := q; Tasks.Start(c) END;
 		WHILE Tasks.Count() > 0 DO Tasks.Step END;
 		Strings.IntToString(sum, str);
 		Console.WriteStr("sum = "); Console.WriteStr(str); Console.WriteLn
 	END Do;
 
-END ObxTasks2.
+END TasksSample2.
 ```
 
 The command prints `sum = 338350`, the sum of the squares from 1 to 100. The client's text stays
-straight: put the request, wait, add the answer. Condition `r.done` refers to the client's
-parameter; it is evaluated on the frame of the waiting task, so every client has its own
-condition. Line `sum := sum + r.res` stands outside the monitor and is still correct, for the
-same reason as the counter above.
+straight: put the request and return. Monitor `Queue` holds the queue; `Await` waits for the
+flags "has room" and "has a request", and the FIFO order of the queues preserves the order of
+requests.
 
 Command `Do` executes outside a task and drives the scheduler itself by calling `Tasks.Step`
 while tasks are alive. In the BlackBox window this is not needed: the scheduler is built into
@@ -172,10 +179,10 @@ There are eight states; the module exports their values, and `State(t)` returns 
 |---|---|---|
 | `New` (0) | `Ready` (1) | `Start` or `StartIn` |
 | `Ready` | `Running` (2) | the scheduler took the task from the queue |
-| `Running` | `Ready` | `Yield`; `Sleep` with a time not above zero; a yield point |
+| `Running` | `Ready` | `Yield`; `Sleep` with a time not above zero |
 | `Running` | `Sleeping` (3) | `Sleep` with a positive time |
 | `Running` | `Waiting` (4) | `Join` while the target is alive |
-| `Running` | `Parked` (5) | `Park`; a busy monitor; a false `AWAIT` condition; waiting for its group |
+| `Running` | `Parked` (5) | `Park`; a busy monitor; waiting in `Await`; waiting for its group |
 | `Sleeping` | `Ready` | the time is up; `Unpark`; `Cancel` |
 | `Waiting` | `Ready` | the target ended; `Unpark`; `Cancel` |
 | `Parked` | `Ready` | `Unpark`; `Cancel`; a monitor was handed to the task |
@@ -199,8 +206,8 @@ signal is needed. The module has an operation for each of these reasons.
 
 `Yield` waits for nothing. The task goes to the end of the ready queue, and the tasks that were
 ready earlier get to execute. It is called in a long computation so as not to hold the
-processor: without `Yield` and without yield points a task that computes for a minute stops all
-other tasks and the BlackBox window for a minute.
+processor: without `Yield` a task that computes for a minute stops all other tasks and the
+BlackBox window for a minute.
 
 `Sleep(ms)` puts the task to sleep for at least `ms` milliseconds by the clock `Kernel.Time`. The
 task wakes when the scheduler sees in one of its steps that the time is up, so a sleep may last
@@ -216,7 +223,7 @@ The example combines all three operations. The main task starts a sleeper and a 
 for both:
 
 ```
-MODULE ObxTasks1;
+MODULE TasksSample1;
 	IMPORT Tasks, Console;
 
 	TYPE
@@ -254,7 +261,7 @@ MODULE ObxTasks1;
 		WHILE Tasks.Count() > 0 DO Tasks.Step END
 	END Do;
 
-END ObxTasks1.
+END TasksSample1.
 ```
 
 Output:
@@ -310,7 +317,7 @@ The example shows the second rule. The parent starts three children and leaves `
 child traps after 10 ms, the two others sleep in an endless loop:
 
 ```
-MODULE ObxTasks3;
+MODULE TasksSample3;
 	IMPORT Tasks, Console, Strings;
 
 	TYPE
@@ -345,7 +352,7 @@ MODULE ObxTasks3;
 		END
 	END Do;
 
-END ObxTasks3.
+END TasksSample3.
 ```
 
 Output:
@@ -379,11 +386,8 @@ calls the same action between commands and while waiting for input.
 
 The quantum is checked only when a task has given control back by itself. There is no
 preemption: a task computing without switch points holds both the scheduler and the window until
-it is done. Compiler option `^` guards against this: a module compiled with it gets a *yield
-point* at the end of every repetition of `WHILE`, `REPEAT`, `LOOP` and `FOR`. A yield point is a
-call of `Kernel.Poll`; every 5 ms the scheduler raises a flag, and the next yield point does a
-`Yield`. A task holding a monitor and code outside a task do not switch at a yield point;
-otherwise the monitor would stay busy during someone else's work.
+it is done. Therefore a long computation is split by explicit `Yield` (or `Sleep`): the language
+has no other switch points.
 
 Where waiting is forbidden. An event handler, a broadcast over a document's domain, a menu
 command are code of the BlackBox framework. That code expects to run to the end before the next
@@ -398,10 +402,8 @@ and tests that want to wait for tasks without the main loop call `Step` in a loo
 examples of this guide do.
 
 Waiting is also forbidden inside an *atomic section* — between `BeginAtomic` and the matching
-`EndAtomic`. The section is opened by an `AsyncStm` transaction (`Docu/Async.md`, section
-"Transactions"): no other task may see its writes until the transaction has ended. A wait inside the
-section traps 25 with the text `Tasks: wait inside an atomic section`, `Step` traps 22, and a yield
-point inside the section does not switch.
+`EndAtomic`. The section protects writes that no other task may see until it has ended. A wait
+inside the section traps 25 with the text `Tasks: wait inside an atomic section`, `Step` traps 22.
 
 ## 6. Deadlock
 
@@ -411,7 +413,7 @@ ready ones, and no sleeper waits for a time. Then a step prints once a log of "w
 what" and raises flag `Deadlocked()`:
 
 ```
-MODULE ObxTasks4;
+MODULE TasksSample4;
 	IMPORT Tasks;
 
 	TYPE Lonely = POINTER TO RECORD (Tasks.Task) END;
@@ -429,32 +431,27 @@ MODULE ObxTasks4;
 		IF Tasks.Deadlocked() THEN Tasks.Cancel(l); Tasks.Step END
 	END Do;
 
-END ObxTasks4.
+END TasksSample4.
 ```
 
 Output:
 
 ```
 Tasks: deadlock: no ready tasks and no wake-up deadlines
-Kernel: monitor dump
-  (no monitors)
 Tasks: cancelled
 ```
 
-The log is a diagnosis, not a crash. When monitors form the deadlock, the dump shows every busy
-monitor, its owner's name and the queues of entering tasks and of tasks waiting for a condition.
-The program can get out of the deadlock: `Unpark` or `Cancel` make a task ready again, and the
+The log is a diagnosis, not a crash. The program can get out of the deadlock: `Unpark` or `Cancel` make a task ready again, and the
 flag is cleared. In the example the command cancels the lonely task, and it ends with trap 127.
 
 The scheduler detects only a complete deadlock. If even one task sleeps with a time or spins in a
 loop with `Yield`, some tasks may stand forever and no log appears. A task that never yields is
 not detected either: the scheduler simply does not get control.
 
-A wait for an event from outside the tasks is not a deadlock: a timer, a ready descriptor, a worker
-thread, a call from the main stack. A task woken by such events waits in `ParkExternal`, not in
+A wait for an event from outside the tasks is not a deadlock: a timer, a ready descriptor, a
+signal from another process. A task woken by such events waits in `ParkExternal`, not in
 `Park`. While even one task waits in `ParkExternal`, the scheduler declares no deadlock and prints
-no log. `AsyncChan.Select` with a timeout, `AsyncIO.WaitFd` and `AsyncWork.Execute` wait this way. A
-primitive of one's own that is woken from outside the tasks must wait in `ParkExternal`: in `Park`
+no log. A primitive of one's own that is woken from outside the tasks must wait in `ParkExternal`: in `Park`
 the scheduler prints the log although the wake-up will come. The opposite mistake is worse:
 `ParkExternal` where nobody will wake the task hides a real deadlock as long as at least one such
 task waits. Neither the compiler nor `Tasks` can tell the two cases apart.
@@ -480,21 +477,19 @@ as much as in Go (868–1,032 ns). The pool keeps up to 1024 free stacks; the sc
 surplus to the kernel little by little, no more than 16 stacks per step, so that a mass end of
 tasks does not cost a mass of system calls at once.
 
-A switch between two tasks costs 84–113 ns per `Yield` against 35–60 ns in Go under the same
-conditions: the switcher saves all registers, and around it the kernel carries the `Kernel.Try`
-context. Sleeping thousands of tasks is cheap: sleepers lie in a heap ordered by time, and 10
-thousand tasks with 20 sleeps each give 684–723 ns per wake-up, less than Go (831–931 ns). The
-numbers are reproduced by the commands
+`System_devBench` gives the cost of one `Yield` switch — 29–30 ns — and of restarting a task —
+196–207 ns against 507–523 ns when each run does a `NEW`. Garbage collection with standing tasks:
+9–11 ms at 10 thousand, 72–77 ms at 50 thousand, 202–223 ms at 100 thousand
+(`System_devGcStacks`). Creating 10 thousand tasks with 64 KB stacks takes 52 ms on fresh stacks
+and 4.3 ms on stacks from the pool (`System_devTasks.TestSlowLoadTenThousand`).
 
 ```sh
-printf 'UnitRunner.Run System_devTasks proc slow quit\n' | tools/run64.sh
-printf 'Async_devBench.All\n' | tools/run64.sh
+printf 'UnitRunner.Run System_devTasks slow noquit\n' | tools/run64.sh
+tools/iso.sh sh -c "echo 'System_devBench.Yield' | tools/run64.sh"
 ```
 
-The limits of the model follow from the single thread. Tasks give no parallel work on several
-cores; worker threads and computons exist for that (`Docu/Async.md`). OS worker threads do not
-touch module `Tasks` or the heap. Without module `Monitors` loaded every monitor entry traps 20:
-the kernel calls `Monitors` through a hook, and there is no hook.
+The limits of the model follow from the single thread: tasks give no parallel work on several
+cores.
 
 ## 8. Interface
 
@@ -546,6 +541,12 @@ DEFINITION Tasks;
 END Tasks.
 ```
 
+Besides classic tasks, the module exports the monitor object and the pass: `Ctx` (`LIMITED
+RECORD`), `Job` with abstract `Body-` and ready `Run`, `Object` with `Do`, `Await`, `AwaitCond`,
+`Ready`, `HoldsWhileWaiting` and `TransferOnRelease`, `Op`, `Cond`, operations `Spawn`,
+`JoinAll`, `ParkCtx`, `SetDeadline`, diagnostics `Held`, `Depth`, `Queued`. Their signatures,
+rules and examples are in `docs/monitor-object.md`.
+
 Before every trap the module writes a line `Tasks: <text>` to the console. The operations that
 suspend a task (`Yield`, `Sleep`, `Join`, `Park`) begin with one check; below it is called "the
 wait check":
@@ -557,7 +558,7 @@ Pre: no Services action (other than the scheduler) and no domain broadcast is ru
 Pre: no atomic section (BeginAtomic) is open — 25
 ```
 
-A monitor wait (entry into a busy monitor, `AWAIT`) passes the same check.
+Entry into a busy monitor object and waiting in `Await` pass the same check.
 
 `Sleep`, `Join` and `Park` repeat the check after waking, so cancelling a sleeping or waiting task
 interrupts it with trap 127.
@@ -713,7 +714,7 @@ Opens an atomic section; sections nest. A section inside which the task ended wi
 together with the task.
 
 ```
-Post: until the matching EndAtomic the wait check traps 25, Step traps 22, a yield point does not switch
+Post: until the matching EndAtomic the wait check traps 25, Step traps 22
 ```
 
 **PROCEDURE EndAtomic**

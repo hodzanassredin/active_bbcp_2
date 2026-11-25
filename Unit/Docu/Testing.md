@@ -146,7 +146,7 @@ on demand.
 A module's name determines its file by the BlackBox rules: `Text_devWriter` lies in
 `Text_dev/Mod/Writer.cp`. The entry point of a subsystem without a topic is `<Subsystem>_devMain`, for
 example `Text_dev/Mod/Main.cp`. Tests for amd64 only lie in `Mod64` of the same subsystem: the module
-`Async_devChannels` is in `Async_dev/Mod64/Channels.cp`.
+`System_devTasksObj` is in `System_dev/Mod64/TasksObj.cp`.
 
 The runner itself is checked by `Unit_devMain`. The module `Unit_devProbe` contains a passing, a
 trapping, a failing, an empty and a slow test and fixtures; `TestNestedRunner` runs the probe quietly
@@ -156,7 +156,7 @@ through `UnitRunner.RunModuleCounts` and compares the counters.
 
 Inside BlackBox the command `UnitRunner.Run` runs tests, with arguments separated by spaces. The first
 argument is the target: a module name, a subsystem name or `all`. A subsystem name selects the loaded
-modules of its tests: `System` finds `System_dev*`, `Async` finds `Async_dev*`; `all` selects all loaded
+modules of its tests: `System` finds `System_dev*`; `all` selects all loaded
 modules whose name contains `_dev`. The modules must already be loaded into the world. The keys `slow`,
 `gui`, `proc` enable marks; `tap` prints a TAP report; `junit=FILE` writes a JUnit XML report; `quit`
 at the end calls `Kernel.Quit(0)` or `Kernel.Quit(1)` so that an external launcher gets the code;
