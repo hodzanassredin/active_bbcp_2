@@ -335,6 +335,7 @@ code, and the checks to run before a commit.
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
 | `docs/kernel-plan.md` | future kernel work |
+| `docs/low-alloc-style.md` | allocation inventory per operation and no-allocation style proposal |
 | `docs/adr/README.md` | decision records (Russian only): options considered and why rejected |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
 | `Demo/Docu/Sys-Map.md` | examples |
