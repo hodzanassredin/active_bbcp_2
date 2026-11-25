@@ -86,6 +86,8 @@ ObxTasks3  docu/sources		a task group: a failing child cancels the others
 ObxTasks4  docu/sources		deadlock detection by the scheduler
 ObxChan0  docu/sources		rendezvous: a channel that holds no messages
 ObxChan1  docu/sources		a bounded buffer lets the producer run ahead
+ObxBufObj  docu/sources		a bounded buffer on a base-class monitor; Put and Get are Op records
+ObxObjCompose  docu/sources		composition: one monitor held while another waits; waiting at call depth
 ObxChan2  docu/sources		a mailbox: sending never waits
 ObxSelect0  docu/sources		selection with a timeout
 ObxProto0  docu/sources		a dialogue protocol checked at every send
@@ -113,6 +115,7 @@ ObxBank3  docu/sources		tutorial: deadlock on the monitors of two accounts
 ObxBank4  docu/sources		tutorial: transfers as transactions, Retry, OrElse
 ObxBank5  docu/sources		tutorial: a cashier owns the accounts, requests via a mailbox
 ObxBank6  docu/sources		tutorial: selecting a request, closing or a timeout; a promise
+ObxBankObj  docu/sources		the bank scene on a base-class monitor: waiting for a balance
 
 Content-Addressed Store
 ObxCas0  docu/sources		a block named by its hash: deduplication

@@ -12,6 +12,8 @@ ObxTasks3  docu/sources		группа задач: провал ребёнка о
 ObxTasks4  docu/sources		тупик: планировщик печатает, кто чего ждёт
 ObxChan0  docu/sources		встреча: канал без хранения сообщений
 ObxChan1  docu/sources		ограниченный буфер даёт производителю забежать вперёд
+ObxBufObj  docu/sources		ограниченный буфер на мониторе базового класса; Put и Get — записи Op
+ObxObjCompose  docu/sources		композиция: один монитор взят, другой ждёт; ожидание на глубине вызовов
 ObxChan2  docu/sources		почтовый ящик: отправка не ждёт
 ObxSelect0  docu/sources		выбор с тайм-аутом
 ObxProto0  docu/sources		протокол диалога, проверка при каждой отправке
@@ -39,6 +41,7 @@ ObxBank3  docu/sources		учебник: тупик на мониторах дв�
 ObxBank4  docu/sources		учебник: переводы транзакциями, Retry, OrElse
 ObxBank5  docu/sources		учебник: кассир владеет счетами, заявки через ящик
 ObxBank6  docu/sources		учебник: выбор из заявки, закрытия и тайм-аута; обещание
+ObxBankObj  docu/sources		банковская сцена на мониторе в базовом классе: ожидание остатка
 
 Хранилище по содержимому
 ObxCas0  docu/sources		блок называется своим хешем: дедупликация
