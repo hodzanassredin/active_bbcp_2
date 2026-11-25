@@ -23,6 +23,8 @@ MODULE System_devCRaw ["libtest64.so"];
 	PROCEDURE [ccall] c_minflt* ["test64_minflt"] (): LONGINT;
 	PROCEDURE [ccall] c_perf* ["test64_perf"] (phase, on: LONGINT);
 	PROCEDURE [ccall] c_vmas* ["test64_vmas"] (): LONGINT;
+	PROCEDURE [ccall] c_vmsize* ["test64_vmsize"] (): LONGINT;
+	PROCEDURE [ccall] c_vmrss* ["test64_vmrss"] (): LONGINT;
 	PROCEDURE [ccall] c_rss* ["test64_rss"] (): LONGINT;
 
 END System_devCRaw.

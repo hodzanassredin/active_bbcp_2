@@ -304,6 +304,31 @@ printf 'Async_devStacks.Mass1m4\n' | tools/run64.sh
 отображений, 2,0 с; 1 млн со стеком 8 КБ — 3,61 с, 8,2 ГБ, 1,9 с. Разбор — `docs/stacks-study.md`,
 раздел 6.5.
 
+### 2.7. Потолок числа задач
+
+```sh
+tools/go64.sh 'Async_devStacks%'
+printf 'Async_devStacks.CeilingGuard4k\n' | tools/run64.sh
+printf 'Async_devStacks.CeilingSlab4k\n' | tools/run64.sh
+printf 'Async_devStacks.CeilingDense4k\nAsync_devStacks.CeilingDense4m\n' | tools/run64.sh
+printf 'Async_devStacks.MapsPerTask\n' | tools/run64.sh
+```
+
+Машина: `vm.max_map_count` = 1 048 576 (не по умолчанию), `sysctl` не менялся. Строка `CEIL`
+печатает созданные задачи, отказ, участки `/proc/self/maps`, VmRSS и VmSize; строка `MAPS` — добавку
+участков на задачу. 25.11.2026, по одному прогону.
+
+| Поставщик | Участков на задачу | Потолок при 1 048 576 (измерено) | Потолок при 65 530 (расчёт) |
+|---|---:|---:|---:|
+| (а) стек со сторожем | 2,00 | 524 220 | ≈ 32 700 |
+| (б) плиты со сторожем | 2,00 | 524 220 | ≈ 32 700 |
+| (в) плотные плиты | 0,03125 | не наступил: 4 млн задач, 125 138 участков, 17,2 ГБ RSS | ≈ 2,09 млн |
+
+Отказ (а) и (б) — `HALT(22)` в `StartIn`, трап 22 и сообщение `Tasks: no stack memory (platform does
+not support it)`; трап пойман `Kernel.Try`, процесс жив. У (в) до 4 млн отказа нет: предел задаёт
+память (4,29 КБ RSS на задачу), 24 ГБ наступили бы около 5,7 млн задач — расчёт. Стеки 4 КБ и 256 КБ
+дают один и тот же потолок по участкам. Подробности — `docs/stacks-study.md`, раздел 6.6.
+
 ## 3. Рабочие нити
 
 ```sh

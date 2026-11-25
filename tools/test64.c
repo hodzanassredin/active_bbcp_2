@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <string.h>
 
 #define GUARD 4096
 
@@ -112,15 +114,46 @@ long test64_minflt (void) {
 }
 
 /* Число отображений процесса (строк /proc/self/maps): стек задачи со
-   сторожевой страницей — два отображения. */
+   сторожевой страницей — два отображения. Чтение низкоуровневое (open/read,
+   без malloc): функцию зовут и тогда, когда лимит vm.max_map_count исчерпан,
+   а выделение памяти в этот момент само может не удаться. */
 long test64_vmas (void) {
-	FILE *f = fopen ("/proc/self/maps", "r");
-	long n = 0; int c;
-	if (f == NULL) return -1;
-	while ((c = fgetc (f)) != EOF) if (c == '\n') n++;
-	fclose (f);
-	return n;
+	static char buf[65536];
+	int fd; ssize_t r; char *p; long n = 0;
+	fd = open ("/proc/self/maps", O_RDONLY);
+	if (fd < 0) return -1;
+	while ((r = read (fd, buf, sizeof buf)) > 0)
+		for (p = buf; p < buf + r; p++) if (*p == '\n') n++;
+	close (fd);
+	return r < 0 ? -1 : n;
 }
+
+/* Поле /proc/self/status в байтах (VmSize, VmRSS и т.п.), низкоуровневое
+   чтение: на пределе числа отображений память может быть недоступна. */
+static long status_bytes (const char *name) {
+	static char buf[8192];
+	int fd; ssize_t r; char *p; size_t nlen = strlen (name);
+	fd = open ("/proc/self/status", O_RDONLY);
+	if (fd < 0) return -1;
+	r = read (fd, buf, sizeof buf - 1);
+	close (fd);
+	if (r <= 0) return -1;
+	buf[r] = 0;
+	p = buf;
+	while (p != NULL) {
+		if (strncmp (p, name, nlen) == 0) {
+			p += nlen;
+			while (*p == ' ' || *p == '\t') p++;
+			return atol (p) * 1024;
+		}
+		p = strchr (p, '\n');
+		if (p != NULL) p++;
+	}
+	return -1;
+}
+
+long test64_vmsize (void) { return status_bytes ("VmSize:"); }
+long test64_vmrss (void) { return status_bytes ("VmRSS:"); }
 
 /* Память процесса в байтах: resident из /proc/self/statm. */
 long test64_rss (void) {

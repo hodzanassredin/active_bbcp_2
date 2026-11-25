@@ -15,7 +15,22 @@ MODULE Async_devStacks;
 	Mass… — n задач у плотного поставщика стеков (Tasks.NewDenseDir) разом:
 	время создания, память процесса (RSS), число отображений, исполнение.
 	Модуль собирается с ключом % (go64 Async_devStacks%), иначе плотный
-	поставщик отдаёт задачам этого модуля стеки со сторожем. *)
+	поставщик отдаёт задачам этого модуля стеки со сторожем.
+
+	Ceiling… — потолок числа задач у поставщика: задачи создаются разом, не
+	исполняясь (у незапущенной задачи запись стека в реестре ядра имеет sp = 0,
+	поэтому сборка при создании не сканирует стеки; иначе создание становится
+	квадратичным), пока очередной Tasks.Start не откажет. Отказ — трап 22 от
+	HALT(22) в StartIn (AllocStack вернул FALSE); он ловится Kernel.Try вокруг
+	создания, процесс жив. После отказа каждая созданная задача исполняется один
+	раз (касается своего стека и засыпает), затем все разбужены и завершены.
+	Строка CEIL печатает, сколько задач успело создаться, признак отказа, код
+	трапа, число строк /proc/self/maps и VmRSS/VmSize из /proc/self/status до и
+	после первого исполнения.
+
+	Maps… — сколько строк /proc/self/maps добавляет одна задача у каждого
+	поставщика (1000, 10 000 и 100 000 задач). Отсюда расчётный потолок при
+	чужом vm.max_map_count: предел участков делится на участки на задачу. *)
 
 	IMPORT S := SYSTEM, ACTIVE, Kernel, Tasks, AsyncSelect, AsyncChan, System_devCRaw, System_devClock,
 		Console, Strings;
@@ -24,6 +39,7 @@ MODULE Async_devStacks;
 		pattern = 5A5A5A5AH;
 		SP = 4;	(* номер регистра указателя стека amd64 *)
 		rounds = 3;	(* операций ожидания на замер глубины *)
+		sleepForever = 1000000000;	(* срок сна задачи замера, мс (~11,6 суток) *)
 		yield = 0; chan = 1; select = 2; await = 3; buffer = 4;
 
 	TYPE
@@ -48,8 +64,18 @@ MODULE Async_devStacks;
 
 		Once = POINTER TO RECORD (Tasks.Task) END;
 
+		Waiter = POINTER TO RECORD (Tasks.Task)
+			link: Waiter;	(* список созданных задач для разблокировки *)
+			mode: INTEGER;	(* 0 — Park до Unpark, 1 — Sleep до Unpark *)
+			sum: INTEGER	(* след касания своего стека *)
+		END;
+
 	VAR
 		counter: INTEGER;
+		ceilHead: Waiter;	(* уже созданные задачи замера потолка *)
+		ceilLimit, ceilSize, ceilMade, ceilMode: INTEGER;
+		ceilDone: BOOLEAN;
+		ceilRan: INTEGER;	(* сколько задач уже исполнилось хотя бы раз *)
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);
 	BEGIN
@@ -252,5 +278,167 @@ MODULE Async_devStacks;
 		Load1(10000, 8 * 1024, 1, "load8k");
 		Load1(10000, 8 * 1024, 3, "load8k-warm")
 	END LoadSmall;
+
+	(* --- потолок числа задач --------------------------------------------- *)
+
+	PROCEDURE (w: Waiter) Run;
+	(* Один раз касается своего стека, отмечается в ceilRan и встаёт в ожидание.
+	   mode 1 — Sleep: у спящих есть срок, поэтому планировщик не считает
+	   остановку тупиком. mode 0 — Park: так задачи в MAPS не исполняются до
+	   Unpark, который делает Park пустым (задача сразу завершается). *)
+		VAR buf: ARRAY 128 OF CHAR; i, x: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE i < LEN(buf) DO buf[i] := CHR(65 + i MOD 26); INC(i) END;
+		x := ORD(buf[0]) + ORD(buf[LEN(buf) - 1]);
+		w.sum := x; INC(ceilRan);
+		IF w.mode = 0 THEN Tasks.Park ELSE Tasks.Sleep(sleepForever) END
+	END Run;
+
+	PROCEDURE CreateAll (a, b, c: INTEGER);
+	(* Создаёт задачи до ceilLimit, не исполняя их: у ещё не запущенной задачи
+	   запись стека в реестре ядра имеет sp = 0, поэтому сборка при создании не
+	   сканирует стеки (иначе скан всех стеков на каждой сборке делает создание
+	   квадратичным по числу задач). Отказ платформы (HALT(22) в StartIn)
+	   прерывает цикл и ловится Kernel.Try снаружи; ceilDone тогда FALSE. *)
+		VAR i: INTEGER; t: Waiter;
+	BEGIN
+		FOR i := ceilMade + 1 TO ceilLimit DO
+			NEW(t); t.mode := ceilMode; Tasks.SetStackSize(t, ceilSize); t.link := ceilHead;
+			Tasks.Start(t);
+			ceilHead := t; ceilMade := i
+		END;
+		ceilDone := TRUE
+	END CreateAll;
+
+	PROCEDURE RunCreated;
+	(* Исполнить каждую созданную задачу один раз: она коснётся своего стека и
+	   уснёт. Создание уже кончилось, поэтому сборки здесь не запускаются. *)
+	BEGIN
+		WHILE ceilRan < ceilMade DO Tasks.Step END
+	END RunCreated;
+
+	PROCEDURE Ceiling1 (kind, limit, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
+		VAR old, d: Tasks.StackDir; t: Waiter; maps0, maps1, maps2, rss0, rss1, rss2, vmsz1, vmsz2: LONGINT;
+			err: INTEGER; refused: BOOLEAN; createdMs, runMs: LONGINT;
+	BEGIN
+		old := Tasks.StackDirOf();
+		CASE kind OF
+		| 0: d := Tasks.NewGuardDir()
+		| 1: d := Tasks.NewSlabDir()
+		| 2: d := Tasks.NewDenseDir(reserve)
+		END;
+		maps0 := System_devCRaw.c_vmas(); rss0 := System_devCRaw.c_vmrss();
+		Tasks.SetStackDir(d);
+		ceilHead := NIL; ceilMade := 0; ceilRan := 0; ceilLimit := limit; ceilSize := size;
+		ceilDone := FALSE; ceilMode := 1;
+		createdMs := System_devClock.now();
+		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(CreateAll)), 0, 0, 0);
+		refused := ~ceilDone; err := Kernel.err;
+		maps1 := System_devCRaw.c_vmas();
+		rss1 := System_devCRaw.c_vmrss(); vmsz1 := System_devCRaw.c_vmsize();
+		createdMs := (System_devClock.now() - createdMs) DIV 1000000;
+		(* однократное исполнение всех созданных задач: касание стеков *)
+		runMs := System_devClock.now(); RunCreated; runMs := (System_devClock.now() - runMs) DIV 1000000;
+		maps2 := System_devCRaw.c_vmas(); rss2 := System_devCRaw.c_vmrss(); vmsz2 := System_devCRaw.c_vmsize();
+		Tasks.SetStackDir(old);
+		t := ceilHead;
+		WHILE t # NIL DO Tasks.Unpark(t); t := t.link END;
+		Pump;
+		W("CEIL "); W(tag); W(" size="); N(size); W(" limit="); N(limit); W(" made="); N(ceilMade);
+		W(" refused="); IF refused THEN W("1"); W(" err="); N(err) ELSE W("0") END;
+		W(" maps0="); N(maps0); W(" mapsBeforeRun="); N(maps1); W(" mapsAfterRun="); N(maps2);
+		W(" rssBeforeMB="); N((rss1 - rss0) DIV (1024 * 1024));
+		W(" rssAfterMB="); N((rss2 - rss0) DIV (1024 * 1024));
+		W(" vmsizeBeforeMB="); N(vmsz1 DIV (1024 * 1024));
+		W(" vmsizeAfterMB="); N(vmsz2 DIV (1024 * 1024));
+		W(" createMs="); N(createdMs); W(" runMs="); N(runMs); Console.WriteLn
+	END Ceiling1;
+
+	PROCEDURE CeilingSmoke*;
+	(** Быстрая проверка механизма замера: 1000 задач со стеком 4 КБ, отказа нет. *)
+	BEGIN Ceiling1(0, 1000, 4096, 0, "smoke")
+	END CeilingSmoke;
+
+	PROCEDURE CeilingRefuse*;
+	(** Проверка пути отказа: стек 70 МБ больше Kernel.maxStackScan, поэтому
+		AllocStack отказывает на первой задаче; отказ ловится, процесс жив. *)
+	BEGIN Ceiling1(0, 1, 70 * 1024 * 1024, 0, "refuse")
+	END CeilingRefuse;
+
+	PROCEDURE CeilingGuard4k*;
+	(** (а) стек со сторожем на задачу, стек 4 КБ; предел поиска 2 млн задач. *)
+	BEGIN Ceiling1(0, 2000000, 4096, 0, "guard4k")
+	END CeilingGuard4k;
+
+	PROCEDURE CeilingSlab4k*;
+	(** (б) плиты со сторожем на стек, стек 4 КБ; предел поиска 2 млн задач. *)
+	BEGIN Ceiling1(1, 2000000, 4096, 0, "slab4k")
+	END CeilingSlab4k;
+
+	PROCEDURE CeilingDense4k*;
+	(** (в) плотные плиты, стек 4 КБ; предел поиска 1 млн задач. *)
+	BEGIN Ceiling1(2, 1000000, 4096, 2048, "dense4k")
+	END CeilingDense4k;
+
+	PROCEDURE CeilingDense4m*;
+	(** (в) плотные плиты, стек 4 КБ; предел 4 млн — ищем предел по памяти. *)
+	BEGIN Ceiling1(2, 4000000, 4096, 2048, "dense4m")
+	END CeilingDense4m;
+
+	PROCEDURE CeilingGuardDef*;
+	(** (а) стек по умолчанию (256 КБ); предел поиска 2 млн задач. *)
+	BEGIN Ceiling1(0, 2000000, 256 * 1024, 0, "guardDef")
+	END CeilingGuardDef;
+
+	PROCEDURE CeilingSlabDef*;
+	(** (б) стек по умолчанию (256 КБ); предел поиска 2 млн задач. *)
+	BEGIN Ceiling1(1, 2000000, 256 * 1024, 0, "slabDef")
+	END CeilingSlabDef;
+
+	PROCEDURE CeilingDenseDef*;
+	(** (в) стек по умолчанию (256 КБ); предел поиска 1 млн задач. *)
+	BEGIN Ceiling1(2, 1000000, 256 * 1024, 2048, "denseDef")
+	END CeilingDenseDef;
+
+	PROCEDURE Maps1 (kind, n, size, reserve: INTEGER; IN tag: ARRAY OF CHAR);
+	(* Создаёт n задач без шага планировщика (стеки уже выделены), печатает
+	   число добавленных строк /proc/self/maps, затем разблокирует и завершает. *)
+		VAR old, d: Tasks.StackDir; t: Waiter; maps0, maps1: LONGINT; refused: BOOLEAN; err: INTEGER;
+	BEGIN
+		old := Tasks.StackDirOf();
+		CASE kind OF
+		| 0: d := Tasks.NewGuardDir()
+		| 1: d := Tasks.NewSlabDir()
+		| 2: d := Tasks.NewDenseDir(reserve)
+		END;
+		maps0 := System_devCRaw.c_vmas();
+		Tasks.SetStackDir(d);
+		ceilHead := NIL; ceilMade := 0; ceilRan := 0; ceilLimit := n; ceilSize := size;
+		ceilDone := FALSE; ceilMode := 0;
+		Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(CreateAll)), 0, 0, 0);
+		refused := ~ceilDone; err := Kernel.err;
+		maps1 := System_devCRaw.c_vmas();
+		Tasks.SetStackDir(old);
+		t := ceilHead;
+		WHILE t # NIL DO Tasks.Unpark(t); t := t.link END;
+		Pump;
+		W("MAPS "); W(tag); W(" n="); N(ceilMade); W(" size="); N(size);
+		W(" maps0="); N(maps0); W(" maps="); N(maps1); W(" added="); N(maps1 - maps0);
+		W(" milliPerTask="); N((maps1 - maps0) * 1000 DIV ceilMade);
+		W(" refused="); IF refused THEN W("1"); W(" err="); N(err) ELSE W("0") END; Console.WriteLn
+	END Maps1;
+
+	PROCEDURE MapsPerTask*;
+	(** Добавка строк /proc/self/maps на задачу у трёх поставщиков: 1000,
+		10 тыс. и 100 тыс. задач, стек 4 КБ. *)
+	BEGIN
+		Maps1(0, 1000, 4096, 0, "guard1k"); Maps1(0, 10000, 4096, 0, "guard10k");
+		Maps1(0, 100000, 4096, 0, "guard100k");
+		Maps1(1, 1000, 4096, 0, "slab1k"); Maps1(1, 10000, 4096, 0, "slab10k");
+		Maps1(1, 100000, 4096, 0, "slab100k");
+		Maps1(2, 1000, 4096, 2048, "dense1k"); Maps1(2, 10000, 4096, 2048, "dense10k");
+		Maps1(2, 100000, 4096, 2048, "dense100k")
+	END MapsPerTask;
 
 END Async_devStacks.
