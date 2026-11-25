@@ -83,6 +83,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | руководство по модулю `Tasks` |
 | `Docu/ru/Async.md`, `Docu/Async.md` | библиотека `Async` |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | подсистема `Actor`: акторы, ящики, исполнители, супервизор; примеры `ObxActor0`–`ObxActor2` |
+| `Crypto/Docu/ru/Crypto.md`, `Crypto/Docu/Crypto.md` | подсистема `Crypto`: криптография A2 и клиент TLS 1.2 |
 | `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | учебник «несколько дел в одной программе»: когда брать действие, задачу, монитор, транзакцию, канал, выбор, рабочую нить, компутон; сквозной пример — касса и счета (`ObxBank0`–`ObxBank6`) |
 | `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | хранилище «ключ → значение» `Kv` с транзакциями (по образцу LMDB/BoltDB) |
 | `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | согласованный журнал `Raft`: выборы, репликация, чтение ReadIndex, сеансы клиентов, снимки, хранилище на Kv, узел-актор `RaftNode`, журнал стойких акторов `RaftJournal`; проверка симуляцией по зёрнам |
