@@ -25,6 +25,8 @@ Async_devBench|proc slow|900|AsyncSelect AsyncChan AsyncOnce System_devCRaw Syst
 Async_devProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
 # Монитор в базовом классе (AsyncObject): вход, выход, ожидание, трап, отмена.
 Async_devObject|proc|300|AsyncObject
+# Монитор-объект и пропуск в Tasks: флаги, Cond, повторный вход, трап, отмена, Spawn.
+System_devTasksObj|proc|300|
 Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan AsyncOnce
 System_devUnload|proc|600|System_devUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 System_devUnloadGuard|proc|300|System_devUnloadGuardCode
