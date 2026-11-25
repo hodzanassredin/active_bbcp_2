@@ -2440,7 +2440,9 @@ MODULE Kernel;
 	END UpdateHeapBounds;
 
 	PROCEDURE ScanStack (lo, hi: S.ADDRESS);
-	(* Консервативный скан диапазона стека [lo, hi) с шагом 4. *)
+	(* Консервативный скан диапазона стека [lo, hi) с шагом 4. Кандидаты
+	   копятся в общем буфере: CheckCandidates обходит ВСЮ кучу, поэтому
+	   вызов на каждый стек стоил N_стеков × N_блоков. *)
 		VAR stk, p: LONGINT; ar: AdrRef;
 	BEGIN
 		IF (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN END;
@@ -2449,7 +2451,6 @@ MODULE Kernel;
 		   локалов, напр. Stores.Reader) бывают на адресах ≡ 4 (mod 8). Скан по 8
 		   (любой фазы) пропускал половину слотов → живые объекты собирались Sweep
 		   (use-after-free в StdConfig.Setup: модель жила только в слоте ≡4 (mod 8)). *)
-		nofcand := 0;
 		stk := lo; INC(stk, 3); stk := stk DIV 4 * 4;
 		WHILE stk < hi - 7 DO	(* ar.a читает 8 байт: не заходить за верх *)
 			ar := S.VAL(AdrRef, stk); p := ar.a;
@@ -2458,9 +2459,7 @@ MODULE Kernel;
 				IF nofcand = LEN(candidates) - 1 THEN CheckCandidates; nofcand := 0 END
 			END;
 			INC(stk, 4)
-		END;
-		candidates[nofcand] := heapMax; INC(nofcand);	(* ensure complete scan for interface mark*)
-		IF nofcand > 0 THEN CheckCandidates END
+		END
 	END ScanStack;
 
 	PROCEDURE MarkLocals (): BOOLEAN;
@@ -2476,6 +2475,7 @@ MODULE Kernel;
 		S.GETREG(FP, fp);
 		cur := StackOf(fp);
 		IF cur = NIL THEN RETURN FALSE END;
+		nofcand := 0;
 		interrupted := NIL;
 		IF cur.signal THEN
 			(* GC в обработчике трапа: сканируем сигнальный стек и прерванный *)
@@ -2492,6 +2492,11 @@ MODULE Kernel;
 			END;
 			s := s.next
 		END;
+		(* Один полный проход по куче за сборку. Кандидат heapMax не даёт
+		   обходу оборваться раньше конца и включает отметку интерфейсных
+		   записей (blk.actual > 0) во всех блоках. *)
+		candidates[nofcand] := heapMax; INC(nofcand);
+		CheckCandidates;
 		RETURN TRUE
 	END MarkLocals;
 
