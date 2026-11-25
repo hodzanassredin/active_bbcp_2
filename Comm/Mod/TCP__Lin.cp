@@ -256,14 +256,13 @@ MODULE CommTCP__Lin;
 	END LocalAdr;
 
 	PROCEDURE (l: Listener) Accept (OUT s: CommStreams.Stream);
-		VAR p: Libc.pollfd; res, namelen: INTEGER;
+		VAR timeout: Net.timeval; set: Net.fd_set; res, namelen: INTEGER;
 			sock: Net.SOCKET; tcpstream: Stream;
 			adr: Net.sockaddr_storage;
 	BEGIN
-		(* poll, не select: таблица fd_set ограничена 1024 дескрипторами,
-		   а библиотека ожиданий держит тысячи соединений *)
-		p.fd := l.sock; p.events := 1; p.revents := 0;
-		res := Libc.poll(SYSTEM.ADR(p), 1, 0);
+		timeout.tv_sec := 0; timeout.tv_usec := 0;
+		MakeFdSet(l.sock, set);
+		res := Net.select(l.sock + 1, set, NIL, NIL, timeout);
 		ASSERT(res # SOCKET_ERROR, 100);
 		IF res > 0 THEN
 			namelen := SIZE(Net.sockaddr_storage);
@@ -277,11 +276,6 @@ MODULE CommTCP__Lin;
 			s := tcpstream
 		END
 	END Accept;
-
-	PROCEDURE (l: Listener) Handle (): INTEGER;
-	BEGIN
-		RETURN l.sock
-	END Handle;
 
 	PROCEDURE (l: Listener) Close;
 		VAR res: INTEGER;
@@ -303,7 +297,7 @@ MODULE CommTCP__Lin;
 
 	PROCEDURE NewListener* (localAdr: ARRAY OF CHAR; OUT l: CommStreams.Listener; OUT res: INTEGER);
 		(* localAdr must contain a port number *)
-		CONST SOMAXCONN = 128;	(* очередь accept: 1000 одновременных соединений *)
+		CONST SOMAXCONN = 5;	(* use default length of listener backlog queue *)
 		VAR portnr, namelen, optval: INTEGER; ok: BOOLEAN; tcplistener: Listener;
 			adr: Net.sockaddr_in; sock: Net.SOCKET;
 			peername: ARRAY 64 OF CHAR;
@@ -353,24 +347,30 @@ MODULE CommTCP__Lin;
 
 	PROCEDURE (s: Stream) IsConnected (): BOOLEAN;
 		(* Give an educated guess on whether the peer has closed the connection. *)
-		(* This is not a guarantee that data sent on s will arrive at the peer.
-		   poll вместо select: без ограничения fd < 1024. *)
-		VAR p: Libc.pollfd; n, res, avail: INTEGER;
+		(* This is not a guarantee that data sent on s will arrive at the peer. *)
+		VAR timeout: Net.timeval; set: Net.fd_set; n, res, avail: INTEGER;
 	BEGIN
 		IF s.sock = INVALID_SOCKET THEN
 			RETURN FALSE
 		ELSE
-			p.fd := s.sock; p.events := 1; p.revents := 0;	(* POLLIN *)
-			n := Libc.poll(SYSTEM.ADR(p), 1, 0);
+			timeout.tv_sec := 0; timeout.tv_usec := 0;
+			MakeFdSet(s.sock, set);
+			n := Net.select(s.sock + 1, set, NIL, NIL, timeout);
 			ASSERT(n # SOCKET_ERROR, 100);
-			IF (n > 0) & ODD(p.revents) THEN	(* POLLIN: есть данные или EOF *)
+			IF n = 1 THEN	(* a recv on s.sock would not block; find out whether there is data queued *)
 				res := Ioctl.ioctl1(s.sock, Ioctl.FIONREAD, avail);
 				ASSERT(res = 0, 101);
+				(* if there is data queued, we assume the socket is still open.
+					if no data is queued, then we know that a recv can only return with zero bytes
+					read, telling us that the socket has been closed. *)
 				RETURN avail > 0
-			ELSIF (n > 0) & (p.revents # 0) THEN	(* POLLERR/POLLHUP *)
-				RETURN FALSE
-			ELSE	(* recv заблокировался бы: соединение открыто/устанавливается *)
-				RETURN TRUE
+			ELSE (* a recv on s.sock would block, so the peer has not closed the socket yet or the connect failed entirely *)
+				timeout.tv_sec := 0; timeout.tv_usec := 0;
+				MakeFdSet(s.sock, set);
+				n := Net.select(s.sock + 1, NIL, NIL, set, timeout);
+				ASSERT(n # SOCKET_ERROR, 102);
+				IF n = 1 THEN s.Close END;
+				RETURN n = 0
 			END
 		END
 	END IsConnected;
@@ -411,11 +411,6 @@ MODULE CommTCP__Lin;
 			END
 		END
 	END ReadBytes;
-
-	PROCEDURE (s: Stream) Handle (): INTEGER;
-	BEGIN
-		RETURN s.sock
-	END Handle;
 
 	PROCEDURE (s: Stream) Close;
 		VAR res: INTEGER;

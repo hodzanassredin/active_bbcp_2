@@ -2,7 +2,6 @@ MODULE LinIntInit;
 
 	IMPORT
 		Kernel,
-		Monitors (* реализация Kernel.Lock/Unlock/Wait/Await *) ,
 		StdInterpreter (* Dialog.SetCallHook *) ,
 		LinConsole (* Console.SetHook *) ,
 		
@@ -29,11 +28,7 @@ MODULE LinIntInit;
 		Converters.Register("StdTextConv.ImportText", "StdTextConv.ExportText", "TextViews.View", "txt", {});
 		
 		Windows.Init;  (* neet to set hooks *)
-
-		(* Пул рабочих нитей стартует лениво: первый
-		   AsyncWork.Execute сам ставит платформенного делегата через
-		   Dialog.Call. Базовый init пул не заводит. *)
-
+		
 		Dialog.Call("ConsInterp.Run", " ", res)
 		
 	END Init;

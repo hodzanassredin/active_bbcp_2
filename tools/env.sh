@@ -12,9 +12,8 @@ INSTALL="${BB64INSTALL:-$BB/.work/BB64LIN}"
 INTERP="$INSTALL/blackbox-console"
 DEV0="$BB/dev0Linux"
 
-# Подсистемы, которые собираются по умолчанию (порядок как у Ивана; Cas —
-# до Obx: её импортируют примеры ObxCas).
-DEFAULT_SUBSYSTEMS="Lin System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket Unit Demo"
+# Подсистемы, которые собираются по умолчанию (порядок как у Ивана).
+DEFAULT_SUBSYSTEMS="Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit"
 
 # Запуск консольного 64-битного BlackBox из каталога установки: StdLoader
 # ищет <Подсистема>/Code рядом с процессом.

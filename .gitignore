@@ -7,6 +7,3 @@ OLD/
 .work/
 __pycache__/
 *.pyc
-
-# Рабочий журнал сессии, не входит в репозиторий.
-docs/current-tasks.md

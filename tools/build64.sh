@@ -34,80 +34,14 @@ fi
 LOG="${TMPDIR:-/tmp}/build64-$$.log"
 trap 'rm -f "$LOG" "$LOG.cmd"' EXIT
 
-# Demo собирается отдельно: её модули импортируют Async, а Async идёт
-# после основного списка. Из общего списка её имя убираем.
-core=""
-for s in $subs; do
-	[ "$s" = Demo ] || core="$core $s"
-done
-
 echo "build64: компиляция подсистем:$subs"
 {
 	echo 'DevCompiler64.InitLogMarks'
 	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
-	[ -n "$core" ] && echo "DevCompiler64.CompileSubs @Lin $core"
-	# Модули Mod64 вне списка CompileSubs (<Sub>/Mod). Tasks и LinNative/
-	# LinThreads нужны самой подсистеме Async (AsyncSelect, AsyncComputon),
-	# поэтому идут до неё.
+	[ -n "$subs" ] && echo "DevCompiler64.CompileSubs @Lin $subs"
+	# Tasks и Taskarch лежат в <Sub>/Mod64 и в обход CompileSubs не попадают.
 	echo "DevCompiler64.CompileThis Taskarch"
 	echo "DevCompiler64.CompileThis Tasks"
-	echo "DevCompiler64.CompileThis LinThreads"
-	echo "DevCompiler64.CompileThis LinNative"
-	# Async — отдельным вызовом: ей нужны Tasks, LinNative и LinThreads,
-	# которые собираются выше, а в общий список их не добавить (там
-	# CompileSubs идёт до отдельных CompileThis).
-	if [ -d "$BB/Async/Mod" ] || [ -d "$BB/Async/Mod64" ]; then
-		echo "DevCompiler64.CompileSubs @Lin Async"
-		# Модули Mod64 подсистемы Async: их нет в обходе CompileSubs.
-		echo "DevCompiler64.CompileThis AsyncComputon"
-		echo "DevCompiler64.CompileThis AsyncMpi"
-		echo "DevCompiler64.CompileThis AsyncWork"
-		echo "DevCompiler64.CompileThis AsyncWorkLin"
-	fi
-	# Robust — фасад RobustParallel над AsyncComputon (этап 9).
-	if [ -d "$BB/Robust/Mod" ] || [ -d "$BB/Robust/Mod64" ]; then
-		echo "DevCompiler64.CompileSubs @Lin Robust"
-	fi
-	# Kv — хранилище «ключ -> значение»; KvLin нужен LinLibc, поэтому
-	# подсистема идёт после основного списка (на Windows её нет).
-	if [ -d "$BB/Kv/Mod" ]; then
-		echo "DevCompiler64.CompileSubs @Lin Kv"
-	fi
-	# Actor — акторы и супервизор над Tasks и Async (только amd64);
-	# журнал ActorKvJournal импортирует Kv, поэтому Actor — после Kv.
-	if [ -d "$BB/Actor/Mod" ]; then
-		echo "DevCompiler64.CompileSubs @Lin Actor"
-	fi
-	# Raft — согласованный журнал; ядро ни от чего не зависит, слои над
-	# Kv и Actor импортируют их, поэтому Raft — после Actor.
-	if [ -d "$BB/Raft/Mod" ]; then
-		echo "DevCompiler64.CompileSubs @Lin Raft"
-	fi
-	# Примеры Obx на задачах и каналах лежат в Obx/Mod64: обход CompileSubs
-	# их не берёт (им нужны Tasks и Async, которые собираются выше), поэтому
-	# каждый — отдельным CompileThis. Примеры друг друга не импортируют.
-	case " $subs " in
-	*" Obx "*)
-		for f in "$BB"/Obx/Mod64/*.cp; do
-			[ -f "$f" ] || continue
-			b=$(basename "$f" .cp)
-			echo "DevCompiler64.CompileThis Obx$b"
-		done
-		;;
-	esac
-	# Demo — примеры задач, мониторов и каналов (ACTIVE + Async).
-	case " $subs " in
-	*" Demo "*)
-		if [ -d "$BB/Demo/Mod" ]; then
-			echo "DevCompiler64.CompileThis DemoSupport"
-			for m in DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup \
-				DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong \
-				DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool; do
-				echo "DevCompiler64.CompileThis $m"
-			done
-		fi
-		;;
-	esac
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$BB/dev0Linux" < "$LOG.cmd" > "$LOG" 2>&1; then
@@ -148,7 +82,7 @@ if [ "$gui" -eq 1 ]; then
 		mkdir -p "$INSTALL/$sub"
 		cp -a "$BB/$sub/Rsrc/." "$INSTALL/$sub/Rsrc/"
 	done
-	for d in Docu Obx/Docu Demo/Docu Lin/Docu Unit/Docu Cas/Docu Actor/Docu Raft/Docu; do
+	for d in Docu Obx/Docu Demo/Docu Lin/Docu Unit/Docu; do
 		[ -d "$BB/$d" ] || continue
 		mkdir -p "$INSTALL/$d"
 		cp -a "$BB/$d/." "$INSTALL/$d/"

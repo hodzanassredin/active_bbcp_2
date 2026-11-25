@@ -14,7 +14,7 @@ MODULE WinInit;
 	(** the first dynamically-loaded module *)
 
 	IMPORT
-		SYSTEM, Kernel, Monitors, Services, Log, Dialog, Converters, Loop, Meta, 
+		SYSTEM, Kernel, Services, Log, Dialog, Converters, Loop, Meta, 
 	
 	(* platform specific modules *)
 		WinApi,
@@ -107,10 +107,7 @@ MODULE WinInit;
 	BEGIN
 		WinClipboard.Install;
 		WinShowHook.SetShowHook;
-
-		(* Пул рабочих нитей стартует лениво при первом
-		   AsyncWork.Execute; базовый init его не заводит. *)
-
+		
 		Dialog.Call("WinGui.InstallCtrlBreakInterrupt", "Failed to set Ctrl+Break interrupt", res_);
 		
 		m := Kernel.ThisMod("DevDebug");
