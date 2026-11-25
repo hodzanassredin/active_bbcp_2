@@ -40,6 +40,7 @@ MODULE System_devTasksObj;
 		ProbeOp = RECORD (Tasks.Op) END;
 		JoinOp = RECORD (Tasks.Op) child: Tasks.Task END;
 		CrossOp = RECORD (Tasks.Op) y: Lock END;
+		RunOp = RECORD (Tasks.Op) END;
 
 		(* --- объект-монитор с флагами ------------------------------------- *)
 
@@ -104,6 +105,15 @@ MODULE System_devTasksObj;
 		BufCons = POINTER TO RECORD (Tasks.Job) b: Buf; n: INTEGER END;
 		CondProd = POINTER TO RECORD (Tasks.Job) b: CondBuf; id, n: INTEGER END;
 		CondCons = POINTER TO RECORD (Tasks.Job) b: CondBuf; n: INTEGER END;
+
+		(* --- повторный запуск --------------------------------------------- *)
+
+		RestartTask = POINTER TO RECORD (Tasks.Task) runs: INTEGER END;
+		RestartJob = POINTER TO RECORD (Tasks.Job)
+			x: Lock; runs: INTEGER; sleepMs: LONGINT
+		END;
+		DoubleStartJob = POINTER TO RECORD (Tasks.Job) t: Tasks.Task END;
+		SleepTask = POINTER TO RECORD (Tasks.Task) ms: LONGINT END;
 
 		(* --- задачи без пропуска (управление) ------------------------------ *)
 
@@ -315,6 +325,7 @@ MODULE System_devTasksObj;
 			Tasks.Join(op.child)
 		| op: CrossOp DO
 			op.y.Do(ctx, visit)
+		| op: RunOp DO
 		| op: ProbeOp DO
 		ELSE
 			HALT(20)
@@ -590,6 +601,29 @@ MODULE System_devTasksObj;
 		Tasks.Sleep(2);
 		INC(childDone)
 	END Body;
+
+	PROCEDURE (t: RestartTask) Run;
+	BEGIN
+		INC(t.runs)
+	END Run;
+
+	PROCEDURE (j: RestartJob) Body- (VAR ctx: Tasks.Ctx);
+		VAR op: RunOp;
+	BEGIN
+		IF j.sleepMs > 0 THEN Tasks.Sleep(j.sleepMs) END;
+		INC(j.runs);
+		j.x.Do(ctx, op)
+	END Body;
+
+	PROCEDURE (j: DoubleStartJob) Body- (VAR ctx: Tasks.Ctx);
+	BEGIN
+		Tasks.Start(j.t)
+	END Body;
+
+	PROCEDURE (t: SleepTask) Run;
+	BEGIN
+		Tasks.Sleep(t.ms)
+	END Run;
 
 	PROCEDURE (t: Unparker) Run;
 	BEGIN
@@ -1077,6 +1111,75 @@ MODULE System_devTasksObj;
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
 	END CaseWakeRequeuesAtHead;
 
+	(* -------------------- повторный запуск -------------------------------- *)
+
+	PROCEDURE CaseRestartTask;
+		VAR t: RestartTask; i: INTEGER; a0, a1: LONGINT;
+	BEGIN
+		NEW(t); Tasks.SetStackSize(t, 128 * 1024);
+		FOR i := 1 TO 8 DO Tasks.Start(t); IF Pump(1000) THEN END END;	(* прогрев *)
+		UnitAssert.EqualInt(8, t.runs, "прогрев прошёл");
+		a0 := Kernel.AllocCount();
+		FOR i := 1 TO 1000 DO
+			Tasks.Start(t);
+			WHILE Tasks.Count() > 0 DO Tasks.Step END
+		END;
+		a1 := Kernel.AllocCount();
+		UnitAssert.EqualInt(1008, t.runs, "1000 повторных запусков");
+		UnitAssert.EqualInt(0, a1 - a0, "повторный запуск без выделений");
+		UnitAssert.EqualInt(0, Tasks.Count(), "задач не осталось")
+	END CaseRestartTask;
+
+	PROCEDURE CaseRestartJob;
+		VAR x: Lock; j: RestartJob; i: INTEGER; a0, a1: LONGINT;
+	BEGIN
+		NEW(x); NEW(j); j.x := x; Tasks.SetStackSize(j, 128 * 1024);
+		FOR i := 1 TO 8 DO Tasks.Start(j); IF Pump(1000) THEN END END;	(* прогресс: cleaner и Hold *)
+		UnitAssert.EqualInt(8, j.runs, "прогрев прошёл");
+		a0 := Kernel.AllocCount();
+		FOR i := 1 TO 1000 DO
+			Tasks.Start(j);
+			WHILE Tasks.Count() > 0 DO Tasks.Step END
+		END;
+		a1 := Kernel.AllocCount();
+		UnitAssert.EqualInt(1008, j.runs, "1000 повторных запусков");
+		UnitAssert.EqualInt(0, a1 - a0, "повторный Job без выделений");
+		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
+	END CaseRestartJob;
+
+	PROCEDURE CaseRestartCancelled;
+		VAR x: Lock; j: RestartJob;
+	BEGIN
+		NEW(x); NEW(j); j.x := x; j.sleepMs := 50;
+		Tasks.SetStackSize(j, 128 * 1024);
+		Tasks.Start(j); Tasks.Step;
+		UnitAssert.EqualInt(Tasks.Sleeping, Tasks.State(j), "задача спит");
+		Tasks.Cancel(j);
+		UnitAssert.True(Pump(1000), "отменённая задача завершилась");
+		UnitAssert.EqualInt(Tasks.Cancelled, Tasks.State(j), "задача отменена");
+		j.sleepMs := 0;
+		Tasks.Start(j);
+		UnitAssert.True(Pump(1000), "повторный запуск завершился");
+		UnitAssert.EqualInt(1, j.runs, "тело выполнилось после отмены");
+		UnitAssert.EqualInt(Tasks.Finished, Tasks.State(j), "состояние — finished");
+		UnitAssert.True(~Tasks.Failed(j), "без трапа");
+		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
+	END CaseRestartCancelled;
+
+	PROCEDURE CaseRestartRunningTraps;
+		VAR j: DoubleStartJob; s: SleepTask;
+	BEGIN
+		NEW(s); s.ms := 50; Tasks.SetStackSize(s, 128 * 1024);
+		Tasks.Start(s); Tasks.Step;
+		UnitAssert.EqualInt(Tasks.Sleeping, Tasks.State(s), "цель спит");
+		NEW(j); j.t := s; Tasks.SetStackSize(j, 128 * 1024);
+		Tasks.Start(j);
+		UnitAssert.True(Pump(2000), "обе задачи закончились");
+		UnitAssert.True(Tasks.Failed(j), "повторный запуск спящей задачи трапует");
+		UnitAssert.EqualInt(21, Kernel.err, "повторный запуск — трап 21");
+		UnitAssert.True(Tasks.State(s) IN {Tasks.Finished, Tasks.Cancelled}, "цель дожила")
+	END CaseRestartRunningTraps;
+
 	(* -------------------- запуск обоих режимов ---------------------------- *)
 
 	PROCEDURE TestMutualExclusion*;
@@ -1137,5 +1240,13 @@ MODULE System_devTasksObj;
 	BEGIN RunBoth(CaseEntryHoldAllowed) END TestEntryHoldAllowed;
 	PROCEDURE TestWakeRequeuesAtHead*;
 	BEGIN RunBoth(CaseWakeRequeuesAtHead) END TestWakeRequeuesAtHead;
+	PROCEDURE TestRestartTask*;
+	BEGIN RunBoth(CaseRestartTask) END TestRestartTask;
+	PROCEDURE TestRestartJob*;
+	BEGIN RunBoth(CaseRestartJob) END TestRestartJob;
+	PROCEDURE TestRestartCancelled*;
+	BEGIN RunBoth(CaseRestartCancelled) END TestRestartCancelled;
+	PROCEDURE TestRestartRunningTraps*;
+	BEGIN RunBoth(CaseRestartRunningTraps) END TestRestartRunningTraps;
 
 END System_devTasksObj.

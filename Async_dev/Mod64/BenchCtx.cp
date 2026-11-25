@@ -22,6 +22,7 @@ MODULE Async_devBenchCtx;
 		NoOp = RECORD (Tasks.Op) END;
 		Box = POINTER TO RECORD (Tasks.Object) n: INTEGER END;
 		BoxJob = POINTER TO RECORD (Tasks.Job) b: Box; n: INTEGER; ns: LONGINT END;
+		SpinTask = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 
 		(* --- буфер на флагах --- *)
 
@@ -131,6 +132,42 @@ MODULE Async_devBenchCtx;
 	BEGIN
 		WITH op: NoOp DO INC(b.n) END
 	END Exclusive;
+
+	PROCEDURE (t: SpinTask) Run;
+	BEGIN
+		INC(t.n)
+	END Run;
+
+	PROCEDURE Drain;
+	BEGIN
+		WHILE Tasks.Count() > 0 DO Tasks.Step END
+	END Drain;
+
+	PROCEDURE NewTasks10k*;
+	(* Создание, запуск и завершение 10 тыс. задач: каждый раз NEW. *)
+		VAR i: INTEGER; t: SpinTask; t0: LONGINT; a0, s0: LONGINT;
+	BEGIN
+		Drain;
+		a0 := Kernel.AllocCount(); s0 := Tasks.Switches(); t0 := System_devClock.now();
+		FOR i := 1 TO 10000 DO
+			NEW(t); Tasks.SetStackSize(t, 128 * 1024); Tasks.Start(t); Drain
+		END;
+		Report("restart-new", 10000, System_devClock.now() - t0,
+			Kernel.AllocCount() - a0, Tasks.Switches() - s0)
+	END NewTasks10k;
+
+	PROCEDURE RestartTasks10k*;
+	(* Те же 10 тыс. прогонов, но задача создана один раз. *)
+		VAR i: INTEGER; t: SpinTask; t0: LONGINT; a0, s0: LONGINT;
+	BEGIN
+		NEW(t); Tasks.SetStackSize(t, 128 * 1024);
+		FOR i := 1 TO 8 DO Tasks.Start(t); Drain END;	(* прогрев стека и записи *)
+		a0 := Kernel.AllocCount(); s0 := Tasks.Switches(); t0 := System_devClock.now();
+		FOR i := 1 TO 10000 DO Tasks.Start(t); Drain END;
+		Report("restart-same", 10000, System_devClock.now() - t0,
+			Kernel.AllocCount() - a0, Tasks.Switches() - s0);
+		W("RUNS "); N(t.n); Console.WriteLn
+	END RestartTasks10k;
 
 	PROCEDURE (j: BoxJob) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; op: NoOp;

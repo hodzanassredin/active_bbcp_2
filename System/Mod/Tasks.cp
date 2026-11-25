@@ -624,18 +624,36 @@ MODULE Tasks;
 	BEGIN
 		IF t = NIL THEN Msg("NIL task") END;
 		ASSERT(t # NIL, 20);
-		IF t.state # New THEN Msg("task already started or finished") END;
-		ASSERT(t.state = New, 21)
+		IF ~(t.state IN {New, Finished, Cancelled}) THEN
+			Msg("task is running or waiting")
+		END;
+		ASSERT(t.state IN {New, Finished, Cancelled}, 21)
 	END CheckTask;
 
 	PROCEDURE StartIn* (t: Task; g: Group);
-	(** Пред: t # NIL (трап 20), t ещё не запущена (21), платформа дала
-		стек (22). Пост: t готова к исполнению; g # NIL — t в группе g. *)
+	(** Пред: t # NIL (трап 20), t не идёт и не ждёт (21), платформа дала
+		стек (22). Пост: t готова к исполнению; g # NIL — t в группе g.
+		Завершённую или отменённую задачу можно запустить снова: поля
+		прошлого запуска сбрасываются, стек и его запись берутся заново. *)
+		VAR restart: BOOLEAN;
 	BEGIN
 		CheckTask(t);
+		restart := t.state IN {Finished, Cancelled};
+		IF restart THEN
+			ASSERT(t.holds = NIL, 100);
+			ASSERT(t.pctx = 0, 100);
+			t.cancel := FALSE; t.wake := FALSE; t.failed := FALSE;
+			t.bodyOk := FALSE; t.external := FALSE; t.deadline := 0;
+			t.waiters := NIL; t.wnext := NIL;
+			t.qnext := NIL; t.qkind := 0; t.qcond := NIL; t.qneed := {};
+			(* Своя группа прошлого запуска: дети уже отменены или кончились;
+			   владельца снимаем, чтобы их завершение не будило новый запуск. *)
+			IF t.own # NIL THEN t.own.owner := NIL; t.own := NIL END
+		END;
 		IF ~InitStack(t) THEN Msg("no stack memory (platform does not support it)"); HALT(22) END;
 		ReserveHeap(2 * (alive + 1) + heapMin);	(* PushSleeper не выделяет: heapN < 2 * nSleeping + heapMin *)
-		IF g # NIL THEN t.group := g; INC(g.alive) END;
+		t.group := g;
+		IF g # NIL THEN INC(g.alive) END;
 		t.state := Ready; Enqueue(t); deadlocked := FALSE;
 		t.prev := NIL; t.next := all;
 		IF all # NIL THEN all.prev := t END;
