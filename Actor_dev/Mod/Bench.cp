@@ -13,12 +13,19 @@ MODULE Actor_devBench;
 		exchanges = 100000;
 		events = 100000;
 		kvEvents = 2048;	(* с Sync на каждое событие *)
+		poolActors = 1000;	(* акторов в замере роста пула *)
+		napMs = 200;	(* сколько ждёт обработчик в замере роста *)
+		waitNs = 300 * 1000 * 1000;	(* ожидание, пока ждущие войдут в обработчик *)
+		capNs = 1000 * 1000 * 1000;	(* предел замера доставки *)
 
 	TYPE
 		Msg = ActorCore.Msg;
 		Ball = POINTER TO RECORD (Msg) END;
+		Nap = POINTER TO RECORD (Msg) ms: INTEGER END;
+		Ping = POINTER TO RECORD (Msg) END;
 		Counter = POINTER TO RECORD (ActorCore.Actor) END;
 		Pinger = POINTER TO RECORD (ActorCore.Actor) kick: ActorCore.Ref END;
+		PoolProbe = POINTER TO RECORD (ActorCore.Actor) END;
 		Driver = POINTER TO RECORD (Tasks.Task) body: PROCEDURE END;
 
 		Added = POINTER TO RECORD (ActorPersist.Event) n: INTEGER END;
@@ -37,6 +44,9 @@ MODULE Actor_devBench;
 		saved, recovered: BOOLEAN;
 		total: LONGINT;
 		kvDone: INTEGER;
+		poolRefs: POINTER TO ARRAY OF ActorCore.Ref;
+		poolStarted, poolInside, poolNaps, poolPings, poolReached, poolPeak, caseN: INTEGER;
+		napMsg: Nap; pingMsg: Ping;
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);
 	BEGIN
@@ -300,6 +310,82 @@ MODULE Actor_devBench;
 		Report(name, limit, t0);
 		ActorCore.StopActor(a); ActorCore.StopActor(b)
 	END PingPong;
+
+	PROCEDURE (a: PoolProbe) Receive (c: ActorCore.Context; m: Msg);
+	BEGIN
+		IF m IS ActorCore.Started THEN INC(poolStarted)
+		ELSIF m IS Nap THEN
+			INC(poolInside); IF poolInside > poolPeak THEN poolPeak := poolInside END;
+			Tasks.Sleep(m(Nap).ms); DEC(poolInside); INC(poolNaps)
+		ELSIF m IS Ping THEN INC(poolPings)
+		END
+	END Receive;
+
+	PROCEDURE NewPoolProbe (): ActorCore.Actor;
+		VAR a: PoolProbe;
+	BEGIN
+		NEW(a); RETURN a
+	END NewPoolProbe;
+
+	PROCEDURE PoolBody;
+	(* Пост: caseN акторов ждут в обработчике, остальные получают Ping;
+	   строки BENCH pool-wait-N и BENCH pool-after-N. *)
+		VAR i: INTEGER; t0: LONGINT; execs: INTEGER; pings: INTEGER;
+	BEGIN
+		poolStarted := 0; poolInside := 0; poolNaps := 0; poolPings := 0;
+		poolReached := 0; poolPeak := 0;
+		NEW(poolRefs, poolActors);
+		FOR i := 0 TO poolActors - 1 DO
+			poolRefs[i] := ActorCore.Spawn(NIL, ActorCore.NewProps(NewPoolProbe), "")
+		END;
+		WHILE poolStarted < poolActors DO Tasks.Yield END;
+		FOR i := 0 TO caseN - 1 DO ActorCore.Tell(poolRefs[i], napMsg) END;
+		t0 := System_devClock.now();
+		WHILE (poolInside < caseN) & (System_devClock.now() - t0 < waitNs) DO Tasks.Yield END;
+		poolReached := poolInside;
+		execs := ActorRun.n;
+		t0 := System_devClock.now();
+		pings := poolActors - caseN;
+		FOR i := caseN TO poolActors - 1 DO ActorCore.Tell(poolRefs[i], pingMsg) END;
+		WHILE (poolPings < pings) & (System_devClock.now() - t0 < capNs) DO Tasks.Yield END;
+		W("BENCH pool-wait-"); N(caseN);
+		W(" reached="); N(poolReached); W(" execs="); N(execs);
+		W(" peakWaiters="); N(poolPeak); W(" deliveryNs="); N(System_devClock.now() - t0);
+		W(" pings="); N(pings); W(" done="); N(poolPings);
+		W(" nsPerPing="); N((System_devClock.now() - t0) DIV pings); Console.WriteLn;
+		W("BENCH pool-after-"); N(caseN); W(" execs="); N(ActorRun.n); Console.WriteLn;
+		FOR i := 0 TO poolActors - 1 DO ActorCore.StopActor(poolRefs[i]) END
+	END PoolBody;
+
+	PROCEDURE OnePoolCase (n: INTEGER; ms: LONGINT);
+	BEGIN
+		caseN := n;
+		ActorRun.Start(4);
+		UnitAssert.True(Drive(PoolBody, ms), "pool case finished");
+		ActorRun.Shutdown
+	END OnePoolCase;
+
+	PROCEDURE InitPoolMsgs;
+	BEGIN
+		NEW(napMsg); napMsg.ms := napMs; NEW(pingMsg)
+	END InitPoolMsgs;
+
+	PROCEDURE Pool0*;
+	BEGIN InitPoolMsgs; OnePoolCase(0, 120000) END Pool0;
+
+	PROCEDURE Pool64*;
+	BEGIN InitPoolMsgs; OnePoolCase(64, 120000) END Pool64;
+
+	PROCEDURE Pool500*;
+	BEGIN InitPoolMsgs; OnePoolCase(500, 120000) END Pool500;
+
+	PROCEDURE TestSlowPoolGrow*;
+	BEGIN
+		InitPoolMsgs;
+		OnePoolCase(0, 120000);
+		OnePoolCase(64, 120000);
+		OnePoolCase(500, 120000)
+	END TestSlowPoolGrow;
 
 	PROCEDURE TestSlowTenThousandActors*;
 	BEGIN
