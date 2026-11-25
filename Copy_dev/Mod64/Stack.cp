@@ -156,6 +156,19 @@ MODULE Copy_devStack;
 		UnitAssert.EqualInt(0, RunDeep(depthFifty), "depth 50")
 	END TestProcDepth;
 
+	PROCEDURE TestProcDeep*;
+	(** Рекурсия на 300 кадров: участок в десятки килобайт. *)
+		VAR o: Deep;
+	BEGIN
+		NEW(o); o.depth := 300; o.err := 0;
+		CopyStack.Start(o); Step1;
+		UnitAssert.EqualInt(CopyStack.Waiting, CopyStack.State(o), "depth 300: sleeps");
+		UnitAssert.True(CopyStack.SegLen(o) >= 30000, "depth 300: segment at least 30 KB");
+		o.Wake; Step1;
+		UnitAssert.EqualInt(CopyStack.Finished, CopyStack.State(o), "depth 300: finished");
+		UnitAssert.EqualInt(0, o.err, "depth 300: locals and links intact")
+	END TestProcDeep;
+
 	(* --- сборка мусора при спящем ----------------------------------------- *)
 
 	PROCEDURE (o: GcObj) Exclusive-;
