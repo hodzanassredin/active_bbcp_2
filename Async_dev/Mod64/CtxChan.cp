@@ -54,6 +54,10 @@ MODULE Async_devCtxChan;
 			ms: LONGINT; n: INTEGER
 		END;
 
+		Locker = POINTER TO RECORD (Tasks.Task)
+			a, b: AsyncChan.Chan; sent: BOOLEAN
+		END;
+
 		HoldRecvOp = RECORD (Tasks.Op) c: AsyncChan.Chan; rec: BOOLEAN; got: INTEGER END;
 		HoldSelOp = RECORD (Tasks.Op) a, b: AsyncChan.Chan; idx: INTEGER END;
 		HoldSendOp = RECORD (Tasks.Op) c: AsyncChan.Chan; sent: BOOLEAN END;
@@ -200,6 +204,18 @@ MODULE Async_devCtxChan;
 		Tasks.Sleep(s.ms);
 		m := NewNum(s.n);
 		IF s.useBuf THEN s.b.Send(m) ELSE s.c.Send(m) END
+	END Run;
+
+	PROCEDURE (l: Locker) Run;
+	(* Держит монитор канала a дольше срока получателя и, пока тот ждёт
+	   монитор, чтобы снять своё предложение с a, отдаёт сообщение в его ещё
+	   не снятое предложение на b. Остановка — сроком: отменённую задачу вход
+	   в занятый монитор прерывает трапом 127, как и в Select без пропуска. *)
+	BEGIN
+		Kernel.Lock(l.a);
+		Tasks.Sleep(80);
+		l.b.Send(NewNum(7)); l.sent := TRUE;
+		Kernel.Unlock(l.a)
 	END Run;
 
 	(* -------------------- объект-монитор ---------------------------------- *)
@@ -395,6 +411,24 @@ MODULE Async_devCtxChan;
 		UnitAssert.True(j.repeat & j.fast, "повтор после остановки — сразу");
 		ChannelStillWorks(a)
 	END TestSelectCtxCancel;
+
+	PROCEDURE TestSelectCtxDecidedWhileWithdrawing*;
+		(* Решение, принятое, пока остановленная задача снимает предложения
+		   (монитор канала a занят), важнее остановки: сообщение, которое
+		   отправитель уже отдал, не теряется. *)
+		VAR j: SelJob; l: Locker; a, b: AsyncChan.Chan;
+	BEGIN
+		a := AsyncChan.NewChan(); b := AsyncChan.NewChan();
+		NEW(j); j.a := a; j.b := b; j.timeout := 5000; j.deadline := 20;
+		Start(j);
+		NEW(l); l.a := a; l.b := b;
+		Start(l);
+		UnitAssert.True(Pump(2000), "обе задачи завершились");
+		UnitAssert.True(l.sent, "отправка состоялась");
+		UnitAssert.True(j.expired, "срок получателя наступил");
+		UnitAssert.EqualInt(1, j.idx, "победил приём из b, а не остановка");
+		UnitAssert.EqualInt(7, j.got, "сообщение получено")
+	END TestSelectCtxDecidedWhileWithdrawing;
 
 	PROCEDURE TestSelectCtxDeadlineFirst*;
 		(* Срок пропуска 10 мс раньше тайм-аута 500 мс: −1. *)

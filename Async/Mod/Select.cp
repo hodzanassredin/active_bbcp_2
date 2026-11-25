@@ -699,7 +699,7 @@ MODULE AsyncSelect;
 		важнее остановки: возвращается индекс победителя. Протокол отверг
 		отправку — трап 21, как у Select. *)
 		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer; i, last, tIdx, winner: INTEGER;
-			tMs: LONGINT; refused: BOOLEAN;
+			tMs: LONGINT; refused, stopped: BOOLEAN;
 	BEGIN
 		ASSERT(Tasks.InTask(), 20);
 		ASSERT(LEN(ops) <= maxAlt, 21);
@@ -712,15 +712,19 @@ MODULE AsyncSelect;
 		IF tctx.Stopped() THEN RETURN -1 END;
 		ctx := TakeCtx();
 		RegisterAll(ops, ctx, offers, last, tIdx, tMs);
-		IF ~AwaitDecisionCtx(tctx, ctx, tIdx, tMs) THEN
-			WithdrawAll(ops, offers, last);
+		stopped := ~AwaitDecisionCtx(tctx, ctx, tIdx, tMs);
+		(* Снятие предложения может ждать занятый монитор канала; за это
+		   время другая сторона успевает принять решение по ещё не снятому
+		   предложению. Поэтому остановка проверяется после снятия: принятое
+		   решение важнее, иначе переданное сообщение пропало бы. *)
+		WithdrawAll(ops, offers, last);
+		IF stopped & ~ctx.decided THEN
 			FOR i := 0 TO last - 1 DO
 				IF offers[i] # NIL THEN FreeOffer(offers[i]) END
 			END;
 			FreeCtx(ctx);
 			RETURN -1
 		END;
-		WithdrawAll(ops, offers, last);
 		winner := ctx.winner;
 		ASSERT((0 <= winner) & (winner < last), 100);
 		refused := (offers[winner] # NIL) & offers[winner].refused;
