@@ -292,7 +292,8 @@ MODULE Kernel;
 			trapStack: TrapCleaner;	(* цепочка уборщиков на этом стеке *)
 			tryCount: INTEGER;
 			signal: BOOLEAN;		(* сигнальный стек: сканировать прерванный стек по Kernel.sp *)
-			main: BOOLEAN			(* главный стек процесса *)
+			main: BOOLEAN;			(* главный стек процесса *)
+			segment: BOOLEAN		(* диапазон кучи: сканируется пакетом с другими *)
 		END;
 
 		(* Состояние ловли трапа, привязанное к стеку: контекст последнего
@@ -413,8 +414,9 @@ MODULE Kernel;
 		free: ARRAY N OF FreeBlock;	(* free list *)
 		sentinelBlock: FreeDesc;
 		sentinel: FreeBlock;
-		candidates: ARRAY 1024 OF LONGINT;
+		candidates: ARRAY 262144 OF LONGINT;
 		nofcand: INTEGER;
+		batching: BOOLEAN;	(* ScanStack копит кандидатов без CheckCandidates *)
 		heapMin, heapMax: LONGINT;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
 		gcGoal: LONGINT;	(* Инвариант: после Sweep = выжившее + MAX(выжившее * gcPercent DIV 100, gcMinGrowth) *)
@@ -1646,7 +1648,7 @@ MODULE Kernel;
 		NEW(s);
 		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
 		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
-		s.signal := signal; s.main := FALSE;
+		s.signal := signal; s.main := FALSE; s.segment := FALSE;
 		s.prev := NIL; s.next := stacks;
 		IF stacks # NIL THEN stacks.prev := s END;
 		stacks := s;
@@ -1669,7 +1671,7 @@ MODULE Kernel;
 	BEGIN
 		IF (lo = 0) OR (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN NIL END;
 		s := NewStack(lo, hi, FALSE);
-		s.sp := lo;
+		s.sp := lo; s.segment := TRUE;
 		RETURN s
 	END RegisterStackSegment;
 
@@ -2491,7 +2493,7 @@ MODULE Kernel;
 		   локалов, напр. Stores.Reader) бывают на адресах ≡ 4 (mod 8). Скан по 8
 		   (любой фазы) пропускал половину слотов → живые объекты собирались Sweep
 		   (use-after-free в StdConfig.Setup: модель жила только в слоте ≡4 (mod 8)). *)
-		nofcand := 0;
+		IF ~batching THEN nofcand := 0 END;
 		stk := lo; INC(stk, 3); stk := stk DIV 4 * 4;
 		WHILE stk < hi - 7 DO	(* ar.a читает 8 байт: не заходить за верх *)
 			ar := S.VAL(AdrRef, stk); p := ar.a;
@@ -2501,8 +2503,10 @@ MODULE Kernel;
 			END;
 			INC(stk, 4)
 		END;
-		candidates[nofcand] := heapMax; INC(nofcand);	(* ensure complete scan for interface mark*)
-		IF nofcand > 0 THEN CheckCandidates END
+		IF ~batching THEN
+			candidates[nofcand] := heapMax; INC(nofcand);	(* ensure complete scan for interface mark*)
+			IF nofcand > 0 THEN CheckCandidates END
+		END
 	END ScanStack;
 
 	PROCEDURE MarkLocals (): BOOLEAN;
@@ -2529,11 +2533,24 @@ MODULE Kernel;
 		END;
 		s := stacks;
 		WHILE s # NIL DO
-			IF (s # cur) & (s # interrupted) & (s.sp # 0) & (s.sp < s.hi) THEN
+			IF (s # cur) & (s # interrupted) & (s.sp # 0) & (s.sp < s.hi) & ~s.segment THEN
 				ScanStack(s.sp, s.hi)
 			END;
 			s := s.next
 		END;
+		(* Диапазоны кучи (копии участков стека) — одним пакетом: CheckCandidates
+		   обходит кучу, и на каждый диапазон это дало бы N_diap × N_kuchi. *)
+		batching := TRUE; nofcand := 0;
+		s := stacks;
+		WHILE s # NIL DO
+			IF (s # cur) & (s # interrupted) & (s.sp # 0) & (s.sp < s.hi) & s.segment THEN
+				ScanStack(s.sp, s.hi)
+			END;
+			s := s.next
+		END;
+		batching := FALSE;
+		candidates[nofcand] := heapMax; INC(nofcand);
+		IF nofcand > 0 THEN CheckCandidates END;
 		RETURN TRUE
 	END MarkLocals;
 
