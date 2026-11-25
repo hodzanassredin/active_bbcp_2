@@ -1503,16 +1503,15 @@ MODULE System_devTasksSim;
 	END CheckCoverage;
 
 	PROCEDURE TestProcAbandonedHandoffDepth*;
-	(** Известная ошибка ядра, найденная этим тестом: после брошенного
-		ожидания, монитор которого уже передан другой задаче, Reconcile
-		второй раз зовёт ReleaseHold для той же записи и уменьшает глубину
-		уже чужого владельца. Монитор считается взятым (Held TRUE), а
-		Depth возвращает 0. Тест намеренно красный, пока ядро не исправлено. *)
+	(** Брошенное ожидание, монитор которого уже передан другой задаче:
+		Reconcile второй раз зовёт ReleaseHold для той же записи, и глубина
+		нового владельца не должна уменьшиться. Взятый монитор (Held TRUE)
+		имеет глубину не меньше 1. *)
 		VAR s: UnitAssert.Message;
 	BEGIN
 		ResetCov;
 		One(1, FALSE);
-		s := "known kernel defect: after an abandoned wait is handed to another task, held is ";
+		s := "after an abandoned wait is handed to another task, held is ";
 		IF abandonHeld THEN App(s, "TRUE") ELSE App(s, "FALSE") END;
 		App(s, ", depth is "); AppNum(s, abandonDepth);
 		App(s, " (a held monitor must have depth >= 1)");
