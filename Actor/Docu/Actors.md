@@ -489,9 +489,40 @@ Failure rules:
 | a store error on write or read | trap `storeTrap` (71); the supervisor decides: retry (`Restart`) or stop |
 | a frame cannot be read (type not found, version out of range) | the codec answers `unknown` and does not trap; recovery traps `decodeTrap` (72), the reader `ActorPersist.Read` gets `res = corrupt` (`TestUnknownEventType`) |
 
-Waiting: `Persist` is synchronous and has no switch points, so while it writes the executor is busy.
-A slow store delays the whole pool; an actor for which this matters is created with
-`Props.dedicated` (section 3).
+Waiting: the journals in memory, in a file and in `Kv` answer at once, so with them `Persist` is
+synchronous and has no switch points: while it writes the executor is busy. A slow store delays the
+whole pool; an actor for which this matters is created with `Props.dedicated` (section 3).
+
+A journal may also answer later: `RaftJournal` confirms a write only when a majority of Raft nodes has
+committed it, and waiting for that inside a handler is not possible — under `ActorSim` the same task
+also drives the Raft nodes. So `Persist` hands the event to the journal with
+`ActorJournal.Journal.Submit` and does not wait. If the journal answered at once, the event is applied
+and `Persisted(c, e)` is called before `Persist` returns; if it answers later, `Persist` returns at
+once, and applying and `Persisted` happen when the answer arrives as a message. Until then the actor
+handles no new messages: each one that arrives is stashed (`ActorCore.Context.Stash`) and after the
+answer goes back to the head of the mailbox in its old order. So the handler of the next command
+always sees the state with every written event. Reply to a command in `Persisted`: there the state
+already includes the event and `c.Sender()` is the sender of the command. Code after `Persist` sees
+the new state only with a journal that answers at once:
+
+```
+PROCEDURE (a: Counter) Handle (c: ActorCore.Context; m: ActorCore.Msg);
+	VAR e: Added;
+BEGIN
+	IF m IS Inc THEN NEW(e); a.Persist(c, e, 0) END	(* the reply is in Persisted *)
+END Handle;
+
+PROCEDURE (a: Counter) Persisted (c: ActorCore.Context; e: ActorPersist.Event);
+	VAR r: Value;
+BEGIN
+	NEW(r); r.v := a.v; c.Respond(r)	(* the event is written and applied *)
+END Persisted;
+```
+
+Recovery takes the same path (`ActorJournal.Journal.Replay`): messages before `ReplayComplete` are
+stashed too. The journal's answer arrives in the mailbox, so a bounded mailbox
+(`Props.capacity > 0`) may drop it and the actor would wait forever: a journal that answers later
+needs an unbounded mailbox.
 
 Event versions. `Stores.Writer.WriteStore` writes the frame: the type name, then the fields from
 `Externalize`. The type reads its version number with `ReadVersion(min, max, v)` and parses the
@@ -865,7 +896,9 @@ DEFINITION ActorCore;
 			(c: Context) Watch (r: Ref), NEW;
 			(c: Context) Unwatch (r: Ref), NEW;
 			(c: Context) SetReceiveTimeout (ms: LONGINT), NEW;
-			(c: Context) Become (b: Behavior), NEW
+			(c: Context) Become (b: Behavior), NEW;
+			(c: Context) Stash, NEW;
+			(c: Context) Unstash, NEW
 		END;
 
 	VAR
@@ -999,6 +1032,16 @@ Pre: called from the handler of `c` — trap 20.
 Post: the following letters are handled by `b.Receive`; `b = NIL` and a restart return
 `Actor.Receive`.
 
+**PROCEDURE (c: Context) Stash**
+Put aside the message being handled: the handler cannot take it now.
+Pre: called from the handler of `c` handling a user message (not a life-cycle step) — trap 20.
+Post: the message and its sender are stashed. A restart puts the stashed messages back at the head
+of the mailbox, a stop makes them dead letters.
+
+**PROCEDURE (c: Context) Unstash**
+Pre: called from the handler of `c` — trap 20.
+Post: the stashed messages are at the head of the mailbox in `Stash` order, with their senders.
+
 **PROCEDURE NewProps (f: Factory): Props**
 Pre: `f # NIL` — trap 20.
 Post: a description with factory `f`, an unlimited mailbox, a pool executor, no strategy.
@@ -1130,7 +1173,18 @@ DEFINITION ActorJournal;
 				IN data: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER), NEW, ABSTRACT;
 			(j: Journal) LoadSnapshot (IN stream: ARRAY OF CHAR; OUT seq: LONGINT;
 				OUT data: Bytes; OUT len, res: INTEGER), NEW, ABSTRACT;
-			(j: Journal) Close, NEW, EMPTY
+			(j: Journal) Close, NEW, EMPTY;
+			(j: Journal) Submit (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: Meta;
+				IN body: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) SubmitSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
+				IN data: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) Replay (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE
+		END;
+
+		Request = POINTER TO ABSTRACT RECORD (Sink)
+			(r: Request) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, EXTENSIBLE;
+			(r: Request) Snapshot (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
+			(r: Request) Done (res: INTEGER), NEW, ABSTRACT
 		END;
 
 	VAR
@@ -1146,6 +1200,13 @@ END ActorJournal.
 A journal is a set of streams; a stream is events numbered 1, 2, 3 … without gaps. `res`: `ok`;
 `conflict`, the expected number does not match; `absent`, there is no snapshot; `failed`, an
 environment error; `corrupt`, the data cannot be read.
+
+`Submit`, `SubmitSnapshot` and `Replay` are the same `Append`, `SaveSnapshot` and reading of the
+snapshot with its events, but the result goes to the request `r` by `Done(res)` — exactly once, inside
+the call or later, from another context; `Replay` gives the snapshot to `r.Snapshot` and the events to
+`r.Event` before `Done`. By default they call the synchronous methods and answer at once, so a
+synchronous journal does not redefine them; a journal that answers later (`RaftJournal.Client`) does.
+Pre: `r # NIL` — trap 23 (`Replay`: 20).
 
 `Meta` is the event metadata: the number `seq`, the write time `time` (UTC, `YYYYMMDDhhmmss`), the
 cause `cause`, the author `author`. The journal keeps them apart from the body and returns them
@@ -1236,6 +1297,7 @@ DEFINITION ActorPersist;
 
 	CONST
 		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
+		mutNoStash = 0;
 
 	TYPE
 		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
@@ -1251,6 +1313,8 @@ DEFINITION ActorPersist;
 			stream: ActorCore.Name;
 			(a: Actor) Apply (e: Event), NEW, ABSTRACT;
 			(a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg), NEW, ABSTRACT;
+			(a: Actor) Persisted (c: ActorCore.Context; e: Event), NEW, EMPTY;
+			(a: Actor) Busy (): BOOLEAN, NEW;
 			(a: Actor) Snapshot (): Stores.Store, NEW, EXTENSIBLE;
 			(a: Actor) Restore (s: Stores.Store), NEW, EMPTY;
 			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg), EXTENSIBLE;
@@ -1261,6 +1325,9 @@ DEFINITION ActorPersist;
 		Visitor = POINTER TO ABSTRACT RECORD
 			(v: Visitor) Visit (e: Event), NEW, ABSTRACT
 		END;
+
+	VAR
+		mutations: SET;
 
 	PROCEDURE Read (j: ActorJournal.Journal; IN stream: ARRAY OF CHAR; from: LONGINT; v: Visitor;
 		OUT last: LONGINT; OUT res: INTEGER);
@@ -1279,6 +1346,15 @@ Post: the state of `a` is changed by event `e`. No messages, no writes, no traps
 **PROCEDURE (a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg)**
 The command handler. It gets `ReplayComplete` first and does not get `Started`.
 
+**PROCEDURE (a: Actor) Persisted (c: ActorCore.Context; e: Event)**
+After a write: `e` is written and applied, `seq = e.meta.seq`; `c.Sender()` is the sender of the
+message whose handler wrote `e`. Reply to the command here; `Persist` may be called.
+
+**PROCEDURE (a: Actor) Busy (): BOOLEAN**
+Post: recovery or a write without the journal's answer is in progress — user messages are stashed.
+
+`mutations` (`mutNoStash`: a message arriving during a write is handled at once) is for tests only.
+
 **PROCEDURE (a: Actor) Snapshot (): Stores.Store**
 Post: the object whose frame is the snapshot of the state. By default the actor itself (its
 `Externalize`).
@@ -1288,20 +1364,25 @@ Post: the state of `a` is taken from `s`, the object read from the snapshot. Cal
 when `seq` already equals the snapshot number.
 
 **PROCEDURE (a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg)**
-On `Started`: the snapshot of the stream, if any, goes to `Restore`, then the events after it go to
-`Apply`, then `Handle(c, ReplayComplete)`. A journal error traps `storeTrap`, an unreadable frame
-traps `decodeTrap`. Other messages go to `Handle`.
+On `Started`: the journal's `Replay` — the snapshot of the stream, if any, goes to `Restore`, then the
+events after it go to `Apply`, then `Handle(c, ReplayComplete)`. A journal error traps `storeTrap`,
+an unreadable frame traps `decodeTrap`. The journal's answer applies the event and calls `Persisted`.
+While `Busy`, user messages are stashed (`Stash`) and come back after the answer; `Stopping`,
+`Stopped`, `Restarting` go to `Handle` at once. Other messages go to `Handle`.
 
 **PROCEDURE (a: Actor) SaveSnapshot (c: ActorCore.Context)**
 Pre: called from the handler of `a` (not checked); `a.seq > 0`, trap 20.
-Post: the snapshot of the state after event `seq` is saved; an error traps `storeTrap`.
+Post: the snapshot of the state after event `seq` is handed to the journal (`SubmitSnapshot`) after
+the waiting writes; a journal failure traps `storeTrap`.
 
 **PROCEDURE (a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT)**
 Pre: called from the handler of `a` (not checked); `e # NIL`, trap 20.
-Post: `e` is written to the stream with number `seq + 1`, with the sender of the command as author
-(the actor itself when there is no sender), cause `cause` and the write time; then `e.meta` is
-filled, `Apply(e)` runs and `seq` grows; a snapshot is taken if `seq` is a multiple of `snapEvery`.
-Another writer appended to the stream: trap `conflictTrap`; a store error: `storeTrap`; in both
+Post: `e` is handed to the journal (`Submit`) with number `seq + 1` plus the number of events still
+waiting for an answer, with the sender of the command as author (the actor itself when there is no
+sender), cause `cause` and the write time. On the journal's answer: `e.meta` is filled, `Apply(e)`
+runs, `seq` grows, `Persisted(c, e)` is called; a snapshot is taken if `seq` is a multiple of
+`snapEvery`. If the journal answered at once, all this happens before the return. Another writer
+appended to the stream: trap `conflictTrap`; a store error or an unknown result: `storeTrap`; in both
 cases `e` is not applied. No switch points.
 
 **PROCEDURE (v: Visitor) Visit (e: Event)**

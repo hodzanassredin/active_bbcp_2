@@ -5,8 +5,9 @@ A persistent counter actor whose event journal is Raft: the counter survives the
 Three `RaftNode` nodes with their own clocks (a tick every 5 ms) hold the `RaftJournal` journal: each
 event of the actor is a Raft entry. The counter is an `ActorPersist.Actor` with `journal` =
 `RaftJournal.Client`; it lives as a child of a node actor and dies with the node. The executor is the
-`ActorRun` pool: `Persist` waits for the commit inside the handler while the Raft nodes run in their
-own tasks. The example belongs to the guide `Raft/Docu/Raft.md` (section "Journal of persistent
+`ActorRun` pool. `Persist` does not wait for the commit: it hands the event to the journal, and the
+counter replies to `Inc` in `Persisted` when a majority of nodes has stored the entry; new messages
+are stashed until then. The example belongs to the guide `Raft/Docu/Raft.md` (section "Journal of persistent
 actors").
 
 ```
@@ -65,15 +66,20 @@ MODULE ObxRaft1;
 	PROCEDURE (a: Counter) Handle (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR e: Added; r: Value;
 	BEGIN
-		WITH m: Inc DO
-			NEW(e); a.Persist(c, e, 0);	(* ждёт, пока событие зафиксирует большинство узлов *)
-			NEW(r); r.v := a.v; c.Respond(r)
+		WITH m: Inc DO NEW(e); a.Persist(c, e, 0)	(* ответ — в Persisted *)
 		| m: Get DO NEW(r); r.v := a.v; c.Respond(r)
 		| m: ActorPersist.ReplayComplete DO
 			Console.WriteStr("  counter is up with value "); WriteInt(a.v); Console.WriteLn
 		ELSE
 		END
 	END Handle;
+
+	PROCEDURE (a: Counter) Persisted (c: ActorCore.Context; e: ActorPersist.Event);
+	(* событие зафиксировано большинством узлов и применено: ответить на Inc *)
+		VAR r: Value;
+	BEGIN
+		NEW(r); r.v := a.v; c.Respond(r)
+	END Persisted;
 
 	PROCEDURE NewCounter (): ActorCore.Actor;
 		VAR a: Counter;
@@ -181,8 +187,9 @@ inc
 
 The counter started on the leader's node and read its stream `counter` through Raft (`LoadSnapshot`
 and `Read` are ReadIndex reads): the stream is empty, the value is 0. Each `inc` is a `Persist`: the
-event went to the leader as a Raft command, and `Append` returned only after a majority of nodes had
-stored the entry and the leader had applied it to its copy of the journal.
+event went to the leader as a Raft command, and the answer "written" came only after a majority of
+nodes had stored the entry and the leader had applied it to its copy of the journal; then the counter
+applied the event and replied to `Inc` in `Persisted`.
 
 The leader's node crashed, and the counter with it. The other two nodes elected a new leader. A new
 incarnation of the counter on another node, with a new journal client, read the stream through the

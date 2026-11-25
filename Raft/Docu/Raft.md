@@ -127,15 +127,21 @@ A storage failure breaks the node: it stops answering and stops itself; it is br
 copy of the journal (`ActorJournal.NewMem`) on every node; the commands "append an event" and "save a
 snapshot" go through the Raft log, and the check of the expected number (`expected`) runs when the
 command is applied — one check for the whole cluster. `RaftJournal.Client` goes into
-`ActorPersist.Actor.journal`: `Append` and `SaveSnapshot` send a `Propose` to the leader and wait for the
-answer with `ActorCore.Ask` — the persistent actor's task waits in `AsyncChan.Select` without polling;
-`Append` returns after a majority has committed. `Last`, `Read`, `LoadSnapshot` are `Query` reads.
+`ActorPersist.Actor.journal`. Behind the client is an agent actor on node `net` (named
+`$journal<id>`): it sends `Propose` commands to the leader, looks for the leader, retries on timeout and
+answers the journal request by a message. A persistent actor uses the asynchronous methods (`Submit`,
+`SubmitSnapshot`, `Replay`, ADR 0026): `Persist` does not wait; the event is applied and `Persisted` is
+called when a majority has committed the entry, and messages are stashed until then. `Replay` is one
+`Query` read: the snapshot and the events after it. The synchronous `Append`, `Last`, `Read`,
+`SaveSnapshot`, `LoadSnapshot` remain for code outside an actor: they wait for the agent's answer in
+`AsyncChan.Select`.
 
-Conditions: calls come from a task (the `ActorRun` pool), the `RaftNode` nodes have their own clocks, and
-the journal client number is new for every `Client` incarnation. Under `ActorSim` the journal does not
-work: there is one driver task there, and `Append` would wait for itself. `failed` from `Append` means
-"unknown" (no answer within `giveUpMs`): `ActorPersist` traps, and the actor's restart re-reads the
-journal. Example: `ObxRaft1`.
+The agent's clock: `tickMs > 0` (default 10) is its own clock with timeouts `timeoutMs` and `giveUpMs`;
+`tickMs = 0` means the owner sends ticks by calling `RaftJournal.Tick(c)`, with timeouts `timeoutTicks`
+and `giveUpTicks` in ticks. So the journal works under `ActorSim` too: the driver ticks the client
+together with the nodes, and a run is a function of the seed. The journal client number is new for every
+`Client` incarnation. `failed` from a write means "unknown" (no answer within `giveUp`): `ActorPersist`
+traps, and the actor's restart re-reads the journal. `Close` stops the agent. Example: `ObxRaft1`.
 
 ## Testing
 
@@ -176,6 +182,16 @@ and a mutation search). The driver mutations `RaftNode.mutations` are caught: se
 (`mutSendFirst`) — "a new leader without a committed entry", answering the client before commit
 (`mutEarlyReply`) — "a confirmed command is lost".
 
+`Raft_devPersist` tests persistent actors on `RaftJournal` under `ActorSim` by seed: 3 Raft nodes on
+`ActorNetMem` with frame loss, duplicates and delays, node crashes and network partitions; persistent
+counters write, die with their node and recover on another one, sometimes two incarnations write to one
+stream. Invariants: a confirmed event is in the journal; the stream numbers go without gaps; each event
+was written from the state right before it (no interleaving of two incarnations); after recovery the
+actor's state equals the fold of the journal. The normal run is 300 seeds of 1500 steps (about 2 s); the
+long one is `Raft_devPersist.Long` (2000 seeds of 3000 steps and the mutation search). Mutations are
+caught: `RaftJournal.mutNoWait` on seed 1, `ActorPersist.mutNoStash` on seed 1,
+`RaftJournal.mutNoExpected` on seed 9.
+
 `Raft_devJournal` tests `RaftJournal` on the `ActorRun` pool in real time: a persistent counter writes and
 recovers from the Raft journal, the leader's death loses nothing confirmed, and a leader cut off from the
 majority does not confirm a write (Append returns through the new leader once the entry is on a
@@ -196,8 +212,9 @@ and 11 thousand with 64, because 64 commands go in one commit per node (0.05 sav
 
 - The `RaftNode` actor is tested on `ActorNetMem` (with faults) and in the examples; it was not run on
   `ActorNetTcp` between processes.
-- The `RaftJournal` journal works only on the `ActorRun` pool (not under `ActorSim`, see above); its tests
-  are real-time scenarios, not seeds. `ActorGrain` was not tested on it. The journal state machine's
+- The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`; `ActorGrain` was not tested
+  on it. A mailbox with `Props.capacity > 0` may lose the journal's answer — a persistent actor on Raft
+  needs an unbounded mailbox. The journal state machine's
   snapshot is all accepted commands in a row; there is no separate truncation for it.
 - No membership change: the cluster size is fixed at creation.
 - No PreVote and no CheckQuorum: a node behind a partition raises its term and deposes the leader when it
@@ -215,5 +232,6 @@ and 11 thousand with 64, because 64 commands go in one commit per node (0.05 sav
 `RaftStorage`: `Storage` (`Save`, `Compact`, `Load`), `NewMem`. `RaftKvStorage`: `New(db)`.
 `RaftNode`: `NewConfig`, `Start`, `Config` (`peers`, `tickMs`, `electionTicks`, `compactEvery`, `seed`,
 `actor`), messages `Tick`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`), `Caps`.
-`RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`timeoutMs`, `giveUpMs`).
+`RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`tickMs`, `timeoutMs`, `giveUpMs`,
+`timeoutTicks`, `giveUpTicks`, `Close`), `Tick(c)`, mutations `mutNoWait`, `mutNoExpected`.
 `RaftSm.StateMachine.Query` is the read for `RaftNode.Query`.

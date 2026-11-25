@@ -126,14 +126,20 @@ Raft между узлами — кадры `ActorNet`: срок, индексы
 `RaftJournal` делает из Raft `ActorJournal.Journal`. Автомат `RaftJournal.Machine` держит копию журнала
 (`ActorJournal.NewMem`) на каждом узле; команды «дописать событие» и «сохранить снимок» идут через журнал
 Raft, проверка ожидаемого номера (`expected`) выполняется при применении — одна на кластер.
-`RaftJournal.Client` ставят в `ActorPersist.Actor.journal`: `Append` и `SaveSnapshot` шлют `Propose`
-лидеру и ждут ответа `ActorCore.Ask` — задача стойкого актора ждёт в `AsyncChan.Select`, не опрашивая;
-`Append` возвращается после фиксации большинством. `Last`, `Read`, `LoadSnapshot` — чтения `Query`.
+`RaftJournal.Client` ставят в `ActorPersist.Actor.journal`. За клиентом стоит актор-агент на узле `net`
+(имя `$journal<id>`): он шлёт команды `Propose` лидеру, ищет лидера, повторяет по тайм-ауту и отвечает
+запросу журнала письмом. Стойкий актор пользуется асинхронными методами (`Submit`, `SubmitSnapshot`,
+`Replay`, ADR 0026): `Persist` не ждёт, событие применяется и `Persisted` вызывается, когда большинство
+зафиксировало запись; письма до этого откладываются. `Replay` — одно чтение `Query`: снимок и события
+после него. Синхронные `Append`, `Last`, `Read`, `SaveSnapshot`, `LoadSnapshot` остались для кода вне
+актора: они ждут ответа агента в `AsyncChan.Select`.
 
-Условия: вызовы — из задачи (пул `ActorRun`), у узлов `RaftNode` свои часы, номер клиента журнала новый
-для каждого воплощения `Client`. Под `ActorSim` журнал не работает: там одна задача-водитель, и
-`Append` ждал бы сам себя. `failed` у `Append` значит «неизвестно» (ответа не было за `giveUpMs`):
-`ActorPersist` трапует, перезапуск актора перечитывает журнал. Пример — `ObxRaft1`.
+Часы агента: `tickMs > 0` (по умолчанию 10) — свои часы, тайм-ауты `timeoutMs` и `giveUpMs`;
+`tickMs = 0` — тики шлёт владелец вызовом `RaftJournal.Tick(c)`, тайм-ауты `timeoutTicks` и
+`giveUpTicks` в тиках. Так журнал работает и под `ActorSim`: водитель тикает клиента вместе с узлами, и
+прогон — функция зерна. Номер клиента журнала новый для каждого воплощения `Client`. `failed` у записи
+значит «неизвестно» (ответа не было за `giveUp`): `ActorPersist` трапует, перезапуск актора перечитывает
+журнал. `Close` останавливает агента. Пример — `ObxRaft1`.
 
 ## Проверка
 
@@ -173,6 +179,15 @@ echo 'Raft_devSim.Replay' | ./blackbox-console --RAFT_SEED=<зерно> --RAFT_N
 `RaftNode.mutations` ловятся: отправка до сохранения (`mutSendFirst`) — «новый лидер без
 зафиксированной записи», ответ клиенту до фиксации (`mutEarlyReply`) — «подтверждённая команда потеряна».
 
+`Raft_devPersist` проверяет стойких акторов на `RaftJournal` под `ActorSim` по зерну: 3 узла Raft на
+`ActorNetMem` с потерей, дублем и задержкой кадров, падениями узлов и разрывами сети; стойкие счётчики
+пишут, умирают вместе с узлом и восстанавливаются на другом, иногда два воплощения пишут в один поток.
+Инварианты: подтверждённое событие есть в журнале; номера потока идут подряд; каждое событие записано по
+состоянию сразу перед ним (без вперемешку двух воплощений); после восстановления состояние актора равно
+свёртке журнала. Обычный прогон — 300 зёрен по 1500 ходов (около 2 с); долгий — `Raft_devPersist.Long`
+(2000 зёрен по 3000 ходов и поиск мутаций). Мутации ловятся: `RaftJournal.mutNoWait` — зерно 1,
+`ActorPersist.mutNoStash` — зерно 1, `RaftJournal.mutNoExpected` — зерно 9.
+
 `Raft_devJournal` проверяет `RaftJournal` на пуле `ActorRun` в реальном времени: стойкий счётчик пишет и
 восстанавливается из журнала Raft, гибель лидера не теряет подтверждённого, лидер, отрезанный от
 большинства, записи не подтверждает (Append возвращается через нового лидера, когда запись у
@@ -191,8 +206,9 @@ echo 'Raft_devSim.Replay' | ./blackbox-console --RAFT_SEED=<зерно> --RAFT_N
 
 - Узел-актор `RaftNode` проверен на `ActorNetMem` (со сбоями) и в примерах; на `ActorNetTcp` между
   процессами он не запускался.
-- Журнал `RaftJournal` работает только на пуле `ActorRun` (под `ActorSim` — нет, см. выше); его тесты —
-  сценарии в реальном времени, а не зёрна. `ActorGrain` на нём не проверялся. Снимок автомата журнала —
+- Журнал `RaftJournal` под `ActorSim` проверен только на `ActorNetMem`; `ActorGrain` на нём не
+  проверялся. Ящик с `Props.capacity > 0` может потерять ответ журнала — стойкому актору на Raft нужен
+  неограниченный ящик. Снимок автомата журнала —
   все принятые команды подряд, усечения журнала Raft для него не настраивается отдельно.
 - Смены состава нет: кластер задаётся числом узлов при создании.
 - Нет PreVote и CheckQuorum: узел за разделением поднимает срок и, вернувшись, сбивает лидера; старый
@@ -210,5 +226,6 @@ echo 'Raft_devSim.Replay' | ./blackbox-console --RAFT_SEED=<зерно> --RAFT_N
 `RaftStorage`: `Storage` (`Save`, `Compact`, `Load`), `NewMem`. `RaftKvStorage`: `New(db)`.
 `RaftNode`: `NewConfig`, `Start`, `Config` (`peers`, `tickMs`, `electionTicks`, `compactEvery`, `seed`,
 `actor`), письма `Tick`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`), `Caps`.
-`RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`timeoutMs`, `giveUpMs`).
+`RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`tickMs`, `timeoutMs`, `giveUpMs`,
+`timeoutTicks`, `giveUpTicks`, `Close`), `Tick(c)`, мутации `mutNoWait`, `mutNoExpected`.
 `RaftSm.StateMachine.Query` — чтение для `RaftNode.Query`.

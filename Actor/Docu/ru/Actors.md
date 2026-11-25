@@ -476,9 +476,38 @@ N выбирают больше числа операций, которые мо
 | ошибка хранилища при записи или чтении | трап `storeTrap` (71); судьбу решает супервизор — повторить (`Restart`) или остановить |
 | кадр не читается (тип не найден, версия вне допустимых) | кодек отвечает `unknown`, не трапует; восстановление трапует `decodeTrap` (72), читатель `ActorPersist.Read` получает `res = corrupt` (`TestUnknownEventType`) |
 
-Ожидание: `Persist` синхронный и точек переключения не имеет, поэтому пока он пишет, исполнитель
-занят. Медленное хранилище задерживает весь пул; актор, которому это важно, создаётся с
-`Props.dedicated` (раздел 3).
+Ожидание: журналы в памяти, в файле и в `Kv` отвечают сразу, поэтому `Persist` с ними синхронный и
+точек переключения не имеет: пока он пишет, исполнитель занят. Медленное хранилище задерживает весь
+пул; актор, которому это важно, создаётся с `Props.dedicated` (раздел 3).
+
+Журнал может ответить и позже: `RaftJournal` подтверждает запись, только когда её зафиксировало
+большинство узлов Raft, а ждать этого внутри обработчика нельзя — под `ActorSim` ту же задачу ждут и
+узлы Raft. Поэтому `Persist` отдаёт событие журналу методом `ActorJournal.Journal.Submit` и не ждёт.
+Ответил журнал сразу — событие применено и вызван `Persisted(c, e)` ещё до возврата из `Persist`;
+ответит позже — `Persist` возвращается сразу, а применение и `Persisted` случатся, когда ответ придёт
+письмом. Пока ответа нет, актор новых писем не обрабатывает: каждое пришедшее откладывается
+(`ActorCore.Context.Stash`) и после ответа возвращается в начало ящика в прежнем порядке. Так
+обработчик следующей команды всегда видит состояние со всеми записанными событиями. Отвечать на
+команду надо в `Persisted`: там состояние уже включает событие, а `c.Sender()` — отправитель команды.
+Код после `Persist` видит новое состояние только у журнала, который отвечает сразу:
+
+```
+PROCEDURE (a: Counter) Handle (c: ActorCore.Context; m: ActorCore.Msg);
+	VAR e: Added;
+BEGIN
+	IF m IS Inc THEN NEW(e); a.Persist(c, e, 0) END	(* ответ — в Persisted *)
+END Handle;
+
+PROCEDURE (a: Counter) Persisted (c: ActorCore.Context; e: ActorPersist.Event);
+	VAR r: Value;
+BEGIN
+	NEW(r); r.v := a.v; c.Respond(r)	(* событие записано и применено *)
+END Persisted;
+```
+
+Восстановление идёт тем же путём (`ActorJournal.Journal.Replay`): письма до `ReplayComplete` тоже
+откладываются. Ответ журнала приходит в ящик, поэтому ящик с пределом (`Props.capacity > 0`) может
+его потерять, и актор будет ждать вечно: журналу с ответом позже нужен ящик без предела.
 
 Версии событий. Кадр пишет `Stores.Writer.WriteStore`: имя типа, затем поля из `Externalize`. Тип
 читает свой номер версии `ReadVersion(min, max, v)` и разбирает поля по `v`. Новое поле — новая
@@ -837,7 +866,9 @@ DEFINITION ActorCore;
 			(c: Context) Watch (r: Ref), NEW;
 			(c: Context) Unwatch (r: Ref), NEW;
 			(c: Context) SetReceiveTimeout (ms: LONGINT), NEW;
-			(c: Context) Become (b: Behavior), NEW
+			(c: Context) Become (b: Behavior), NEW;
+			(c: Context) Stash, NEW;
+			(c: Context) Unstash, NEW
 		END;
 
 	VAR
@@ -970,6 +1001,17 @@ END ActorCore.
 Пред: вызов из обработчика `c` — трап 20.
 Пост: следующие письма обрабатывает `b.Receive`; `b = NIL` и перезапуск возвращают `Actor.Receive`.
 
+**PROCEDURE (c: Context) Stash**
+Отложить письмо в обработке: обработчик сейчас не может его принять.
+Пред: вызов из обработчика `c`, обрабатывающего пользовательское письмо (не шаг жизненного цикла) —
+трап 20.
+Пост: письмо и его отправитель отложены. Перезапуск возвращает отложенные в начало ящика, остановка
+делает их мёртвыми письмами.
+
+**PROCEDURE (c: Context) Unstash**
+Пред: вызов из обработчика `c` — трап 20.
+Пост: отложенные письма — в начале ящика в порядке `Stash`, с прежними отправителями.
+
 **PROCEDURE NewProps (f: Factory): Props**
 Пред: `f # NIL` — трап 20.
 Пост: описание с фабрикой `f`, ящик без предела, исполнитель пула, без стратегии.
@@ -1098,7 +1140,18 @@ DEFINITION ActorJournal;
 				IN data: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER), NEW, ABSTRACT;
 			(j: Journal) LoadSnapshot (IN stream: ARRAY OF CHAR; OUT seq: LONGINT;
 				OUT data: Bytes; OUT len, res: INTEGER), NEW, ABSTRACT;
-			(j: Journal) Close, NEW, EMPTY
+			(j: Journal) Close, NEW, EMPTY;
+			(j: Journal) Submit (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: Meta;
+				IN body: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) SubmitSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
+				IN data: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) Replay (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE
+		END;
+
+		Request = POINTER TO ABSTRACT RECORD (Sink)
+			(r: Request) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, EXTENSIBLE;
+			(r: Request) Snapshot (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
+			(r: Request) Done (res: INTEGER), NEW, ABSTRACT
 		END;
 
 	VAR
@@ -1114,6 +1167,12 @@ END ActorJournal.
 Журнал — набор потоков; поток — события с номерами 1, 2, 3 … без пропусков. `res`: `ok`; `conflict`
 — ожидаемый номер не совпал; `absent` — снимка нет; `failed` — ошибка среды; `corrupt` — данные не
 читаются.
+
+`Submit`, `SubmitSnapshot` и `Replay` — те же `Append`, `SaveSnapshot` и чтение снимка с событиями,
+но итог приходит в запрос `r` методом `Done(res)` — ровно один раз, внутри вызова или позже, из
+чужого контекста; `Replay` отдаёт снимок в `r.Snapshot` и события в `r.Event` до `Done`. По умолчанию
+они зовут синхронные методы и отвечают сразу, поэтому синхронному журналу их не переопределяют;
+журнал с ответом позже (`RaftJournal.Client`) переопределяет. Пред: `r # NIL` — трап 23 (`Replay` — 20).
 
 `Meta` — метаданные события: номер `seq`, время записи `time` (UTC, `ГГГГММДДччммсс`), причина
 `cause`, автор `author`. Журнал хранит их отдельно от тела и отдаёт без разбора тела.
@@ -1203,6 +1262,7 @@ DEFINITION ActorPersist;
 
 	CONST
 		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
+		mutNoStash = 0;
 
 	TYPE
 		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
@@ -1218,6 +1278,8 @@ DEFINITION ActorPersist;
 			stream: ActorCore.Name;
 			(a: Actor) Apply (e: Event), NEW, ABSTRACT;
 			(a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg), NEW, ABSTRACT;
+			(a: Actor) Persisted (c: ActorCore.Context; e: Event), NEW, EMPTY;
+			(a: Actor) Busy (): BOOLEAN, NEW;
 			(a: Actor) Snapshot (): Stores.Store, NEW, EXTENSIBLE;
 			(a: Actor) Restore (s: Stores.Store), NEW, EMPTY;
 			(a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg), EXTENSIBLE;
@@ -1228,6 +1290,9 @@ DEFINITION ActorPersist;
 		Visitor = POINTER TO ABSTRACT RECORD
 			(v: Visitor) Visit (e: Event), NEW, ABSTRACT
 		END;
+
+	VAR
+		mutations: SET;
 
 	PROCEDURE Read (j: ActorJournal.Journal; IN stream: ARRAY OF CHAR; from: LONGINT; v: Visitor;
 		OUT last: LONGINT; OUT res: INTEGER);
@@ -1246,6 +1311,15 @@ END ActorPersist.
 **PROCEDURE (a: Actor) Handle (c: ActorCore.Context; m: ActorCore.Msg)**
 Обработчик команд. Первым получает `ReplayComplete`; `Started` не получает.
 
+**PROCEDURE (a: Actor) Persisted (c: ActorCore.Context; e: Event)**
+После записи: `e` записано, применено, `seq = e.meta.seq`; `c.Sender()` — отправитель письма, обработчик
+которого записал `e`. Здесь отвечают на команду; можно звать `Persist`.
+
+**PROCEDURE (a: Actor) Busy (): BOOLEAN**
+Пост: идёт восстановление или запись без ответа журнала — пользовательские письма откладываются.
+
+`mutations` (`mutNoStash` — письмо во время записи обрабатывается сразу) — только для тестов.
+
 **PROCEDURE (a: Actor) Snapshot (): Stores.Store**
 Пост: объект, кадр которого — снимок состояния. По умолчанию — сам актор (его `Externalize`).
 
@@ -1254,20 +1328,25 @@ END ActorPersist.
 когда `seq` уже равен номеру снимка.
 
 **PROCEDURE (a: Actor) Receive (c: ActorCore.Context; m: ActorCore.Msg)**
-На `Started`: снимок потока (если есть) — `Restore`, затем события после него — `Apply`, затем
-`Handle(c, ReplayComplete)`. Ошибка журнала — трап `storeTrap`, нечитаемый кадр — `decodeTrap`.
-Остальные письма — `Handle`.
+На `Started`: `Replay` журнала — снимок потока (если есть) — `Restore`, затем события после него —
+`Apply`, затем `Handle(c, ReplayComplete)`. Ошибка журнала — трап `storeTrap`, нечитаемый кадр —
+`decodeTrap`. Ответ журнала — применение события и `Persisted`. Пока `Busy`, пользовательские письма
+откладываются (`Stash`) и возвращаются после ответа; `Stopping`, `Stopped`, `Restarting` — сразу в
+`Handle`. Остальные письма — `Handle`.
 
 **PROCEDURE (a: Actor) SaveSnapshot (c: ActorCore.Context)**
 Пред: вызов из обработчика `a` (не проверяется); `a.seq > 0` — трап 20.
-Пост: снимок состояния после события `seq` сохранён; ошибка — трап `storeTrap`.
+Пост: снимок состояния после события `seq` отдан журналу (`SubmitSnapshot`) после ждущих записей;
+отказ журнала — трап `storeTrap`.
 
 **PROCEDURE (a: Actor) Persist (c: ActorCore.Context; e: Event; cause: LONGINT)**
 Пред: вызов из обработчика `a` (не проверяется); `e # NIL` — трап 20.
-Пост: `e` записано в поток с номером `seq + 1`, автором — отправителем команды (без отправителя — сам
-актор), причиной `cause` и временем записи; затем `e.meta` заполнено, `Apply(e)`, `seq` увеличен;
-снимок, если `seq` кратен `snapEvery`. Поток дописан другим — трап `conflictTrap`; ошибка хранилища
-— `storeTrap`; в обоих случаях `e` не применено. Точек переключения нет.
+Пост: `e` отдано журналу (`Submit`) с номером `seq + 1` плюс число событий, ещё ждущих ответа,
+автором — отправителем команды (без отправителя — сам актор), причиной `cause` и временем записи. По
+ответу журнала: `e.meta` заполнено, `Apply(e)`, `seq` увеличен, `Persisted(c, e)`; снимок, если `seq`
+кратен `snapEvery`. Журнал ответил сразу — всё это до возврата. Поток дописан другим — трап
+`conflictTrap`; ошибка хранилища или неизвестный итог — `storeTrap`; в обоих случаях `e` не
+применено. Точек переключения нет.
 
 **PROCEDURE (v: Visitor) Visit (e: Event)**
 Пост: событие `e` (метаданные — в `e.meta`) учтено.

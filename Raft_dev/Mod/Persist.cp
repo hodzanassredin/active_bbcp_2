@@ -32,7 +32,7 @@ MODULE Raft_devPersist;
 	RaftJournal.mutNoExpected — автомат не сверяет expected) обязаны
 	ловиться. *)
 
-	IMPORT Services, Tasks, Strings, Log, Stores, AsyncIO,
+	IMPORT Services, Tasks, Strings, Log, Stores,
 		ActorCore, ActorJournal, ActorCodec, ActorPersist, ActorNet, ActorNetMem, ActorSim,
 		Core := RaftCore, RaftSm, RaftStorage, RaftNode, RaftJournal, UnitAssert;
 
@@ -653,7 +653,7 @@ MODULE Raft_devPersist;
 		seed := s; runSteps := steps; done := FALSE; ok := TRUE; why := "";
 		NEW(d); Tasks.Start(d);
 		t := Services.Ticks();
-		WHILE ~done & (Services.Ticks() - t <= 120000) DO Services.actionHook.Step; AsyncIO.Poll(0) END;
+		WHILE ~done & (Services.Ticks() - t <= 120000) DO Services.actionHook.Step END;
 		IF ~done THEN Violation("прогон завис", 0) END;
 		res := ok; msg := why$
 	END Run;

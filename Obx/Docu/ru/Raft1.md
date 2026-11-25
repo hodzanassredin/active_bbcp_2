@@ -4,8 +4,9 @@
 
 Три узла `RaftNode` со своими часами (тик — 5 мс) хранят журнал `RaftJournal`: каждое событие актора —
 запись Raft. Счётчик — `ActorPersist.Actor` с `journal` = `RaftJournal.Client`; он живёт ребёнком
-узла-актора и падает вместе с узлом. Исполнитель — пул `ActorRun`: `Persist` ждёт фиксации внутри
-обработчика, а узлы Raft в это время работают в своих задачах. Пример относится к руководству
+узла-актора и падает вместе с узлом. Исполнитель — пул `ActorRun`. `Persist` не ждёт фиксации: он отдаёт
+событие журналу, а ответ на `Inc` счётчик шлёт в `Persisted`, когда большинство узлов сохранило
+запись; новые письма до этого откладываются. Пример относится к руководству
 `Raft/Docu/ru/Raft.md` (раздел «Журнал стойких акторов»).
 
 ```
@@ -64,15 +65,20 @@ MODULE ObxRaft1;
 	PROCEDURE (a: Counter) Handle (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR e: Added; r: Value;
 	BEGIN
-		WITH m: Inc DO
-			NEW(e); a.Persist(c, e, 0);	(* ждёт, пока событие зафиксирует большинство узлов *)
-			NEW(r); r.v := a.v; c.Respond(r)
+		WITH m: Inc DO NEW(e); a.Persist(c, e, 0)	(* ответ — в Persisted *)
 		| m: Get DO NEW(r); r.v := a.v; c.Respond(r)
 		| m: ActorPersist.ReplayComplete DO
 			Console.WriteStr("  counter is up with value "); WriteInt(a.v); Console.WriteLn
 		ELSE
 		END
 	END Handle;
+
+	PROCEDURE (a: Counter) Persisted (c: ActorCore.Context; e: ActorPersist.Event);
+	(* событие зафиксировано большинством узлов и применено: ответить на Inc *)
+		VAR r: Value;
+	BEGIN
+		NEW(r); r.v := a.v; c.Respond(r)
+	END Persisted;
 
 	PROCEDURE NewCounter (): ActorCore.Actor;
 		VAR a: Counter;
@@ -180,8 +186,8 @@ inc
 
 Счётчик поднялся на узле лидера и прочитал свой поток `counter` через Raft (`LoadSnapshot` и `Read` —
 чтения ReadIndex): поток пуст, значение 0. Каждое `inc` — `Persist`: событие ушло лидеру командой Raft,
-и `Append` вернулся только после того, как запись сохранило большинство узлов и лидер применил её к
-своей копии журнала.
+и ответ «записано» пришёл только после того, как запись сохранило большинство узлов и лидер применил её
+к своей копии журнала; тогда счётчик применил событие и в `Persisted` ответил на `Inc`.
 
 Узел лидера упал, а с ним — и счётчик. Оставшиеся два узла выбрали нового лидера. Новое воплощение
 счётчика на другом узле с новым клиентом журнала прочитало поток через нового лидера — значение 3 —
