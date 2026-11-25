@@ -153,7 +153,7 @@ MODULE ActorPersist;
 	BEGIN
 		ActorCodec.dir.Decode(data, len, s, res);
 		IF res # ActorCodec.ok THEN r.bad := TRUE
-		ELSE r.a.Restore(s); r.a.seq := seq
+		ELSE r.a.seq := seq; r.a.Restore(s)	(* Restore видит номер снимка, как до ADR 0026 *)
 		END
 	END Restore;
 
