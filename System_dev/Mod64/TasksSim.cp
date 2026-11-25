@@ -21,10 +21,18 @@ MODULE System_devTasksSim;
 	равна сумме взятого плюс остаток; счётчики монитора равны модели;
 	задачи завершаются, JoinAll не возвращается раньше детей,
 	Tasks.Count() в конце равен начальному. В каждом прогоне первые
-	задачи встают в очередь на монотонный флаг, следующая его ставит:
-	так FIFO проверяется в каждом прогоне с K >= 3. Покрытие путей
-	(TRUE/FALSE из Await и AwaitCond, отмена, Spawn, JoinAll, повторный
-	Start, оба вида трапа, вложенный Do, FIFO) проверяется в конце теста.
+	задачи встают в очередь на монотонный флаг, следующая его ставит
+	трапом на отпускании: так FIFO проверяется в каждом прогоне с K >= 4,
+	а кадр ожидания, снятый трапом в окне между постановкой в очередь и
+	сном, попадает в AbandonWait. Тогда же монитор передаётся ждущему; при
+	четырёх ждущих его сразу отменяют до первого шага (класс «остановлен
+	после передачи»), а вложенный Do на том же мониторе продолжается Await с
+	проверкой «я один внутри». Трап на отпускании случается, только если
+	в очереди флагов есть ждущий: ChooseFlag тогда зовёт Ready(), и второй
+	её вызов приходится на отпускание. Покрытие путей (TRUE/FALSE из
+	Await и AwaitCond, отмена, Spawn, JoinAll, повторный Start, оба вида
+	трапа, вложенный Do, FIFO, трап на отпускании, остановка после
+	передачи, Await после вложенного Do) проверяется в конце теста.
 
 	Часы: подменяемых в ядре нет, сроки идут по Kernel.Time(). Сама
 	программа от зерна не зависит от времени, но чередование задач и
@@ -53,7 +61,7 @@ MODULE System_devTasksSim;
 		(* виды действий *)
 		aInc = 0; aPut = 1; aGet = 2; aWait = 3; aCond = 4; aFlag = 5;
 		aYield = 6; aSleep = 7; aCancel = 8; aSpawn = 9; aJoin = 10;
-		aRestart = 11; aTrap = 12;
+		aRestart = 11; aTrap = 12; aTrapRel = 13; aNestAwait = 14;
 
 		(* вид очереди в зеркале ждущих *)
 		wFlag = 1; wCond = 2;
@@ -74,6 +82,7 @@ MODULE System_devTasksSim;
 			acts: ARRAY maxActs OF INTEGER;
 			p1, p2, p3: ARRAY maxActs OF INTEGER;
 			runs, gen: INTEGER;
+			prologueDone: BOOLEAN;	(* проба затвора уже была в этом прогоне *)
 			cleaner: SimCleaner
 		END;
 
@@ -105,6 +114,10 @@ MODULE System_devTasksSim;
 			insideTask: SimTask;
 			ws: ARRAY maxWaiters OF Waiter;
 			nw: INTEGER;
+			(* трап на отпускании: arm — через сколько вызовов Ready;
+			   releaseTrapped — трап случился (кадры ожидания сняты) *)
+			arm: INTEGER;
+			releaseTrapped: BOOLEAN;
 			cond: ARRAY 2 OF BufCond
 		END;
 
@@ -151,6 +164,20 @@ MODULE System_devTasksSim;
 
 		CrashOp = RECORD (Tasks.Op) END;
 
+		(* Трап в Ready() на отпускании монитора внутри Await: кадр ожидания
+		   снят, задача продолжает работу вне Do. *)
+		TrapRelOp = RECORD (Tasks.Op)
+			dms: INTEGER
+		END;
+
+		(* Вложенный Do на том же мониторе, затем Await во внешнем теле и
+		   проверка «я один внутри» после пробуждения. *)
+		NestAwaitOp = RECORD (Tasks.Op)
+			dms: INTEGER;
+			nOuter, nInner: INTEGER;
+			woke: BOOLEAN
+		END;
+
 		CtxPtr = POINTER TO Tasks.Ctx;
 
 	VAR
@@ -172,9 +199,16 @@ MODULE System_devTasksSim;
 		trapY: Mon;
 		trapCtx: S.ADDRESS;
 		trapHit: BOOLEAN;
+		trapRelDms: INTEGER;
+		(* монитор, отданный ждущему, которого остановили до первого шага *)
+		handedStopTarget: SimTask;
+		(* наблюдение брошенного ожидания: монитор уже передан *)
+		abandonSeen, abandonHeld: BOOLEAN;
+		abandonDepth: INTEGER;
 		(* покрытие путей за прогон теста *)
 		covAwaitT, covAwaitF, covCondT, covCondF, covCancel, covSpawn,
-		covJoin, covRestart, covCaught, covUncaught, covNested: INTEGER;
+		covJoin, covRestart, covCaught, covUncaught, covNested,
+		covTrapRel, covHandedStop, covNestAwait: INTEGER;
 
 	PROCEDURE^ PlanChild (c: SimTask; sd: LONGINT; parentId, actIdx, id: INTEGER);
 	PROCEDURE^ KidAt (slot: INTEGER): SimTask;
@@ -200,7 +234,11 @@ MODULE System_devTasksSim;
 	BEGIN
 		covAwaitT := 0; covAwaitF := 0; covCondT := 0; covCondF := 0;
 		covCancel := 0; covSpawn := 0; covJoin := 0; covRestart := 0;
-		covCaught := 0; covUncaught := 0; covNested := 0; fifoChecks := 0
+		covCaught := 0; covUncaught := 0; covNested := 0;
+		covTrapRel := 0; covHandedStop := 0; covNestAwait := 0;
+		handedStopTarget := NIL;
+		abandonSeen := FALSE; abandonHeld := FALSE; abandonDepth := -1;
+		fifoChecks := 0
 	END ResetCov;
 
 	PROCEDURE Violation (IN what: ARRAY OF CHAR);
@@ -398,6 +436,16 @@ MODULE System_devTasksSim;
 	PROCEDURE (o: Mon) Ready (): SET;
 		VAR s: SET;
 	BEGIN
+		(* Задуманный трап на отпускании: arm считает вызовы Ready после
+		   взвода. Первый — проверка условия в Await, второй — ChooseFlag
+		   на отпускании, когда в очереди флагов есть ждущие. *)
+		IF o.arm > 0 THEN
+			DEC(o.arm);
+			IF o.arm = 0 THEN
+				o.arm := -1; o.releaseTrapped := TRUE;
+				NilCrash
+			END
+		END;
 		s := {};
 		IF o.count < cap THEN INCL(s, 0) END;
 		IF o.count > 0 THEN INCL(s, 1) END;
@@ -455,8 +503,72 @@ MODULE System_devTasksSim;
 				Violation("Await: returned TRUE but the condition is false")
 			END
 		END;
+		IF ~ok & (CurTask() = handedStopTarget) THEN
+			(* Монитор передан этой задаче, но она остановлена раньше, чем
+			   успела продолжить: Await вернул FALSE, монитор остался у неё. *)
+			handedStopTarget := NIL;
+			IF ~Tasks.Held(o) THEN
+				Violation("stopped after handoff: the monitor is not held")
+			END;
+			INC(covHandedStop)
+		END;
 		IF ok & (s1 # s0) & (kind = wFlag) & (need = {2}) THEN CheckGateFifo(o, sq) END
 	END DoWait;
+
+	PROCEDURE AnyFlagWaiter (o: Mon): BOOLEAN;
+	(* Спит ли ждущий по флагам: тогда его запись в очереди флагов ядра есть,
+	   и ChooseFlag на отпускании вызовет Ready(). Разбуженный, но ещё не
+	   продолживший ждущий уже снят из очереди ядра и не годится. *)
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO o.nw - 1 DO
+			IF o.ws[i].active & (o.ws[i].kind = wFlag) & (o.ws[i].task # NIL)
+					& (Tasks.State(o.ws[i].task) = Tasks.Sleeping) THEN
+				RETURN TRUE
+			END
+		END;
+		RETURN FALSE
+	END AnyFlagWaiter;
+
+	PROCEDURE GateWaiter (o: Mon; awake: BOOLEAN): SimTask;
+	(* Первый в зеркале ждущий затвора {2}; awake — только уже разбуженный. *)
+		VAR i: INTEGER; t: SimTask; st: INTEGER;
+	BEGIN
+		FOR i := 0 TO o.nw - 1 DO
+			IF o.ws[i].active & (o.ws[i].kind = wFlag) & (o.ws[i].need = {2})
+					& (o.ws[i].task # NIL) THEN
+				t := o.ws[i].task; st := Tasks.State(t);
+				IF ~awake OR (st IN {Tasks.Ready, Tasks.Running}) THEN RETURN t END
+			END
+		END;
+		RETURN NIL
+	END GateWaiter;
+
+	PROCEDURE LostWakeup (o: Mon): BOOLEAN;
+	(* Монитор свободен, а ждущий с истинным условием всё ещё спит: разбудить
+	   его может только новое отпускание, а если его не будет — пробуждение
+	   потеряно. *)
+		VAR i: INTEGER;
+	BEGIN
+		IF Tasks.Held(o) THEN RETURN FALSE END;
+		FOR i := 0 TO o.nw - 1 DO
+			IF o.ws[i].active & (o.ws[i].task # NIL)
+					& (Tasks.State(o.ws[i].task) = Tasks.Sleeping)
+					& WaiterReadyIdx(o, i) THEN
+				RETURN TRUE
+			END
+		END;
+		RETURN FALSE
+	END LostWakeup;
+
+	PROCEDURE TrapRelBody (adr, b, c: S.ADDRESS);
+	(* Тело под Kernel.Try: Do, чей Await трапует в Ready() на отпускании. *)
+		VAR p: CtxPtr; op: TrapRelOp;
+	BEGIN
+		p := S.VAL(CtxPtr, adr);
+		op.dms := trapRelDms;
+		trapY.Do(p^, op)
+	END TrapRelBody;
 
 	PROCEDURE SimTrapHandler (adr, b, c: S.ADDRESS);
 	(* Трап внутри внутреннего Do: внешний монитор остаётся, внутренний
@@ -596,6 +708,42 @@ MODULE System_devTasksSim;
 			END;
 			op.ok := (op.heldAfter = 1) & Tasks.Held(o);
 			RepairMirrors
+		| op: TrapRelOp DO
+			(* Трап в Ready() на отпускании. transfer — чтобы выбор ждущего
+			   и передача монитора были одним шагом HandOff. *)
+			o.flag2 := TRUE;	(* затвор: ждущие по флагу {2} готовы *)
+			o.transfer := TRUE;
+			o.arm := 2;
+			Tasks.SetDeadline(ctx, op.dms);
+			IF o.Await(ctx, {3}) THEN
+				Violation("trap-release: Await returned TRUE on an unsatisfiable condition")
+			END;
+			o.arm := -1;	(* сюда доходят, только если трапа не было *)
+			o.releaseTrapped := FALSE
+		| op: NestAwaitOp DO
+			(* Вложенный Do на том же мониторе, затем ожидание во внешнем
+			   теле: после пробуждения внутри снова только эта задача. *)
+			inner.nested := FALSE; inner.sameMon := FALSE; inner.other := NIL;
+			inner.nOuter := 0; inner.nInner := 0; inner.innerIdx := -1; inner.done := FALSE;
+			o.Do(ctx, inner);
+			IF inner.done THEN op.nInner := 1 END;
+			INC(modelInc[o.idx], op.nInner);
+			IF Tasks.Depth(o) # 1 THEN
+				Violation("nested-await: depth is not 1 after the nested Do")
+			END;
+			IF (o.inside # 1) OR (o.insideTask # cur) THEN
+				Violation("nested-await: not alone inside after the nested Do")
+			END;
+			Tasks.SetDeadline(ctx, op.dms);
+			DoWait(o, ctx, FALSE, 0, {3}, op.woke);
+			IF (o.inside # 1) OR (o.insideTask # cur) THEN
+				Violation("nested-await: not alone inside after Await")
+			END;
+			IF Tasks.Depth(o) # 1 THEN
+				Violation("nested-await: depth is not 1 after Await")
+			END;
+			INC(o.counter); op.nOuter := 1; INC(covNestAwait);
+			INC(modelInc[o.idx])
 		| op: CrashOp DO
 			NilCrash
 		ELSE
@@ -624,9 +772,9 @@ MODULE System_devTasksSim;
 	END CheckPayload;
 
 	PROCEDURE (t: SimTask) Body- (VAR ctx: Tasks.Ctx);
-		VAR i, a, m, r, target: INTEGER; hold: ARRAY 2 OF Payload;
+		VAR i, a, m, r, target, held: INTEGER; hold: ARRAY 2 OF Payload;
 			opI: IncOp; opP: PutOp; opG: GetOp; opW: WaitOp; opC: CondWaitOp;
-			opF: FlagOp; opT: TrapCaughtOp; child: SimTask;
+			opF: FlagOp; opT: TrapCaughtOp; opN: NestAwaitOp; child, gw: SimTask;
 			g: Tasks.Group; pushed: BOOLEAN;
 	BEGIN
 		INC(t.runs); INC(t.gen);
@@ -712,6 +860,60 @@ MODULE System_devTasksSim;
 					INC(covUncaught);
 					NilCrash
 				END
+			| aTrapRel:
+				(* Трап в Ready() на отпускании монитора внутри Await. Трап
+				   снимает кадр Do и кадр ожидания; Heal отпускает брошенный
+				   кадр: AbandonWait убирает задачу из очереди и, если монитор
+				   уже у неё, передаёт его ждущему. *)
+				m := t.p1[i];
+				(* Один раз за прогон: перезапуск выполняет тот же план, но
+				   очередь затвора к этому времени уже другая. *)
+				IF ~t.prologueDone & AnyFlagWaiter(mons[m]) THEN
+					t.prologueDone := TRUE;
+					mons[m].releaseTrapped := FALSE;
+					trapY := mons[m]; trapCtx := S.ADR(ctx); trapRelDms := t.p3[i];
+					Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TrapRelBody)), trapCtx, 0, 0);
+					IF ~mons[m].releaseTrapped THEN
+						(* Случайное действие могло не застать очередь флагов в
+						   ядре: зеркало хранит и уже разбуженного ждущего. *)
+						IF t.p2[i] > 0 THEN
+							Violation("trap-release: the planned trap did not happen")
+						END
+					ELSE
+						held := ctx.HeldCount();	(* Heal: AbandonWait *)
+						RepairOne(mons[m]);	(* кадр Exclusive снят трапом *)
+						IF t.p2[i] > 0 THEN
+							(* Наблюдение задуманной пробы: глобалы не должны
+							   перезаписываться случайными действиями. *)
+							abandonSeen := TRUE;
+							abandonHeld := Tasks.Held(mons[m]);
+							abandonDepth := Tasks.Depth(mons[m]);
+							(* Проба: монитор обязан уйти разбуженному ждущему. *)
+							gw := GateWaiter(mons[m], TRUE);
+							IF ~Tasks.Held(mons[m]) THEN
+								Violation("trap-release: the monitor was not handed to a waiter")
+							END;
+							IF gw = NIL THEN
+								Violation("trap-release: no awake gate waiter after the handoff")
+							END;
+							IF t.p2[i] = 2 THEN
+								(* Отменить получившего монитор до его первого шага:
+								   Await вернёт FALSE, монитор останется у него. *)
+								handedStopTarget := gw; Tasks.Cancel(gw)
+							END
+						ELSIF LostWakeup(mons[m]) THEN
+							Violation("trap-release: lost wakeup after an abandoned wait")
+						END;
+						INC(covTrapRel)
+					END
+				END;
+				Tasks.Yield
+			| aNestAwait:
+				(* Вложенный Do на том же мониторе, затем Await во внешнем
+				   теле: изменение состояния после пробуждения видно только
+				   этой задаче. *)
+				opN.dms := t.p3[i]; opN.nOuter := 0; opN.nInner := 0; opN.woke := FALSE;
+				mons[m].Do(ctx, opN);	(* модель обновляет сам Exclusive *)
 			ELSE
 				HALT(20)
 			END;
@@ -774,19 +976,20 @@ MODULE System_devTasksSim;
 		t.nacts := n;
 		FOR i := 0 TO n - 1 DO
 			r := RandK(x, 100);
-			IF r < 20 THEN kind := aInc
-			ELSIF r < 34 THEN kind := aPut
-			ELSIF r < 48 THEN kind := aGet
-			ELSIF r < 58 THEN kind := aWait
-			ELSIF r < 66 THEN kind := aCond
-			ELSIF r < 71 THEN kind := aFlag
-			ELSIF r < 80 THEN kind := aYield
-			ELSIF r < 87 THEN kind := aSleep
-			ELSIF r < 91 THEN kind := aCancel
-			ELSIF r < 95 THEN kind := aSpawn
-			ELSIF r < 97 THEN kind := aJoin
-			ELSIF r < 99 THEN kind := aRestart
-			ELSE kind := aTrap
+			IF r < 18 THEN kind := aInc
+			ELSIF r < 30 THEN kind := aPut
+			ELSIF r < 42 THEN kind := aGet
+			ELSIF r < 52 THEN kind := aWait
+			ELSIF r < 60 THEN kind := aCond
+			ELSIF r < 65 THEN kind := aFlag
+			ELSIF r < 74 THEN kind := aYield
+			ELSIF r < 81 THEN kind := aSleep
+			ELSIF r < 85 THEN kind := aCancel
+			ELSIF r < 89 THEN kind := aSpawn
+			ELSIF r < 91 THEN kind := aJoin
+			ELSIF r < 93 THEN kind := aRestart
+			ELSIF r < 96 THEN kind := aTrap
+			ELSE kind := aNestAwait
 			END;
 			IF (kind = aSpawn) & (plannedKid >= maxKids) THEN kind := aYield END;
 			(* Повторный запуск — только задачи с большим номером: цикл
@@ -826,19 +1029,29 @@ MODULE System_devTasksSim;
 				t.p1[i] := 0; t.p2[i] := id + RandK(x, nTasks - id); t.p3[i] := 0
 			| aTrap:
 				t.p1[i] := RandK(x, nMon); t.p2[i] := RandK(x, 2); t.p3[i] := 0
+			| aTrapRel, aNestAwait:
+				t.p1[i] := RandK(x, nMon); t.p2[i] := 0;
+				t.p3[i] := 2 + RandK(x, 3)
 			ELSE
 				t.p1[i] := 0; t.p2[i] := 0; t.p3[i] := 0
 			END
 		END;
 		(* Проба FIFO: первые задачи встают в очередь на затвор монитора 0,
 		   следующая ставит затвор. Так очередь из нескольких ждущих одного
-		   условия есть в каждом прогоне с K >= 3. *)
+		   условия есть в каждом прогоне с K >= 4; при K >= 5 первого
+		   ждущего отменяют, и FIFO проверяется на оставшихся. *)
 		wcount := nTasks - 1;
-		IF wcount > 3 THEN wcount := 3 END;
+		IF wcount > 4 THEN wcount := 4 END;	(* первый отменяем, для FIFO нужно ещё >= 2 *)
 		IF id <= wcount THEN
-			t.acts[0] := aWait; t.p1[0] := 0; t.p2[0] := 2; t.p3[0] := 4
+			(* Затвор: ждём долго, чтобы сцена ниже застала очередь живой. *)
+			t.acts[0] := aWait; t.p1[0] := 0; t.p2[0] := 2; t.p3[0] := 50
 		ELSIF id = wcount + 1 THEN
-			t.acts[0] := aFlag; t.p1[0] := 0; t.p2[0] := 0; t.p3[0] := 0
+			(* Ставит затвор и трапует в Ready() на отпускании: кадр ожидания
+			   уже в очереди, а монитор ещё у задачи. При четырёх ждущих
+			   первого отменяют до его шага; при трёх его не трогают, иначе
+			   FIFO проверять будет не на ком. *)
+			t.acts[0] := aTrapRel; t.p1[0] := 0; t.p3[0] := 4;
+			IF wcount >= 4 THEN t.p2[0] := 2 ELSE t.p2[0] := 1 END
 		END
 	END PlanTask;
 
@@ -865,6 +1078,7 @@ MODULE System_devTasksSim;
 			mons[m].putSeq := 0; mons[m].lastGot := 0;
 			mons[m].puts := 0; mons[m].gets := 0; mons[m].nw := 0;
 			mons[m].inside := 0; mons[m].insideTask := NIL; mons[m].insideGen := 0;
+			mons[m].arm := -1; mons[m].releaseTrapped := FALSE;
 			NEW(mons[m].cond[0]); mons[m].cond[0].idx := 0;
 			NEW(mons[m].cond[1]); mons[m].cond[1].idx := 1
 		END
@@ -1084,6 +1298,8 @@ MODULE System_devTasksSim;
 		seedN := sd; gcMode := gc; stepNo := 0; violations := 0;
 		failed := FALSE; reported := FALSE; restartsDone := 0; waitSeq := 0;
 		plannedKid := 0; baseCount := 0;
+		handedStopTarget := NIL;
+		abandonSeen := FALSE; abandonHeld := FALSE; abandonDepth := -1;
 		harnessRng := Mix(sd, 999);
 		planRng := Mix(sd, 777);
 		nMon := 1 + RandK(planRng, maxMon);
@@ -1093,6 +1309,9 @@ MODULE System_devTasksSim;
 		END;
 		MakeMons;
 		MakeTasks;
+		FOR i := 0 TO maxTasks - 1 DO
+			IF taskMade[i] THEN tasks[i].prologueDone := FALSE END
+		END;
 		FOR i := 0 TO nTasks - 1 DO PlanTask(tasks[i], sd, i + 1) END
 	END ResetRun;
 
@@ -1271,12 +1490,34 @@ MODULE System_devTasksSim;
 		IF covCaught = 0 THEN App(s, " caught-trap") END;
 		IF covUncaught = 0 THEN App(s, " uncaught-trap") END;
 		IF covNested = 0 THEN App(s, " nested-Do") END;
+		IF covTrapRel = 0 THEN App(s, " trap-on-release") END;
+		IF covHandedStop = 0 THEN App(s, " stopped-after-handoff") END;
+		IF covNestAwait = 0 THEN App(s, " Await-after-nested-Do") END;
 		IF fifoChecks = 0 THEN App(s, " FIFO") END;
 		complete := (covAwaitT > 0) & (covAwaitF > 0) & (covCondT > 0) & (covCondF > 0)
 			& (covCancel > 0) & (covSpawn > 0) & (covJoin > 0) & (covRestart > 0)
-			& (covCaught > 0) & (covUncaught > 0) & (covNested > 0) & (fifoChecks > 0);
+			& (covCaught > 0) & (covUncaught > 0) & (covNested > 0)
+			& (covTrapRel > 0) & (covHandedStop > 0) & (covNestAwait > 0)
+			& (fifoChecks > 0);
 		UnitAssert.True(complete, s)
 	END CheckCoverage;
+
+	PROCEDURE TestProcAbandonedHandoffDepth*;
+	(** Известная ошибка ядра, найденная этим тестом: после брошенного
+		ожидания, монитор которого уже передан другой задаче, Reconcile
+		второй раз зовёт ReleaseHold для той же записи и уменьшает глубину
+		уже чужого владельца. Монитор считается взятым (Held TRUE), а
+		Depth возвращает 0. Тест намеренно красный, пока ядро не исправлено. *)
+		VAR s: UnitAssert.Message;
+	BEGIN
+		ResetCov;
+		One(1, FALSE);
+		s := "known kernel defect: after an abandoned wait is handed to another task, held is ";
+		IF abandonHeld THEN App(s, "TRUE") ELSE App(s, "FALSE") END;
+		App(s, ", depth is "); AppNum(s, abandonDepth);
+		App(s, " (a held monitor must have depth >= 1)");
+		UnitAssert.True(abandonSeen & abandonHeld & (abandonDepth >= 1), s)
+	END TestProcAbandonedHandoffDepth;
 
 	PROCEDURE TestSeeds*;
 	(** Зёрна 1..80 без сборщика. *)
