@@ -37,6 +37,8 @@ MODULE System_devTasksObj;
 		CaughtOp = RECORD (Tasks.Op) tryIt: BOOLEAN; heldAfter: INTEGER; result: BOOLEAN END;
 		CrashOp = RECORD (Tasks.Op) END;
 		ProbeOp = RECORD (Tasks.Op) END;
+		JoinOp = RECORD (Tasks.Op) child: Tasks.Task END;
+		CrossOp = RECORD (Tasks.Op) y: Lock END;
 
 		(* --- объект-монитор с флагами ------------------------------------- *)
 
@@ -76,7 +78,10 @@ MODULE System_devTasksObj;
 		(* --- задачи ------------------------------------------------------- *)
 
 		EnterJob = POINTER TO RECORD (Tasks.Job) x: Lock; done: BOOLEAN END;
-		SleepHoldJob = POINTER TO RECORD (Tasks.Job) x: Lock; ms: LONGINT END;
+		SleepHoldJob = POINTER TO RECORD (Tasks.Job) x: Lock; ms: LONGINT; done: BOOLEAN END;
+		JoinChild = POINTER TO RECORD (Tasks.Task) ms: LONGINT END;
+		JoinHoldJob = POINTER TO RECORD (Tasks.Job) x: Lock; child: Tasks.Task; done: BOOLEAN END;
+		CrossJob = POINTER TO RECORD (Tasks.Job) x, y: Lock; done: BOOLEAN END;
 		SetJob = POINTER TO RECORD (Tasks.Job) x: Lock; v: BOOLEAN END;
 		WaitJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: WaitOp END;
 		CondWaitJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: CondWaitOp END;
@@ -117,6 +122,8 @@ MODULE System_devTasksObj;
 		nextSeq, got: ARRAY producers OF INTEGER;
 		readyCalls: INTEGER;
 		allocDelta: LONGINT;
+		(* новые пробы: сон, Join и вход в чужой монитор под монитором *)
+		sleepDone, joinDone: INTEGER;
 		(* трап внутри Exclusive: обработчик Kernel.Try получает адрес Ctx *)
 		trapY: Lock; trapCtx: S.ADDRESS;
 
@@ -142,7 +149,7 @@ MODULE System_devTasksObj;
 		p := NIL; p.entries := 1
 	END NilCrash;
 
-	PROCEDURE Setup*;
+	PROCEDURE ResetCase;
 		VAR i: INTEGER;
 	BEGIN
 		waits := 0; orderN := 0; spawnDone := 0; childDone := 0;
@@ -150,9 +157,15 @@ MODULE System_devTasksObj;
 		failed := FALSE; bodyDone := FALSE; caughtSeen := FALSE;
 		bufBroken := FALSE; condBroken := FALSE; bufCount := 0; condCount := 0;
 		allocDelta := -1; trapY := NIL; trapCtx := 0;
+		sleepDone := 0; joinDone := 0;
 		consStopped := FALSE;
 		FOR i := 0 TO producers - 1 DO nextSeq[i] := 0; got[i] := 0 END;
 		FOR i := 0 TO LEN(order) - 1 DO order[i] := 0 END
+	END ResetCase;
+
+	PROCEDURE Setup*;
+	BEGIN
+		ResetCase
 	END Setup;
 
 	PROCEDURE Note (id: INTEGER);
@@ -192,7 +205,7 @@ MODULE System_devTasksObj;
 	END InnerTrap;
 
 	PROCEDURE (x: Lock) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
-		VAR inner: InnerOp; hold: HoldOp; deep: BOOLEAN; s0, s1: LONGINT;
+		VAR inner: InnerOp; hold: HoldOp; visit: EnterOp; deep: BOOLEAN; s0, s1: LONGINT;
 	BEGIN
 		WITH op: EnterOp DO
 			INC(x.entries); INC(x.inside);
@@ -263,6 +276,10 @@ MODULE System_devTasksObj;
 			caughtSeen := op.result
 		| op: CrashOp DO
 			NilCrash
+		| op: JoinOp DO
+			Tasks.Join(op.child)
+		| op: CrossOp DO
+			op.y.Do(ctx, visit)
 		| op: ProbeOp DO
 		ELSE
 			HALT(20)
@@ -400,7 +417,29 @@ MODULE System_devTasksObj;
 		VAR op: SleepOp;
 	BEGIN
 		op.ms := j.ms;
-		j.x.Do(ctx, op)
+		j.x.Do(ctx, op);
+		j.done := TRUE
+	END Body;
+
+	PROCEDURE (t: JoinChild) Run;
+	BEGIN
+		Tasks.Sleep(t.ms)
+	END Run;
+
+	PROCEDURE (j: JoinHoldJob) Body- (VAR ctx: Tasks.Ctx);
+		VAR op: JoinOp;
+	BEGIN
+		op.child := j.child;
+		j.x.Do(ctx, op);
+		j.done := TRUE
+	END Body;
+
+	PROCEDURE (j: CrossJob) Body- (VAR ctx: Tasks.Ctx);
+		VAR op: CrossOp;
+	BEGIN
+		op.y := j.y;
+		j.x.Do(ctx, op);
+		j.done := TRUE
 	END Body;
 
 	PROCEDURE (j: SetJob) Body- (VAR ctx: Tasks.Ctx);
@@ -516,22 +555,22 @@ MODULE System_devTasksObj;
 
 	(* -------------------- тесты ------------------------------------------- *)
 
-	PROCEDURE TestMutualExclusion*;
+	PROCEDURE CaseMutualExclusion;
 		VAR x: Lock; a, b: EnterJob;
 	BEGIN
-		NEW(x); NEW(a); a.x := x; NEW(b); b.x := x;
+		NEW(x); x.allow := TRUE; NEW(a); a.x := x; NEW(b); b.x := x;
 		Start(a); Start(b);
 		UnitAssert.True(Pump(2000), "задачи вошли и вышли");
 		UnitAssert.EqualInt(1, maxInside, "внутри монитора не больше одной задачи");
 		UnitAssert.EqualInt(2, x.entries, "обе задачи выполнили операцию");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestMutualExclusion;
+	END CaseMutualExclusion;
 
-	PROCEDURE TestFifo*;
+	PROCEDURE CaseFifo;
 	(* A спит в мониторе; B и C встают в очередь входа по порядку. *)
 		VAR x: Lock; a: SleepHoldJob; b, c: OrderJob;
 	BEGIN
-		NEW(x); NEW(a); a.x := x; a.ms := 20;
+		NEW(x); x.allow := TRUE; NEW(a); a.x := x; a.ms := 20;
 		Start(a); Tasks.Step;
 		UnitAssert.EqualInt(1, x.inside, "A вошла и спит");
 		NEW(b); b.x := x; b.id := 2; NEW(c); c.x := x; c.id := 3;
@@ -542,9 +581,9 @@ MODULE System_devTasksObj;
 		UnitAssert.EqualInt(2, order[0], "первым вошёл B");
 		UnitAssert.EqualInt(3, order[1], "вторым вошёл C");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestFifo;
+	END CaseFifo;
 
-	PROCEDURE TestFlagFifo*;
+	PROCEDURE CaseFlagFifo;
 	(* Несколько ждущих по флагам: выход будит первого готового по порядку. *)
 		VAR x: Lock; b, c, d: WaitJob; n: ProbeJob;
 	BEGIN
@@ -562,9 +601,9 @@ MODULE System_devTasksObj;
 		UnitAssert.EqualInt(12, order[1], "вторым C");
 		UnitAssert.EqualInt(13, order[2], "третьим D");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestFlagFifo;
+	END CaseFlagFifo;
 
-	PROCEDURE TestFlagPriority*;
+	PROCEDURE CaseFlagPriority;
 	(* Двое ждут разных флагов; готов только второй — будится он, а не первый в очереди. *)
 		VAR x: Lock; a, b: NeedJob; n: ProbeJob; t0: LONGINT;
 	BEGIN
@@ -583,9 +622,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(Pump(1000), "A отпущен");
 		UnitAssert.EqualInt(2, orderN, "оба прошли");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestFlagPriority;
+	END CaseFlagPriority;
 
-	PROCEDURE TestCondPriority*;
+	PROCEDURE CaseCondPriority;
 	(* Двое ждут разных условий-объектов; готово второе — будится он. *)
 		VAR x: Lock; c1, c2: YesCond; a, b: CondWaitJob; n: ProbeJob; t0: LONGINT;
 	BEGIN
@@ -605,9 +644,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(Pump(1000), "A отпущен");
 		UnitAssert.EqualInt(2, orderN, "оба прошли");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestCondPriority;
+	END CaseCondPriority;
 
-	PROCEDURE TestBufferFlags*;
+	PROCEDURE CaseBufferFlags;
 		VAR b: Buf; p: BufProd; c: BufCons; i, total: INTEGER;
 	BEGIN
 		total := producers * per;
@@ -624,9 +663,9 @@ MODULE System_devTasksObj;
 		FOR i := 0 TO producers - 1 DO UnitAssert.EqualInt(per, got[i], "все предметы производителя") END;
 		UnitAssert.EqualInt(0, b.count, "буфер пуст");
 		UnitAssert.True(~Tasks.Held(b), "монитор свободен")
-	END TestBufferFlags;
+	END CaseBufferFlags;
 
-	PROCEDURE TestBufferCond*;
+	PROCEDURE CaseBufferCond;
 		VAR b: CondBuf; p: CondProd; c: CondCons; i, total: INTEGER;
 	BEGIN
 		total := producers * per;
@@ -644,9 +683,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(~consStopped, "потребитель не остановлен");
 		UnitAssert.EqualInt(0, b.count, "буфер пуст");
 		UnitAssert.True(~Tasks.Held(b), "монитор свободен")
-	END TestBufferCond;
+	END CaseBufferCond;
 
-	PROCEDURE TestReentrant*;
+	PROCEDURE CaseReentrant;
 		VAR x: Lock; j: NestJob;
 	BEGIN
 		NEW(x); NEW(j); j.x := x; x.deepWait := FALSE;
@@ -656,9 +695,9 @@ MODULE System_devTasksObj;
 		UnitAssert.EqualInt(2, j.n.innerDepth, "в повторном входе глубина 2");
 		UnitAssert.EqualInt(1, j.n.depth3, "после внутреннего выхода глубина 1");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestReentrant;
+	END CaseReentrant;
 
-	PROCEDURE TestWaitDepth2Traps*;
+	PROCEDURE CaseWaitDepth2Traps;
 		(* InnerOp ждёт на глубине 2 своего объекта — трап 23. *)
 		VAR x: Lock; j: NestJob;
 	BEGIN
@@ -668,10 +707,10 @@ MODULE System_devTasksObj;
 		UnitAssert.True(Tasks.Failed(j), "задача трапнула");
 		UnitAssert.True(~Tasks.Held(x), "монитор отпущен");
 		UnitAssert.EqualInt(0, Tasks.Queued(x), "очереди пусты")
-	END TestWaitDepth2Traps;
+	END CaseWaitDepth2Traps;
 
-	PROCEDURE TestForeignMonitorDenied*;
-		(* X взят, Y.Wait ждёт — X не разрешает ждать: трап 24. *)
+	PROCEDURE CaseForeignMonitorDenied;
+		(* X взят, Y.Wait ждёт — X не разрешает ждать: трап 26. *)
 		VAR x, y: Lock; j: OuterJob;
 	BEGIN
 		NEW(x); NEW(y); x.allow := FALSE; y.flag := FALSE; x.y := y;
@@ -681,9 +720,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(Tasks.Failed(j), "ожидание с чужим монитором трапует");
 		UnitAssert.True(~Tasks.Held(x), "X отпущен");
 		UnitAssert.True(~Tasks.Held(y), "Y отпущен")
-	END TestForeignMonitorDenied;
+	END CaseForeignMonitorDenied;
 
-	PROCEDURE TestForeignMonitorAllowed*;
+	PROCEDURE CaseForeignMonitorAllowed;
 		(* X разрешает ждать, держа его; Y освобождает условие. *)
 		VAR x, y: Lock; j: OuterJob; set: SetJob;
 	BEGIN
@@ -696,9 +735,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(~Tasks.Failed(j), "ожидание с разрешением не трапует");
 		UnitAssert.True(~Tasks.Held(x), "X отпущен");
 		UnitAssert.True(~Tasks.Held(y), "Y отпущен")
-	END TestForeignMonitorAllowed;
+	END CaseForeignMonitorAllowed;
 
-	PROCEDURE TestUncaughtTrapReleasesAll*;
+	PROCEDURE CaseUncaughtTrapReleasesAll;
 		VAR x, y: Lock; j: CaughtJob;
 	BEGIN
 		NEW(x); NEW(y); x.y := y;
@@ -709,9 +748,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(~Tasks.Held(x), "внешний монитор отпущен");
 		UnitAssert.True(~Tasks.Held(y), "внутренний монитор отпущен");
 		UnitAssert.EqualInt(0, Tasks.Queued(x) + Tasks.Queued(y), "очереди пусты")
-	END TestUncaughtTrapReleasesAll;
+	END CaseUncaughtTrapReleasesAll;
 
-	PROCEDURE TestCaughtTrapReleasesInner*;
+	PROCEDURE CaseCaughtTrapReleasesInner;
 		VAR x, y: Lock; j: CaughtJob;
 	BEGIN
 		NEW(x); NEW(y); x.y := y;
@@ -723,13 +762,13 @@ MODULE System_devTasksObj;
 		UnitAssert.True(j.op.result, "внутренний отпущен, внешний ещё взят");
 		UnitAssert.True(~Tasks.Held(x), "после выхода внешний отпущен");
 		UnitAssert.True(~Tasks.Held(y), "внутренний свободен")
-	END TestCaughtTrapReleasesInner;
+	END CaseCaughtTrapReleasesInner;
 
-	PROCEDURE TestCancelEntry*;
+	PROCEDURE CaseCancelEntry;
 		(* Ожидание входа: отмена не пускает в Exclusive, следующий входит. *)
 		VAR x: Lock; a: SleepHoldJob; b: StopEntryJob; c: OrderJob;
 	BEGIN
-		NEW(x); NEW(a); a.x := x; a.ms := 40;
+		NEW(x); x.allow := TRUE; NEW(a); a.x := x; a.ms := 40;
 		Start(a); Tasks.Step;
 		UnitAssert.EqualInt(1, x.inside, "A держит монитор");
 		NEW(b); b.x := x; b.deadline := 0;
@@ -744,13 +783,13 @@ MODULE System_devTasksObj;
 		NEW(c); c.x := x; c.id := 7; Start(c);
 		UnitAssert.True(Pump(1000), "следующий вошёл");
 		UnitAssert.EqualInt(1, orderN, "следующий waiter работает")
-	END TestCancelEntry;
+	END CaseCancelEntry;
 
-	PROCEDURE TestDeadlineEntry*;
+	PROCEDURE CaseDeadlineEntry;
 		(* Ожидание входа: срок не пускает в Exclusive. *)
 		VAR x: Lock; a: SleepHoldJob; b: StopEntryJob;
 	BEGIN
-		NEW(x); NEW(a); a.x := x; a.ms := 40;
+		NEW(x); x.allow := TRUE; NEW(a); a.x := x; a.ms := 40;
 		Start(a); Tasks.Step;
 		UnitAssert.EqualInt(1, x.inside, "A держит монитор");
 		NEW(b); b.x := x; b.deadline := 5;
@@ -760,9 +799,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(~b.done, "Exclusive не выполнен");
 		UnitAssert.True(b.expired, "причина — срок");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestDeadlineEntry;
+	END CaseDeadlineEntry;
 
-	PROCEDURE TestCancelWait*;
+	PROCEDURE CaseCancelWait;
 		(* Отмена в Wait: FALSE, причина, монитор у задачи, второй Wait сразу. *)
 		VAR x: Lock; b: WaitJob; c: OrderJob;
 	BEGIN
@@ -784,9 +823,9 @@ MODULE System_devTasksObj;
 		NEW(c); c.x := x; c.id := 9; Start(c);
 		UnitAssert.True(Pump(1000), "следующий вошёл");
 		UnitAssert.EqualInt(1, orderN, "следующий waiter работает")
-	END TestCancelWait;
+	END CaseCancelWait;
 
-	PROCEDURE TestDeadlineWait*;
+	PROCEDURE CaseDeadlineWait;
 		(* Срок в Wait: FALSE, причина — срок, монитор у задачи. *)
 		VAR x: Lock; j: DeadlineJob;
 	BEGIN
@@ -799,9 +838,9 @@ MODULE System_devTasksObj;
 		UnitAssert.True(j.expired, "причина — срок");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен");
 		UnitAssert.EqualInt(0, Tasks.Queued(x), "очередь пуста")
-	END TestDeadlineWait;
+	END CaseDeadlineWait;
 
-	PROCEDURE TestReadyOnce*;
+	PROCEDURE CaseReadyOnce;
 		(* Пустые очереди не зовут Ready; один выход при ждущем — ровно раз. *)
 		VAR x: Lock; a: AllocJob; w: WaitJob; n: ProbeJob; t0: LONGINT;
 	BEGIN
@@ -826,18 +865,18 @@ MODULE System_devTasksObj;
 		x.flag := TRUE; Tasks.Unpark(w);
 		UnitAssert.True(Pump(1000), "ждущий отпущен");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
-	END TestReadyOnce;
+	END CaseReadyOnce;
 
-	PROCEDURE TestNoAllocation*;
+	PROCEDURE CaseNoAllocation;
 		VAR x: Lock; j: AllocJob;
 	BEGIN
 		NEW(x); NEW(j); j.x := x;
 		Start(j);
 		UnitAssert.True(Pump(1000), "задача завершилась");
 		UnitAssert.EqualInt(0, allocDelta, "1000 пар вход-выход без выделений")
-	END TestNoAllocation;
+	END CaseNoAllocation;
 
-	PROCEDURE TestSpawnJoinAll*;
+	PROCEDURE CaseSpawnJoinAll;
 		VAR j: SpawnJob;
 	BEGIN
 		NEW(j); j.n := 3;
@@ -846,6 +885,150 @@ MODULE System_devTasksObj;
 		UnitAssert.EqualInt(3, spawnDone, "запущено детей");
 		UnitAssert.EqualInt(3, childDone, "дети дошли до конца");
 		UnitAssert.EqualInt(0, Tasks.Count(), "задач не осталось")
-	END TestSpawnJoinAll;
+	END CaseSpawnJoinAll;
+
+	(* -------------------- сон под монитором (трап 26) --------------------- *)
+
+	PROCEDURE CaseSleepHoldDenied;
+		VAR x: Lock; j: SleepHoldJob;
+	BEGIN
+		NEW(x); x.allow := FALSE;
+		NEW(j); j.x := x; j.ms := 10;
+		Start(j);
+		UnitAssert.True(Pump(1000), "задача закончилась");
+		UnitAssert.True(Tasks.Failed(j), "сон под монитором без разрешения трапует");
+		UnitAssert.EqualInt(26, Kernel.err, "сон под монитором — трап 26");
+		UnitAssert.True(~j.done, "тело после трапа не продолжилось");
+		UnitAssert.True(~Tasks.Held(x), "монитор отпущен");
+		UnitAssert.EqualInt(0, Tasks.Queued(x), "очереди пусты")
+	END CaseSleepHoldDenied;
+
+	PROCEDURE CaseSleepHoldAllowed;
+		VAR x: Lock; j: SleepHoldJob;
+	BEGIN
+		NEW(x); x.allow := TRUE;
+		NEW(j); j.x := x; j.ms := 5;
+		Start(j);
+		UnitAssert.True(Pump(1000), "задача закончилась");
+		UnitAssert.True(~Tasks.Failed(j), "сон с разрешением не трапует");
+		UnitAssert.True(j.done, "тело дошло до конца");
+		UnitAssert.EqualInt(1, x.entries, "операция выполнена");
+		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
+	END CaseSleepHoldAllowed;
+
+	PROCEDURE CaseJoinHoldDenied;
+		VAR x: Lock; c: JoinChild; j: JoinHoldJob;
+	BEGIN
+		NEW(x); x.allow := FALSE;
+		NEW(c); c.ms := 60; Start(c);
+		NEW(j); j.x := x; j.child := c; Start(j);
+		UnitAssert.True(Pump(2000), "задачи закончились");
+		UnitAssert.True(Tasks.Failed(j), "Join под монитором без разрешения трапует");
+		UnitAssert.EqualInt(26, Kernel.err, "Join под монитором — трап 26");
+		UnitAssert.True(~j.done, "тело после трапа не продолжилось");
+		UnitAssert.True(~Tasks.Held(x), "монитор отпущен")
+	END CaseJoinHoldDenied;
+
+	PROCEDURE CaseJoinHoldAllowed;
+		VAR x: Lock; c: JoinChild; j: JoinHoldJob;
+	BEGIN
+		NEW(x); x.allow := TRUE;
+		NEW(c); c.ms := 10; Start(c);
+		NEW(j); j.x := x; j.child := c; Start(j);
+		UnitAssert.True(Pump(2000), "задачи закончились");
+		UnitAssert.True(~Tasks.Failed(j), "Join с разрешением не трапует");
+		UnitAssert.True(j.done, "Join вернулся");
+		UnitAssert.EqualInt(0, Tasks.Count(), "задач не осталось")
+	END CaseJoinHoldAllowed;
+
+	PROCEDURE CaseEntryHoldDenied;
+		(* Ждать входа в чужой монитор, держа свой, — тоже сон под монитором. *)
+		VAR x, y: Lock; h: SleepHoldJob; j: CrossJob;
+	BEGIN
+		NEW(x); x.allow := FALSE;
+		NEW(y); y.allow := TRUE;
+		NEW(h); h.x := y; h.ms := 60; Start(h);
+		Tasks.Step;
+		UnitAssert.True(Tasks.Held(y), "держатель взял Y");
+		NEW(j); j.x := x; j.y := y; Start(j);
+		UnitAssert.True(Pump(2000), "задачи закончились");
+		UnitAssert.True(Tasks.Failed(j), "ожидание входа под монитором трапует");
+		UnitAssert.EqualInt(26, Kernel.err, "ожидание входа — трап 26");
+		UnitAssert.True(~j.done, "тело после трапа не продолжилось");
+		UnitAssert.True(~Tasks.Held(x), "X отпущен");
+		UnitAssert.True(~Tasks.Held(y), "Y отпущен")
+	END CaseEntryHoldDenied;
+
+	PROCEDURE CaseEntryHoldAllowed;
+		VAR x, y: Lock; h: SleepHoldJob; j: CrossJob;
+	BEGIN
+		NEW(x); x.allow := TRUE;
+		NEW(y); y.allow := TRUE;
+		NEW(h); h.x := y; h.ms := 20; Start(h);
+		Tasks.Step;
+		UnitAssert.True(Tasks.Held(y), "держатель взял Y");
+		NEW(j); j.x := x; j.y := y; Start(j);
+		UnitAssert.True(Pump(2000), "задачи закончились");
+		UnitAssert.True(~Tasks.Failed(j), "ожидание входа с разрешением не трапует");
+		UnitAssert.True(j.done, "операция выполнена");
+		UnitAssert.EqualInt(2, y.entries, "вошли в Y: держатель и ожидавший")
+	END CaseEntryHoldAllowed;
+
+	(* -------------------- пробуждение без передачи ------------------------ *)
+
+	(* -------------------- запуск обоих режимов ---------------------------- *)
+
+	PROCEDURE TestMutualExclusion*;
+	BEGIN CaseMutualExclusion END TestMutualExclusion;
+	PROCEDURE TestFifo*;
+	BEGIN CaseFifo END TestFifo;
+	PROCEDURE TestFlagFifo*;
+	BEGIN CaseFlagFifo END TestFlagFifo;
+	PROCEDURE TestFlagPriority*;
+	BEGIN CaseFlagPriority END TestFlagPriority;
+	PROCEDURE TestCondPriority*;
+	BEGIN CaseCondPriority END TestCondPriority;
+	PROCEDURE TestBufferFlags*;
+	BEGIN CaseBufferFlags END TestBufferFlags;
+	PROCEDURE TestBufferCond*;
+	BEGIN CaseBufferCond END TestBufferCond;
+	PROCEDURE TestReentrant*;
+	BEGIN CaseReentrant END TestReentrant;
+	PROCEDURE TestWaitDepth2Traps*;
+	BEGIN CaseWaitDepth2Traps END TestWaitDepth2Traps;
+	PROCEDURE TestForeignMonitorDenied*;
+	BEGIN CaseForeignMonitorDenied END TestForeignMonitorDenied;
+	PROCEDURE TestForeignMonitorAllowed*;
+	BEGIN CaseForeignMonitorAllowed END TestForeignMonitorAllowed;
+	PROCEDURE TestUncaughtTrapReleasesAll*;
+	BEGIN CaseUncaughtTrapReleasesAll END TestUncaughtTrapReleasesAll;
+	PROCEDURE TestCaughtTrapReleasesInner*;
+	BEGIN CaseCaughtTrapReleasesInner END TestCaughtTrapReleasesInner;
+	PROCEDURE TestCancelEntry*;
+	BEGIN CaseCancelEntry END TestCancelEntry;
+	PROCEDURE TestDeadlineEntry*;
+	BEGIN CaseDeadlineEntry END TestDeadlineEntry;
+	PROCEDURE TestCancelWait*;
+	BEGIN CaseCancelWait END TestCancelWait;
+	PROCEDURE TestDeadlineWait*;
+	BEGIN CaseDeadlineWait END TestDeadlineWait;
+	PROCEDURE TestReadyOnce*;
+	BEGIN CaseReadyOnce END TestReadyOnce;
+	PROCEDURE TestNoAllocation*;
+	BEGIN CaseNoAllocation END TestNoAllocation;
+	PROCEDURE TestSpawnJoinAll*;
+	BEGIN CaseSpawnJoinAll END TestSpawnJoinAll;
+	PROCEDURE TestSleepHoldDenied*;
+	BEGIN CaseSleepHoldDenied END TestSleepHoldDenied;
+	PROCEDURE TestSleepHoldAllowed*;
+	BEGIN CaseSleepHoldAllowed END TestSleepHoldAllowed;
+	PROCEDURE TestJoinHoldDenied*;
+	BEGIN CaseJoinHoldDenied END TestJoinHoldDenied;
+	PROCEDURE TestJoinHoldAllowed*;
+	BEGIN CaseJoinHoldAllowed END TestJoinHoldAllowed;
+	PROCEDURE TestEntryHoldDenied*;
+	BEGIN CaseEntryHoldDenied END TestEntryHoldDenied;
+	PROCEDURE TestEntryHoldAllowed*;
+	BEGIN CaseEntryHoldAllowed END TestEntryHoldAllowed;
 
 END System_devTasksObj.

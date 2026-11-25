@@ -20,7 +20,7 @@ MODULE Tasks;
 
 	Отмена — флаг; каждая точка ожидания проверяет его до и после
 	ожидания и прерывает задачу трапом 127. Нарушение предусловия — трап
-	20–25 с текстом в Console (номер — по порядку проверок в процедуре);
+	20–26 с текстом в Console (номер — по порядку проверок в процедуре);
 	100 — нарушен инвариант планировщика.
 
 	Неделимый участок (BeginAtomic/EndAtomic) запрещает точки
@@ -91,6 +91,7 @@ MODULE Tasks;
 			qkind: INTEGER;
 			qneed: SET;
 			qcond: Cond;
+			holds: Hold;		(* вершина цепочки взятых мониторов-объектов *)
 			pctx: S.ADDRESS;	(* Ctx задачи Job; 0 — задача не Job *)
 			name: ARRAY nameLen OF CHAR
 		END;
@@ -141,7 +142,6 @@ MODULE Tasks;
 			task-: Task;
 			group-: Group;
 			cancelled-, expired-: BOOLEAN;
-			holds: Hold;		(* вершина цепочки взятых мониторов *)
 			free: Hold;		(* свободные записи вызовов *)
 			cleaner: Cleaner;
 			deadline: LONGINT;	(* абсолютный срок Kernel.Time; 0 — нет *)
@@ -206,6 +206,7 @@ MODULE Tasks;
 	PROCEDURE^ EnsureScheduled;
 	PROCEDURE^ CancelGroup (g: Group);
 	PROCEDURE^ Reconcile (VAR ctx: Ctx);
+	PROCEDURE^ CheckSleepHolds (except: Object);
 	PROCEDURE^ FinishTaskPass (t: Task);
 
 	(* --- текст в Console -------------------------------------------------- *)
@@ -492,6 +493,7 @@ MODULE Tasks;
 				t.state := Cancelled;
 				Finish; RETURN
 			END;
+			CheckSleepHolds(NIL);
 			t.state := Parked;
 			Leave
 		END
@@ -670,9 +672,13 @@ MODULE Tasks;
 	END Yield;
 
 	PROCEDURE Sleep* (ms: LONGINT);
+	(** Пред: точка ожидания; держа монитор-объект, спать можно только с его
+		разрешения HoldsWhileWaiting (трап 26). Sleep(0) — уступка, не сон:
+		как Yield, проверки мониторов нет. *)
 	BEGIN
 		CheckWait("Sleep");
 		IF ms <= 0 THEN current.state := Ready; Enqueue(current); Leave; RETURN END;
+		CheckSleepHolds(NIL);
 		current.deadline := Kernel.Time() + ms;
 		current.state := Sleeping; INC(current.sleepSeq);
 		PushSleeper(current);
@@ -695,6 +701,7 @@ MODULE Tasks;
 		IF t.state = New THEN Msg("Join: task not started") END;
 		ASSERT(t.state # New, 24);
 		IF ~IsDone(t) THEN
+			CheckSleepHolds(NIL);
 			(* Инвариант: пока t не завершена, current в очереди t.waiters ровно
 			   один раз; WakeWaiters снимает всю очередь при Reap(t). *)
 			current.wnext := t.waiters; t.waiters := current;
@@ -708,10 +715,12 @@ MODULE Tasks;
 	END Join;
 
 	PROCEDURE Park*;
-	(** Усыпить себя до Unpark. Пробуждение до Park не теряется. *)
+	(** Усыпить себя до Unpark. Пробуждение до Park не теряется.
+		Держа монитор-объект, спать можно только с его разрешения (трап 26). *)
 	BEGIN
 		CheckWait("Park");
 		IF current.wake THEN current.wake := FALSE; RETURN END;
+		CheckSleepHolds(NIL);
 		current.state := Parked;
 		Leave;
 		current.wake := FALSE;	(* пробуждение потреблено этим Park *)
@@ -725,6 +734,7 @@ MODULE Tasks;
 	BEGIN
 		CheckWait("Park");
 		IF current.wake THEN current.wake := FALSE; RETURN END;
+		CheckSleepHolds(NIL);
 		current.external := TRUE; INC(nExternal);
 		current.state := Parked;
 		Leave;
@@ -739,6 +749,7 @@ MODULE Tasks;
 		следующему Park. Monitors ждёт в цикле «пока не владелец». *)
 	BEGIN
 		CheckWait("monitor wait");
+		CheckSleepHolds(NIL);
 		current.state := Parked;
 		Leave;
 		CheckWait("monitor wait")
@@ -951,22 +962,28 @@ MODULE Tasks;
 		h.acq := FALSE
 	END ReleaseHold;
 
+	PROCEDURE Chain (VAR ctx: Ctx): Hold;
+	(** Вершина цепочки мониторов задачи; NIL — задачи уже нет. *)
+	BEGIN
+		IF ctx.task = NIL THEN RETURN NIL ELSE RETURN ctx.task.holds END
+	END Chain;
+
 	PROCEDURE Reconcile (VAR ctx: Ctx);
 	(* Отпустить записи вызовов, чьи кадры уже сняты трапом: mark ниже
 	   текущего указателя стека. Записи лежат в куче, поэтому переживают
 	   снятый кадр; порядок цепочки — от глубокого к внешнему. *)
 		VAR h, n: Hold; sp: S.ADDRESS; marker: INTEGER;
 	BEGIN
-		IF current = NIL THEN RETURN END;
-		h := ctx.holds;
+		IF (current = NIL) OR (ctx.task = NIL) THEN RETURN END;
+		h := ctx.task.holds;
 		WHILE h # NIL DO
 			n := h.next;
 			IF h.waiting THEN ReleaseHold(h) END;
 			h := n
 		END;
 		sp := S.ADR(marker);
-		WHILE (ctx.holds # NIL) & (ctx.holds.mark < sp) DO
-			h := ctx.holds; ctx.holds := h.next;
+		WHILE (ctx.task.holds # NIL) & (ctx.task.holds.mark < sp) DO
+			h := ctx.task.holds; ctx.task.holds := h.next;
 			ReleaseHold(h);
 			GiveHold(ctx, h)
 		END
@@ -1010,7 +1027,7 @@ MODULE Tasks;
 		VAR h: Hold; n: INTEGER;
 	BEGIN
 		EnterOp(c);
-		n := 0; h := c.holds;
+		n := 0; h := Chain(c);
 		WHILE h # NIL DO
 			IF h.acq THEN INC(n) END;
 			h := h.next
@@ -1018,15 +1035,17 @@ MODULE Tasks;
 		RETURN n
 	END HeldCount;
 
-	PROCEDURE ParkAwait (VAR ctx: Ctx);
+	PROCEDURE ParkAwait (VAR ctx: Ctx; except: Object);
 	(* Усыпить до передачи монитора, отмены или срока. Отмена не трапует:
-	   решение принимает Wait, вернув FALSE. *)
+	   решение принимает Wait, вернув FALSE. except — монитор, в чьём Wait
+	   задача спит на глубине 1. *)
 	BEGIN
 		ASSERT(current # NIL, 22);
 		IF current.wake THEN current.wake := FALSE; RETURN END;
 		IF (ctx.deadline > 0) & (Kernel.Time() >= ctx.deadline) THEN
 			ctx.expired := TRUE; RETURN
 		END;
+		CheckSleepHolds(except);
 		IF ctx.deadline > 0 THEN
 			current.deadline := ctx.deadline;
 			current.state := Sleeping; INC(current.sleepSeq); PushSleeper(current)
@@ -1039,11 +1058,13 @@ MODULE Tasks;
 		IF (ctx.deadline > 0) & (Kernel.Time() >= ctx.deadline) THEN ctx.expired := TRUE END
 	END ParkAwait;
 
-	PROCEDURE ParkRaw;
-	(* Усыпить без проверки остановки: дождаться опустошения группы. *)
+	PROCEDURE ParkRaw (except: Object);
+	(* Усыпить без проверки остановки: дождаться опустошения группы или
+	   монитора. *)
 	BEGIN
 		ASSERT(current # NIL, 22);
 		IF current.wake THEN current.wake := FALSE; RETURN END;
+		CheckSleepHolds(except);
 		current.state := Parked;
 		Leave;
 		current.wake := FALSE
@@ -1059,7 +1080,7 @@ MODULE Tasks;
 			h.waiting := TRUE; h.qkind := entryQ;
 			current.qkind := entryQ; current.qnext := NIL;
 			Append(o.enter, o.enterTail, current);
-			ParkAwait(ctx);
+			ParkAwait(ctx, NIL);
 			IF current.qkind # 0 THEN RemoveQueued(o, current) END;
 			h.waiting := FALSE; h.qkind := 0;
 			IF o.owner = tok THEN RETURN TRUE END;	(* передан вместе с пробуждением *)
@@ -1081,25 +1102,28 @@ MODULE Tasks;
 			END;
 			current.qkind := entryQ; current.qnext := NIL;
 			Append(o.enter, o.enterTail, current);
-			ParkRaw;
+			ParkRaw(o);	(* o — монитор, в чьём Wait задача уже стоит *)
 			IF current.qkind # 0 THEN RemoveQueued(o, current) END
 		END
 	END AcquireForced;
 
-	PROCEDURE CheckOtherHolds (VAR ctx: Ctx; o: Object);
-	(* Ждать, держа другие мониторы, можно только с их разрешения. *)
+	PROCEDURE CheckSleepHolds (except: Object);
+	(* Перед сном: каждый взятый монитор-объект, кроме except (того, в
+	   чьём Wait задача засыпает на глубине 1), должен разрешать ожидание.
+	   Быстрый путь: задача не Job или ничего не держит — одно сравнение. *)
 		VAR h: Hold;
 	BEGIN
-		h := ctx.holds;
+		IF (current = NIL) OR (current.holds = NIL) THEN RETURN END;
+		h := current.holds;
 		WHILE h # NIL DO
-			IF h.acq & (h.obj # NIL) & (h.obj # o) THEN
+			IF h.acq & (h.obj # NIL) & (h.obj # except) THEN
 				IF ~h.obj.HoldsWhileWaiting() THEN
-					Msg("Wait: a held monitor does not allow waiting"); HALT(24)
+					Msg("Sleep: a held monitor does not allow waiting"); HALT(26)
 				END
 			END;
 			h := h.next
 		END
-	END CheckOtherHolds;
+	END CheckSleepHolds;
 
 	PROCEDURE (o: Object) Do* (VAR ctx: Ctx; VAR op: Op), NEW;
 	(** Пред: o # NIL (20), вызов из задачи (22), ctx этой задачи (25).
@@ -1114,9 +1138,9 @@ MODULE Tasks;
 		IF ctx.Stopped() THEN RETURN END;
 		tok := Kernel.monTok;
 		h := TakeHold(ctx);
-		h.obj := o; h.next := ctx.holds; h.mark := S.ADR(marker);
+		h.obj := o; h.next := ctx.task.holds; h.mark := S.ADR(marker);
 		h.need := {}; h.cond := NIL; h.qkind := 0; h.waiting := FALSE; h.acq := FALSE;
-		ctx.holds := h;
+		ctx.task.holds := h;
 		acq := FALSE; entered := FALSE;
 		IF o.owner = tok THEN
 			INC(o.depth); entered := TRUE
@@ -1132,18 +1156,18 @@ MODULE Tasks;
 			Reconcile(ctx);
 			IF acq THEN ReleaseOne(o) ELSIF o.depth > 0 THEN DEC(o.depth) END
 		END;
-		IF ctx.holds = h THEN
-			ctx.holds := h.next
+		IF ctx.task.holds = h THEN
+			ctx.task.holds := h.next
 		ELSE
 			(* Более глубокие записи сняты трапом; текущая — вершина. *)
-			ASSERT(ctx.holds = h, 100)
+			ASSERT(ctx.task.holds = h, 100)
 		END;
 		GiveHold(ctx, h)
 	END Do;
 
 	PROCEDURE (o: Object) Wait* (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
-	(** Пред: монитор у вызывающей задачи (21), глубина 1 (23), чужие
-		мониторы разрешают ждать (24), вызов из задачи (22), ctx этой
+	(** Пред: монитор у вызывающей задачи (21), глубина 1 (23), сон с
+		удерживаемыми мониторами разрешён (26), вызов из задачи (22), ctx этой
 		задачи (25). Пост: TRUE — условие истинно, монитор у задачи;
 		FALSE — задача остановлена, монитор тоже у задачи. *)
 		VAR h: Hold; tok: S.ADDRESS;
@@ -1155,8 +1179,7 @@ MODULE Tasks;
 		tok := Kernel.monTok;
 		IF o.owner # tok THEN Msg("Wait outside Exclusive"); HALT(21) END;
 		IF o.depth # 1 THEN Msg("Wait on a nested entry"); HALT(23) END;
-		CheckOtherHolds(ctx, o);
-		h := ctx.holds;
+		h := ctx.task.holds;
 		IF (h = NIL) OR (h.obj # o) OR ~h.acq THEN
 			Msg("Wait: no Do record"); HALT(100)
 		END;
@@ -1170,7 +1193,7 @@ MODULE Tasks;
 			Append(o.flagq, o.flagTail, current);
 			o.owner := 0; o.depth := 0;
 			HandOff(o);
-			ParkAwait(ctx);
+			ParkAwait(ctx, o);
 			IF o.owner = tok THEN
 				(* монитор передан этой задаче *)
 			ELSE
@@ -1196,8 +1219,7 @@ MODULE Tasks;
 		tok := Kernel.monTok;
 		IF o.owner # tok THEN Msg("WaitFor outside Exclusive"); HALT(21) END;
 		IF o.depth # 1 THEN Msg("WaitFor on a nested entry"); HALT(23) END;
-		CheckOtherHolds(ctx, o);
-		h := ctx.holds;
+		h := ctx.task.holds;
 		IF (h = NIL) OR (h.obj # o) OR ~h.acq THEN
 			Msg("WaitFor: no Do record"); HALT(100)
 		END;
@@ -1211,7 +1233,7 @@ MODULE Tasks;
 			Append(o.condq, o.condTail, current);
 			o.owner := 0; o.depth := 0;
 			HandOff(o);
-			ParkAwait(ctx);
+			ParkAwait(ctx, o);
 			IF o.owner = tok THEN
 			ELSE
 				IF current.qkind # 0 THEN RemoveQueued(o, current) END;
@@ -1256,9 +1278,9 @@ MODULE Tasks;
 		WHILE g.alive > 0 DO
 			IF ctx.Stopped() THEN
 				CancelGroup(g);
-				ParkRaw
+				ParkRaw(NIL)
 			ELSE
-				ParkAwait(ctx)
+				ParkAwait(ctx, NIL)
 			END
 		END;
 		g.owner := NIL
@@ -1283,8 +1305,8 @@ MODULE Tasks;
 		ctx.cleaner := NIL;
 		ctx.cleanerPushed := FALSE;
 		Reconcile(ctx);
-		WHILE ctx.holds # NIL DO
-			h := ctx.holds; ctx.holds := h.next;
+		WHILE ctx.task.holds # NIL DO
+			h := ctx.task.holds; ctx.task.holds := h.next;
 			ReleaseHold(h);
 			GiveHold(ctx, h)
 		END;
@@ -1320,7 +1342,7 @@ MODULE Tasks;
 	BEGIN
 		ctx.task := t; ctx.group := NIL;
 		ctx.cancelled := FALSE; ctx.expired := FALSE;
-		ctx.holds := NIL; ctx.free := NIL; ctx.deadline := 0;
+		ctx.free := NIL; ctx.deadline := 0;
 		ctx.trapped := FALSE; ctx.cleanerPushed := FALSE;
 		NEW(cleaner); cleaner.ctxAdr := S.ADR(ctx); ctx.cleaner := cleaner;
 		t.pctx := S.ADR(ctx);
