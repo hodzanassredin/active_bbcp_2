@@ -79,7 +79,7 @@ enable the librarian again.
 
 ```sh
 echo "DevLibrarian.EnableDevLib('build/BB64LIN', 'Mod64');
-DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket;
+DevCompiler64.CompileSubs @Lin Lin System Std Cons Text Fig Form Dev Comm Crypto Obx Xhtml Sql Paket;
 DevLinker1.LinkElfExe64 'build/BB64LIN/blackbox' := Kernel+ LinKernel Files LinFiles StdLoader LinLoader" | ./dev0Linux
 for subsystem in Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket; do
 	if [ -d "$subsystem/Rsrc" ]; then
@@ -328,6 +328,7 @@ code, and the checks to run before a commit.
 | `Docu/ru/Async.md`, `Docu/Async.md` | `Async` library |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | `Cas` content-addressed store |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | `Actor` subsystem: actors and supervision |
+| `Crypto/Docu/ru/Crypto.md`, `Crypto/Docu/Crypto.md` | `Crypto` subsystem: A2 cryptography and TLS 1.2 client |
 | `Docu/ru/Tut-Active-TOC.md`, `Docu/Tut-Active-TOC.md` | tutorial: when to use actions, tasks, monitors, transactions, channels, selection, workers, computons (`ObxBank0`–`ObxBank6`) |
 | `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | `Kv` key-value store with transactions |
 | `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | `Raft` replicated log: core automaton, simulation, sessions, snapshots, node actor `RaftNode`, persistent-actor journal `RaftJournal` |

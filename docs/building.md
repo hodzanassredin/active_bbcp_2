@@ -50,7 +50,7 @@ tools/build64.sh System Lin       # выборочно, поверх готов�
 
 1. Включает `DevLibrarian.EnableDevLib('<INSTALL>', 'Mod64')`: исходник берётся из
    `<Sub>/Mod64`, иначе из `<Sub>/Mod`; `Code` и `Sym` пишутся в установку.
-2. Компилирует подсистемы `Lin System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket Unit`
+2. Компилирует подсистемы `Lin System Std Cons Text Fig Form Dev Comm Crypto Obx Xhtml Sql Paket Unit`
    через `DevCompiler64.CompileSubs @Lin`.
 3. Отдельно компилирует `Tasks`, `LinThreads`, `LinNative`, подсистему `Async` и её
    `Mod64`-модули, фасад `Robust`, подсистему `Actor`, примеры задач и каналов `Obx/Mod64` и примеры `Demo`.
