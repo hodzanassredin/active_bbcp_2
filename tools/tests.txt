@@ -18,4 +18,6 @@ Dev_devOpenArr||180|
 Dev_devPtrInit|proc|180|
 # Монитор-объект и пропуск в Tasks: флаги, Cond, повторный вход, трап, отмена, Spawn.
 System_devTasksObj|proc|300|
+# Случайные расписания задач: модель буфера, инварианты монитора, сборщик.
+System_devTasksSim|proc slow|300|
 System_devUnloadGuard|proc|300|System_devUnloadGuardCode
