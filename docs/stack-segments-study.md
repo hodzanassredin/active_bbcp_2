@@ -168,12 +168,12 @@
 
 | Модуль | Что видно | Причина |
 |---|---|---|
-| `System_devStackChk` | `TestProcOverflowTraps137`: «trap raised before SP left the stack» | проверенный код растёт куском вместо трапа 137; тест ждёт трап |
+| `System_devStackChk` | `TestProcOverflowTraps137`: «trap raised before SP left the stack»; `TestSlabNeighboursSurvive`: ожидалось 137, получено 43 | проверенный код растёт куском вместо трапа 137; тесты ждут трап, а 43 — оставшийся `Kernel.err` от прошлого теста |
 | `Async_devWorkers` | `TestFileIo`, `TestProcNoFreeze`, `TestResolve` — таймаут 5 с | задачи рабочих нитей и файловые задачи не собраны с `%`, стартовый стек 4 КБ меньше их глубины (файлы — 7,8 КБ по замеру 6.5) |
 | `Async_devProtocol` | `TestSelectViolationWithdrawsOtherOffers`: ожидалось 7, получено 0 | задача `Select` без ключа `%` на 4 КБ не укладывается; по замеру 6.5 глубина 4,2–5,2 КБ |
 
 Остальные модули, включая `System_devTasks` (35 тестов), `System_devMonitors` (15),
-`Async_devChannels` (16) и `System_devSegStacks` (9), проходят: их задачи либо укладываются в
+`Async_devChannels` (16) и `System_devSegStacks` (10), проходят: их задачи либо укладываются в
 4 КБ, либо сами задают поставщика стеков. Это и есть главный итог прогона: режим кусков
 безопасен только для задач, весь код которых собран с `%`; стартовый кусок 4 КБ для
 непроверенного кода мал, а поставить ему больший стек по умолчанию нельзя — размер задаётся
@@ -188,10 +188,13 @@
 |---|---|---|
 | 1 | `Kernel.SegmentDone` не возвращает `stkLo` | `TestProcParamsAcrossBoundary` (проверка `loOk` и число переходов) |
 | 2 | `MarkLocals` пропускает записи кусков (`~s.seg`) | `TestProcCollectLowerSegments`: массивы нижних кусков собраны |
-| 3 | код возврата после `pop rax`/`fld` обнуляет результат | 7 тестов: `TestProcDeepRecursion` (сумма 17 964 вместо 2 001 000), `TestProcParamsAcrossBoundary` (статическая связь 0 вместо 8), `TestProcCanarySegmented`, `TestProcCancelDeep`, `TestProcCollectLowerSegments`, `TestProcSpareAndRelease`, `TestProcTryTrapOnLowerSegment` |
+| 3 | код возврата после `pop rax`/`fld` обнуляет результат | шесть тестов по числам: `TestProcDeepRecursion` (сумма 17 964 вместо 2 001 000), `TestProcParamsAcrossBoundary` (статическая связь 0 вместо 8, `REAL` 0), `TestProcCanarySegmented`, `TestProcCancelDeep`, `TestProcSpareAndRelease`, `TestProcTryTrapOnLowerSegment` |
 
 Мутации 1 и 2 — правка ядра и пересборка консоли; мутация 3 — правка `DevCPCamd64` и
-самосборка компилятора, затем пересборка тестового модуля. Ветка после мутаций восстановлена.
+самосборка компилятора, затем пересборка тестового модуля. В прогоне мутации 3 в консоли
+оставалась ещё мутация 2 (ядро не пересобиралось после её отмены), поэтому падал и
+`TestProcCollectLowerSegments`; к сохранению результата это не относится. Ветка после мутаций
+восстановлена, окончательная сборка и наборы зелёные.
 
 ## 5. Границы
 
