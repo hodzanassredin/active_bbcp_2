@@ -11,12 +11,38 @@ MODULE AsyncChan;
 
 	Сообщение (AsyncSelect.Msg) после отправки не меняется. *)
 
-	IMPORT AsyncSelect, AsyncProto;
+	IMPORT Tasks, AsyncSelect, AsyncProto;
 
 	TYPE
 		Chan* = POINTER TO RECORD (AsyncSelect.Core) END;
 		Buffer* = POINTER TO RECORD (AsyncSelect.Core) END;
 		Mailbox* = POINTER TO RECORD (AsyncSelect.Core) END;
+
+	(* --- операции с пропуском --------------------------------------------- *)
+
+	PROCEDURE SendCtxCore (c: AsyncSelect.Core; VAR ctx: Tasks.Ctx;
+		m: AsyncSelect.Msg): BOOLEAN;
+	(* Отправка одним предложением SelectCtx: решение, снятие и пробуждение
+	   по остановке — там же. *)
+		VAR ops: ARRAY 1 OF AsyncSelect.Op;
+	BEGIN
+		AsyncSelect.AltSend(c, m, ops[0]);
+		RETURN AsyncSelect.SelectCtx(ctx, ops) = 0
+	END SendCtxCore;
+
+	PROCEDURE RecvCtxCore (c: AsyncSelect.Core; VAR ctx: Tasks.Ctx;
+		OUT m: AsyncSelect.Msg): BOOLEAN;
+	(* Приём одним предложением SelectCtx. FALSE — приём не состоялся,
+	   m = NIL. *)
+		VAR ops: ARRAY 1 OF AsyncSelect.Op;
+	BEGIN
+		AsyncSelect.AltRecv(c, ops[0]);
+		IF AsyncSelect.SelectCtx(ctx, ops) = 0 THEN
+			m := ops[0].got; RETURN TRUE
+		ELSE
+			m := NIL; RETURN FALSE
+		END
+	END RecvCtxCore;
 
 	PROCEDURE NewChan* (): Chan;
 	(** Пост: новая пустая встреча без протокола. *)
@@ -94,6 +120,49 @@ MODULE AsyncChan;
 		AsyncSelect.QueueRecv(c, m)
 	END Recv;
 
+	(* --- те же операции с пропуском --------------------------------------- *)
+
+	PROCEDURE (c: Chan) SendCtx* (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пред: вызов из задачи, ctx этой задачи (20, 25). Пост: TRUE — m
+		отправлено (встреча состоялась целиком); FALSE — пропуск остановлен,
+		m не отправлено и ожидания не было. *)
+	BEGIN
+		RETURN SendCtxCore(c, ctx, m)
+	END SendCtx;
+
+	PROCEDURE (c: Chan) RecvCtx* (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пост: TRUE — m получено; FALSE — пропуск остановлен, m = NIL и
+		приёма не было. *)
+	BEGIN
+		RETURN RecvCtxCore(c, ctx, m)
+	END RecvCtx;
+
+	PROCEDURE (c: Buffer) SendCtx* (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пост: TRUE — m в буфере; FALSE — пропуск остановлен, m не отправлено.
+		Полный буфер — ждать места с пропуском. *)
+	BEGIN
+		RETURN SendCtxCore(c, ctx, m)
+	END SendCtx;
+
+	PROCEDURE (c: Buffer) RecvCtx* (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пост: TRUE — m из буфера; FALSE — пропуск остановлен, m = NIL. *)
+	BEGIN
+		RETURN RecvCtxCore(c, ctx, m)
+	END RecvCtx;
+
+	PROCEDURE (c: Mailbox) SendCtx* (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пост: TRUE — m в ящике; FALSE — пропуск остановлен, m не отправлено.
+		Ящик не ждёт места, но вызов всё равно требует задачу и пропуск. *)
+	BEGIN
+		RETURN SendCtxCore(c, ctx, m)
+	END SendCtx;
+
+	PROCEDURE (c: Mailbox) RecvCtx* (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пост: TRUE — m из ящика; FALSE — пропуск остановлен, m = NIL. *)
+	BEGIN
+		RETURN RecvCtxCore(c, ctx, m)
+	END RecvCtx;
+
 	(* --- протокол -------------------------------------------------------- *)
 
 	PROCEDURE SetProtocol* (c: AsyncSelect.Core; p: AsyncProto.Protocol);
@@ -130,5 +199,12 @@ MODULE AsyncChan;
 	BEGIN
 		RETURN AsyncSelect.Select(ops)
 	END Select;
+
+	PROCEDURE SelectCtx* (VAR ctx: Tasks.Ctx; VAR ops: ARRAY OF AsyncSelect.Op): INTEGER;
+	(** То же, что AsyncSelect.SelectCtx: −1 — пропуск остановлен и ни одна
+		альтернатива не исполнена. *)
+	BEGIN
+		RETURN AsyncSelect.SelectCtx(ctx, ops)
+	END SelectCtx;
 
 END AsyncChan.
