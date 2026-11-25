@@ -68,7 +68,6 @@ MODULE DevCPB;
 
 		(* procedure flags (conval.setval) *)
 		hasBody = 1; isRedef = 2; slNeeded = 3; imVar = 4;
-		isHidden = 29;	(* скрытая процедура условия ACTIVE.AWAIT *)
 		
 		(* attribute flags (attr.adr, struct.attribute, proc.conval.setval)*)
 		newAttr = 16; absAttr = 17; limAttr = 18; empAttr = 19; extAttr = 20;
@@ -87,16 +86,11 @@ MODULE DevCPB;
 	VAR
 		typSize*: PROCEDURE(typ: DevCPT.Struct);
 		zero, one, two, dummy, quot: DevCPT.Const;
-		synth, synthLast: DevCPT.Node;	(* скрытые процедуры условий AWAIT *)
 
 	PROCEDURE err(n: SHORTINT);
 	BEGIN DevCPM.err(n)
 	END err;
-
-	(* Раскрытие ACTIVE.AWAIT. Определено после Call;
-	   StFct зовёт его через это предварительное объявление. *)
-	PROCEDURE ^AwaitExpansion* (VAR p: DevCPT.Node): DevCPT.Node;
-
+	
 	PROCEDURE NewLeaf*(obj: DevCPT.Object): DevCPT.Node;
 		VAR node: DevCPT.Node; typ: DevCPT.Struct;
 	BEGIN
@@ -1232,10 +1226,7 @@ MODULE DevCPB;
 			IF DevCPT.EqualType(x, y) OR (g = NilTyp) THEN (* ok *)
 			ELSIF (ynode.class = Nproc) & (ynode.obj.mode IN {XProc, IProc, LProc}) THEN
 				IF ynode.obj.mode = LProc THEN
-					IF ynode.obj.mnolev = 0 THEN ynode.obj.mode := XProc
-					ELSIF (ynode.obj.conval = NIL) OR ~(isHidden IN ynode.obj.conval.setval) THEN
-						err(73)	(* обычную вложенную процедуру как значение не берём *)
-					END
+					IF ynode.obj.mnolev = 0 THEN ynode.obj.mode := XProc ELSE err(73) END
 				END;
 				IF (x.sysflag = 0) & (ynode.obj.sysflag >= 0) OR (x.sysflag = ynode.obj.sysflag) THEN
 					IF DevCPT.EqualType(x.BaseTyp, ynode.obj.typ) THEN CheckParameters(x.link, ynode.obj.link, FALSE)
@@ -1551,10 +1542,6 @@ MODULE DevCPB;
 				IF (x.class = Ntype) OR (x.class = Nproc) THEN err(126)
 				ELSIF f # Pointer THEN err(111)
 				END
-		| DevCPT.awaitfn: (* ACTIVE.AWAIT: тип условия; раскрытие — в StFct *)
-				IF (x.class = Ntype) OR (x.class = Nproc) THEN err(126); x := NewBoolConst(FALSE)
-				ELSIF f # Bool THEN err(120); x := NewBoolConst(FALSE)
-				END
 		END ;
 		par0 := x
 	END StPar0;
@@ -1856,10 +1843,6 @@ MODULE DevCPB;
 			END
 		ELSIF (fctno = thisrecfn) OR (fctno = thisarrfn) THEN
 			IF parno < 2 THEN err(65) END
-		ELSIF fctno = DevCPT.awaitfn THEN
-			IF parno # 1 THEN err(65)
-			ELSE p := AwaitExpansion(p)
-			END
 		ELSE (* COM *)
 			IF fctno = queryfn THEN
 				IF parno < 3 THEN err(65) END
@@ -2249,170 +2232,6 @@ MODULE DevCPB;
 		END
 	END ShowTree;
 *)
-	(* --- ACTIVE.AWAIT: раскрытие по схеме Мюллера ---------------------- *)
-	(*
-		ACTIVE.AWAIT(c) в теле процедуры P с [exclusive] раскрывается в
-
-			SYSTEM.GETREG(BP, @frame);	(* кадр ждущего *)
-			IF ~c THEN
-				Kernel.Await(@awaitN, @frame, monitor)
-			END
-
-		где @awaitN — скрытая вложенная процедура P с телом RETURN c.
-		Ядро зовёт её с кадром в BX (Kernel.CallCond), поэтому c читает
-		переменные P через статическую связь, а сам кадр жив, пока задача
-		спит. Условие проверяется компилятором до вызова и ещё раз внутри
-		Kernel.Await (как в Active Oberon).
-	*)
-
-	PROCEDURE HasSideEffect (x: DevCPT.Node): BOOLEAN;
-		VAR y: DevCPT.Node;
-	BEGIN
-		y := x;
-		WHILE y # NIL DO
-			IF (y.class = Ncall) OR (y.class = Nassign) THEN RETURN TRUE END;
-			IF HasSideEffect(y.left) OR HasSideEffect(y.right) THEN RETURN TRUE END;
-			y := y.link
-		END;
-		RETURN FALSE
-	END HasSideEffect;
-
-	PROCEDURE MonitorActual (proc: DevCPT.Object): DevCPT.Node;
-	(** Выражение объекта-монитора: получатель метода или скрытая
-		глобальная модуля для процедуры верхнего уровня. *)
-		VAR x: DevCPT.Node; recv: DevCPT.Object;
-	BEGIN
-		IF proc.mode = TProc THEN recv := proc.link
-		ELSE recv := DevCPT.ModuleMonitor()
-		END;
-		x := NewLeaf(recv);
-		IF (proc.mode # TProc) OR (recv.mode = VarPar) THEN MOp(adr, x) END;
-		x.typ := DevCPT.anyptrtyp;	(* адрес/указатель — форма ANYPTR *)
-		RETURN x
-	END MonitorActual;
-
-	PROCEDURE MakeAwaitHelper (cond: DevCPT.Node; owner: DevCPT.Object): DevCPT.Object;
-	(** Скрытая вложенная процедура (frame: ADDRESS): BOOLEAN с телом
-		RETURN cond. Её статическая связь — кадр owner; ядро передаёт
-		этот кадр в BX, поэтому условие видит переменные owner. *)
-		VAR help, par: DevCPT.Object; body, node: DevCPT.Node; lvl: BYTE; nm: DevCPT.Name;
-	BEGIN
-		lvl := DevCPT.topScope.mnolev;
-		IF owner # NIL THEN INCL(owner.conval.setval, imVar) END;
-		DevCPT.NewHidden("@await", nm);
-		DevCPT.Insert(nm, help);
-		help.mode := LProc; help.typ := DevCPT.booltyp; help.vis := internal;
-		help.conval := DevCPT.NewConst(); INCL(help.conval.setval, hasBody);
-		INCL(help.conval.setval, isHidden);
-		DevCPT.OpenScope(SHORT(SHORT(lvl + 1)), help);
-		DevCPT.Insert("frame", par);
-		par.mode := Var; par.typ := DevCPT.adrtyp; par.vis := internal;
-		help.link := par;
-		body := DevCPT.NewNode(Nreturn); body.typ := DevCPT.notyp;
-		body.obj := help; body.left := cond;
-		body.conval := DevCPT.NewConst(); body.conval.intval := DevCPM.errpos;
-		node := DevCPT.NewNode(Nenter); node.typ := DevCPT.notyp; node.obj := help;
-		node.left := NIL; node.right := body;
-		node.conval := DevCPT.NewConst();
-		node.conval.intval := DevCPM.errpos; node.conval.intval2 := DevCPM.startpos;
-		DevCPT.CloseScope;
-		IF synth = NIL THEN synth := node ELSE synthLast.link := node END;
-		synthLast := node;
-		RETURN help
-	END MakeAwaitHelper;
-
-	PROCEDURE CopyExpr (x: DevCPT.Node): DevCPT.Node;
-	(* Глубокая копия выражения: узлы и их константы; объекты и типы общие.
-	   Поздние проходы правят узлы на месте (DevCPH.UseReals и Convert на
-	   i386: LONGINT-операции и константы переводятся в вещественные), и
-	   поддерево, стоящее в двух местах дерева, обработалось бы дважды. *)
-		VAR y: DevCPT.Node; c: DevCPT.Const;
-	BEGIN
-		IF x = NIL THEN RETURN NIL END;
-		y := DevCPT.NewNode(x.class); y^ := x^;
-		IF x.conval # NIL THEN c := DevCPT.NewConst(); c^ := x.conval^; y.conval := c END;
-		y.left := CopyExpr(x.left); y.right := CopyExpr(x.right); y.link := CopyExpr(x.link);
-		RETURN y
-	END CopyExpr;
-
-	PROCEDURE AwaitExpansion* (VAR p: DevCPT.Node): DevCPT.Node;
-	(** ACTIVE.AWAIT(c): проверка контекста и условия, раскрытие в
-		IF ~c THEN Kernel.Await(@cond, frame, monitor) END. Условие стоит
-		в двух местах: в проверке до ожидания (p) и в теле процедуры
-		условия (копия p). Тип условия уже проверил StPar0. *)
-		VAR proc, help, frame: DevCPT.Object;
-			pre, x, guard, callNode, condLeaf, frameLeaf, objLeaf: DevCPT.Node;
-	BEGIN
-		proc := DevCPT.topScope.link;
-		IF (proc = NIL) OR (proc.sysflag # DevCPM.exclusive) THEN
-			err(225);	(* AWAIT только внутри [exclusive] *)
-			RETURN NIL
-		END;
-		IF HasSideEffect(p) THEN
-			err(225);	(* условие — только чтение, без вызовов и присваиваний *)
-			RETURN NIL
-		END;
-		DevCPT.EnsureKernel; DevCPT.kAwait.used := TRUE;
-		IF (p.class = Nconst) & (p.conval.intval # 0) THEN RETURN NIL END;	(* AWAIT(TRUE) *)
-		GetTempVar("@frm", DevCPT.adrtyp, frame);	(* имя <= 4: буфер GetTempVar *)
-		pre := DevCPT.NewNode(Nassign); pre.subcl := getrfn; pre.typ := DevCPT.notyp;
-		pre.left := NewLeaf(frame); pre.right := NewIntConst(5);	(* BP *)
-		pre.conval := DevCPT.NewConst(); pre.conval.intval := DevCPM.errpos;
-		help := MakeAwaitHelper(CopyExpr(p), proc);
-		condLeaf := NewLeaf(help); frameLeaf := NewLeaf(frame);
-		objLeaf := MonitorActual(proc);
-		condLeaf.link := frameLeaf; frameLeaf.link := objLeaf;
-		callNode := NewLeaf(DevCPT.kAwait);
-		Call(callNode, condLeaf, DevCPT.kAwait.link);
-		callNode.conval := DevCPT.NewConst(); callNode.conval.intval := DevCPM.errpos;
-		IF p.class = Nconst THEN	(* AWAIT(FALSE): ждать без проверки *)
-			pre.link := callNode
-		ELSE
-			guard := p; MOp(not, guard);
-			Construct(Nif, guard, callNode);
-			guard.conval := DevCPT.NewConst(); guard.conval.intval := DevCPM.errpos;
-			Construct(Nifelse, guard, NIL);
-			guard.conval := DevCPT.NewConst(); guard.conval.intval := DevCPM.errpos;
-			pre.link := guard
-		END;
-		RETURN pre
-	END AwaitExpansion;
-
-	PROCEDURE AttachSynth* (VAR procdec: DevCPT.Node);
-	(** Добавить скрытые процедуры условий к локальным процедурам блока:
-		procs генератора обходит их до тела объемлющей процедуры, поэтому
-		адрес условия уже известен в точке AWAIT. *)
-		VAR last: DevCPT.Node;
-	BEGIN
-		IF synth # NIL THEN
-			IF procdec = NIL THEN procdec := synth
-			ELSE
-				last := procdec;
-				WHILE last.link # NIL DO last := last.link END;
-				last.link := synth
-			END;
-			synth := NIL; synthLast := NIL
-		END
-	END AttachSynth;
-
-	PROCEDURE YieldPoint* (VAR body: DevCPT.Node);
-	(** Точка уступки ключа компиляции: Kernel.Poll в конце тела цикла,
-		то есть на обратном переходе WHILE/REPEAT/LOOP/FOR. *)
-		VAR x, last: DevCPT.Node;
-	BEGIN
-		DevCPT.EnsureKernel; DevCPT.kPoll.used := TRUE;
-		x := NewLeaf(DevCPT.kPoll);
-		Call(x, NIL, NIL);
-		x.conval := DevCPT.NewConst(); x.conval.intval := DevCPM.errpos;
-		IF body = NIL THEN body := x
-		ELSE
-			last := body;
-			WHILE last.link # NIL DO last := last.link END;
-			last.link := x
-		END;
-		IF DevCPT.topScope.link # NIL THEN DevCPT.topScope.link.leaf := FALSE END
-	END YieldPoint;
-
 BEGIN
 	zero := DevCPT.NewConst(); zero.intval := 0; zero.realval := 0;
 	one := DevCPT.NewConst(); one.intval := 1; one.realval := 0;

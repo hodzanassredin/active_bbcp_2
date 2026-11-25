@@ -12,7 +12,7 @@ MODULE DevCompiler64;
 
 **)
 
-	IMPORT Kernel,
+	IMPORT Kernel, 
 		Files, Strings, Views, Dialog, Controls, Utf, Librarian, Converters,
 		TextModels, TextMappers, TextViews, TextControllers,
 		StdLog,
@@ -23,7 +23,6 @@ MODULE DevCompiler64;
 		(* compiler options: *)
 		checks = 0; allchecks = 1; assert = 2; obj = 3; ref = 4;
 		allref = 5; srcpos = 6; reallib = 7; signatures = 8;
-		yieldPts = 13;	(* ключ точек уступки, символ "^" в CompileThis *)
 		hint = 29; oberon = 30; errorTrap = 31;
 		defopt = {checks, assert, obj, ref, allref, srcpos, signatures};
 
@@ -54,7 +53,6 @@ MODULE DevCompiler64;
 		(* IF found THEN *) INCL(DevCPM.options, DevCPM.comAware); (* END; *)
 		IF errorTrap IN opt THEN INCL(DevCPM.options, DevCPM.trap) END;
 		IF oberon IN opt THEN INCL(DevCPM.options, DevCPM.oberon) END;
-		IF yieldPts IN opt THEN INCL(DevCPM.options, DevCPM.yieldPts) END;
 		IF DevCPT.processor # DevCPV.processor THEN
 			DevCPT.processor := DevCPV.processor;
 			DevCPT.InitDefault;  (* reload NIL size and SYSTEM.ADDRESS size  *)
@@ -195,7 +193,6 @@ MODULE DevCompiler64;
 			ELSIF opt[i] = "?" THEN INCL(opts, hint)
 			ELSIF opt[i] = "@" THEN INCL(opts, errorTrap)
 			ELSIF opt[i] = "$" THEN INCL(opts, oberon)
-			ELSIF opt[i] = "^" THEN INCL(opts, yieldPts)
 			END;
 			INC(i)
 		END;
@@ -363,7 +360,6 @@ MODULE DevCompiler64;
 					ELSIF s.char = "?" THEN INCL(opts, hint)
 					ELSIF s.char = "@" THEN INCL(opts, errorTrap)
 					ELSIF s.char = "$" THEN INCL(opts, oberon)
-					ELSIF s.char = "^" THEN INCL(opts, yieldPts)
 					ELSIF s.char = "(" THEN
 						s.Scan;
 						WHILE (s.start < end) & (s.type = TextMappers.string) DO

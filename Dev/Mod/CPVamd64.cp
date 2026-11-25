@@ -281,10 +281,8 @@ MODULE DevCPVamd64;
 	PROCEDURE GetComKernel;
 	BEGIN
 		IF addRef = NIL THEN
-			(* Область "$$" (Poll/Lock/Unlock/Await) создаётся по
-			   требованию; добавляем в неё COM-точки входа. *)
-			DevCPT.EnsureKernel;
-			DevCPT.OpenKernel;
+			DevCPT.OpenScope(SHORT(SHORT(-DevCPT.nofGmod)), NIL);
+			DevCPT.topScope.name := DevCPT.NewName("$$");
 			DevCPT.Insert("AddRef", addRef);
 			addRef.mode := XProc;
 			addRef.fprint := addRefFP;
@@ -301,7 +299,9 @@ MODULE DevCPVamd64;
 			DevCPCamd64.intHandler.mode := XProc;
 			DevCPCamd64.intHandler.fprint := intHandlerFP;
 			DevCPCamd64.intHandler.fpdone := TRUE;
-			DevCPT.CloseKernel
+			DevCPT.GlbMod[DevCPT.nofGmod] := DevCPT.topScope;
+			INC(DevCPT.nofGmod);
+			DevCPT.CloseScope;
 		END
 	END GetComKernel;
 

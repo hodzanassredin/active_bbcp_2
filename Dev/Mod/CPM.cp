@@ -88,13 +88,10 @@ MODULE DevCPM;
 		oberon* = 6;
 		java* = 7; javaAware* = 8;
 		noCode* = 9;
-		active* = 11;		(* модуль импортировал псевдомодуль ACTIVE *)
 		sysAMD64* = 12; (* target supports the explicit Windows x64 ABI *)
-		yieldPts* = 13;	(* ключ точек уступки: Kernel.Poll на обратном переходе *)
 		allSysVal* = 14;
 		sysImp* = 15;
 		trap* = 31;
-		exclusive* = 32;	(* sysflag процедуры [exclusive] *)
 		sys386 = 10; sys68k = 20;	(* processor type in options if system imported *)
 		
 	CONST
@@ -262,12 +259,7 @@ MODULE DevCPM;
 			ELSIF id = "noframe" THEN num := 16
 			ELSIF id = "native" THEN num := -33
 			ELSIF id = "bytecode" THEN num := -35
-			ELSIF id = "exclusive" THEN num := 32
 			END
-		END;
-		(* [exclusive] не комбинируется с другими флагами *)
-		IF (num = 32) & (flag # 0) OR (flag = 32) & (num # 0) THEN
-			err(225); flag := 0; RETURN
 		END;
 		IF (options * {sysImp, sys386, sys68k} # {}) & ((num = 1) OR (num = 2)) THEN INC(flag, num)
 		ELSIF (sys68k IN options) & (num = 4) THEN INC(flag, num)
@@ -275,7 +267,6 @@ MODULE DevCPM;
 		ELSIF (options * {sys386, interface} # {}) & (num = -12) & (flag = 0) THEN
 			IF sysAMD64 IN options THEN flag := -10 ELSE flag := -12 END
 		ELSIF (sysAMD64 IN options) & (num = -14) & (flag = 0) THEN flag := -14
-		ELSIF (active IN options) & (num = 32) & (flag = 0) THEN flag := 32
 		ELSIF (options * {sys386, com} # {}) & (num = 8) & (flag = 0) THEN flag := 8
 		ELSIF (options * {sysImp, sys386} # {}) & (num = 16) & (flag = 0) THEN flag := 16
 		ELSIF ({sysImp, java} - options = {}) & ((num= -33) OR (num = -35)) & (flag = 0) THEN flag := num
@@ -480,17 +471,17 @@ MODULE DevCPM;
 		StdLog.Int(i)
 	END LogWNum;
 
-	PROCEDURE GetPar* (IN key: ARRAY OF CHAR; OUT val: ARRAY OF CHAR; OUT res: INTEGER);
-	(** Чтение внешнего параметра компилятора. Компилятор не импортирует
-		Dialog напрямую: связь с хостом идёт через DevCPM. *)
-	BEGIN
-		Dialog.GetPar(key, val, res)
-	END GetPar;
-
 	PROCEDURE LogWLn*;
 	BEGIN
 		StdLog.Ln
 	END LogWLn;
+
+	PROCEDURE GetPar* (IN key: ARRAY OF CHAR; OUT val: ARRAY OF CHAR; OUT res: INTEGER);
+	(** Чтение внешнего параметра компилятора: BB_COMPILE_TIME для
+		детерминированной метки времени в .ocf. *)
+	BEGIN
+		Dialog.GetPar(key, val, res)
+	END GetPar;
 
 (*	
 	PROCEDURE LogW* (ch: CHAR);
