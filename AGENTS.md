@@ -340,3 +340,4 @@ code, and the checks to run before a commit.
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
 | `Demo/Docu/Sys-Map.md` | examples |
 | `Obx/Docu/Sys-Map.md`, `Obx/Docu/ru/Sys-Map.md` | Overview by Example, sections Tasks, Monitors and Channels; Content-Addressed Store |
+| `Obx/Docu/ru/HttpStyles.md`, `Obx/Docu/HttpStyles.md` | one HTTP client in three styles: tasks, decoder layers, decoder layers on a task; comparison of code, memory and time |

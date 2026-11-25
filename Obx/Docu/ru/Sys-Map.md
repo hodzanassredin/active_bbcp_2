@@ -40,6 +40,9 @@ ObxBank4  docu/sources		учебник: переводы транзакциям�
 ObxBank5  docu/sources		учебник: кассир владеет счетами, заявки через ящик
 ObxBank6  docu/sources		учебник: выбор из заявки, закрытия и тайм-аута; обещание
 
+Стили HTTP-клиента
+ObxHttpTask, ObxHttpCodec, ObxHttpCodecTask  docu/sources  один HTTP-клиент тремя способами: задачи, слои-кодеки, слои-кодеки на задаче
+
 Хранилище по содержимому
 ObxCas0  docu/sources		блок называется своим хешем: дедупликация
 ObxCas1  docu/sources		нарезка двух почти одинаковых входов по содержимому

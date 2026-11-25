@@ -96,6 +96,7 @@ tools/test32.sh                                   # i386: сборка и тес
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | соглашение о тестах |
 | `Demo/Docu/Sys-Map.md` | карта примеров; описание каждого примера — `Demo/Docu/<Имя>.md` (`Ants`, `Barber`, `Boring`, `Buffer`, `Group`, `ModuleMonitor`, `Philo`, `PingPong`, `Pipeline`, `ReaderWriter`, `SelectTimeout`, `Sieve`, `WorkerPool`, `Support`) |
 | `Obx/Docu/ru/Sys-Map.md`, `Obx/Docu/Sys-Map.md` | раздел «Обзора на примерах» о задачах, мониторах и каналах: `ObxTasks0`–`ObxTasks4`, `ObxChan0`–`ObxChan2`, `ObxSelect0`, `ObxProto0`, `ObxOnce`, `ObxStm0`–`ObxStm2`, `ObxWork0`, `ObxComputon`, `ObxBank0`–`ObxBank6`, и о хранилище по содержимому: `ObxCas0`–`ObxCas2`, хранилище `ObxKv0`–`ObxKv2`; у каждого страница `Obx/Docu/ru/<Имя>.md` |
+| `Obx/Docu/ru/HttpStyles.md`, `Obx/Docu/HttpStyles.md` | один HTTP-клиент тремя способами: задачи, слои-кодеки, слои-кодеки на задаче; сравнение кода, памяти и времени |
 | `AGENTS.md` | правила работы с репозиторием для агентов |
 
 ## Лицензия

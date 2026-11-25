@@ -114,6 +114,9 @@ ObxBank4  docu/sources		tutorial: transfers as transactions, Retry, OrElse
 ObxBank5  docu/sources		tutorial: a cashier owns the accounts, requests via a mailbox
 ObxBank6  docu/sources		tutorial: selecting a request, closing or a timeout; a promise
 
+HTTP Client Styles
+ObxHttpTask, ObxHttpCodec, ObxHttpCodecTask  docu/sources  one HTTP client three ways: tasks, decoder layers, decoder layers on a task
+
 Content-Addressed Store
 ObxCas0  docu/sources		a block named by its hash: deduplication
 ObxCas1  docu/sources		cutting two nearly equal inputs by content
