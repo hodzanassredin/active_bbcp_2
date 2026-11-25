@@ -85,7 +85,7 @@ MODULE ActorPersist;
 		END;
 
 		(* ответ журнала, пришедший позже *)
-		Written = POINTER TO RECORD (ActorCore.Msg) r: Req END;
+		Written = POINTER TO RECORD (ActorCore.Urgent) r: Req END;	(* мимо предела ящика *)
 
 		(** Посетитель событий потока (читатель-представление, CQRS). *)
 		Visitor* = POINTER TO ABSTRACT RECORD END;

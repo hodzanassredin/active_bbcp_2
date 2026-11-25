@@ -213,8 +213,7 @@ and 11 thousand with 64, because 64 commands go in one commit per node (0.05 sav
 - The `RaftNode` actor is tested on `ActorNetMem` (with faults) and in the examples; it was not run on
   `ActorNetTcp` between processes.
 - The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`; `ActorGrain` was not tested
-  on it. A mailbox with `Props.capacity > 0` may lose the journal's answer — a persistent actor on Raft
-  needs an unbounded mailbox. The journal state machine's
+  on it. The journal state machine's
   snapshot is all accepted commands in a row; there is no separate truncation for it.
 - No membership change: the cluster size is fixed at creation.
 - No PreVote and no CheckQuorum: a node behind a partition raises its term and deposes the leader when it

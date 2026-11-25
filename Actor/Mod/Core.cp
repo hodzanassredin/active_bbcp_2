@@ -94,6 +94,12 @@ MODULE ActorCore;
 		(** Каталог адресов: имя узла и актора -> адрес. *)
 		Directory* = POINTER TO ABSTRACT RECORD END;
 
+		(** Служебное письмо: в ящик идёт мимо предела capacity. Им отвечают
+			актору, который ждёт этого ответа и без него из ожидания не выйдет
+			(ответ журнала стойкому актору); потеря такого письма на полном
+			ящике оставила бы актор ждать вечно. **)
+		Urgent* = POINTER TO ABSTRACT RECORD (Msg) END;
+
 		(** сообщения жизненного цикла, их получает Receive **)
 		Started* = POINTER TO RECORD (Msg) END;
 		Stopping* = POINTER TO RECORD (Msg) END;
@@ -792,11 +798,13 @@ MODULE ActorCore;
 
 	PROCEDURE (c: Context) Post* (m: Msg; sender: Ref);
 	(** Пред: m # NIL — 20. Пост: m в ящике c; c останавливается, остановлен
-		или ящик полон — мёртвое письмо. Вызов из задачи или с главного
-		стека. *)
+		или ящик полон — мёртвое письмо. Ящик полон, когда писем в нём вместе
+		с отложенными (Stash) не меньше capacity > 0; письмо Urgent идёт мимо
+		предела. Вызов из задачи или с главного стека. *)
 	BEGIN
 		ASSERT(m # NIL, 20);
-		IF (c.state >= stopping) OR (c.props.capacity > 0) & (c.user.count >= c.props.capacity) THEN
+		IF (c.state >= stopping)
+		OR (c.props.capacity > 0) & ~(m IS Urgent) & (c.user.count + c.stash.count >= c.props.capacity) THEN
 			Dead(m, sender)
 		ELSE
 			Push(c.user, m, sender); Wake(c)

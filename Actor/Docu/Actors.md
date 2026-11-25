@@ -155,7 +155,7 @@ deadlock; the examples `ObxActor0`–`ObxActor2` check a clean log.
 Delivery follows the rule "at most once". A letter that cannot be processed is neither returned to
 the sender nor repeated; it becomes a *dead letter*, and the counter `ActorCore.deadLetters` grows by
 one. A letter becomes dead when it goes to a stopped actor, exceeds the mailbox limit
-`Props.capacity`, is a `Respond` to a message without a sender, or remains in the mailbox when the
+`Props.capacity` (stashed letters count toward the limit; an `ActorCore.Urgent` letter bypasses it), is a `Respond` to a message without a sender, or remains in the mailbox when the
 actor stops. The sender neither traps nor waits.
 
 A mailbox without a limit grows while memory lasts. With the limit `capacity = 5`, twenty letters
@@ -520,9 +520,10 @@ END Persisted;
 ```
 
 Recovery takes the same path (`ActorJournal.Journal.Replay`): messages before `ReplayComplete` are
-stashed too. The journal's answer arrives in the mailbox, so a bounded mailbox
-(`Props.capacity > 0`) may drop it and the actor would wait forever: a journal that answers later
-needs an unbounded mailbox.
+stashed too. The journal's answer arrives in the mailbox as a service letter `ActorCore.Urgent`,
+bypassing `Props.capacity`: a full mailbox does not lose it. Stashed letters count toward the
+mailbox limit, so while the actor waits for an answer it holds at most `capacity` letters, and the
+extra ones become dead at once (`Actor_devBounded`).
 
 Event versions. `Stores.Writer.WriteStore` writes the frame: the type name, then the fields from
 `Externalize`. The type reads its version number with `ReadVersion(min, max, v)` and parses the
@@ -873,6 +874,7 @@ DEFINITION ActorCore;
 			(d: Directory) Lookup (IN node, name: ARRAY OF CHAR): Ref, NEW, ABSTRACT
 		END;
 
+		Urgent = POINTER TO ABSTRACT RECORD (Msg) END;
 		Started = POINTER TO RECORD (Msg) END;
 		Stopping = POINTER TO RECORD (Msg) END;
 		Stopped = POINTER TO RECORD (Msg) END;
@@ -927,7 +929,13 @@ executor installed by `SetDispatcher`: for any other `Dispatcher` they trap with
 
 **PROCEDURE (r: Ref) Post (m: Msg; sender: Ref)**
 Pre: `m # NIL` — trap 20.
-Post: `m` is in the receiver's mailbox or counted as a dead letter; the sender does not wait.
+Post: `m` is in the receiver's mailbox or counted as a dead letter; the sender does not wait. A
+mailbox is full when its letters together with the stashed ones number at least `capacity > 0`; an
+`Urgent` letter bypasses the limit.
+
+**TYPE Urgent**
+A service letter: it enters the mailbox bypassing `Props.capacity`. It answers an actor that cannot
+leave its waiting without it (the journal's answer to a persistent actor).
 
 **PROCEDURE (r: Ref) AddWatcher (w: Ref)**
 Called by `c.Watch` and `Ask`.
@@ -1035,7 +1043,8 @@ Post: the following letters are handled by `b.Receive`; `b = NIL` and a restart 
 **PROCEDURE (c: Context) Stash**
 Put aside the message being handled: the handler cannot take it now.
 Pre: called from the handler of `c` handling a user message (not a life-cycle step) — trap 20.
-Post: the message and its sender are stashed. A restart puts the stashed messages back at the head
+Post: the message and its sender are stashed; they still count toward the mailbox limit
+`capacity`. A restart puts the stashed messages back at the head
 of the mailbox, a stop makes them dead letters.
 
 **PROCEDURE (c: Context) Unstash**
