@@ -32,7 +32,7 @@ MODULE ActorRun;
 		Own = POINTER TO RECORD (Tasks.Task) c: ActorCore.Context; idle: BOOLEAN END;
 
 	VAR
-		execs: ARRAY maxExec OF Exec;
+		execs: POINTER TO ARRAY OF Exec;	(* запас растёт вместе с пулом *)
 		n-: INTEGER;	(** число исполнителей пула; 0 — пул остановлен *)
 		run: POINTER TO ARRAY OF ActorCore.Context;
 		head, count: INTEGER;
@@ -117,6 +117,7 @@ MODULE ActorRun;
 		VAR i: INTEGER;
 	BEGIN
 		ASSERT((k > 0) & (k <= maxExec), 20); ASSERT(n = 0, 21);
+		IF (execs = NIL) OR (LEN(execs^) < k) THEN NEW(execs, k) END;
 		FOR i := 0 TO k - 1 DO
 			NEW(execs[i]); execs[i].idle := FALSE; execs[i].quit := FALSE; Tasks.Start(execs[i])
 		END;
