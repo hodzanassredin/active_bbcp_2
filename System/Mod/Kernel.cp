@@ -494,6 +494,13 @@ MODULE Kernel;
 	PROCEDURE (VAR p: Platform) DeallocateStackMem* (lo, hi: S.ADDRESS), NEW, EXTENSIBLE;
 	BEGIN
 	END DeallocateStackMem;
+	PROCEDURE (VAR p: Platform) AllocateStackSlab* (size, n: INTEGER; OUT base: S.ADDRESS; OUT step: INTEGER), NEW, EXTENSIBLE;
+	(** Плита из n стеков одним отображением: стек i — [base + i * step + g, base + (i + 1) * step),
+		ниже каждого — сторожевая страница g. Каждый стек плиты освобождается
+		DeallocateStackMem по отдельности. Платформа без поддержки возвращает base = 0. *)
+	BEGIN
+		base := 0; step := 0
+	END AllocateStackSlab;
 	(* Контекст Kernel.Try на текущем стеке: сохраняется/восстанавливается
 	   при переключении стеков. По умолчанию пусто. *)
 	PROCEDURE (VAR p: Platform) GetTryContext* (): S.ADDRESS, NEW, EXTENSIBLE;
@@ -1965,6 +1972,17 @@ MODULE Kernel;
 	BEGIN
 		IF lo # 0 THEN platform.DeallocateStackMem(lo, hi) END
 	END FreeStack;
+
+	PROCEDURE AllocStacks* (size, n: INTEGER; OUT base: S.ADDRESS; OUT step, guard: INTEGER): BOOLEAN;
+	(** Пред: n > 0. Пост: TRUE — плита из n стеков по size со сторожевыми страницами
+		размером guard (AllocateStackSlab); FALSE — платформа плит не даёт или памяти нет. *)
+	BEGIN
+		ASSERT(n > 0, 20);
+		base := 0; step := 0; guard := platform.PageSize();
+		IF (size <= 0) OR (size > maxStackScan) THEN RETURN FALSE END;
+		platform.AllocateStackSlab(size, n, base, step);
+		RETURN base # 0
+	END AllocStacks;
 
 	PROCEDURE UnregisterStack* (s: Stack);
 	BEGIN
