@@ -58,3 +58,9 @@ Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devCrash|proc|900|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devTasks|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devBench|proc slow|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+# Ожидания библиотеки: Once, встреча, буфер, ящик, выбор, отсутствие выделений.
+Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
+# Транзакционная память: откат, Retry, OrElse, ожидание, цена.
+Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan
+# Парные замеры задач, каналов и свободного монитора-объекта (итог обмена).
+Async_devBench|proc slow|900|AsyncSelect AsyncChan System_devCRaw System_devClock
