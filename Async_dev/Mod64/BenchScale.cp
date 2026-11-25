@@ -9,7 +9,7 @@ MODULE Async_devBenchScale;
 	время пробуждения и число завершившихся.
 
 	Варианты:
-		Ctx   — Job входит в СВОЙ Tasks.Object и ждёт в Wait (условие ложно);
+		Ctx   — Job входит в СВОЙ Tasks.Object и ждёт в Await (условие ложно);
 		Old   — то же на AsyncObject из этой ветки;
 		Excl  — задача ждёт в [exclusive]-методе через ACTIVE.AWAIT;
 		Chan  — задача ждёт приёма из своего AsyncChan.Chan;
@@ -33,7 +33,7 @@ MODULE Async_devBenchScale;
 		gcMaxN = 100000;	(* дольше одной сборки при большем N не ждём *)
 
 	TYPE
-		(* --- вариант Ctx: свой объект-монитор и Wait с ложным условием --- *)
+		(* --- вариант Ctx: свой объект-монитор и Await с ложным условием --- *)
 
 		WaitOp = RECORD (Tasks.Op) END;
 		CtxObj = POINTER TO RECORD (Tasks.Object) flag: BOOLEAN END;
@@ -226,7 +226,7 @@ MODULE Async_devBenchScale;
 		Ln
 	END Report;
 
-	(* -------------------- Ctx: Tasks.Object и Wait ------------------------ *)
+	(* -------------------- Ctx: Tasks.Object и Await ------------------------ *)
 
 	PROCEDURE (o: CtxObj) Ready (): SET;
 	BEGIN
@@ -237,7 +237,7 @@ MODULE Async_devBenchScale;
 	BEGIN
 		WITH op: WaitOp DO
 			WHILE ~o.flag DO
-				IF ~o.Wait(ctx, {0}) THEN RETURN END
+				IF ~o.Await(ctx, {0}) THEN RETURN END
 			END
 		END
 	END Exclusive;

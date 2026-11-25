@@ -212,14 +212,14 @@ MODULE Async_devBenchCtx;
 	BEGIN
 		WITH op: PutOp DO
 			WHILE b.count = b.capacity DO
-				IF ~b.Wait(ctx, {0}) THEN RETURN END
+				IF ~b.Await(ctx, {0}) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.v;
 			b.tail := (b.tail + 1) MOD b.capacity; INC(b.count);
 			IF op.id = 1 THEN INC(b.puts1) ELSE INC(b.puts0) END
 		| op: GetOp DO
 			WHILE b.count = 0 DO
-				IF ~b.Wait(ctx, {1}) THEN RETURN END
+				IF ~b.Await(ctx, {1}) THEN RETURN END
 			END;
 			op.v := b.ring[b.head];
 			b.head := (b.head + 1) MOD b.capacity; DEC(b.count)
@@ -303,14 +303,14 @@ MODULE Async_devBenchCtx;
 	BEGIN
 		WITH op: PutOp DO
 			WHILE ~b.nf.Ready(b) DO
-				IF ~b.WaitFor(ctx, b.nf) THEN RETURN END
+				IF ~b.AwaitCond(ctx, b.nf) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.v;
 			b.tail := (b.tail + 1) MOD b.capacity; INC(b.count);
 			IF op.id = 1 THEN INC(b.puts1) ELSE INC(b.puts0) END
 		| op: GetOp DO
 			WHILE ~b.ne.Ready(b) DO
-				IF ~b.WaitFor(ctx, b.ne) THEN RETURN END
+				IF ~b.AwaitCond(ctx, b.ne) THEN RETURN END
 			END;
 			op.v := b.ring[b.head];
 			b.head := (b.head + 1) MOD b.capacity; DEC(b.count)
@@ -387,11 +387,11 @@ MODULE Async_devBenchCtx;
 		WITH op: WaitOp DO
 			IF op.c = NIL THEN
 				LOOP
-					IF ~o.Wait(ctx, {0}) THEN RETURN END
+					IF ~o.Await(ctx, {0}) THEN RETURN END
 				END
 			ELSE
 				LOOP
-					IF ~o.WaitFor(ctx, op.c) THEN RETURN END
+					IF ~o.AwaitCond(ctx, op.c) THEN RETURN END
 				END
 			END
 		| op: NoOp DO

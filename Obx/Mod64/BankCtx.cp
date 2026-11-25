@@ -45,7 +45,7 @@ MODULE ObxBankCtx;
 	BEGIN
 		WITH op: WithdrawOp DO
 			WHILE a.balance < op.amount DO
-				IF ~a.Wait(ctx, {0}) THEN op.ok := FALSE; RETURN END
+				IF ~a.Await(ctx, {0}) THEN op.ok := FALSE; RETURN END
 			END;
 			DEC(a.balance, op.amount); op.ok := TRUE
 		| op: DepositOp DO

@@ -55,13 +55,13 @@ MODULE ObxDownCtx;
 	BEGIN
 		WITH op: PutOp DO
 			WHILE p.count = cap DO
-				IF ~p.Wait(ctx, {0}) THEN RETURN END
+				IF ~p.Await(ctx, {0}) THEN RETURN END
 			END;
 			p.ring[p.tail] := op.seq;
 			p.tail := (p.tail + 1) MOD cap; INC(p.count)
 		| op: GetOp DO
 			WHILE p.count = 0 DO
-				IF ~p.Wait(ctx, {1}) THEN op.ok := FALSE; RETURN END
+				IF ~p.Await(ctx, {1}) THEN op.ok := FALSE; RETURN END
 			END;
 			op.seq := p.ring[p.head];
 			p.head := (p.head + 1) MOD cap; DEC(p.count); op.ok := TRUE

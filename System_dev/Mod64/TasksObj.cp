@@ -3,10 +3,10 @@ MODULE System_devTasksObj;
 
 	Проверяется: взаимное исключение и FIFO очередей; буфер на флагах
 	Ready и на условии-объекте Cond; повторный вход и отпускание на
-	глубине 1; трап Wait на глубине 2; чужие мониторы в руках (запрет и
+	глубине 1; трап Await на глубине 2; чужие мониторы в руках (запрет и
 	разрешение); непойманный трап отпускает все мониторы, пойманный через
 	Kernel.Try — только внутренние; отмена и срок при ожидании входа и в
-	Wait; Spawn/JoinAll; выделения на операцию. *)
+	Await; Spawn/JoinAll; выделения на операцию. *)
 
 	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert;
 
@@ -256,13 +256,13 @@ MODULE System_devTasksObj;
 			x.flag := op.v
 		| op: WaitOp DO
 			INC(waits);
-			op.result := x.Wait(ctx, {0});
+			op.result := x.Await(ctx, {0});
 			op.cancelled := ctx.cancelled; op.expired := ctx.expired;
 			op.depth := Tasks.Depth(x); op.queued := Tasks.Queued(x);
 			IF op.result & (op.id # 0) THEN Note(op.id) END;
 			IF ~op.result THEN
 				s0 := Tasks.Switches();
-				op.second := x.Wait(ctx, {0});
+				op.second := x.Await(ctx, {0});
 				s1 := Tasks.Switches();
 				op.fast := s1 = s0
 			END
@@ -272,7 +272,7 @@ MODULE System_devTasksObj;
 					IF op.id # 0 THEN Note(op.id) END;
 					EXIT
 				END;
-				IF ~x.Wait(ctx, op.need) THEN RETURN END
+				IF ~x.Await(ctx, op.need) THEN RETURN END
 			END
 		| op: CondWaitOp DO
 			LOOP
@@ -280,7 +280,7 @@ MODULE System_devTasksObj;
 					IF op.id # 0 THEN Note(op.id) END;
 					EXIT
 				END;
-				IF ~x.WaitFor(ctx, op.c) THEN RETURN END
+				IF ~x.AwaitCond(ctx, op.c) THEN RETURN END
 			END
 		| op: NoteOp DO
 			Note(op.id)
@@ -293,7 +293,7 @@ MODULE System_devTasksObj;
 			op.depth := Tasks.Depth(x); op.seen := TRUE;
 			deep := x.deepWait;
 			IF deep THEN
-				IF ~x.Wait(ctx, {0}) THEN RETURN END
+				IF ~x.Await(ctx, {0}) THEN RETURN END
 			END
 		| op: OuterOp DO
 			hold.result := FALSE;
@@ -301,7 +301,7 @@ MODULE System_devTasksObj;
 			x.y.Do(ctx, hold)
 		| op: HoldOp DO
 			INC(x.entries);
-			op.result := x.Wait(ctx, {0})
+			op.result := x.Await(ctx, {0})
 		| op: CaughtOp DO
 			trapY := x.y; trapCtx := S.ADR(ctx);
 			IF op.tryIt THEN
@@ -352,13 +352,13 @@ MODULE System_devTasksObj;
 	BEGIN
 		WITH op: PutOp DO
 			WHILE b.count = cap DO
-				IF ~b.Wait(ctx, {0}) THEN RETURN END
+				IF ~b.Await(ctx, {0}) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.id * 100 + op.seq;
 			b.tail := (b.tail + 1) MOD cap; INC(b.count)
 		| op: GetOp DO
 			WHILE b.count = 0 DO
-				IF ~b.Wait(ctx, {1}) THEN RETURN END
+				IF ~b.Await(ctx, {1}) THEN RETURN END
 			END;
 			op.item := b.ring[b.head];
 			b.head := (b.head + 1) MOD cap; DEC(b.count)
@@ -417,13 +417,13 @@ MODULE System_devTasksObj;
 	BEGIN
 		WITH op: CondPutOp DO
 			WHILE ~b.notFull.Ready(b) DO
-				IF ~b.WaitFor(ctx, b.notFull) THEN RETURN END
+				IF ~b.AwaitCond(ctx, b.notFull) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.id * 100 + op.seq;
 			b.tail := (b.tail + 1) MOD cap; INC(b.count)
 		| op: CondGetOp DO
 			WHILE ~b.notEmpty.Ready(b) DO
-				IF ~b.WaitFor(ctx, b.notEmpty) THEN RETURN END
+				IF ~b.AwaitCond(ctx, b.notEmpty) THEN RETURN END
 			END;
 			op.item := b.ring[b.head];
 			b.head := (b.head + 1) MOD cap; DEC(b.count)
@@ -794,7 +794,7 @@ MODULE System_devTasksObj;
 	END CaseWaitDepth2Traps;
 
 	PROCEDURE CaseForeignMonitorDenied;
-		(* X взят, Y.Wait ждёт — X не разрешает ждать: трап 26. *)
+		(* X взят, Y.Await ждёт — X не разрешает ждать: трап 26. *)
 		VAR x, y: Lock; j: OuterJob;
 	BEGIN
 		NEW(x); NEW(y); x.allow := FALSE; y.flag := FALSE; x.y := y;
@@ -917,7 +917,7 @@ MODULE System_devTasksObj;
 	END CaseDeadlineEntry;
 
 	PROCEDURE CaseCancelWait;
-		(* Отмена в Wait: FALSE, причина, монитор у задачи, второй Wait сразу. *)
+		(* Отмена в Await: FALSE, причина, монитор у задачи, второй Await сразу. *)
 		VAR x: Lock; b: WaitJob; c: OrderJob;
 	BEGIN
 		NEW(x); x.flag := FALSE;
@@ -926,13 +926,13 @@ MODULE System_devTasksObj;
 		UnitAssert.True(waits > 0, "B ждёт условия");
 		Tasks.Cancel(b);
 		UnitAssert.True(Pump(1000), "B завершилась");
-		UnitAssert.True(~b.op.result, "Wait вернул FALSE");
+		UnitAssert.True(~b.op.result, "Await вернул FALSE");
 		UnitAssert.True(b.op.cancelled, "причина — отмена");
 		UnitAssert.True(~b.op.expired, "срок не истёк");
 		UnitAssert.EqualInt(1, b.op.depth, "монитор снова у задачи");
 		UnitAssert.EqualInt(0, b.op.queued, "очередь пуста");
-		UnitAssert.True(~b.op.second, "второй Wait тоже FALSE");
-		UnitAssert.True(b.op.fast, "второй Wait не спал");
+		UnitAssert.True(~b.op.second, "второй Await тоже FALSE");
+		UnitAssert.True(b.op.fast, "второй Await не спал");
 		UnitAssert.EqualInt(Tasks.Cancelled, Tasks.State(b), "задача отменена");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен");
 		NEW(c); c.x := x; c.id := 9; Start(c);
@@ -941,7 +941,7 @@ MODULE System_devTasksObj;
 	END CaseCancelWait;
 
 	PROCEDURE CaseDeadlineWait;
-		(* Срок в Wait: FALSE, причина — срок, монитор у задачи. *)
+		(* Срок в Await: FALSE, причина — срок, монитор у задачи. *)
 		VAR x: Lock; j: DeadlineJob;
 	BEGIN
 		NEW(x); x.flag := FALSE;
@@ -949,7 +949,7 @@ MODULE System_devTasksObj;
 		Start(j);
 		UnitAssert.True(Pump(1000), "задача завершилась");
 		UnitAssert.True(~Tasks.Failed(j), "без трапа");
-		UnitAssert.True(~j.op.result, "Wait вернул FALSE");
+		UnitAssert.True(~j.op.result, "Await вернул FALSE");
 		UnitAssert.True(j.expired, "причина — срок");
 		UnitAssert.True(~Tasks.Held(x), "монитор свободен");
 		UnitAssert.EqualInt(0, Tasks.Queued(x), "очередь пуста")

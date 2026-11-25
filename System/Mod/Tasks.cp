@@ -64,7 +64,7 @@ MODULE Tasks;
 		stackHead = Taskarch.stackHead;	(* запас у верха стека *)
 
 	TYPE
-		(* Условие-объект для Object.WaitFor: Ready читает состояние
+		(* Условие-объект для Object.AwaitCond: Ready читает состояние
 		   объекта-монитора o. Наследник заводит свои поля. *)
 		Cond* = POINTER TO ABSTRACT RECORD END;
 
@@ -118,7 +118,7 @@ MODULE Tasks;
 		END;
 
 		(* Запись одного вызова Do. Лежит в куче и берётся из списка
-		   свободных Ctx: после прогрева Do и Wait не выделяют памяти.
+		   свободных Ctx: после прогрева Do и Await не выделяют памяти.
 		   mark — адрес локальной переменной кадра Do; по нему Reconcile
 		   отличает кадры, уже снятые трапом, от живых. *)
 		Hold = POINTER TO HoldRec;
@@ -951,7 +951,7 @@ MODULE Tasks;
 
 	PROCEDURE WakeChosen (o: Object);
 	(* Способ без передачи: снять с очереди первого готового и разбудить
-	   его, оставив монитор свободным. Задача сама возьмёт его в Wait. *)
+	   его, оставив монитор свободным. Задача сама возьмёт его в Await. *)
 		VAR t: Task;
 	BEGIN
 		t := ChooseFlag(o);
@@ -1048,7 +1048,7 @@ MODULE Tasks;
 	   текущего указателя стека. Записи лежат в куче, поэтому переживают
 	   снятый кадр; порядок цепочки — от глубокого к внешнему.
 	   Ожидание снимается, только если снят его собственный кадр (wmark):
-	   живой Wait, только что вставший в очередь перед сном, не трогается. *)
+	   живой Await, только что вставший в очередь перед сном, не трогается. *)
 		VAR h, n: Hold; sp: S.ADDRESS; marker: INTEGER;
 	BEGIN
 		IF (current = NIL) OR (ctx.task = NIL) THEN RETURN END;
@@ -1130,7 +1130,7 @@ MODULE Tasks;
 
 	PROCEDURE ParkAwait (VAR ctx: Ctx; except: Object);
 	(* Усыпить до передачи монитора, отмены или срока. Отмена не трапует:
-	   решение принимает Wait, вернув FALSE. except — монитор, в чьём Wait
+	   решение принимает Await, вернув FALSE. except — монитор, в чьём Await
 	   задача спит на глубине 1. *)
 	BEGIN
 		ASSERT(current # NIL, 22);
@@ -1188,7 +1188,7 @@ MODULE Tasks;
 	END AcquireEntry;
 
 	PROCEDURE AcquireForced (o: Object);
-	(* Войти, даже если задача остановлена: Wait обязан вернуть FALSE,
+	(* Войти, даже если задача остановлена: Await обязан вернуть FALSE,
 	   держа монитор, чтобы Exclusive мог выйти. *)
 		VAR tok: S.ADDRESS;
 	BEGIN
@@ -1199,7 +1199,7 @@ MODULE Tasks;
 			END;
 			current.qkind := entryQ; current.qnext := NIL;
 			Append(o.enter, o.enterTail, current);
-			ParkRaw(o);	(* o — монитор, в чьём Wait задача уже стоит *)
+			ParkRaw(o);	(* o — монитор, в чьём Await задача уже стоит *)
 			IF current.qkind # 0 THEN RemoveQueued(o, current) END
 		END
 	END AcquireForced;
@@ -1217,7 +1217,7 @@ MODULE Tasks;
 
 	PROCEDURE CheckSleepHolds (except: Object);
 	(* Перед сном: каждый взятый монитор-объект, кроме except (того, в
-	   чьём Wait задача засыпает на глубине 1), должен разрешать ожидание.
+	   чьём Await задача засыпает на глубине 1), должен разрешать ожидание.
 	   Быстрый путь: задача не Job или ничего не держит — одно сравнение. *)
 		VAR h: Hold;
 	BEGIN
@@ -1311,18 +1311,18 @@ MODULE Tasks;
 		GiveHold(ctx, h)
 	END Do;
 
-	PROCEDURE WaitCommon (o: Object; VAR ctx: Ctx; cond: Cond; need: SET): BOOLEAN;
-	(* Общее тело Wait (cond = NIL, ждём флаги need) и WaitFor (cond # NIL).
+	PROCEDURE AwaitCommon (o: Object; VAR ctx: Ctx; cond: Cond; need: SET): BOOLEAN;
+	(* Общее тело Await (cond = NIL, ждём флаги need) и AwaitCond (cond # NIL).
 	   Предусловия и сообщения проверяют обёртки. *)
 		VAR h: Hold; tok: S.ADDRESS; first, isCond: BOOLEAN; marker: INTEGER;
 	BEGIN
 		Heal(ctx);
 		tok := Token();
-		IF o.owner # tok THEN Msg("Wait outside Exclusive"); HALT(21) END;
-		IF o.depth # 1 THEN Msg("Wait on a nested entry"); HALT(23) END;
+		IF o.owner # tok THEN Msg("Await outside Exclusive"); HALT(21) END;
+		IF o.depth # 1 THEN Msg("Await on a nested entry"); HALT(23) END;
 		h := ctx.task.holds;
 		IF (h = NIL) OR (h.obj # o) OR ~h.acq THEN
-			Msg("Wait: no Do record"); HALT(100)
+			Msg("Await: no Do record"); HALT(100)
 		END;
 		isCond := cond # NIL;
 		IF StoppedNow(ctx) THEN RETURN FALSE END;
@@ -1360,29 +1360,29 @@ MODULE Tasks;
 			o.depth := 1;
 			IF StoppedNow(ctx) THEN RETURN FALSE END
 		END
-	END WaitCommon;
+	END AwaitCommon;
 
-	PROCEDURE (o: Object) Wait* (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
+	PROCEDURE (o: Object) Await* (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
 	(** Пред: монитор у вызывающей задачи (21), глубина 1 (23), сон с
 		удерживаемыми мониторами разрешён (26), вызов из задачи (22), ctx этой
 		задачи (25). Пост: TRUE — условие истинно, монитор у задачи;
 		FALSE — задача остановлена, монитор тоже у задачи. *)
 	BEGIN
-		IF o = NIL THEN Msg("Wait: NIL object"); HALT(20) END;
-		IF current = NIL THEN Msg("Wait outside a task"); HALT(22) END;
-		IF ctx.task # current THEN Msg("Wait: pass of another task"); HALT(25) END;
-		RETURN WaitCommon(o, ctx, NIL, need)
-	END Wait;
+		IF o = NIL THEN Msg("Await: NIL object"); HALT(20) END;
+		IF current = NIL THEN Msg("Await outside a task"); HALT(22) END;
+		IF ctx.task # current THEN Msg("Await: pass of another task"); HALT(25) END;
+		RETURN AwaitCommon(o, ctx, NIL, need)
+	END Await;
 
-	PROCEDURE (o: Object) WaitFor* (VAR ctx: Ctx; c: Cond): BOOLEAN, NEW;
-	(** То же, что Wait, но условие — объект c.Ready(o). *)
+	PROCEDURE (o: Object) AwaitCond* (VAR ctx: Ctx; c: Cond): BOOLEAN, NEW;
+	(** То же, что Await, но условие — объект c.Ready(o). *)
 	BEGIN
-		IF o = NIL THEN Msg("WaitFor: NIL object"); HALT(20) END;
-		IF c = NIL THEN Msg("WaitFor: NIL condition"); HALT(25) END;
-		IF current = NIL THEN Msg("WaitFor outside a task"); HALT(22) END;
-		IF ctx.task # current THEN Msg("WaitFor: pass of another task"); HALT(25) END;
-		RETURN WaitCommon(o, ctx, c, {})
-	END WaitFor;
+		IF o = NIL THEN Msg("AwaitCond: NIL object"); HALT(20) END;
+		IF c = NIL THEN Msg("AwaitCond: NIL condition"); HALT(25) END;
+		IF current = NIL THEN Msg("AwaitCond outside a task"); HALT(22) END;
+		IF ctx.task # current THEN Msg("AwaitCond: pass of another task"); HALT(25) END;
+		RETURN AwaitCommon(o, ctx, c, {})
+	END AwaitCond;
 
 	(* --- дети пропуска ---------------------------------------------------- *)
 

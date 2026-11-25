@@ -6,7 +6,7 @@ MODULE ObxBufCtx;
 	нужен, и просыпается только когда этот флаг появился. Второй способ —
 	положить k предметов разом: условие-объект Room проверяет, что в
 	буфере есть место для всех k. Первый способ — цикл по флагам, второй —
-	WaitFor. *)
+	AwaitCond. *)
 
 	IMPORT Tasks, Console, Strings;
 
@@ -75,20 +75,20 @@ MODULE ObxBufCtx;
 	BEGIN
 		WITH op: PutOp DO
 			WHILE b.count = cap DO
-				IF ~b.Wait(ctx, {empty}) THEN RETURN END
+				IF ~b.Await(ctx, {empty}) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.id * 100 + op.seq;
 			b.tail := (b.tail + 1) MOD cap; INC(b.count)
 		| op: GetOp DO
 			WHILE b.count = 0 DO
-				IF ~b.Wait(ctx, {full}) THEN RETURN END
+				IF ~b.Await(ctx, {full}) THEN RETURN END
 			END;
 			op.item := b.ring[b.head];
 			b.head := (b.head + 1) MOD cap; DEC(b.count)
 		| op: PutAllFlagOp DO
 			FOR i := 0 TO k - 1 DO
 				WHILE b.count = cap DO
-					IF ~b.Wait(ctx, {empty}) THEN RETURN END
+					IF ~b.Await(ctx, {empty}) THEN RETURN END
 				END;
 				b.ring[b.tail] := op.id * 100 + op.seq + i;
 				b.tail := (b.tail + 1) MOD cap; INC(b.count)
@@ -96,7 +96,7 @@ MODULE ObxBufCtx;
 		| op: PutAllCondOp DO
 			op.room.k := k;
 			WHILE ~op.room.Ready(b) DO
-				IF ~b.WaitFor(ctx, op.room) THEN RETURN END
+				IF ~b.AwaitCond(ctx, op.room) THEN RETURN END
 			END;
 			FOR i := 0 TO k - 1 DO
 				b.ring[b.tail] := op.id * 100 + op.seq + i;
