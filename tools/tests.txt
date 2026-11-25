@@ -26,6 +26,14 @@ Async_devWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
 Async_devComputons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 Async_devBench|proc slow|900|AsyncSelect AsyncChan AsyncOnce System_devCRaw System_devClock
 Async_devProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
+# Монитор в базовом классе (AsyncObject): вход, выход, ожидание, трап, отмена.
+Async_devObject|proc|300|AsyncObject
+# Монитор-объект и пропуск в Tasks: флаги, Cond, повторный вход, трап, отмена, Spawn.
+System_devTasksObj|proc|300|
+# Сон под монитором-объектом в Select и AsyncChan: трап 26 и разрешение.
+Async_devCtxSleep|proc|600|AsyncSelect AsyncChan AsyncOnce
+# Каналы и выбор с пропуском: SendCtx/RecvCtx/SelectCtx, −1, срок и отмена.
+Async_devCtxChan|proc|600|AsyncSelect AsyncChan AsyncOnce
 Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan AsyncOnce
 System_devUnload|proc|600|System_devUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 System_devUnloadGuard|proc|300|System_devUnloadGuardCode

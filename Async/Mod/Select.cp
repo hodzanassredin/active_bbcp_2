@@ -152,6 +152,25 @@ MODULE AsyncSelect;
 		IF foreign THEN Tasks.Unpark(Tasks.Current()) END
 	END ParkUntilDecided;
 
+	PROCEDURE ParkUntilDecidedCtx (ctx: Ctx; VAR tctx: Tasks.Ctx; external: BOOLEAN): BOOLEAN;
+	(* То же с пропуском: сон кончается и остановкой. Пост: TRUE — решение
+	   принято; FALSE — пропуск остановлен и решения не было. Решение,
+	   пришедшее вместе с пробуждением, важнее остановки: канал мог уже
+	   передать сообщение, и отменить это нельзя. *)
+		VAR foreign: BOOLEAN;
+	BEGIN
+		foreign := FALSE;
+		WHILE ~ctx.decided DO
+			IF ~Tasks.ParkCtx(tctx, external) THEN
+				IF ~ctx.decided THEN RETURN FALSE END
+			ELSIF ~ctx.decided THEN
+				foreign := TRUE
+			END
+		END;
+		IF foreign THEN Tasks.Unpark(Tasks.Current()) END;
+		RETURN TRUE
+	END ParkUntilDecidedCtx;
+
 	PROCEDURE SignalReady* (ctx: Ctx; idx: INTEGER);
 	(** Пред: владелец сигнала, ctx и idx — из Arm, Disarm ещё не вызван.
 		Пост: решение принято (idx победил, если решения ещё не было),
@@ -642,5 +661,80 @@ MODULE AsyncSelect;
 		ASSERT(~refused, 21);
 		RETURN winner
 	END Select;
+
+	PROCEDURE AwaitDecisionCtx (VAR tctx: Tasks.Ctx; ctx: Ctx; tIdx: INTEGER; tMs: LONGINT): BOOLEAN;
+	(* AwaitDecision с пропуском. Прежде чем уснуть, проверяет остановку:
+	   при ней решения нет и таймер не заводится. Пост: TRUE — ctx.decided,
+	   таймер (если был) снят; FALSE — пропуск остановлен без решения. *)
+		VAR timer: Timer;
+	BEGIN
+		IF ~ctx.decided & (tIdx >= 0) & (tMs <= 0) THEN Decide(ctx, tIdx) END;
+		IF ~ctx.decided THEN
+			IF tctx.Stopped() THEN RETURN FALSE END;
+			timer := NIL;
+			IF tIdx >= 0 THEN
+				NEW(timer); timer.ctx := ctx; timer.idx := tIdx;
+				Services.DoLater(timer, Services.Ticks() + tMs)
+			END;
+			ctx.ready := TRUE;
+			IF ~ParkUntilDecidedCtx(ctx, tctx, timer # NIL) THEN
+				(* решают WithdrawAll и FreeCtx вызывающего *)
+				IF timer # NIL THEN Services.RemoveAction(timer); timer.ctx := NIL END;
+				RETURN FALSE
+			END;
+			IF timer # NIL THEN Services.RemoveAction(timer); timer.ctx := NIL END
+		END;
+		RETURN TRUE
+	END AwaitDecisionCtx;
+
+	PROCEDURE SelectCtx* (VAR tctx: Tasks.Ctx; VAR ops: ARRAY OF Op): INTEGER;
+	(** То же, что Select, с пропуском. Пред: вызов из задачи (20);
+		LEN(ops) <= 32 (21); tctx этой задачи (25); альтернативы и их поля —
+		как у Select (22–24).
+		Пост: задача не была остановлена — исполнена ровно одна альтернатива,
+		результат — её индекс; у победившего приёма ops[i].got — сообщение.
+		Задача остановлена (отмена или срок), и ни одна альтернатива не
+		исполнилась — −1: все предложения сняты, сигналы разоружены.
+		Если решение уже было принято (канал успел передать сообщение), оно
+		важнее остановки: возвращается индекс победителя. Протокол отверг
+		отправку — трап 21, как у Select. *)
+		VAR ctx: Ctx; offers: ARRAY maxAlt OF Offer; i, last, tIdx, winner: INTEGER;
+			tMs: LONGINT; refused, stopped: BOOLEAN;
+	BEGIN
+		ASSERT(Tasks.InTask(), 20);
+		ASSERT(LEN(ops) <= maxAlt, 21);
+		ASSERT(tctx.TaskOf() = Tasks.Current(), 25);
+		FOR i := 0 TO LEN(ops) - 1 DO
+			ASSERT((ops[i].kind >= SendKind) & (ops[i].kind <= SignalKind), 22);
+			ASSERT((ops[i].kind > RecvKind) OR (ops[i].core # NIL), 23);
+			ASSERT((ops[i].kind # SignalKind) OR (ops[i].sig # NIL), 24)
+		END;
+		IF tctx.Stopped() THEN RETURN -1 END;
+		ctx := TakeCtx();
+		RegisterAll(ops, ctx, offers, last, tIdx, tMs);
+		stopped := ~AwaitDecisionCtx(tctx, ctx, tIdx, tMs);
+		(* Снятие предложения может ждать занятый монитор канала; за это
+		   время другая сторона успевает принять решение по ещё не снятому
+		   предложению. Поэтому остановка проверяется после снятия: принятое
+		   решение важнее, иначе переданное сообщение пропало бы. *)
+		WithdrawAll(ops, offers, last);
+		IF stopped & ~ctx.decided THEN
+			FOR i := 0 TO last - 1 DO
+				IF offers[i] # NIL THEN FreeOffer(offers[i]) END
+			END;
+			FreeCtx(ctx);
+			RETURN -1
+		END;
+		winner := ctx.winner;
+		ASSERT((0 <= winner) & (winner < last), 100);
+		refused := (offers[winner] # NIL) & offers[winner].refused;
+		IF (ops[winner].kind = RecvKind) & ~refused THEN ops[winner].got := offers[winner].got END;
+		FOR i := 0 TO last - 1 DO
+			IF offers[i] # NIL THEN FreeOffer(offers[i]) END
+		END;
+		FreeCtx(ctx);
+		ASSERT(~refused, 21);
+		RETURN winner
+	END SelectCtx;
 
 END AsyncSelect.

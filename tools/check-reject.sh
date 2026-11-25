@@ -17,8 +17,9 @@ cleanup () {
 	rm -f "$BB/Dev/Mod/RejAwait.cp" "$BB/Dev/Mod/RejCall.cp" \
 		"$BB/Dev/Mod/RejLocal.cp" "$BB/Dev/Mod/RejNoActive.cp" \
 		"$BB/Dev/Mod/RejCode.cp" "$BB/Dev/Mod/RejSize.cp" "$BB/Dev/Mod/KeyProbe.cp" "$BB/Dev/Mod/RejGuarded.cp" \
+		"$BB/Dev/Mod/RejCtxVar.cp" "$BB/Dev/Mod/RejCtxCopy.cp" "$BB/Dev/Mod/RejExclusive.cp" \
 		"$BB/System/Mod/KeyProbe.cp" "$BB/System/Mod/Usermod.cp"
-	rm -f "$BB"/.work/BB64LIN/Dev/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,RejSize,KeyProbe}.ocf 2>/dev/null
+	rm -f "$BB"/.work/BB64LIN/Dev/Code/{RejAwait,RejCall,RejLocal,RejNoActive,RejCode,RejSize,KeyProbe,RejCtxVar,RejCtxCopy,RejExclusive}.ocf 2>/dev/null
 	rm -f "$BB"/.work/BB64LIN/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
 	rm -f "$BB"/.work/i386/System/Code/{KeyProbe,Usermod}.ocf 2>/dev/null
 	rm -f "$BB"/.work/i386/Dev/Code/KeyProbe.ocf 2>/dev/null
@@ -81,6 +82,12 @@ run GuardedAmd64.cp "$BB/Dev/Mod/RejGuarded.cp" "$CC64" DevRejGuarded \
 	"[guarded] на amd64 (SEH/GetComKernel)"
 run_ok UserKey.cp "$BB/System/Mod/Usermod.cp" "$CC64" 'Usermod^' \
 	"ключ точек уступки в однословном пользовательском модуле"
+run TasksCtxVar.cp "$BB/Dev/Mod/RejCtxVar.cp" "$CC64" DevRejCtxVar \
+	"переменная Tasks.Ctx вне Tasks"
+run TasksCtxCopy.cp "$BB/Dev/Mod/RejCtxCopy.cp" "$CC64" DevRejCtxCopy \
+	"копия пропуска Tasks.Ctx"
+run TasksExclusiveCall.cp "$BB/Dev/Mod/RejExclusive.cp" "$CC64" DevRejExclusive \
+	"вызов Exclusive снаружи"
 
 echo "== reject: прошло $ok, провалов $bad"
 [ $bad -eq 0 ]
