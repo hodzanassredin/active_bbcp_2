@@ -295,6 +295,16 @@ MODULE Kernel;
 			main: BOOLEAN			(* главный стек процесса *)
 		END;
 
+		(* Состояние ловли трапа, привязанное к стеку: контекст последнего
+		   Kernel.Try, счётчик вложенности и цепочка уборщиков. Снимок для
+		   переключения с общего стека. Копия участка стека возвращается на
+		   те же адреса, поэтому снятый контекст снова годен. *)
+		Context* = RECORD
+			tryContext-: S.ADDRESS;
+			trapStack-: TrapCleaner;
+			tryCount-: INTEGER
+		END;
+
 		PtrType = RECORD v: S.PTR END;	(* used for array of pointer *)
 		Char8Type = RECORD v: SHORTCHAR END;
 		Char16Type = RECORD v: CHAR END;
@@ -1651,6 +1661,18 @@ MODULE Kernel;
 		RETURN NewStack(lo, hi, FALSE)
 	END RegisterStack;
 
+	PROCEDURE RegisterStackSegment* (lo, hi: S.ADDRESS): Stack;
+	(** Зарегистрировать диапазон кучи [lo, hi) как корень сборщика:
+		MarkLocals сканирует его консервативно, как спящий стек. Так проба
+		CopyStack держит копию участка общего стека, пока объект ждёт. *)
+		VAR s: Stack;
+	BEGIN
+		IF (lo = 0) OR (hi <= lo) OR (hi - lo > maxStackScan) THEN RETURN NIL END;
+		s := NewStack(lo, hi, FALSE);
+		s.sp := lo;
+		RETURN s
+	END RegisterStackSegment;
+
 	PROCEDURE RegisterSignalStack* (lo, hi: S.ADDRESS): Stack;
 	(** Сигнальный стек (sigaltstack): MarkLocals сканирует по нему
 		прерванный стек, адрес SP которого лежит в Kernel.sp. *)
@@ -1738,6 +1760,26 @@ MODULE Kernel;
 			trapStack := NIL; tryCount := 0
 		END
 	END SwitchRestore;
+
+	PROCEDURE TakeContext* (OUT c: Context);
+	(** Снять с текущего стека состояние ловли трапа: записать в c и
+		очистить глобальное, чтобы следующий стек начал со своего.
+		Пара к RestoreContext; запись стека не нужна, когда у каждого
+		ждущего своя копия участка. *)
+	BEGIN
+		IF monTop # monBase THEN FlushMonitors END;
+		IF platform # NIL THEN c.tryContext := platform.GetTryContext() ELSE c.tryContext := 0 END;
+		c.trapStack := trapStack; c.tryCount := tryCount;
+		IF platform # NIL THEN platform.SetTryContext(0) END;
+		trapStack := NIL; tryCount := 0
+	END TakeContext;
+
+	PROCEDURE RestoreContext* (IN c: Context);
+	(** Вернуть состояние ловли трапа, снятое TakeContext. *)
+	BEGIN
+		IF platform # NIL THEN platform.SetTryContext(c.tryContext) END;
+		trapStack := c.trapStack; tryCount := c.tryCount
+	END RestoreContext;
 
 	PROCEDURE UpdateMainStack (sp: S.ADDRESS);
 	(* Верх главного стека — самый старший виденный SP. Kernel.Start приходит
