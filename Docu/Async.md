@@ -121,8 +121,8 @@ from the main stack takes its message without waiting, and there is no trap.
 
 The second violation is a lost partner. If the sending of `NIL` is removed from the example, the
 receiver stays in `Recv` forever. There are no other tasks and no wake-up deadlines, and the scheduler
-prints `Tasks: deadlock: no ready tasks and no wake-up deadlines` to the console together with a list
-of monitors. The command `Do` then never returns, because nobody sets `done`.
+prints `Tasks: deadlock: no ready tasks and no wake-up deadlines` to the console. The command `Do`
+then never returns, because nobody sets `done`.
 
 A rendezvous costs two stack switches per message: the task goes to the scheduler, the scheduler
 goes on to the other task. The measurement `pingpong` (`docs/measurements.md`, section 2.2) — a
@@ -665,12 +665,12 @@ either branch changes. The example "pay with the first card, otherwise with the 
 `ObxStm2`, page `Obx/Docu/Stm2.md`.
 
 The first violation: a switch point inside a transaction. If `Do` calls `Tasks.Yield`,
-`Tasks.Sleep`, waits in a channel, enters a busy monitor or `AWAIT`, another task would see the
-writes of an unfinished transaction. For the time of `Do`, `Atomically` opens the atomic section
-`Tasks.BeginAtomic`; a wait inside it traps 25 with the text `Tasks: wait inside an atomic section`,
-a call of `Tasks.Step` traps 22. The writes are rolled back, trap 25 goes to the caller. A yield
-point `^` inside a transaction does not switch, as inside a monitor. Entering a free monitor is not
-a switch point, and it is allowed.
+`Tasks.Sleep` or waits in a channel, another task would see the writes of an unfinished transaction.
+For the time of `Do`, `Atomically` opens the atomic section `Tasks.BeginAtomic`; a wait inside it
+traps 25 with the text `Tasks: wait inside an atomic section`, a call of `Tasks.Step` traps 22. The
+writes are rolled back, trap 25 goes to the caller. A transaction body has no pass `Tasks.Ctx`, so a
+monitor-object operation cannot be called inside it at all: the earlier "free or busy monitor"
+distinction belonged to the language monitors and is not expressible here.
 
 The second violation: a `Retry` with nothing to wait for. A transaction that has read no variable
 would wait forever; `Atomically` traps 21 with the text `AsyncStm: Retry with nothing read`. Only a
@@ -691,10 +691,9 @@ value into the record `AsyncStm.Saved` (fields `i`, `x`, `p`) and back. A record
 `p` as a copy allocated in `Save`.
 
 Cost. A transfer "two reads, two writes" as a transaction costs about 80 ns on AMD64, the same
-transfer through `IntVar` without a transaction about 20 ns, by an exclusive procedure over two
-fields about 65 ns, by direct writes to fields less than 1 ns (one thread, a million operations, a
-loaded machine; `docs/measurements.md`, section 11). A transaction is dearer than a monitor by
-`Kernel.Try` and the log; it pays off by rollback and by waiting on several objects, not by speed.
+transfer through `IntVar` without a transaction about 20 ns, by direct writes to fields less than
+1 ns (one thread, a million operations, a loaded machine; `docs/measurements.md`, sections 3 and
+11). A transaction is dearer than a monitor-object operation by `Kernel.Try` and the log; it pays off by rollback and by waiting on several objects, not by speed.
 A waiting task is registered only at the variables it has read and is removed from them on wake-up
 or cancellation; the log lives until the end of the transaction. A trap with a number greater than
 128 (a run-time error) reaches the caller as trap 128: `HALT` accepts numbers 0–128.
@@ -1281,8 +1280,7 @@ Post: a new empty unbounded mailbox without a protocol.
 **PROCEDURE (c: Buffer) Send (m: AsyncSelect.Msg)**
 **PROCEDURE (c: Mailbox) Send (m: AsyncSelect.Msg)**
 Send `m`; the same as `AsyncSelect.QueueSend(c, m)`.
-Pre: waiting only from a task — trap 20 in `Tasks.Park`. `Mailbox.Send` waits only if another task
-holds the channel monitor.
+Pre: waiting only from a task — trap 20 in `Tasks.Park`. `Mailbox.Send` does not wait.
 Post: rendezvous — the receiver took `m`; buffer and mailbox — `m` is the last in the queue. The
 protocol rejected `m` — trap 21, `m` is not sent.
 
