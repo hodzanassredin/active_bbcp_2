@@ -56,3 +56,5 @@ Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devCrash|proc|900|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devTasks|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devBench|proc slow|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+# Слои разбора HTTP: каждый разрез буфера и обрыв на каждой позиции.
+Obx_devHttpCodec||180|ObxCodec ObxHttpCodec
