@@ -1206,6 +1206,42 @@ MODULE Tasks;
 		END
 	END CheckSleepHolds;
 
+	PROCEDURE ParkCtx* (VAR ctx: Ctx; external: BOOLEAN): BOOLEAN;
+	(** Пред: вызов из этой задачи (22), ctx этой задачи (25). Пост: TRUE —
+		задача проснулась по Unpark; FALSE — пропуск остановлен (отмена или
+		срок; причина в ctx), и тогда вызов возвращается сразу, не засыпая.
+		external — ожидание может кончиться событием извне задач (таймер,
+		ввод): планировщик не считает его тупиком. Держа монитор-объект,
+		спать можно только с его разрешения HoldsWhileWaiting (26). *)
+	BEGIN
+		IF current = NIL THEN Msg("ParkCtx outside a task"); HALT(22) END;
+		IF ctx.task # current THEN Msg("ParkCtx: pass of another task"); HALT(25) END;
+		Heal(ctx);
+		IF current.wake THEN
+			current.wake := FALSE;
+			IF StoppedNow(ctx) THEN RETURN FALSE ELSE RETURN TRUE END
+		END;
+		IF StoppedNow(ctx) THEN RETURN FALSE END;
+		CheckSleepHolds(NIL);
+		IF external THEN current.external := TRUE; INC(nExternal) END;
+		IF ctx.deadline > 0 THEN
+			current.deadline := ctx.deadline;
+			current.state := Sleeping; INC(current.sleepSeq); PushSleeper(current)
+		ELSE
+			current.state := Parked
+		END;
+		Leave;
+		current.wake := FALSE;
+		IF current.external THEN	(* срок разбудил спящего мимо MakeReady *)
+			current.external := FALSE; DEC(nExternal)
+		END;
+		IF current.cancel THEN ctx.cancelled := TRUE END;
+		IF ~ctx.expired & (ctx.deadline > 0) & (Kernel.Time() >= ctx.deadline) THEN
+			ctx.expired := TRUE
+		END;
+		RETURN ~(ctx.cancelled OR ctx.expired)
+	END ParkCtx;
+
 	PROCEDURE (o: Object) Do* (VAR ctx: Ctx; VAR op: Op), NEW;
 	(** Пред: o # NIL (20), вызов из задачи (22), ctx этой задачи (25).
 		Пост: Exclusive выполнен под монитором; при трапе внутри
