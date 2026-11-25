@@ -2,9 +2,9 @@ MODULE Raft_devJournal;
 (** Тесты журнала стойких акторов поверх Raft (RaftJournal).
 
 	Три узла RaftNode со своими часами на сети ActorNetMem без сбоев
-	(доставляет главный цикл), исполнитель — пул ActorRun: Append ждёт
-	фиксации внутри обработчика стойкого актора, пока узлы Raft работают
-	в своих задачах. Стойкий актор — счётчик (ActorPersist) на отдельном
+	(доставляет главный цикл), исполнитель — пул ActorRun, у клиента журнала
+	свои часы: сценарии в реальном времени. Прогоны по зёрнам под ActorSim —
+	Raft_devPersist. Стойкий актор — счётчик (ActorPersist) на отдельном
 	узле P; журнал — RaftJournal.Client.
 
 	Проверяется: запись идёт в журнал Raft и после фиксации есть у
@@ -108,10 +108,16 @@ MODULE Raft_devJournal;
 	PROCEDURE (a: Counter) Handle (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR e: Added; r: Value;
 	BEGIN
-		IF m IS Inc THEN NEW(e); a.Persist(c, e, 0); NEW(r); r.v := a.v; c.Respond(r)
+		IF m IS Inc THEN NEW(e); a.Persist(c, e, 0)	(* ответ — в Persisted, после фиксации *)
 		ELSIF m IS Get THEN NEW(r); r.v := a.v; c.Respond(r)
 		END
 	END Handle;
+
+	PROCEDURE (a: Counter) Persisted (c: ActorCore.Context; e: ActorPersist.Event);
+		VAR r: Value;
+	BEGIN
+		NEW(r); r.v := a.v; c.Respond(r)
+	END Persisted;
 
 	PROCEDURE NewCounter (): ActorCore.Actor;
 		VAR a: Counter;

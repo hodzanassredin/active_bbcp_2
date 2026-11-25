@@ -12,6 +12,16 @@ MODULE ActorJournal;
 	Провайдер устроен как Files.Directory: абстрактный тип, переменные dir и
 	stdDir, процедура SetDir. Дисковая реализация — ActorFileJournal.
 
+	Запись с ответом позже. Стойкий актор (ActorPersist) пишет через Submit,
+	SubmitSnapshot и Replay: журнал принимает запрос (Request) и сообщает
+	итог его методом Done — сразу, внутри вызова, или позже, из чужого
+	контекста (журнал поверх Raft отвечает, когда запись зафиксирована
+	большинством). По умолчанию эти методы зовут Append, SaveSnapshot,
+	LoadSnapshot и Read и отвечают сразу, поэтому синхронному журналу
+	ничего добавлять не нужно; журнал с ответом позже их переопределяет.
+	Request.Done и Request.Event журнал зовёт по одному разу на событие,
+	Done — последним и ровно один раз.
+
 	Раскладка для упорядоченного хранилища ключ -> значение (адаптер к Kv):
 	событие — ключ "e" + поток + 0X + seq (8 байт, big-endian), значение —
 	метаданные и тело; снимок — ключ "s" + поток, значение — seq и кадр.
@@ -46,6 +56,10 @@ MODULE ActorJournal;
 		Sink* = POINTER TO ABSTRACT RECORD END;
 
 		Journal* = POINTER TO ABSTRACT RECORD END;
+
+		(** Запрос Submit, SubmitSnapshot или Replay: итог приходит в Done.
+			Replay отдаёт снимок в Snapshot и события в Event (Sink). *)
+		Request* = POINTER TO ABSTRACT RECORD (Sink) END;
 
 		(* Тела событий потока лежат подряд в одном массиве data: событие без
 		   своего указателя не добавляет сборщику работы на каждую разметку. *)
@@ -99,6 +113,54 @@ MODULE ActorJournal;
 
 	PROCEDURE (j: Journal) Close*, NEW, EMPTY;
 	(** Пост: ресурсы среды освобождены; после Close журналом не пользуются. *)
+
+	PROCEDURE (r: Request) Event* (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, EXTENSIBLE;
+	(** Для Replay: событие потока. По умолчанию пропускается. *)
+	BEGIN
+		RETURN TRUE
+	END Event;
+
+	PROCEDURE (r: Request) Snapshot* (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
+	(** Для Replay: снимок после события seq, кадр data[0 .. len-1]; зовётся до событий. *)
+
+	PROCEDURE (r: Request) Done* (res: INTEGER), NEW, ABSTRACT;
+	(** Итог запроса: коды Append, SaveSnapshot или Read. Зовётся ровно один раз,
+		внутри вызова журнала или позже. *)
+
+	PROCEDURE (j: Journal) Submit* (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: Meta;
+		IN body: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+	(** Append с ответом в r.Done. Пред: как у Append; r # NIL — 23.
+		Пост: по умолчанию — Append и сразу r.Done(res). *)
+		VAR res: INTEGER;
+	BEGIN
+		ASSERT(r # NIL, 23);
+		j.Append(stream, expected, m, body, len, res); r.Done(res)
+	END Submit;
+
+	PROCEDURE (j: Journal) SubmitSnapshot* (IN stream: ARRAY OF CHAR; seq: LONGINT;
+		IN data: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+	(** SaveSnapshot с ответом в r.Done. Пред: r # NIL — 23.
+		Пост: по умолчанию — SaveSnapshot и сразу r.Done(res). *)
+		VAR res: INTEGER;
+	BEGIN
+		ASSERT(r # NIL, 23);
+		j.SaveSnapshot(stream, seq, data, len, res); r.Done(res)
+	END SubmitSnapshot;
+
+	PROCEDURE (j: Journal) Replay* (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE;
+	(** Восстановление: последний снимок потока в r.Snapshot (если есть), затем
+		события после него в r.Event, затем r.Done(res): ok или код ошибки.
+		Пред: r # NIL — 20. Пост: по умолчанию — LoadSnapshot и Read, ответ сразу. *)
+		VAR seq: LONGINT; data: Bytes; len, res: INTEGER;
+	BEGIN
+		ASSERT(r # NIL, 20);
+		j.LoadSnapshot(stream, seq, data, len, res);
+		IF res = ok THEN r.Snapshot(seq, data^, len)
+		ELSIF res = absent THEN seq := 0
+		ELSE r.Done(res); RETURN
+		END;
+		j.Read(stream, seq + 1, r, res); r.Done(res)
+	END Replay;
 
 	PROCEDURE Now* (): LONGINT;
 	(** Пост: текущее время UTC числом ГГГГММДДччммсс. *)

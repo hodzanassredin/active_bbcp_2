@@ -9,38 +9,46 @@ MODULE RaftJournal;
 	поток мимо друг друга — второе получит conflict.
 
 	Client — сторона актора: реализация ActorJournal.Journal, которую
-	ставят в ActorPersist.Actor.journal. Append и SaveSnapshot шлют
-	RaftNode.Propose узлу-лидеру и ждут ответа (ActorCore.Ask: задача
-	ждёт в AsyncChan.Select, без опроса); ответ приходит после того,
-	как запись зафиксирована большинством и применена на лидере.
-	Last, Read и LoadSnapshot — чтение RaftNode.Query (ReadIndex) у лидера:
-	видно всё, что зафиксировано до запроса. Не-лидер называет лидера,
-	клиент переходит к нему; нет ответа за timeoutMs — к следующему узлу.
+	ставят в ActorPersist.Actor.journal. Запросы Client исполняет его
+	агент — актор на узле net ("узел/$journal.id"): Submit, SubmitSnapshot
+	и Replay отдают запрос агенту и возвращаются сразу; агент шлёт
+	RaftNode.Propose (запись) или RaftNode.Query (чтение, ReadIndex) узлу,
+	который считает лидером, и отвечает запросу (Request.Done), когда
+	лидер ответил: запись — после фиксации большинством и применения на
+	лидере, чтение — после подтверждения лидерства. Не-лидер называет
+	лидера, агент переходит к нему; нет ответа за timeoutTicks тиков — к
+	следующему узлу; за giveUpTicks — ответ failed («неизвестно»: команда
+	могла пройти). Запросы одного Client агент исполняет по одному: сеанс
+	Raft — одна операция клиента за раз.
+
+	Часы агента: tickMs > 0 (по умолчанию 10) — свои часы главного цикла
+	(Services), тайм-ауты в миллисекундах timeoutMs и giveUpMs; tickMs = 0
+	— тики шлёт владелец (Tick), так работает детерминированный прогон
+	под ActorSim, где одна задача-водитель обслуживает и стойкие акторы, и
+	узлы Raft. Ставить tickMs до первого запроса.
+
+	Append, SaveSnapshot, Last, Read и LoadSnapshot — те же запросы с
+	ожиданием ответа (AsyncChan): только из задачи и не под ActorSim.
 
 	Ограничения.
-	- Вызывать методы Client можно только из задачи (обработчик актора в
-	  пуле ActorRun или своя задача). Под ActorSim (одна задача-водитель)
-	  Append ждал бы сам себя: узлы-акторы обрабатывает та же задача.
-	- Узлы-акторы RaftNode должны иметь свои часы (Config.tickMs > 0).
-	- Вызовы одного Client идут по одному (замок): сеанс Raft — одна
-	  операция клиента за раз.
-	- res = failed у Append значит «неизвестно»: за giveUpMs ответа не было,
-	  но команда могла быть зафиксирована. ActorPersist на failed трапует,
-	  и перезапуск актора перечитывает журнал — состояние снова верное.
+	- res = failed у записи значит «неизвестно». ActorPersist на failed
+	  трапует, и перезапуск актора перечитывает журнал — состояние снова
+	  верное.
 	- Номер клиента id обязан быть новым для каждого воплощения Client:
 	  сеанс помнит последний номер операции, и старый id с номерами
 	  сначала получил бы ответы из памяти сеанса.
 	- Снимок автомата — все принятые команды подряд; сеансы не
 	  вытесняются (граница этапа). *)
 
-	IMPORT Kernel, Services, Tasks, AsyncChan, AsyncSelect, ActorCore, ActorNet, ActorJournal,
+	IMPORT Services, Strings, Tasks, AsyncChan, AsyncSelect, ActorCore, ActorNet, ActorJournal,
 		Core := RaftCore, RaftSm, RaftNode;
 
 	CONST
 		opAppend = 1; opSnap = 2;	(* команды *)
-		qLast = 1; qRead = 2; qLoad = 3;	(* чтения *)
+		qLast = 1; qRead = 2; qLoad = 3; qReplay = 4;	(* чтения *)
 		(** переключатели мутаций — только для тестов *)
 		mutNoWait* = 0;	(** команда отправлена, ответ «записано» — не дожидаясь фиксации *)
+		mutNoExpected* = 1;	(** автомат дописывает событие, не сверяя expected с последним номером *)
 
 	TYPE
 		Bytes = Core.Bytes;
@@ -58,25 +66,50 @@ MODULE RaftJournal;
 
 		Collect = POINTER TO RECORD (ActorJournal.Sink) out: Buf; count: INTEGER END;
 
+		Clock = POINTER TO RECORD (Services.Action) to: ActorCore.Ref; ms: INTEGER; dead: BOOLEAN END;
+
 		(** Сторона актора. *)
 		Client* = POINTER TO RECORD (ActorJournal.Journal)
-			timeoutMs*: INTEGER;	(** ожидание ответа одного узла, мс; по умолчанию 1000 *)
-			giveUpMs*: INTEGER;	(** предел всей операции, мс; по умолчанию 20000 *)
+			tickMs*: INTEGER;	(** > 0 — свои часы, мс на тик (по умолчанию 10); 0 — тики шлёт владелец *)
+			timeoutMs*, giveUpMs*: INTEGER;	(** при своих часах: ожидание одного узла и предел операции, мс; 1000 и 20000 *)
+			timeoutTicks*, giveUpTicks*: INTEGER;	(** при tickMs = 0: то же в тиках; 100 и 2000 *)
 			lastIndex-: INTEGER;	(** индекс записи Raft последней удачной команды *)
 			retries-: INTEGER;	(** переходов к другому узлу и повторов *)
-			net: ActorNet.Node;
 			seq-: INTEGER;	(** номер последней операции сеанса *)
 			id-: INTEGER;	(** номер клиента сеанса *)
-			n, hint, tag: INTEGER;
+			net: ActorNet.Node;
+			n: INTEGER;
 			peers: ARRAY Core.maxNodes OF ActorCore.Ref;
-			lock: AsyncChan.Mailbox
+			agent: ActorCore.Ref;
+			clock: Clock
+		END;
+
+		(* операция клиента: команда (запись) или чтение *)
+		Op = POINTER TO RECORD (ActorCore.Msg)
+			cmd: BOOLEAN; what: INTEGER;	(* opAppend, opSnap или qReplay; 0 — сырые данные для Wait *)
+			body: Bytes;
+			r: ActorJournal.Request;
+			next: Op
+		END;
+
+		TickMsg = POINTER TO RECORD (ActorCore.Msg) END;
+
+		Agent = POINTER TO RECORD (ActorCore.Actor)
+			cl: Client;
+			head, tail, cur: Op;
+			now, target, tag, sentAt, startAt, waitUntil, tmo, giveUp: INTEGER
+		END;
+
+		(* ожидание ответа для блокирующих методов *)
+		Wait = POINTER TO RECORD (ActorJournal.Request)
+			box: AsyncChan.Mailbox; got: BOOLEAN; data: Bytes; res: INTEGER
 		END;
 
 		Token = POINTER TO RECORD (AsyncSelect.Msg) END;
-		Unlock = POINTER TO RECORD (Kernel.TrapCleaner) c: Client END;
 
 	VAR
 		mutations*: SET;	(** включённые мутации; пусто в рабочем пути *)
+		pendingCl: Client;	(* для фабрики агента *)
 
 	(* --- байты ------------------------------------------------------------- *)
 
@@ -161,6 +194,7 @@ MODULE RaftJournal;
 		IF op = opAppend THEN
 			exp := Get(r, 8); GetMeta(r, meta); GetBytes(r, body, blen);
 			IF ~r.ok OR (meta.seq # exp + 1) THEN RETURN ActorJournal.corrupt END;
+			IF mutNoExpected IN mutations THEN exp := m.mem.Last(st); meta.seq := exp + 1 END;
 			m.mem.Append(st, exp, meta, body, blen, res)
 		ELSIF op = opSnap THEN
 			seq := Get(r, 8); GetBytes(r, body, blen);
@@ -192,7 +226,7 @@ MODULE RaftJournal;
 	PROCEDURE (m: Machine) Snapshot* (): Bytes;
 		VAR f: Buf; c: Cmd;
 	BEGIN
-		f.n := 0; Put(f, m.ncmds, 4);
+		f.b := NIL; f.n := 0; Put(f, m.ncmds, 4);
 		c := m.cmds; WHILE c # NIL DO PutBytes(f, c.b, LEN(c.b^)); c := c.next END;
 		RETURN Done(f)
 	END Snapshot;
@@ -221,7 +255,7 @@ MODULE RaftJournal;
 			b, data: Bytes;
 	BEGIN
 		NEW(b, MAX(len, 1)); FOR i := 0 TO len - 1 DO b[i] := q[i] END;
-		Open(r, b, 0, len); op := SHORT(Get(r, 1)); GetStr(r, st); f.n := 0;
+		Open(r, b, 0, len); op := SHORT(Get(r, 1)); GetStr(r, st); f.b := NIL; f.n := 0;
 		IF ~r.ok THEN Put(f, ActorJournal.corrupt, 1)
 		ELSIF op = qLast THEN Put(f, ActorJournal.ok, 1); Put(f, m.mem.Last(st), 8)
 		ELSIF op = qRead THEN
@@ -233,6 +267,18 @@ MODULE RaftJournal;
 			m.mem.LoadSnapshot(st, seq, data, dlen, res);
 			Put(f, res, 1); Put(f, seq, 8);
 			IF data = NIL THEN Put(f, 0, 4) ELSE PutBytes(f, data, dlen) END
+		ELSIF op = qReplay THEN	(* снимок, если есть, и события после него *)
+			m.mem.LoadSnapshot(st, seq, data, dlen, res);
+			IF res = ActorJournal.absent THEN seq := 0; data := NIL; res := ActorJournal.ok END;
+			IF res # ActorJournal.ok THEN Put(f, res, 1)
+			ELSE
+				NEW(s); s.out.n := 0; Put(s.out, 0, 4);
+				m.mem.Read(st, seq + 1, s, res);
+				i := s.out.n; s.out.n := 0; Put(s.out, s.count, 4); s.out.n := i;
+				Put(f, res, 1); Put(f, seq, 8);
+				IF data = NIL THEN Put(f, 0, 1) ELSE Put(f, 1, 1); PutBytes(f, data, dlen) END;
+				PutBytes(f, s.out.b, s.out.n)
+			END
 		ELSE Put(f, ActorJournal.corrupt, 1)
 		END;
 		RETURN Done(f)
@@ -245,66 +291,202 @@ MODULE RaftJournal;
 		NEW(m); m.mem := ActorJournal.NewMem(); RETURN m
 	END NewMachine;
 
-	(* --- сторона актора -------------------------------------------------------- *)
+	(* --- сторона актора: агент --------------------------------------------------- *)
 
-	PROCEDURE (u: Unlock) Cleanup;
+	PROCEDURE (k: Clock) Do;
+		VAR t: TickMsg;
+	BEGIN
+		IF ~k.dead THEN
+			NEW(t); ActorCore.Tell(k.to, t);
+			Services.DoLater(k, Services.Ticks() + k.ms)
+		END
+	END Do;
+
+	PROCEDURE (w: Wait) Done (res: INTEGER);
 		VAR t: Token;
 	BEGIN
-		NEW(t); u.c.lock.Send(t)
-	END Cleanup;
+		w.res := res; NEW(t); w.box.Send(t)
+	END Done;
 
-	PROCEDURE (c: Client) Call (m: ActorNet.Msg; OUT data: Bytes): BOOLEAN, NEW;
+	PROCEDURE Answer (op: Op; got: BOOLEAN; data: Bytes);
+	(* итог операции — её запросу *)
+		VAR rd, e: Rd; res, len, blen, cnt, k: INTEGER; seq: LONGINT; has: BOOLEAN; list, snap, body: Bytes;
+			m: ActorJournal.Meta; w: Wait;
+	BEGIN
+		IF op.r IS Wait THEN w := op.r(Wait); w.got := got; w.data := data; w.Done(ActorJournal.ok)
+		ELSIF op.cmd THEN
+			IF got & (data # NIL) & (LEN(data^) >= 1) THEN op.r.Done(data[0]) ELSE op.r.Done(ActorJournal.failed) END
+		ELSIF ~got OR (data = NIL) THEN op.r.Done(ActorJournal.failed)
+		ELSE	(* qReplay *)
+			Open(rd, data, 0, LEN(data^)); res := SHORT(Get(rd, 1));
+			IF ~rd.ok THEN op.r.Done(ActorJournal.corrupt); RETURN END;
+			IF res # ActorJournal.ok THEN op.r.Done(res); RETURN END;
+			seq := Get(rd, 8); has := Get(rd, 1) = 1; snap := NIL; len := 0;
+			IF has THEN GetBytes(rd, snap, len) END;
+			GetBytes(rd, list, blen);
+			IF ~rd.ok THEN op.r.Done(ActorJournal.corrupt); RETURN END;
+			IF has THEN op.r.Snapshot(seq, snap^, len) END;
+			Open(e, list, 0, blen); cnt := SHORT(Get(e, 4)); k := 0;
+			WHILE e.ok & (k < cnt) DO
+				GetMeta(e, m); GetBytes(e, body, blen);
+				IF e.ok & ~op.r.Event(m, body^, blen) THEN k := cnt END;
+				INC(k)
+			END;
+			IF e.ok THEN op.r.Done(ActorJournal.ok) ELSE op.r.Done(ActorJournal.corrupt) END
+		END
+	END Answer;
+
+	PROCEDURE (g: Agent) Send (c: ActorCore.Context), NEW;
+		VAR p: RaftNode.Propose; q: RaftNode.Query;
+	BEGIN
+		IF g.cur.cmd THEN
+			NEW(p); p.client := g.cl.id; p.seq := g.cl.seq; p.body := g.cur.body; c.Tell(g.cl.peers[g.target], p)
+		ELSE NEW(q); q.tag := -g.tag; q.body := g.cur.body; c.Tell(g.cl.peers[g.target], q)	(* метка чтения < 0: не спутать с номером команды *)
+		END;
+		g.sentAt := g.now; g.waitUntil := -1
+	END Send;
+
+	PROCEDURE (g: Agent) Start (c: ActorCore.Context), NEW;
+	(* следующая операция очереди, если нет текущей *)
+		VAR op: Op; cl: Client; ok: Bytes;
+	BEGIN
+		cl := g.cl;
+		WHILE (g.cur = NIL) & (g.head # NIL) DO
+			op := g.head; g.head := op.next; IF g.head = NIL THEN g.tail := NIL END; op.next := NIL;
+			g.cur := op; g.startAt := g.now;
+			IF cl.tickMs > 0 THEN g.tmo := MAX(1, cl.timeoutMs DIV cl.tickMs); g.giveUp := MAX(1, cl.giveUpMs DIV cl.tickMs)
+			ELSE g.tmo := MAX(1, cl.timeoutTicks); g.giveUp := MAX(1, cl.giveUpTicks)
+			END;
+			IF op.cmd THEN INC(cl.seq) ELSE INC(g.tag) END;
+			g.Send(c);
+			IF op.cmd & (mutNoWait IN mutations) THEN
+				g.cur := NIL; NEW(ok, 1); ok[0] := ActorJournal.ok; Answer(op, TRUE, ok)
+			END
+		END
+	END Start;
+
+	PROCEDURE (g: Agent) Finish (c: ActorCore.Context; got: BOOLEAN; data: Bytes), NEW;
+		VAR op: Op;
+	BEGIN
+		op := g.cur; g.cur := NIL; Answer(op, got, data); g.Start(c)
+	END Finish;
+
+	PROCEDURE (g: Agent) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+		VAR r: RaftNode.Reply; op: Op;
+	BEGIN
+		IF m IS Op THEN
+			op := m(Op);
+			IF g.tail = NIL THEN g.head := op ELSE g.tail.next := op END;
+			g.tail := op; g.Start(c)
+		ELSIF m IS TickMsg THEN
+			INC(g.now);
+			IF g.cur # NIL THEN
+				IF g.now - g.startAt > g.giveUp THEN g.Finish(c, FALSE, NIL)
+				ELSIF g.waitUntil >= 0 THEN IF g.now >= g.waitUntil THEN g.Send(c) END
+				ELSIF g.now - g.sentAt >= g.tmo THEN g.target := (g.target + 1) MOD g.cl.n; INC(g.cl.retries); g.Send(c)
+				END
+			END
+		ELSIF (m IS RaftNode.Reply) & (g.cur # NIL) THEN
+			r := m(RaftNode.Reply);
+			IF g.cur.cmd & (r.tag = g.cl.seq) OR ~g.cur.cmd & (r.tag = -g.tag) THEN
+				IF r.res = RaftNode.ok THEN
+					IF g.cur.cmd THEN g.cl.lastIndex := r.index END;
+					g.Finish(c, TRUE, r.data)
+				ELSIF (r.res = RaftNode.notLeader) & (r.leader >= 0) & (r.leader < g.cl.n) & (r.leader # g.target) THEN
+					g.target := r.leader; INC(g.cl.retries); g.Send(c)
+				ELSIF r.res = RaftNode.notLeader THEN	(* лидера нет или он ещё не готов: подождать выборов *)
+					g.target := (g.target + 1) MOD g.cl.n; INC(g.cl.retries); g.waitUntil := g.now + g.tmo DIV 10 + 1
+				ELSE INC(g.cl.retries); g.Send(c)	(* lost — повтор у того же узла *)
+				END
+			END
+		END
+	END Receive;
+
+	PROCEDURE NewAgent (): ActorCore.Actor;
+		VAR g: Agent;
+	BEGIN
+		NEW(g); g.cl := pendingCl; RETURN g
+	END NewAgent;
+
+	(* --- сторона актора: Client ------------------------------------------------- *)
+
+	PROCEDURE (c: Client) Post (cmd: BOOLEAN; what: INTEGER; VAR f: Buf; r: ActorJournal.Request), NEW;
+		VAR op: Op;
+	BEGIN
+		IF (c.tickMs > 0) & (c.clock = NIL) THEN
+			NEW(c.clock); c.clock.to := c.agent; c.clock.ms := c.tickMs;
+			Services.DoLater(c.clock, Services.Ticks() + c.tickMs)
+		END;
+		NEW(op); op.cmd := cmd; op.what := what; op.body := Done(f); op.r := r;
+		ActorCore.Tell(c.agent, op)
+	END Post;
+
+	PROCEDURE (c: Client) Call (cmd: BOOLEAN; VAR f: Buf; OUT data: Bytes): BOOLEAN, NEW;
 	(* Пост: TRUE — ответ ok лидера, data — его данные. *)
-		VAR t0: LONGINT; target, res: INTEGER; reply: ActorCore.Msg; r: RaftNode.Reply; got: BOOLEAN;
-			tok: AsyncSelect.Msg; u: Unlock;
+		VAR w: Wait; tok: AsyncSelect.Msg;
 	BEGIN
 		ASSERT(Tasks.InTask(), 20);
-		c.lock.Recv(tok);
-		NEW(u); u.c := c; Kernel.PushTrapCleaner(u);
-		t0 := Services.Ticks(); target := c.hint; got := FALSE; data := NIL;
-		LOOP
-			res := ActorCore.Ask(c.peers[target], m, c.timeoutMs, reply);
-			IF (res = ActorCore.ok) & (reply IS RaftNode.Reply) THEN
-				r := reply(RaftNode.Reply);
-				IF r.res = RaftNode.ok THEN data := r.data; c.lastIndex := r.index; got := TRUE; EXIT
-				ELSIF (r.res = RaftNode.notLeader) & (r.leader >= 0) & (r.leader < c.n) & (r.leader # target) THEN
-					target := r.leader
-				ELSIF r.res = RaftNode.notLeader THEN	(* лидера нет или он ещё не готов: подождать выборов *)
-					target := (target + 1) MOD c.n; Tasks.Sleep(c.timeoutMs DIV 10 + 1)
-				END	(* lost — повтор у того же узла *)
-			ELSE target := (target + 1) MOD c.n
-			END;
-			INC(c.retries);
-			IF Services.Ticks() - t0 > c.giveUpMs THEN EXIT END
-		END;
-		c.hint := target;
-		Kernel.PopTrapCleaner(u); u.Cleanup;
-		RETURN got
+		NEW(w); w.box := AsyncChan.NewMailbox();
+		c.Post(cmd, 0, f, w);
+		w.box.Recv(tok);
+		data := w.data; RETURN w.got
 	END Call;
 
 	PROCEDURE (c: Client) Command (VAR f: Buf; OUT res: INTEGER), NEW;
-		VAR p: RaftNode.Propose; data: Bytes;
+		VAR data: Bytes;
 	BEGIN
-		INC(c.seq);
-		NEW(p); p.client := c.id; p.seq := c.seq; p.body := Done(f);
-		IF mutNoWait IN mutations THEN ActorCore.Tell(c.peers[c.hint], p); res := ActorJournal.ok
-		ELSIF c.Call(p, data) & (data # NIL) & (LEN(data^) >= 1) THEN res := data[0]
+		IF c.Call(TRUE, f, data) & (data # NIL) & (LEN(data^) >= 1) THEN res := data[0]
 		ELSE res := ActorJournal.failed
 		END
 	END Command;
 
 	PROCEDURE (c: Client) Ask (VAR f: Buf; OUT r: Rd): BOOLEAN, NEW;
-		VAR q: RaftNode.Query; data: Bytes;
+		VAR data: Bytes;
 	BEGIN
-		INC(c.tag); NEW(q); q.tag := c.tag; q.body := Done(f);
-		IF c.Call(q, data) & (data # NIL) THEN Open(r, data, 0, LEN(data^)); RETURN TRUE END;
+		IF c.Call(FALSE, f, data) & (data # NIL) THEN Open(r, data, 0, LEN(data^)); RETURN TRUE END;
 		RETURN FALSE
 	END Ask;
+
+	PROCEDURE AppendCmd (VAR f: Buf; IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: ActorJournal.Meta;
+		IN body: ARRAY OF BYTE; len: INTEGER);
+	BEGIN
+		ASSERT(stream # "", 20); ASSERT(m.seq = expected + 1, 21); ASSERT((len >= 0) & (len <= LEN(body)), 22);
+		f.b := NIL; f.n := 0; Put(f, opAppend, 1); PutStr(f, stream); Put(f, expected, 8); PutMeta(f, m); PutBytes(f, body, len)
+	END AppendCmd;
+
+	PROCEDURE SnapCmd (VAR f: Buf; IN stream: ARRAY OF CHAR; seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER);
+	BEGIN
+		ASSERT(seq > 0, 20); ASSERT((len >= 0) & (len <= LEN(data)), 21);
+		f.b := NIL; f.n := 0; Put(f, opSnap, 1); PutStr(f, stream); Put(f, seq, 8); PutBytes(f, data, len)
+	END SnapCmd;
+
+	PROCEDURE (c: Client) Submit* (IN stream: ARRAY OF CHAR; expected: LONGINT; IN m: ActorJournal.Meta;
+		IN body: ARRAY OF BYTE; len: INTEGER; r: ActorJournal.Request);
+		VAR f: Buf;
+	BEGIN
+		ASSERT(r # NIL, 23);
+		AppendCmd(f, stream, expected, m, body, len); c.Post(TRUE, opAppend, f, r)
+	END Submit;
+
+	PROCEDURE (c: Client) SubmitSnapshot* (IN stream: ARRAY OF CHAR; seq: LONGINT;
+		IN data: ARRAY OF BYTE; len: INTEGER; r: ActorJournal.Request);
+		VAR f: Buf;
+	BEGIN
+		ASSERT(r # NIL, 23);
+		SnapCmd(f, stream, seq, data, len); c.Post(TRUE, opSnap, f, r)
+	END SubmitSnapshot;
+
+	PROCEDURE (c: Client) Replay* (IN stream: ARRAY OF CHAR; r: ActorJournal.Request);
+		VAR f: Buf;
+	BEGIN
+		ASSERT(r # NIL, 20);
+		f.b := NIL; f.n := 0; Put(f, qReplay, 1); PutStr(f, stream); c.Post(FALSE, qReplay, f, r)
+	END Replay;
 
 	PROCEDURE (c: Client) Last* (IN stream: ARRAY OF CHAR): LONGINT;
 		VAR f: Buf; r: Rd; res: INTEGER; x: LONGINT;
 	BEGIN
-		f.n := 0; Put(f, qLast, 1); PutStr(f, stream);
+		f.b := NIL; f.n := 0; Put(f, qLast, 1); PutStr(f, stream);
 		IF c.Ask(f, r) THEN res := SHORT(Get(r, 1)); x := Get(r, 8); IF r.ok & (res = ActorJournal.ok) THEN RETURN x END END;
 		RETURN -1	(* узнать не удалось *)
 	END Last;
@@ -313,16 +495,14 @@ MODULE RaftJournal;
 		IN body: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER);
 		VAR f: Buf;
 	BEGIN
-		ASSERT(stream # "", 20); ASSERT(m.seq = expected + 1, 21); ASSERT((len >= 0) & (len <= LEN(body)), 22);
-		f.n := 0; Put(f, opAppend, 1); PutStr(f, stream); Put(f, expected, 8); PutMeta(f, m); PutBytes(f, body, len);
-		c.Command(f, res)
+		AppendCmd(f, stream, expected, m, body, len); c.Command(f, res)
 	END Append;
 
 	PROCEDURE (c: Client) Read* (IN stream: ARRAY OF CHAR; from: LONGINT; s: ActorJournal.Sink; OUT res: INTEGER);
 		VAR f: Buf; r, e: Rd; cnt, k, len: INTEGER; list: Bytes; m: ActorJournal.Meta; body: Bytes;
 	BEGIN
 		ASSERT(s # NIL, 20);
-		f.n := 0; Put(f, qRead, 1); PutStr(f, stream); Put(f, from, 8);
+		f.b := NIL; f.n := 0; Put(f, qRead, 1); PutStr(f, stream); Put(f, from, 8);
 		IF ~c.Ask(f, r) THEN res := ActorJournal.failed; RETURN END;
 		res := SHORT(Get(r, 1)); GetBytes(r, list, len);
 		IF ~r.ok THEN res := ActorJournal.corrupt; RETURN END;
@@ -340,9 +520,7 @@ MODULE RaftJournal;
 		IN data: ARRAY OF BYTE; len: INTEGER; OUT res: INTEGER);
 		VAR f: Buf;
 	BEGIN
-		ASSERT(seq > 0, 20); ASSERT((len >= 0) & (len <= LEN(data)), 21);
-		f.n := 0; Put(f, opSnap, 1); PutStr(f, stream); Put(f, seq, 8); PutBytes(f, data, len);
-		c.Command(f, res)
+		SnapCmd(f, stream, seq, data, len); c.Command(f, res)
 	END SaveSnapshot;
 
 	PROCEDURE (c: Client) LoadSnapshot* (IN stream: ARRAY OF CHAR; OUT seq: LONGINT;
@@ -350,7 +528,7 @@ MODULE RaftJournal;
 		VAR f: Buf; r: Rd;
 	BEGIN
 		seq := 0; data := NIL; len := 0;
-		f.n := 0; Put(f, qLoad, 1); PutStr(f, stream);
+		f.b := NIL; f.n := 0; Put(f, qLoad, 1); PutStr(f, stream);
 		IF ~c.Ask(f, r) THEN res := ActorJournal.failed; RETURN END;
 		res := SHORT(Get(r, 1)); seq := Get(r, 8); GetBytes(r, data, len);
 		IF ~r.ok THEN res := ActorJournal.corrupt; seq := 0; data := NIL; len := 0
@@ -358,17 +536,36 @@ MODULE RaftJournal;
 		END
 	END LoadSnapshot;
 
+	PROCEDURE (c: Client) Close*;
+	(** Пост: агент остановлен, свои часы погашены; запросы без ответа ответа не получат. *)
+	BEGIN
+		IF c.clock # NIL THEN c.clock.dead := TRUE END;
+		ActorCore.StopActor(c.agent)
+	END Close;
+
+	PROCEDURE Tick* (c: Client);
+	(** Тик часов агента от владельца (tickMs = 0). Пред: c # NIL — 20. *)
+		VAR t: TickMsg;
+	BEGIN
+		ASSERT(c # NIL, 20);
+		NEW(t); ActorCore.Tell(c.agent, t)
+	END Tick;
+
 	PROCEDURE New* (net: ActorNet.Node; IN caps: RaftNode.Caps; n, id: INTEGER): Client;
 	(** Журнал на узле net для кластера из n узлов-акторов RaftNode с
 		пропусками caps[0 .. n-1] (ActorNet.Export). id — номер клиента
 		сеанса, новый для каждого воплощения.
-		Пред: net # NIL — 20; 0 < n <= RaftCore.maxNodes — 21; id > 0 — 22; caps[0 .. n-1] — пропуски — 23. *)
-		VAR c: Client; i: INTEGER; t: Token;
+		Пред: net # NIL — 20; 0 < n <= RaftCore.maxNodes — 21; id > 0 — 22; caps[0 .. n-1] — пропуски — 23;
+		исполнитель акторов установлен, имя агента "net.name/$journal<id>" свободно — трапы ActorCore.Spawn.
+		Пост: агент создан; свои часы (tickMs = 10) пойдут с первым запросом. *)
+		VAR c: Client; i: INTEGER; name: ActorCore.Name; d: ARRAY 16 OF CHAR;
 	BEGIN
 		ASSERT(net # NIL, 20); ASSERT((n > 0) & (n <= Core.maxNodes), 21); ASSERT(id > 0, 22);
-		NEW(c); c.net := net; c.n := n; c.id := id; c.timeoutMs := 1000; c.giveUpMs := 20000;
+		NEW(c); c.net := net; c.n := n; c.id := id;
+		c.tickMs := 10; c.timeoutMs := 1000; c.giveUpMs := 20000; c.timeoutTicks := 100; c.giveUpTicks := 2000;
 		FOR i := 0 TO n - 1 DO c.peers[i] := ActorNet.Import(net, caps[i]); ASSERT(c.peers[i] # NIL, 23) END;
-		c.lock := AsyncChan.NewMailbox(); NEW(t); c.lock.Send(t);
+		Strings.IntToString(id, d); name := net.name$ + "/$journal" + d$;
+		pendingCl := c; c.agent := ActorCore.Spawn(NIL, ActorCore.NewProps(NewAgent), name); pendingCl := NIL;
 		RETURN c
 	END New;
 

@@ -53,15 +53,20 @@ MODULE ObxRaft1;
 	PROCEDURE (a: Counter) Handle (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR e: Added; r: Value;
 	BEGIN
-		WITH m: Inc DO
-			NEW(e); a.Persist(c, e, 0);	(* ждёт, пока событие зафиксирует большинство узлов *)
-			NEW(r); r.v := a.v; c.Respond(r)
+		WITH m: Inc DO NEW(e); a.Persist(c, e, 0)	(* ответ — в Persisted *)
 		| m: Get DO NEW(r); r.v := a.v; c.Respond(r)
 		| m: ActorPersist.ReplayComplete DO
 			Console.WriteStr("  counter is up with value "); WriteInt(a.v); Console.WriteLn
 		ELSE
 		END
 	END Handle;
+
+	PROCEDURE (a: Counter) Persisted (c: ActorCore.Context; e: ActorPersist.Event);
+	(* событие зафиксировано большинством узлов и применено: ответить на Inc *)
+		VAR r: Value;
+	BEGIN
+		NEW(r); r.v := a.v; c.Respond(r)
+	END Persisted;
 
 	PROCEDURE NewCounter (): ActorCore.Actor;
 		VAR a: Counter;

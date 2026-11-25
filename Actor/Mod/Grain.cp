@@ -111,7 +111,7 @@ MODULE ActorGrain;
 
 	PROCEDURE (a: Actor) Receive* (c: ActorCore.Context; m: ActorCore.Msg);
 	BEGIN
-		IF m IS Passivate THEN
+		IF (m IS Passivate) & ~a.Busy() THEN	(* во время записи пассивация ждёт ответа журнала вместе с прочими письмами *)
 			IF a.seq > 0 THEN a.SaveSnapshot(c) END;
 			c.Stop
 		ELSE a.Receive^(c, m)
