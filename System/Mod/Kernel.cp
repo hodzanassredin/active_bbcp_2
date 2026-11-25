@@ -373,7 +373,7 @@ MODULE Kernel;
 		free: ARRAY N OF FreeBlock;	(* free list *)
 		sentinelBlock: FreeDesc;
 		sentinel: FreeBlock;
-		candidates: ARRAY 1024 OF INTEGER;
+		candidates: ARRAY 65536 OF INTEGER;	(* см. System/Mod64/Kernel.cp: размер выбран замером *)
 		nofcand: INTEGER;
 		heapMin, heapMax: INTEGER;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
@@ -2138,9 +2138,11 @@ MODULE Kernel;
 	END UpdateHeapBounds;
 
 	PROCEDURE ScanStack (lo, hi: S.ADDRESS);
+	(* Консервативный скан диапазона стека [lo, hi) с шагом 4. Кандидаты
+	   копятся в общем буфере: CheckCandidates обходит ВСЮ кучу, поэтому
+	   вызов на каждый стек стоил N_стеков × N_блоков. *)
 		VAR sp, p: INTEGER;
 	BEGIN
-		nofcand := 0;
 		sp := lo;
 		WHILE sp < hi - (SIZE(INTEGER) - 1) DO
 			S.GET(sp, p);
@@ -2149,9 +2151,7 @@ MODULE Kernel;
 				IF nofcand = LEN(candidates) - 1 THEN CheckCandidates; nofcand := 0 END
 			END;
 			INC(sp, 4)
-		END;
-		candidates[nofcand] := heapMax; INC(nofcand);	(* ensure complete scan for interface mark*)
-		IF nofcand > 0 THEN CheckCandidates END
+		END
 	END ScanStack;
 
 	PROCEDURE MarkLocals (): BOOLEAN;
@@ -2166,6 +2166,7 @@ MODULE Kernel;
 		S.GETREG(FP, fp);
 		cur := StackOf(fp);
 		IF cur = NIL THEN RETURN FALSE END;
+		nofcand := 0;
 		interrupted := NIL;
 		IF cur.signal THEN
 			ScanStack(fp, cur.hi);
@@ -2181,6 +2182,11 @@ MODULE Kernel;
 			END;
 			s := s.next
 		END;
+		(* Один полный проход по куче за сборку. Кандидат heapMax не даёт
+		   обходу оборваться раньше конца и включает отметку интерфейсных
+		   записей (blk.actual > 0) во всех блоках. *)
+		candidates[nofcand] := heapMax; INC(nofcand);
+		CheckCandidates;
 		RETURN TRUE
 	END MarkLocals;
 

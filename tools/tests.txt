@@ -5,6 +5,7 @@
 # Каждый модуль запускается отдельным процессом (tools/unit.sh);
 # TestProc-сценарии трогают ядро/сборщик/стеки и потому помечены proc.
 System_devMain|proc|900|System_devSupport System_devCRaw System_devCo System_devBasic System_devHeap System_devTrap System_devActionTrap System_devGcStack System_devTrapStack System_devInHeap
+System_devGcMany|proc|600|
 Lin_devFiles|proc slow|600|
 System_devTasks|proc slow|900|System_devCRaw System_devClock
 System_devStackDirs|proc|600|
