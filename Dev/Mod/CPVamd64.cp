@@ -264,9 +264,10 @@ MODULE DevCPVamd64;
 				GTypeSize(btyp, guarded);
 				IF (typ.sysflag = untagged) OR typ.untagged THEN typ.size := 8
 				ELSE
-					IF btyp.comp = DynArr THEN typ.size := btyp.size + 4
-					ELSE typ.size := 12
-					END
+					IF btyp.comp = DynArr THEN typ.size := btyp.size + 8
+					ELSE typ.size := 16
+					END	(* параметр: адрес 8 байт и по 8-байтному слоту на длину каждого измерения;
+						CPCamd64.VarParDynArr и Kernel.Call кладут каждую длину своим push *)
 				END
 			END
 		END

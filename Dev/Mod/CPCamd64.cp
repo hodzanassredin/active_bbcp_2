@@ -543,7 +543,8 @@ MODULE DevCPCamd64;
 		IF x.tmode = VarPar THEN
 			LevelBase(len, x.obj.mnolev, {}, {}); len.offset := x.obj.adr; len.form := Int32;
 			len.typ := DevCPT.int32typ;
-			INC(len.offset, typ.n * 4 + 8);	(* стековый open-array: [adr8][len0 4]... *)
+			INC(len.offset, typ.n * 8 + 8)	(* открытый массив-параметр: [adr 8][len_0 8]..[len_N-1 8],
+				каждую длину вызывающий кладёт своим push (VarParDynArr, Kernel.Call) *)
 		ELSE ASSERT((x.tmode = Ind) & (x.mode = Ind));
 			len := x; len.offset := ArrDOffs; len.scale := 0; len.form := Int32;
 			INC(len.offset, typ.n * 4 + 16);	(* heap dyn array: [last8][actual8][first8][len0 4]... *)
@@ -2185,7 +2186,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		DevCPLamd64.MakeReg(src, SI, Int32); DevCPLamd64.MakeReg(dst, DI, Int32);
 		DevCPLamd64.GenMove(ptr, len); bt := typ.BaseTyp;
 		WHILE bt.comp = DynArr DO
-			INC(ptr.offset, 4); DevCPLamd64.GenMul(ptr, len, FALSE); bt := bt.BaseTyp
+			INC(ptr.offset, 8); DevCPLamd64.GenMul(ptr, len, FALSE); bt := bt.BaseTyp	(* длины по 8 байт, см. LenDesc *)
 		END;
 		ptr.offset := adr; DevCPLamd64.GenMove(ptr, src);
 		DevCPLamd64.MakeConst(c, bt.size, Int32); DevCPLamd64.GenMul(c, len, FALSE);
@@ -2282,10 +2283,10 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		ELSIF initializeDyn & ~par.typ.untagged THEN	(* untagged open arrays not initialized !!! *)
 			DevCPLamd64.GenMove(x, y);
 			DevCPLamd64.MakeReg(len, CX, Int32);
-			INC(x.offset, 4); DevCPLamd64.GenMove(x, len); (* first len *)
+			INC(x.offset, 8); DevCPLamd64.GenMove(x, len); (* first len; длины по 8 байт, см. LenDesc *)
 			bt := par.typ.BaseTyp;
 			WHILE bt.comp = DynArr DO
-				INC(x.offset, 4); DevCPLamd64.GenMul(x, len, FALSE); bt := bt.BaseTyp
+				INC(x.offset, 8); DevCPLamd64.GenMul(x, len, FALSE); bt := bt.BaseTyp
 			END;
 			size := bt.size;
 			IF size MOD 4 = 0 THEN size := size DIV 4; s := 4
