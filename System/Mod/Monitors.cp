@@ -116,6 +116,11 @@ MODULE Monitors;
 		freeChains: Chain;
 		curTok: S.ADDRESS;	(* токен, к которому относится cur *)
 		cur: Chain;		(* кэш цепочки текущего токена; может быть NIL *)
+		(* Сумма глубин всех цепочек: число взятий, которые держит кто-либо.
+		   0 — не взято ничего, и снимать нечего (Idle). Счётчик меняется там
+		   же, где depth: ChainPush, PushTo, ReleaseTo, DoUnlock и быстрые
+		   вход/выход крючка. *)
+		held: INTEGER;
 
 		hook: Hook;
 
@@ -469,7 +474,7 @@ MODULE Monitors;
 		VAR r: LockRec;
 	BEGIN
 		IF cur = NIL THEN cur := NewChain(curTok) END;
-		r := TakeLock(); r.mon := m; r.next := cur.head; cur.head := r; INC(cur.depth)
+		r := TakeLock(); r.mon := m; r.next := cur.head; cur.head := r; INC(cur.depth); INC(held)
 	END ChainPush;
 
 	PROCEDURE PushTo (t: S.ADDRESS; m: Monitor);
@@ -484,7 +489,7 @@ MODULE Monitors;
 			c := FindChain(t)
 		END;
 		IF c = NIL THEN c := NewChain(t) END;
-		r := TakeLock(); r.mon := m; r.next := c.head; c.head := r; INC(c.depth);
+		r := TakeLock(); r.mon := m; r.next := c.head; c.head := r; INC(c.depth); INC(held);
 		IF t = curTok THEN cur := c END
 	END PushTo;
 
@@ -565,7 +570,7 @@ MODULE Monitors;
 		WHILE (cur # NIL) & (cur.depth > depth) DO
 			r := cur.head;
 			ASSERT(r # NIL, 100);	(* Инвариант: depth — длина цепочки head *)
-			cur.head := r.next; DEC(cur.depth);
+			cur.head := r.next; DEC(cur.depth); DEC(held);
 			m := r.mon; FreeLock(r);
 			(* Монитор, которым владеет другая задача (мы ждём в Await),
 			   только снимаем из цепочки — его счётчик не наш. *)
@@ -650,7 +655,7 @@ MODULE Monitors;
 		IF (r = NIL) OR (r.mon # m) THEN
 			MonErr("Unlock: monitors must be released in LIFO order"); HALT(23)
 		END;
-		cur.head := r.next; DEC(cur.depth); FreeLock(r);
+		cur.head := r.next; DEC(cur.depth); DEC(held); FreeLock(r);
 		DEC(m.count);
 		IF m.count = 0 THEN
 			m.owner := 0;
@@ -763,7 +768,7 @@ MODULE Monitors;
 				& ((m.owner = 0) OR (m.owner = t)) THEN
 			IF m.owner = 0 THEN m.obj := S.VAL(ANYPTR, obj); m.owner := t; m.count := 1 ELSE INC(m.count) END;
 			r := freeLocks; freeLocks := r.next;
-			r.mon := m; r.next := cur.head; cur.head := r; INC(cur.depth)
+			r.mon := m; r.next := cur.head; cur.head := r; INC(cur.depth); INC(held)
 		ELSE
 			Sync; DoLock(obj, off)
 		END
@@ -787,7 +792,7 @@ MODULE Monitors;
 		IF (t = curTok) & (cur # NIL) & (m # NIL) & (m.key = obj) & (m.owner = t)
 				& (cur.head # NIL) & (cur.head.mon = m)
 				& ((m.count > 1) OR (m.wait = NIL) & (m.enter = NIL)) THEN
-			r := cur.head; cur.head := r.next; DEC(cur.depth); FreeLock(r);
+			r := cur.head; cur.head := r.next; DEC(cur.depth); DEC(held); FreeLock(r);
 			DEC(m.count);
 			IF m.count = 0 THEN m.owner := 0; m.obj := NIL END
 		ELSE
@@ -826,6 +831,14 @@ MODULE Monitors;
 	END purge;
 
 	(* -------------------- рабочие запросы -------------------------------- *)
+
+	PROCEDURE Idle* (): BOOLEAN;
+	(** Пост: TRUE — ни один токен не держит монитора и стек взятий быстрым
+		путём пуст. Тогда снимать нечего, и Kernel.DropMonitors можно не звать:
+		он только переключил бы кэш цепочек на токен задачи и обратно. *)
+	BEGIN
+		RETURN (held = 0) & (Kernel.monTop = Kernel.monBase)
+	END Idle;
 
 	PROCEDURE IsLocked* (obj: ANYPTR): BOOLEAN;
 	(** Пост: TRUE — монитор obj кем-то взят; obj = NIL — FALSE. *)

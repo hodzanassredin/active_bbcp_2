@@ -30,6 +30,8 @@ MODULE System_devMonitors;
 		FastEnterer = POINTER TO RECORD (Tasks.Task) END;
 		FastWaiter = POINTER TO RECORD (Tasks.Task) END;
 		FastSetter = POINTER TO RECORD (Tasks.Task) END;
+		LockHold = POINTER TO RECORD (Tasks.Task) END;
+		LockChurn = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 
 	VAR
 		mon, mon2: Box;		(* объекты-мониторы *)
@@ -405,7 +407,8 @@ MODULE System_devMonitors;
 		UnitAssert.True(enteredAfter, "enterer waited for the holder");
 		UnitAssert.True(~Tasks.Failed(h) & ~Tasks.Failed(e), "no traps");
 		UnitAssert.True(~Monitors.IsLocked(mf), "monitor free at the end");
-		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "queues empty")
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "queues empty");
+		UnitAssert.True(Monitors.Idle(), "nothing held after the enter handoff")
 	END TestProcFastContended;
 
 	PROCEDURE TestProcFastCancelEntering*;
@@ -459,7 +462,8 @@ MODULE System_devMonitors;
 		UnitAssert.True(waiterDone, "waiter woke holding the monitor");
 		UnitAssert.True(~Tasks.Failed(w) & ~Tasks.Failed(s), "no traps");
 		UnitAssert.True(~Monitors.IsLocked(mf), "monitor free at the end");
-		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "queues empty")
+		UnitAssert.EqualInt(0, Monitors.WaitersCount(), "queues empty");
+		UnitAssert.True(Monitors.Idle(), "nothing held after the wait handoff")
 	END TestProcFastAwait;
 
 	PROCEDURE LockBig;
@@ -478,5 +482,37 @@ MODULE System_devMonitors;
 		Kernel.Collect; a1 := Kernel.Allocated();
 		UnitAssert.True(a1 - a0 < 512 * 1024, "object of a free monitor was collected")
 	END TestProcFreeMonitorReleasesObject;
+
+	(* --- кэш цепочек Monitors и DropMonitors ------------------------------ *)
+
+	PROCEDURE (t: LockHold) Run;
+	BEGIN
+		Kernel.Lock(mon)	(* намеренно без Unlock: снимет DropMonitors *)
+	END Run;
+
+	PROCEDURE (t: LockChurn) Run;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 1 TO t.n DO Kernel.Lock(mon); Kernel.Unlock(mon) END
+	END Run;
+
+	PROCEDURE TestProcEndReleasesHeld*;
+	(** Задача, кончившая, держа монитор (взятие без Unlock), не оставляет
+		его занятым: DropMonitors снимает взятие. После пар Lock/Unlock,
+		в том числе быстрых, счётчик взятий возвращается к нулю (Idle). *)
+		VAR h: LockHold; c: LockChurn;
+	BEGIN
+		NEW(mon);
+		NEW(h); Tasks.Start(h);
+		UnitAssert.True(Pump(5000), "holder finished");
+		UnitAssert.True(~Monitors.IsLocked(mon), "monitor released at task end");
+		UnitAssert.True(Monitors.Idle(), "nothing held after an unbalanced task");
+
+		NEW(c); c.n := 2000; Tasks.Start(c);
+		UnitAssert.True(Pump(5000), "churner finished");
+		UnitAssert.True(~Tasks.Failed(c), "no traps");
+		UnitAssert.True(~Monitors.IsLocked(mon), "monitor free after lock/unlock pairs");
+		UnitAssert.True(Monitors.Idle(), "held counter returned to zero")
+	END TestProcEndReleasesHeld;
 
 END System_devMonitors.

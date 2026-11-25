@@ -571,7 +571,11 @@ MODULE Tasks;
 			t.bodyOk := FALSE;
 			IF oneTry THEN
 				TaskBody(0, 0, 0);
-				Kernel.DropMonitors	(* как выход из Kernel.Try: несбалансированные входы тела сняты *)
+				(* Как выход из Kernel.Try: несбалансированные входы тела сняты.
+				   Если не взято ничего ни одной задачей, снимать нечего:
+				   DropMonitors только переключил бы кэш Monitors на токен задачи
+				   и обратно — около 25 нс на задачу (docs/speed-main.md). *)
+				IF ~Monitors.Idle() THEN Kernel.DropMonitors END
 			ELSE
 				Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TaskBody)), 0, 0, 0)
 			END;
@@ -1761,7 +1765,9 @@ MODULE Tasks;
 	   проход закончен без трапа задачи. *)
 		VAR t: Task; now: LONGINT;
 	BEGIN
-		now := Kernel.Time();
+		(* Step прочитал время перед проходом; второй раз читать незачем:
+		   на проход из одной задачи лишний вызов часов стоил 17 нс. *)
+		now := stepT0;
 		LOOP
 			(* Инвариант: now — время, прочитанное после последнего переключения. *)
 			IF now - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
