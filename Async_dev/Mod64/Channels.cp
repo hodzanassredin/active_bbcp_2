@@ -16,6 +16,9 @@ MODULE Async_devChannels;
 
 		Filler = POINTER TO RECORD (Tasks.Job) o: AsyncOnce.Once; n: INTEGER END;
 		Reader = POINTER TO RECORD (Tasks.Job) o: AsyncOnce.Once END;
+		LateReader = POINTER TO RECORD (Tasks.Job)
+			o: AsyncOnce.Once; x: INTEGER; read, expired, done: BOOLEAN
+		END;
 		SecondFill = POINTER TO RECORD (Tasks.Job) o: AsyncOnce.Once END;
 
 		Producer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; n: INTEGER END;
@@ -86,8 +89,19 @@ MODULE Async_devChannels;
 	END Body;
 
 	PROCEDURE (t: Reader) Body- (VAR ctx: Tasks.Ctx);
+		VAR x: INTEGER;
 	BEGIN
-		onceDone := t.o.ReadInt(ctx) = 42
+		onceDone := t.o.ReadInt(ctx, x) & (x = 42)
+	END Body;
+
+	PROCEDURE (t: LateReader) Body- (VAR ctx: Tasks.Ctx);
+	(* Срок пропуска раньше заполнения: чтение возвращает FALSE и 0. *)
+		VAR x: INTEGER;
+	BEGIN
+		Tasks.SetDeadline(ctx, 10);
+		x := 7;
+		t.read := t.o.ReadInt(ctx, x);
+		t.x := x; t.expired := ctx.expired; t.done := TRUE
 	END Body;
 
 	PROCEDURE (t: SecondFill) Body- (VAR ctx: Tasks.Ctx);
@@ -106,6 +120,22 @@ MODULE Async_devChannels;
 		UnitAssert.True(onceDone, "Read waits for Fill and sees 42");
 		UnitAssert.True(o.done, "once is filled")
 	END TestOnce;
+
+	PROCEDURE TestOnceReadStopped*;
+	(* Срок пропуска наступил раньше заполнения: Read вернул FALSE и 0,
+	   причина — срок; позднее заполнение проходит. *)
+		VAR o: AsyncOnce.Once; r: LateReader; f: Filler;
+	BEGIN
+		o := AsyncOnce.New();
+		NEW(r); r.o := o; Tasks.Start(r);
+		UnitAssert.True(Pump(2000), "reader ends by deadline");
+		UnitAssert.True(r.done & ~r.read, "Read returned FALSE");
+		UnitAssert.EqualInt(0, r.x, "value is 0");
+		UnitAssert.True(r.expired, "reason is the deadline");
+		NEW(f); f.o := o; f.n := 5; Tasks.Start(f);
+		UnitAssert.True(Pump(2000), "late fill ends");
+		UnitAssert.True(o.done, "once is filled")
+	END TestOnceReadStopped;
 
 	PROCEDURE TestOnceSecondFillTrap*;
 		VAR o: AsyncOnce.Once; t: SecondFill;

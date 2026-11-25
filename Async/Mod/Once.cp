@@ -8,8 +8,9 @@ MODULE AsyncOnce;
 
 	Операции требуют задачу с пропуском (Tasks.Ctx): Do входит в монитор
 	и ждёт в Await, а ждать можно только из задачи Job. Вызов с главного
-	стека трапует 22 (нет задачи); Read, остановленный пропуском,
-	возвращает FALSE (INTEGER-вариант — значение по умолчанию 0). *)
+	стека трапует 22 (нет задачи). Read возвращает TRUE — значение
+	прочитано; FALSE — пропуск остановлен до заполнения (как RecvCtx у
+	каналов), значение тогда 0 или NIL. *)
 
 	IMPORT Tasks, AsyncSelect;
 
@@ -71,12 +72,14 @@ MODULE AsyncOnce;
 		op.x := x; o.Do(ctx, op)
 	END FillInt;
 
-	PROCEDURE (o: Once) ReadInt* (VAR ctx: Tasks.Ctx): INTEGER, NEW;
-	(** Пост: прочитанное значение; 0 — пропуск остановлен до заполнения. *)
+	PROCEDURE (o: Once) ReadInt* (VAR ctx: Tasks.Ctx; OUT x: INTEGER): BOOLEAN, NEW;
+	(** Пост: TRUE — x прочитано; FALSE — пропуск остановлен до
+		заполнения, x = 0. *)
 		VAR op: ReadIntOp;
 	BEGIN
-		op.ok := FALSE; o.Do(ctx, op);
-		IF op.ok THEN RETURN op.x ELSE RETURN 0 END
+		op.x := 0; op.ok := FALSE; o.Do(ctx, op);
+		x := op.x;
+		RETURN op.ok
 	END ReadInt;
 
 	PROCEDURE (o: Once) FillMsg* (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg), NEW;
@@ -86,13 +89,14 @@ MODULE AsyncOnce;
 		op.m := m; o.Do(ctx, op)
 	END FillMsg;
 
-	PROCEDURE (o: Once) ReadMsg* (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg), NEW;
-	(** Пост: m — записанное сообщение; NIL — пропуск остановлен до
-		заполнения. *)
+	PROCEDURE (o: Once) ReadMsg* (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN, NEW;
+	(** Пост: TRUE — m прочитано; FALSE — пропуск остановлен до
+		заполнения, m = NIL. *)
 		VAR op: ReadMsgOp;
 	BEGIN
 		op.m := NIL; op.ok := FALSE; o.Do(ctx, op);
-		m := op.m
+		m := op.m;
+		RETURN op.ok
 	END ReadMsg;
 
 END AsyncOnce.

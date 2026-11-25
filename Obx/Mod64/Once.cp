@@ -9,7 +9,7 @@ MODULE ObxOnce;
 
 	PROCEDURE (r: Reader) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
-		got := o.ReadInt(ctx); done := TRUE	(* ждёт, пока Writer не заполнит *)
+		done := o.ReadInt(ctx, got)	(* ждёт, пока Writer не заполнит; FALSE — задачу остановили *)
 	END Body;
 
 	PROCEDURE (w: Writer) Body- (VAR ctx: Tasks.Ctx);

@@ -437,7 +437,7 @@ reads the result when it needs it; if it is not ready yet, it waits. A channel d
 message from a channel goes to one receiver, and the result is needed by all.
 
 A *single-assignment variable* `AsyncOnce.Once` is filled once and read any number of times.
-`FillInt(ctx, x)` or `FillMsg(ctx, m)` fill it; `ReadInt(ctx)` or `ReadMsg(ctx, m)` wait until it is
+`FillInt(ctx, x)` or `FillMsg(ctx, m)` fill it; `ReadInt(ctx, x)` or `ReadMsg(ctx, m)` wait until it is
 filled and return the value. The variable is a monitor object: the operations run in
 `Once.Exclusive`, and reading waits in `Await` on the `filled` flag. All four methods need the task
 pass `Tasks.Ctx`.
@@ -454,7 +454,7 @@ MODULE ObxOnce;
 
 	PROCEDURE (r: Reader) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
-		got := o.ReadInt(ctx); done := TRUE	(* ждёт, пока Writer не заполнит *)
+		done := o.ReadInt(ctx, got)	(* ждёт, пока Writer не заполнит; FALSE — задачу остановили *)
 	END Body;
 
 	PROCEDURE (w: Writer) Body- (VAR ctx: Tasks.Ctx);
@@ -481,12 +481,12 @@ variable, and the reader wakes up.
 
 A second fill is an error. `FillInt` on a filled variable traps with code 21, `FillMsg` with code 22.
 The variable has one fill flag for both kinds of value, so `FillMsg` after `FillInt` is a second fill
-too. The kind is not checked on reading: `ReadInt` after `FillMsg` returns 0, `ReadMsg` after
-`FillInt` returns `NIL`.
+too. The kind is not checked on reading: `ReadInt` after `FillMsg` gives 0, `ReadMsg` after
+`FillInt` gives `NIL`, both with the result `TRUE`.
 
 Both filling and reading need a task and the pass `Tasks.Ctx`: `Do` on the main stack traps 22.
 Reading an unfilled variable waits in `Await`; the wait can be stopped by the pass, and then
-`ReadInt` returns 0 and `ReadMsg` returns `NIL`. Reading has no deadline of its own; if a deadline
+`ReadInt` and `ReadMsg` return `FALSE` (the value is 0 or `NIL`), like `RecvCtx` of a channel. Reading has no deadline of its own; if a deadline
 is needed, the result is passed over a channel and awaited in a selection with a timeout.
 
 ## 8. Transactions
@@ -1311,9 +1311,9 @@ DEFINITION AsyncOnce;
 		Once = POINTER TO RECORD (Tasks.Object)
 			done-: BOOLEAN;
 			(o: Once) FillInt (VAR ctx: Tasks.Ctx; x: INTEGER), NEW;
-			(o: Once) ReadInt (VAR ctx: Tasks.Ctx): INTEGER, NEW;
+			(o: Once) ReadInt (VAR ctx: Tasks.Ctx; OUT x: INTEGER): BOOLEAN, NEW;
 			(o: Once) FillMsg (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg), NEW;
-			(o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg), NEW
+			(o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN, NEW
 		END;
 
 	PROCEDURE New (): Once;
@@ -1331,19 +1331,19 @@ Post: an unfilled variable, `done = FALSE`.
 Pre: `~o.done` — trap 21.
 Post: `o.done`; the value is `x`.
 
-**PROCEDURE (o: Once) ReadInt (VAR ctx: Tasks.Ctx): INTEGER**
+**PROCEDURE (o: Once) ReadInt (VAR ctx: Tasks.Ctx; OUT x: INTEGER): BOOLEAN**
 Waits for filling in `Await` on the `filled` flag.
 Pre: called from a task with its own pass — traps 22 and 25.
-Post: the result is the integer from `FillInt`; after `FillMsg`, or if the pass was stopped, it is 0.
+Post: `TRUE` — `x` is the integer from `FillInt` (0 after `FillMsg`); `FALSE` — the pass was stopped before filling, `x` = 0.
 
 **PROCEDURE (o: Once) FillMsg (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg)**
 Pre: `~o.done` — trap 22.
 Post: `o.done`; the value is `m`.
 
-**PROCEDURE (o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg)**
+**PROCEDURE (o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN**
 Waits for filling in `Await` on the `filled` flag.
 Pre: called from a task with its own pass — traps 22 and 25.
-Post: `m` is the message from `FillMsg`; after `FillInt`, or if the pass was stopped, it is `NIL`.
+Post: `TRUE` — `m` is the message from `FillMsg` (`NIL` after `FillInt`); `FALSE` — the pass was stopped before filling, `m` = `NIL`.
 
 ### 14.4. AsyncProto
 

@@ -60,7 +60,7 @@ MODULE ObxBank6;
 		Tasks.Sleep(c.delay);
 		NEW(r); r.sum := c.sum; r.answer := AsyncOnce.New();
 		window.Send(r);
-		rest := r.answer.ReadInt(ctx);	(* ждать исполнения обещания *)
+		IF ~r.answer.ReadInt(ctx, rest) THEN RETURN END;	(* ждать исполнения обещания; FALSE — задачу остановили *)
 		IF rest >= 0 THEN Say("client got money, left ", rest) ELSE Say("client refused, id ", c.id) END
 	END Body;
 

@@ -91,6 +91,8 @@ MODULE DemoAnts;
 			moves: LONGINT;
 			limit: LONGINT;	(* 0 — без предела *)
 			stop, paused, paced: BOOLEAN;
+			stepTick: INTEGER;	(* номер заявки команды Step; муравей на паузе исполняет каждую один раз *)
+			stepsLeft: INTEGER;	(* сколько муравьёв ещё не исполнили последнюю заявку *)
 			seed: LONGINT;
 			wallHits: LONGINT;
 			wallViolations: INTEGER
@@ -98,7 +100,8 @@ MODULE DemoAnts;
 
 		Ant = POINTER TO RECORD (Tasks.Job)
 			f: Field;
-			id: INTEGER
+			id: INTEGER;
+			seen: INTEGER	(* последняя исполненная заявка Step *)
 		END;
 
 		Evaporator = POINTER TO RECORD (Tasks.Job) f: Field END;
@@ -323,7 +326,13 @@ MODULE DemoAnts;
 			IF a.f.stop OR ((a.f.limit > 0) & (a.f.moves >= a.f.limit)) THEN EXIT END;
 			IF a.f.paced THEN
 				IF a.f.paused THEN
-					Tasks.Sleep(pausePeriod)
+					IF a.seen # a.f.stepTick THEN	(* заявка команды Step: один шаг под монитором *)
+						a.seen := a.f.stepTick;
+						op.id := a.id; a.f.Do(ctx, op);
+						DEC(a.f.stepsLeft)
+					ELSE
+						Tasks.Sleep(pausePeriod)
+					END
 				ELSE
 					op.id := a.id; a.f.Do(ctx, op);
 					period := 1000 DIV speed;
@@ -391,7 +400,8 @@ MODULE DemoAnts;
 		field.stop := FALSE; field.paused := FALSE; field.paced := paced;
 		field.alive := field.ants; Left := field.ants;
 		FOR i := 0 TO field.ants - 1 DO
-			NEW(antTasks[i]); antTasks[i].f := field; antTasks[i].id := i
+			NEW(antTasks[i]); antTasks[i].f := field; antTasks[i].id := i;
+			antTasks[i].seen := field.stepTick
 		END;
 		FOR i := 0 TO field.ants - 1 DO Tasks.Start(antTasks[i]) END;
 		NEW(evap); evap.f := field; Tasks.Start(evap);
@@ -444,12 +454,18 @@ MODULE DemoAnts;
 	PROCEDURE Step*;
 	(** Один шаг модели на паузе: все муравьи делают по шагу.
 		Команда идёт на главном стеке, где нет задачи и пропуска, поэтому
-		Do недоступен. Модель на паузе: задачи не работают, и прямой вызов
-		StepLocked ни с кем не пересекается. *)
-		VAR i: INTEGER;
+		в монитор она не входит и состояние поля не трогает. Она оставляет
+		заявку (stepTick), а шаг делают сами муравьи — каждый своим Do под
+		монитором. Чтобы команда вернулась после шага, она крутит
+		планировщик, пока заявку не исполнят все (не дольше секунды). *)
+		VAR t0: LONGINT;
 	BEGIN
 		IF (field # NIL) & running & field.paused THEN
-			FOR i := 0 TO field.ants - 1 DO StepLocked(field, i) END
+			INC(field.stepTick); field.stepsLeft := field.alive;
+			t0 := Kernel.Time();
+			WHILE (field.stepsLeft > 0) & (Kernel.Time() - t0 <= 1000) DO
+				Services.actionHook.Step
+			END
 		END
 	END Step;
 

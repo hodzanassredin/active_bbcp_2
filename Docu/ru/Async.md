@@ -426,7 +426,7 @@ END ObxProto0.
 сообщение из канала получает один получатель, а результат нужен всем.
 
 *Однократная переменная* `AsyncOnce.Once` заполняется один раз и читается сколько угодно раз.
-`FillInt(ctx, x)` или `FillMsg(ctx, m)` её заполняют; `ReadInt(ctx)` или `ReadMsg(ctx, m)` ждут
+`FillInt(ctx, x)` или `FillMsg(ctx, m)` её заполняют; `ReadInt(ctx, x)` или `ReadMsg(ctx, m)` ждут
 заполнения и возвращают значение. Переменная устроена как монитор-объект: операции идут в
 `Once.Exclusive`, а чтение ждёт в `Await` флага `filled`. Всем четырём методам нужен пропуск
 `Tasks.Ctx`.
@@ -443,7 +443,7 @@ MODULE ObxOnce;
 
 	PROCEDURE (r: Reader) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
-		got := o.ReadInt(ctx); done := TRUE	(* ждёт, пока Writer не заполнит *)
+		done := o.ReadInt(ctx, got)	(* ждёт, пока Writer не заполнит; FALSE — задачу остановили *)
 	END Body;
 
 	PROCEDURE (w: Writer) Body- (VAR ctx: Tasks.Ctx);
@@ -470,12 +470,12 @@ END ObxOnce.
 
 Второе заполнение — ошибка. `FillInt` по заполненной переменной трапает с кодом 21, `FillMsg` — с
 кодом 22. Признак заполнения у переменной один на оба вида значения, поэтому `FillMsg` после
-`FillInt` — тоже второе заполнение. Вид при чтении не проверяется: `ReadInt` после `FillMsg` вернёт 0,
-`ReadMsg` после `FillInt` — `NIL`.
+`FillInt` — тоже второе заполнение. Вид при чтении не проверяется: `ReadInt` после `FillMsg` даст 0,
+`ReadMsg` после `FillInt` — `NIL`, оба с результатом `TRUE`.
 
 И заполнение, и чтение требуют задачи и пропуска `Tasks.Ctx`: `Do` с главного стека трапает 22.
 Чтение незаполненной переменной ждёт в `Await`; пропуск может остановить ожидание, и тогда
-`ReadInt` вернёт 0, а `ReadMsg` — `NIL`. Своего срока у чтения нет; если срок нужен, результат
+`ReadInt` и `ReadMsg` вернут `FALSE` (значение — 0 или `NIL`), как `RecvCtx` у канала. Своего срока у чтения нет; если срок нужен, результат
 передают по каналу и ждут его в выборе с тайм-аутом.
 
 ## 8. Транзакции
@@ -1290,9 +1290,9 @@ DEFINITION AsyncOnce;
 		Once = POINTER TO RECORD (Tasks.Object)
 			done-: BOOLEAN;
 			(o: Once) FillInt (VAR ctx: Tasks.Ctx; x: INTEGER), NEW;
-			(o: Once) ReadInt (VAR ctx: Tasks.Ctx): INTEGER, NEW;
+			(o: Once) ReadInt (VAR ctx: Tasks.Ctx; OUT x: INTEGER): BOOLEAN, NEW;
 			(o: Once) FillMsg (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg), NEW;
-			(o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg), NEW
+			(o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN, NEW
 		END;
 
 	PROCEDURE New (): Once;
@@ -1310,19 +1310,19 @@ END AsyncOnce.
 Пред: `~o.done` — трап 21.
 Пост: `o.done`; значение — `x`.
 
-**PROCEDURE (o: Once) ReadInt (VAR ctx: Tasks.Ctx): INTEGER**
+**PROCEDURE (o: Once) ReadInt (VAR ctx: Tasks.Ctx; OUT x: INTEGER): BOOLEAN**
 Ждёт заполнения в `Await` флага `filled`.
 Пред: вызов из задачи со своим пропуском — трапы 22 и 25.
-Пост: результат — целое из `FillInt`; после `FillMsg` или при остановке пропуска — 0.
+Пост: `TRUE` — `x` — целое из `FillInt` (после `FillMsg` — 0); `FALSE` — пропуск остановлен до заполнения, `x` = 0.
 
 **PROCEDURE (o: Once) FillMsg (VAR ctx: Tasks.Ctx; m: AsyncSelect.Msg)**
 Пред: `~o.done` — трап 22.
 Пост: `o.done`; значение — `m`.
 
-**PROCEDURE (o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg)**
+**PROCEDURE (o: Once) ReadMsg (VAR ctx: Tasks.Ctx; OUT m: AsyncSelect.Msg): BOOLEAN**
 Ждёт заполнения в `Await` флага `filled`.
 Пред: вызов из задачи со своим пропуском — трапы 22 и 25.
-Пост: `m` — сообщение из `FillMsg`; после `FillInt` или при остановке пропуска — `NIL`.
+Пост: `TRUE` — `m` — сообщение из `FillMsg` (после `FillInt` — `NIL`); `FALSE` — пропуск остановлен до заполнения, `m` = `NIL`.
 
 ### 14.4. AsyncProto
 
