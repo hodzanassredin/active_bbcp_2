@@ -1,5 +1,6 @@
 #!/bin/sh
-# Прогон i386-мира: Unit_devMain, задачи и ядро на 32-битной цели.
+# Прогон i386-мира: Unit_devMain, задачи, транзакции и хранилища Cas и Kv на
+# 32-битной цели.
 #
 #   tools/test32.sh              # build32.sh, затем все модули
 #   tools/test32.sh System_devTasks  # только указанные модули (мир не собирается)
@@ -26,7 +27,17 @@ System_devTasks|proc slow|900
 Dev_devOpenArr||180
 Dev_devPtrInit|proc|180
 System_devCoTests|proc|300
-System_devUnloadGuard|proc|300'
+System_devUnloadGuard|proc|300
+Async_devStm|proc|300
+Cas_devHash||180
+Cas_devStore||180
+Cas_devChunk||180
+Cas_devTree||300
+Cas_devChange||180
+Kv_devBasic|proc|300
+Kv_devTree|proc|600
+Kv_devCrash|proc|1200
+Kv_devTasks|proc|300'
 
 LIST=0; only=""
 for a in "$@"; do
@@ -58,7 +69,10 @@ compile_dev32() {
 			System_devBasic System_devGcStack System_devTrapStack \
 			System_devCoTests System_devTasks \
 			Lin_devFiles Dev_devOpenArr Dev_devPtrInit \
-			System_devUnloadGuardCode System_devUnloadGuard; do
+			System_devUnloadGuardCode System_devUnloadGuard \
+			AsyncProto AsyncSelect AsyncChan Async_devStm \
+			Cas_devHash Cas_devStore Cas_devChunk Cas_devTree Cas_devChange \
+			Kv_devModel Kv_devBasic Kv_devTree Kv_devCrash Kv_devTasks; do
 			echo "DevCompiler.CompileThis $m"
 		done
 		echo 'DevLibrarian.DisableDevLib'
@@ -112,7 +126,7 @@ run_one() {
 }
 
 # В /tmp могут жить временные файлы других процессов стенда (например,
-# других процессов стенда). Проверяем только прирост.
+# давних исполнителей RobustParallel). Проверяем только прирост.
 tmp_before=$(find /tmp -maxdepth 1 -type f -name 'odc[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' 2>/dev/null | wc -l)
 
 ok=0; bad=0; skipped=0; total=0

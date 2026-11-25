@@ -6,7 +6,7 @@
 # Собирает @Win-подсистемы в build/BB64WIN, линкует консольный PE
 # (WinIntInit), переключает подсистему PE с GUI на console (линкер
 # пишет 2, правим заголовок на 3) и гоняет Unit_devMain, System_devWinTasks,
-# Dev_devOpenArr и Dev_devPtrInit.
+# Async_devWinWorkers, Async_devStm и Dev_devOpenArr.
 # Каталог wine — .work/wine64 (WINEARCH=win64), экран пользователя не
 # используется. Нет wine — тест пропускается с причиной.
 set -u
@@ -39,7 +39,7 @@ export WINEPREFIX="$PREFIX" WINEARCH=win64
 # 1. Каркас @Win. Первый прогон долгий; повторно — только с --rebuild.
 if [ "$rebuild" -eq 1 ] || [ ! -f "$OUT/System/Code/Kernel.ocf" ]; then
 	echo "test-win64: сборка каркаса @Win"
-	printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Win System Std Cons Text Fig Form Dev Comm Obx Xhtml Sql Paket\nDevLibrarian.DisableDevLib\n" \
+	printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Win System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket\nDevLibrarian.DisableDevLib\n" \
 		| timeout 1200 "$DEV0" >"$OUT/build.log" 2>&1 || {
 			echo "test-win64: сборка @Win не удалась:" >&2
 			tail -30 "$OUT/build.log" >&2; exit 1; }
@@ -49,7 +49,7 @@ if [ "$rebuild" -eq 1 ] || [ ! -f "$OUT/System/Code/Kernel.ocf" ]; then
 fi
 
 # 2. Unit, Tasks (System/Mod64), пул нитей и Win-тесты задач.
-printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Unit_devProbe\nDevCompiler64.CompileThis Unit_devBadSetup\nDevCompiler64.CompileThis Unit_devCyr\nDevCompiler64.CompileThis Unit_devMain\nDevCompiler64.CompileThis Taskarch\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis System_devWinTasks\nDevCompiler64.CompileThis Dev_devOpenArr\nDevCompiler64.CompileThis Dev_devPtrInit\nDevLibrarian.DisableDevLib\n" \
+printf "DevCompiler64.InitLogMarks\nDevLibrarian.EnableDevLib('$OUT', 'Mod64')\nDevCompiler64.CompileSubs @Win Unit\nDevCompiler64.CompileThis Unit_devProbe\nDevCompiler64.CompileThis Unit_devBadSetup\nDevCompiler64.CompileThis Unit_devCyr\nDevCompiler64.CompileThis Unit_devMain\nDevCompiler64.CompileThis Taskarch\nDevCompiler64.CompileThis Tasks\nDevCompiler64.CompileThis AsyncWinSock\nDevCompiler64.CompileThis AsyncWork\nDevCompiler64.CompileThis AsyncWorkWin\nDevCompiler64.CompileThis WinIntInit\nDevCompiler64.CompileThis WinInit\nDevCompiler64.CompileThis WinKernel\nDevCompiler64.CompileThis AsyncProto\nDevCompiler64.CompileThis AsyncSelect\nDevCompiler64.CompileThis AsyncChan\nDevCompiler64.CompileThis AsyncStm\nDevCompiler64.CompileThis Async_devStm\nDevCompiler64.CompileThis System_devWinTasks\nDevCompiler64.CompileThis Async_devWinWorkers\nDevCompiler64.CompileThis Dev_devOpenArr\nDevCompiler64.CompileThis Dev_devPtrInit\nDevLibrarian.DisableDevLib\n" \
 	| timeout 600 "$DEV0" >"$OUT/unit-build.log" 2>&1 || {
 		echo "test-win64: компиляция Unit/Tasks не удалась:" >&2
 		tail -30 "$OUT/unit-build.log" >&2; exit 1; }
@@ -93,6 +93,8 @@ run() {
 
 run Unit_devMain "" "passed 7"
 run System_devWinTasks proc "passed 5"
+run Async_devWinWorkers proc "passed 4"
+run Async_devStm proc "passed 19"
 run Dev_devOpenArr "" "passed 8"
 run Dev_devPtrInit proc "passed 7"
 exit 0

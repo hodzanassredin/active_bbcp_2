@@ -40,6 +40,13 @@ MODULE CommStreams;
 		VAR x: ARRAY OF BYTE; beg, len: INTEGER; OUT read: INTEGER), NEW, ABSTRACT;
 	PROCEDURE (s: Stream) Close*, NEW, ABSTRACT;
 
+	(** Платформенный дескриптор для ожидания готовности.
+		-1 — поток не умеет отдавать дескриптор; ожидание тогда
+		сводится к повторным попыткам. *)
+	PROCEDURE (s: Stream) Handle* (): INTEGER, NEW, EXTENSIBLE;
+	BEGIN RETURN -1
+	END Handle;
+
 	PROCEDURE NewStream* (protocol, localAdr, remoteAdr: ARRAY OF CHAR; OUT s: Stream; OUT res: INTEGER);
 		VAR ok: BOOLEAN; m, p: Meta.Item; mod: Meta.Name;
 			v: RECORD (Meta.Value)
@@ -61,6 +68,10 @@ MODULE CommStreams;
 	PROCEDURE (l: Listener) LocalAdr* (): Adr, NEW, ABSTRACT;
 	PROCEDURE (l: Listener) Accept* (OUT s: Stream), NEW, ABSTRACT;
 	PROCEDURE (l: Listener) Close*, NEW, ABSTRACT;
+
+	PROCEDURE (l: Listener) Handle* (): INTEGER, NEW, EXTENSIBLE;
+	BEGIN RETURN -1
+	END Handle;
 
 	PROCEDURE NewListener* (protocol, localAdr: ARRAY OF CHAR; OUT l: Listener; OUT res: INTEGER);
 		VAR ok: BOOLEAN; m, p: Meta.Item; mod: Meta.Name;

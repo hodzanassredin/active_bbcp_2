@@ -267,7 +267,12 @@ MODULE WinKernel;
 		VAR narrow: ARRAY 1024 OF SHORTCHAR; h, p, addr: S.ADDRESS; s: Stub; ok: INTEGER;
 	BEGIN
 		IF A.WideCharToMultiByte(65001, 80H, name, -1, S.ADR(narrow), LEN(narrow), 0, 0) = 0 THEN RETURN 0 END;
-		h := A.GetModuleHandleW(dll); IF h = 0 THEN RETURN 0 END;
+		h := A.GetModuleHandleW(dll);
+		(* Динамически загруженный interface-модуль (например AsyncWinSock ->
+		   WS2_32.dll) может ссылаться на библиотеку, которую образ PE не
+		   импортирует: тогда загружаем её здесь. *)
+		IF h = 0 THEN h := A.LoadLibraryW(S.VAL(A.PtrWSTR, dll)) END;
+		IF h = 0 THEN RETURN 0 END;
 		p := S.VAL(S.ADDRESS, A.GetProcAddress(h, narrow)); IF p = 0 THEN RETURN 0 END;
 		s := stubs; WHILE s # NIL DO IF s.proc = p THEN RETURN s.addr END; s := s.next END;
 		addr := WkAlloc(16); IF addr = 0 THEN RETURN 0 END;

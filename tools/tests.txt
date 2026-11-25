@@ -19,3 +19,42 @@ Dev_devPtrInit|proc|180|
 # Монитор-объект и пропуск в Tasks: флаги, Cond, повторный вход, трап, отмена, Spawn.
 System_devTasksObj|proc|300|
 System_devUnloadGuard|proc|300|System_devUnloadGuardCode
+# Каналы, выбор и их пропуск: очередь предложений, тайм-аут, отмена, срок.
+Async_devProtocol|proc|300|AsyncProto AsyncSelect AsyncChan
+Async_devCtxSleep|proc|600|AsyncSelect AsyncChan
+Async_devCtxChan|proc|600|AsyncSelect AsyncChan
+# Ввод-вывод задач поверх неблокирующих потоков Comm.
+Async_devIO|proc|600|AsyncIO AsyncSelect AsyncChan
+# Рабочие нити ОС и компутоны.
+Async_devWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
+Async_devComputons|proc|600|AsyncComputon AsyncIO AsyncSelect AsyncChan LinNative LinThreads
+# Выгрузка кода у исполнителей: перекомпиляция компутона и повторный Push.
+System_devUnload|proc|600|System_devUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan LinNative LinThreads
+# Хранилище по содержимому Cas: SHA-256, блоки, нарезка, деревья, наборы изменений.
+Cas_devHash||180|CasHash
+Cas_devStore||180|CasHash CasStore CasFiles
+Cas_devChunk||180|CasHash CasChunk
+Cas_devTree||300|CasHash CasStore CasChunk CasTree
+Cas_devChange||180|CasHash CasStore CasChange
+Cas_devBench|slow|300|CasHash CasChunk
+# Подсистема Actor: акторы, супервизор, исполнители (amd64).
+Actor_devMain|proc|300|ActorCore ActorSup ActorRun
+Actor_devPersist|proc|300|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal
+Actor_devNet|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorNetTcp AsyncIO
+Actor_devGrain|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorGrain
+Actor_devBounded|proc|300|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorSim
+Actor_devBench|proc slow|900|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal System_devCRaw System_devClock
+# Согласованный журнал Raft: симуляция ядра по зёрнам, инварианты, мутации.
+Raft_devSim||300|RaftCore RaftSm RaftStorage KvPages KvStore KvFault KvTree KvDb RaftKvStorage
+# Водитель узла RaftNode над ActorNetMem: сбои по зерну, инварианты, подтверждённое не теряется, мутации водителя.
+Raft_devNode|proc|900|ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim RaftCore RaftSm RaftStorage RaftNode
+# Журнал стойких акторов поверх Raft: пул ActorRun, свои часы узлов, гибель и разрыв лидера.
+Raft_devJournal|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem RaftCore RaftSm RaftStorage RaftNode RaftJournal
+# Стойкие акторы на RaftJournal под ActorSim по зёрнам: запись с ответом позже, сбои, два воплощения, мутации.
+Raft_devPersist|proc|900|ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim RaftCore RaftSm RaftStorage RaftNode RaftJournal
+# Хранилище Kv: страницы, дерево против эталона, обрыв питания в каждой точке фиксации.
+Kv_devBasic|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+Kv_devTree|proc|600|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+Kv_devCrash|proc|900|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+Kv_devTasks|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
+Kv_devBench|proc slow|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel

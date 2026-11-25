@@ -27,6 +27,16 @@ MODULE Services;
 		END;
 		InsistentAction* = POINTER TO ABSTRACT RECORD (Action) END;
 
+		(** Работа, отложенная в главный цикл. Единственная точка входа для
+			будущих задач: задача кладёт сюда процедуру, а главный
+			цикл исполняет её на своём стеке. Сейчас очередь однонитевая;
+			при переходе на нити ОС сюда добавится блокировка. *)
+		Work* = PROCEDURE;
+		WorkItem = POINTER TO RECORD
+			next: WorkItem;
+			work: Work
+		END;
+
 		SafeAction* = ABSTRACT RECORD
 			(** Type-safe and extensible replacement for TryHandler *)
 			trapped-: BOOLEAN
@@ -49,8 +59,10 @@ MODULE Services;
 		trapCnt: INTEGER;
 		actionsInTheQueue-: INTEGER;
 
+		workHead, workTail: WorkItem;	(* FIFO отложенной работы *)
 		executing-: Action;				(* действие внутри Exec; переживает трап *)
 		executingAction-: BOOLEAN;		(* идёт Do действия: задача не должна ждать *)
+		wakeHook: PROCEDURE;			(* платформенный «разбудить цикл» *)
 		guardCleaner: GuardCleaner;	(* снять флаг при трапе внутри Do *)
 
 	PROCEDURE Ticks* (): LONGINT;
@@ -154,6 +166,65 @@ MODULE Services;
 		END
 	END RemoveAction;
 
+	(** --- очередь в главный цикл для работ из другой нити --- **)
+
+	PROCEDURE Post* (w: Work);
+	(** Отложить работу w до ближайшего шага главного цикла.
+		Единственная точка входа для будущих задач: каркас однонитевой,
+		задача не трогает модель напрямую, а кладёт сюда процедуру. **)
+		VAR i: WorkItem;
+	BEGIN
+		IF w # NIL THEN
+			NEW(i); i.work := w; i.next := NIL;
+			IF workTail = NIL THEN workHead := i ELSE workTail.next := i END;
+			workTail := i
+		END
+	END Post;
+
+	PROCEDURE RunPosted;
+	(** Исполнить всё, что накопилось в очереди. Вызывается со дна цикла. **)
+		VAR i: WorkItem; w: Work;
+	BEGIN
+		WHILE workHead # NIL DO
+			i := workHead; workHead := i.next;
+			IF workHead = NIL THEN workTail := NIL END;
+			w := i.work; i.work := NIL; i.next := NIL;
+			w()	(* может снова вызвать Post; очередь подхватится этим же циклом *)
+		END
+	END RunPosted;
+
+	PROCEDURE NextDeadline* (): LONGINT;
+	(** Ближайший срок среди действий, в тиках Services.Ticks; -1 — ждать
+		нечего. Немедленные действия (notBefore < 0) и отложенная работа
+		означают «сейчас». Нужна главному циклу, чтобы не просыпаться
+		20 раз в секунду на таймере. **)
+		VAR p: Action; t, min: LONGINT;
+	BEGIN
+		IF workHead # NIL THEN RETURN Ticks() END;
+		min := -1; p := actions;
+		WHILE p # NIL DO
+			t := p.notBefore;
+			IF t < 0 THEN RETURN Ticks()
+			ELSIF (min < 0) OR (t < min) THEN min := t
+			END;
+			p := p.next
+		END;
+		RETURN min
+	END NextDeadline;
+
+	PROCEDURE SetWakeHook* (h: PROCEDURE);
+	(** Установить платформенную процедуру «разбудить главный цикл». **)
+	BEGIN
+		wakeHook := h
+	END SetWakeHook;
+
+	PROCEDURE Wake*;
+	(** Разбудить главный цикл (точка входа из другой нити):
+		например, записать байт в eventfd/pipe, который ждёт главный цикл. **)
+	BEGIN
+		IF wakeHook # NIL THEN wakeHook END
+	END Wake;
+
 	PROCEDURE IterateOverActions (time: LONGINT; onlyInsistentActions: BOOLEAN);
 		VAR p: Action;
 	BEGIN
@@ -184,6 +255,7 @@ MODULE Services;
 
 	PROCEDURE (h: StdHook) Step;
 	BEGIN
+		RunPosted;	(* очередь главного цикла: работы будущих задач *)
 		IF (candidates = NIL) OR (trapCnt < Kernel.trapCount) THEN
 			IterateOverActions(Ticks(), ~onlyInsistentActions)
 		END
@@ -198,6 +270,7 @@ MODULE Services;
 
 	PROCEDURE (h: StdHook) Loop;
 	BEGIN
+		RunPosted;	(* очередь главного цикла *)
 		IF hasImmediates THEN
 			ASSERT((candidates = NIL) OR (trapCnt < Kernel.trapCount), 100);
 			hasImmediates := FALSE;
