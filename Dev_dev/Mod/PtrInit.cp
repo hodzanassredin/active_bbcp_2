@@ -208,6 +208,11 @@ MODULE Dev_devPtrInit;
 	BEGIN
 	END OutNil;
 
+	PROCEDURE OutPacked (OUT r: Packed);
+		(* указатель стоит на 4 (mod 8): обнуляется точным смещением, сосед не задет *)
+	BEGIN
+	END OutPacked;
+
 	(* ---------- сборщик мусора ---------- *)
 
 	PROCEDURE GcLive (): BOOLEAN;
@@ -268,7 +273,7 @@ MODULE Dev_devPtrInit;
 	END TestNestedExclusive;
 
 	PROCEDURE TestOut*;
-		VAR p: PInt; r: OnePtr; m: Ptrs12;
+		VAR p: PInt; r: OnePtr; m: Ptrs12; canary: LONGINT; pk: Packed;
 	BEGIN
 		p := g; OutPtr(p);
 		UnitAssert.True(p = NIL, "OUT-указатель");
@@ -279,7 +284,10 @@ MODULE Dev_devPtrInit;
 		p := g; OutNil(p);
 		UnitAssert.True(p = NIL, "OUT [nil]: настоящий адрес");
 		OutNil(NIL);	(* NIL-адрес: обнулять нечего, разыменования нет *)
-		UnitAssert.True(TRUE, "OUT [nil]: NIL-адрес не трапает")
+		UnitAssert.True(TRUE, "OUT [nil]: NIL-адрес не трапает");
+		canary := 123456789; pk.p := g; pk.tag := 3; OutPacked(pk);
+		UnitAssert.True(pk.p = NIL, "OUT-упакованная запись: указатель на 4 (mod 8)");
+		UnitAssert.EqualInt(123456789, canary, "OUT-упакованная запись: соседняя переменная цела")
 	END TestOut;
 
 	PROCEDURE TestProcGc*;

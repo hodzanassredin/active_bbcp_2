@@ -2217,26 +2217,36 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		n := j
 	END Sort;
 	
-	PROCEDURE FindPtrs (typ: DevCPT.Struct; adr: INTEGER; VAR num: INTEGER);
+	PROCEDURE FindPtrs (typ: DevCPT.Struct; adr: INTEGER; VAR num: INTEGER; exact: BOOLEAN);
+	(** Смещения указателей. Для локальных переменных (exact = FALSE) смещение
+		округляется вниз до ptrSlot: плотная ветка AllocAndInitPtrs1 обнуляет
+		такие слоты push'ем, а указатель, попавший в слот не с начала
+		(упакованная запись), занимает ещё один слот ptrSlot. Для OUT-параметров
+		(exact = TRUE) смещение остаётся точным: InitPtrs2 пишет в память
+		вызывающего, и лишний слот мог бы задеть соседнюю переменную. *)
 		VAR fld: DevCPT.Object; btyp: DevCPT.Struct; i, n: INTEGER;
 	BEGIN
 		IF typ.form IN {Pointer, ProcTyp} THEN
-			IF num < MaxPtrs THEN ptrTab[num] := adr DIV ptrSlot * ptrSlot END;
+			IF num < MaxPtrs THEN
+				IF exact THEN ptrTab[num] := adr
+				ELSE ptrTab[num] := adr DIV ptrSlot * ptrSlot
+				END
+			END;
 			INC(num);
-			IF adr MOD ptrSlot # 0 THEN
+			IF ~exact & (adr MOD ptrSlot # 0) THEN
 				IF num < MaxPtrs THEN ptrTab[num] := adr DIV ptrSlot * ptrSlot + ptrSlot END;
 				INC(num)
 			END
 		ELSIF typ.comp = Record THEN
 			btyp := typ.BaseTyp;
-			IF btyp # NIL THEN FindPtrs(btyp, adr, num) END ;
+			IF btyp # NIL THEN FindPtrs(btyp, adr, num, exact) END ;
 			fld := typ.link;
 			WHILE (fld # NIL) & (fld.mode = Fld) DO
 				IF (fld.name^ = DevCPM.HdPtrName) OR
 					(fld.name^ = DevCPM.HdUtPtrName) OR
 					(fld.name^ = DevCPM.HdProcName) THEN
-					FindPtrs(DevCPT.sysptrtyp, fld.adr + adr, num)
-				ELSE FindPtrs(fld.typ, fld.adr + adr, num)
+					FindPtrs(DevCPT.sysptrtyp, fld.adr + adr, num, exact)
+				ELSE FindPtrs(fld.typ, fld.adr + adr, num, exact)
 				END;
 				fld := fld.link
 			END
@@ -2244,10 +2254,10 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 			btyp := typ.BaseTyp; n := typ.n;
 			WHILE btyp.comp = Array DO n := btyp.n * n; btyp := btyp.BaseTyp END ;
 			IF (btyp.form = Pointer) OR (btyp.comp = Record) THEN
-				i := num; FindPtrs(btyp, adr, num);
+				i := num; FindPtrs(btyp, adr, num, exact);
 				IF num # i THEN i := 1;
 					WHILE (i < n) & (num <= MaxPtrs) DO
-						INC(adr, btyp.size); FindPtrs(btyp, adr, num); INC(i)
+						INC(adr, btyp.size); FindPtrs(btyp, adr, num, exact); INC(i)
 					END
 				END
 			END
@@ -2335,7 +2345,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		IF ptrinit & (proc.scope # NIL) THEN
 			nofptrs := 0; obj := proc.scope.scope;	(* local variables *)
 			WHILE (obj # NIL) & (nofptrs <= MaxPtrs) DO
-				FindPtrs(obj.typ, obj.adr, nofptrs);
+				FindPtrs(obj.typ, obj.adr, nofptrs, FALSE);
 				obj := obj.link
 			END;
 			IF (nofptrs > 0) & (nofptrs <= MaxPtrs) THEN
@@ -2390,7 +2400,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				IF (obj.mode = VarPar) & (obj.vis = outPar) THEN
 					nofptrs := 0;
 					IF obj.typ.comp = DynArr THEN	(* currently not initialized *)
-					ELSE FindPtrs(obj.typ, 0, nofptrs)
+					ELSE FindPtrs(obj.typ, 0, nofptrs, TRUE)
 					END;
 					IF nofptrs > 0 THEN
 						IF ~zeroed THEN
@@ -2428,7 +2438,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				IF (obj.mode = VarPar) & (obj.vis = outPar) THEN
 					nofptrs := 0;
 					IF obj.typ.comp = DynArr THEN	(* currently not initialized *)
-					ELSE FindPtrs(obj.typ, 0, nofptrs)
+					ELSE FindPtrs(obj.typ, 0, nofptrs, TRUE)
 					END;
 					IF nofptrs > 0 THEN RETURN TRUE END
 				END;
