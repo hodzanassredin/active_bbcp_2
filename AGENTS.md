@@ -336,6 +336,7 @@ code, and the checks to run before a commit.
 | `docs/measurements.md` | measurements |
 | `docs/kernel-plan.md` | future kernel work |
 | `docs/stacks-study.md` | task stacks: where time goes, stack depth, switching and CPU counters |
+| `docs/copy-stack-study.md` | copy-stack probe: a waiting object on the shared stack, segment copied to the heap and back |
 | `docs/adr/README.md` | decision records (Russian only): options considered and why rejected |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
 | `Demo/Docu/Sys-Map.md` | examples |
