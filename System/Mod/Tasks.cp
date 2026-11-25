@@ -1163,7 +1163,10 @@ MODULE Tasks;
 
 	PROCEDURE AbandonWait (h: Hold);
 	(* Кадр ожидания снят трапом: убрать задачу из очереди и отпустить
-	   монитор, если он уже передан ей. *)
+	   монитор, если он уже передан ей. Запись после этого ничего не держит
+	   (h.obj = NIL): Reconcile снимет её с цепочки вторым вызовом
+	   ReleaseHold, и тот не должен трогать глубину монитора, у которого
+	   уже другой владелец. *)
 		VAR o: Object;
 	BEGIN
 		o := h.obj;
@@ -1174,7 +1177,8 @@ MODULE Tasks;
 				o.owner := 0; o.depth := 0;
 				ReleaseMonitor(o)
 			END
-		END
+		END;
+		h.obj := NIL
 	END AbandonWait;
 
 	PROCEDURE ReleaseHold (h: Hold);
