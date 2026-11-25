@@ -303,6 +303,7 @@ MODULE Kernel;
 			stkLo*: S.ADDRESS;		(* низ текущего куска + запас; переносится переключателем *)
 			seg*: BOOLEAN;			(* кусок сегментированного стека растёт дальше *)
 			owner*: Stack;			(* для куска роста — запись стартового стека задачи *)
+			nseg*: INTEGER;			(* у стартовой записи — сколько кусков роста живо *)
 			signal: BOOLEAN;		(* сигнальный стек: сканировать прерванный стек по Kernel.sp *)
 			main: BOOLEAN			(* главный стек процесса *)
 		END;
@@ -1691,7 +1692,7 @@ MODULE Kernel;
 		NEW(s);
 		s.lo := lo; s.hi := hi; s.sp := hi; s.fp := 0;	(* пустой стек *)
 		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
-		s.stkLo := 0; s.seg := FALSE; s.owner := NIL;
+		s.stkLo := 0; s.seg := FALSE; s.owner := NIL; s.nseg := 0;
 		s.signal := signal; s.main := FALSE;
 		s.prev := NIL; s.next := stacks;
 		IF stacks # NIL THEN stacks.prev := s END;
@@ -1831,6 +1832,8 @@ MODULE Kernel;
 		rec.tryContext := 0; rec.trapStack := NIL; rec.tryCount := 0; rec.stkLo := 0;
 		rec.seg := TRUE; rec.signal := FALSE; rec.main := FALSE;
 		IF old.owner # NIL THEN rec.owner := old.owner ELSE rec.owner := old END;
+		rec.nseg := 0;
+		IF rec.owner # NIL THEN INC(rec.owner.nseg) END;
 		rec.prev := NIL; rec.next := stacks; IF stacks # NIL THEN stacks.prev := rec END; stacks := rec;
 		(* Старый кусок спят: сборщик сканирует его от кадра F, включая
 		   исходные параметры, пока новый кусок не стал текущим. *)
@@ -1843,11 +1846,12 @@ MODULE Kernel;
 	PROCEDURE SegmentDone (adr: S.ADDRESS);
 	(* Зовётся трамплином на возвращаемом куске. Снять запись из реестра,
 	   вернуть stkLo и отдать кусок; поля записи читаются до возврата. *)
-		VAR t: SegMeta; rec: Stack; lo, hi: S.ADDRESS; size: INTEGER; olds: S.ADDRESS;
+	VAR t: SegMeta; rec: Stack; lo, hi: S.ADDRESS; size: INTEGER; olds: S.ADDRESS; owner: Stack;
 	BEGIN
 		t := S.VAL(SegMeta, adr);
 		lo := t.segLo; hi := t.segHi; size := t.segSize; olds := t.oldStkLo;
 		rec := S.VAL(Stack, hi - segHdr);
+		owner := rec.owner; IF owner # NIL THEN DEC(owner.nseg) END;
 		UnregisterStack(rec);
 		stkLo := olds;
 		ReturnSegment(lo, hi, size)
@@ -1859,6 +1863,7 @@ MODULE Kernel;
 		кусков оставляет более новые куски зарегистрированными. *)
 		VAR s, next: Stack;
 	BEGIN
+		IF (base = NIL) OR (base.nseg <= 0) THEN RETURN END;	(* обычный выход: кусков нет *)
 		s := stacks;
 		WHILE s # NIL DO
 			next := s.next;
@@ -1867,7 +1872,8 @@ MODULE Kernel;
 				ReturnSegment(s.lo, s.hi, SHORT(s.hi - s.lo))
 			END;
 			s := next
-		END
+		END;
+		base.nseg := 0
 	END ReleaseSegments;
 
 	PROCEDURE SetSegmentedStacks* (on: BOOLEAN; size, reserve: INTEGER);
