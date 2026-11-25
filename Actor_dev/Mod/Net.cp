@@ -999,12 +999,14 @@ MODULE Actor_devNet;
 
 	PROCEDURE TestSagaRunsFreeMemory*;
 	(* Прогоны саги не копят память: узлы и сети прошлых прогонов собираются
-		сборщиком (раньше их держал список узлов ActorNet, и время на зерно росло). *)
+		сборщиком (раньше их держал список узлов ActorNet, и время на зерно росло).
+		Первые 220 прогонов — прогрев: под правилом gcGoal куча дорастает до цели,
+		и этот разрешённый прирост не считается утечкой. *)
 		VAR crashes: INTEGER; u0, u1: LONGINT;
 	BEGIN
-		IF Seeds(1, 20, FALSE, crashes) THEN END;
+		IF Seeds(1, 220, FALSE, crashes) THEN END;
 		Kernel.Collect; u0 := Kernel.Used();
-		UnitAssert.True(Seeds(21, 220, FALSE, crashes), sagaMsg);
+		UnitAssert.True(Seeds(221, 420, FALSE, crashes), sagaMsg);
 		Kernel.Collect; u1 := Kernel.Used();
 		UnitAssert.True(u1 - u0 < 1000000, "memory does not grow with runs")
 	END TestSagaRunsFreeMemory;
