@@ -35,6 +35,7 @@ MODULE System_devTasksObj;
 		HoldOp = RECORD (Tasks.Op) result: BOOLEAN END;
 		OuterOp = RECORD (Tasks.Op) END;
 		CaughtOp = RECORD (Tasks.Op) tryIt: BOOLEAN; heldAfter: INTEGER; result: BOOLEAN END;
+		HealOp = RECORD (Tasks.Op) park: BOOLEAN; ms: LONGINT; done: BOOLEAN END;
 		CrashOp = RECORD (Tasks.Op) END;
 		ProbeOp = RECORD (Tasks.Op) END;
 		JoinOp = RECORD (Tasks.Op) child: Tasks.Task END;
@@ -90,6 +91,7 @@ MODULE System_devTasksObj;
 		NestJob = POINTER TO RECORD (Tasks.Job) x: Lock; n: NestOp END;
 		OuterJob = POINTER TO RECORD (Tasks.Job) x: Lock END;
 		CaughtJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: CaughtOp END;
+		HealJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: HealOp END;
 		StopEntryJob = POINTER TO RECORD (Tasks.Job)
 			x: Lock; deadline: LONGINT; done, cancelled, expired: BOOLEAN
 		END;
@@ -300,6 +302,13 @@ MODULE System_devTasksObj;
 			op.heldAfter := ctx.HeldCount();
 			op.result := ~Tasks.Held(x.y) & Tasks.Held(x);
 			caughtSeen := op.result
+		| op: HealOp DO
+			(* Внутренний y.Do снят пойманным трапом; его запись ещё в
+			   цепочке. Сверка должна отпустить её до сна. *)
+			trapY := x.y; trapCtx := S.ADR(ctx);
+			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(InnerTrap)), trapCtx, 0, 0);
+			IF op.park THEN Tasks.Park ELSE Tasks.Sleep(op.ms) END;
+			op.done := TRUE
 		| op: CrashOp DO
 			NilCrash
 		| op: JoinOp DO
@@ -523,6 +532,11 @@ MODULE System_devTasksObj;
 	BEGIN
 		j.x.Do(ctx, j.op);
 		bodyDone := TRUE
+	END Body;
+
+	PROCEDURE (j: HealJob) Body- (VAR ctx: Tasks.Ctx);
+	BEGIN
+		j.x.Do(ctx, j.op)
 	END Body;
 
 	PROCEDURE (j: StopEntryJob) Body- (VAR ctx: Tasks.Ctx);
@@ -800,6 +814,37 @@ MODULE System_devTasksObj;
 		UnitAssert.True(~Tasks.Held(y), "внутренний свободен")
 	END CaseCaughtTrapReleasesInner;
 
+	PROCEDURE CaseHealBeforeSleep;
+	(* Пойманный трап, затем Sleep до следующего вызова монитора: запись
+	   внутреннего y уже мертва, а y не разрешает сон. Сверка перед сном
+	   обязана отпустить её, иначе трап 26. *)
+		VAR x, y: Lock; j: HealJob;
+	BEGIN
+		NEW(x); NEW(y); x.allow := TRUE; y.allow := FALSE; x.y := y;
+		NEW(j); j.x := x; j.op.park := FALSE; j.op.ms := 4;
+		Start(j);
+		UnitAssert.True(Pump(1000), "задача завершилась");
+		UnitAssert.True(~Tasks.Failed(j), "сон после пойманного трапа не трапует");
+		UnitAssert.True(j.op.done, "тело дошло до сна и дальше");
+		UnitAssert.True(~Tasks.Held(y), "внутренний монитор отпущен до сна");
+		UnitAssert.True(~Tasks.Held(x), "внешний отпущен на выходе")
+	END CaseHealBeforeSleep;
+
+	PROCEDURE CaseHealBeforePark;
+	(* То же для старого Park: сон ждёт Unpark, проверка мониторов та же. *)
+		VAR x, y: Lock; j: HealJob; u: Unparker;
+	BEGIN
+		NEW(x); NEW(y); x.allow := TRUE; y.allow := FALSE; x.y := y;
+		NEW(j); j.x := x; j.op.park := TRUE;
+		NEW(u); u.t := j;
+		Start(j); Start(u);
+		UnitAssert.True(Pump(2000), "задача завершилась");
+		UnitAssert.True(~Tasks.Failed(j), "Park после пойманного трапа не трапует");
+		UnitAssert.True(j.op.done, "тело дошло до Park и дальше");
+		UnitAssert.True(~Tasks.Held(y), "внутренний монитор отпущен до сна");
+		UnitAssert.True(~Tasks.Held(x), "внешний отпущен на выходе")
+	END CaseHealBeforePark;
+
 	PROCEDURE CaseCancelEntry;
 		(* Ожидание входа: отмена не пускает в Exclusive, следующий входит. *)
 		VAR x: Lock; a: SleepHoldJob; b: StopEntryJob; c: OrderJob;
@@ -1060,6 +1105,10 @@ MODULE System_devTasksObj;
 	BEGIN RunBoth(CaseUncaughtTrapReleasesAll) END TestUncaughtTrapReleasesAll;
 	PROCEDURE TestCaughtTrapReleasesInner*;
 	BEGIN RunBoth(CaseCaughtTrapReleasesInner) END TestCaughtTrapReleasesInner;
+	PROCEDURE TestHealBeforeSleep*;
+	BEGIN RunBoth(CaseHealBeforeSleep) END TestHealBeforeSleep;
+	PROCEDURE TestHealBeforePark*;
+	BEGIN RunBoth(CaseHealBeforePark) END TestHealBeforePark;
 	PROCEDURE TestCancelEntry*;
 	BEGIN RunBoth(CaseCancelEntry) END TestCancelEntry;
 	PROCEDURE TestDeadlineEntry*;

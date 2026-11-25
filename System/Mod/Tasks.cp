@@ -125,10 +125,8 @@ MODULE Tasks;
 		HoldRec = RECORD
 			obj: Object;		(* монитор этого вызова *)
 			next: Hold;		(* предыдущий (внешний) вызов *)
-			mark: S.ADDRESS;
-			need: SET;
-			cond: Cond;
-			qkind: INTEGER;
+			mark: S.ADDRESS;	(* кадр Do этого вызова *)
+			wmark: S.ADDRESS;	(* кадр ожидания, пока waiting *)
 			acq, waiting: BOOLEAN
 		END;
 
@@ -967,21 +965,29 @@ MODULE Tasks;
 
 	PROCEDURE GiveHold (VAR ctx: Ctx; h: Hold);
 	BEGIN
-		h.obj := NIL; h.cond := NIL; h.qkind := 0;
-		h.acq := FALSE; h.waiting := FALSE; h.need := {};
+		h.obj := NIL;
+		h.acq := FALSE; h.waiting := FALSE;
 		h.next := ctx.free; ctx.free := h
 	END GiveHold;
 
+	PROCEDURE Token (): S.ADDRESS;
+	(* Токен текущей задачи — адрес её записи. Поле Kernel.monTok хранит то
+	   же значение, но им пользуются Monitors и старая проба AsyncObject;
+	   монитору-объекту достаточно самой задачи. *)
+	BEGIN
+		IF current = NIL THEN RETURN 0 ELSE RETURN S.ADR(current^) END
+	END Token;
+
 	PROCEDURE AbandonWait (h: Hold);
-	(* Кадр Wait снят трапом: убрать задачу из очереди и отпустить
+	(* Кадр ожидания снят трапом: убрать задачу из очереди и отпустить
 	   монитор, если он уже передан ей. *)
 		VAR o: Object;
 	BEGIN
 		o := h.obj;
-		h.waiting := FALSE; h.qkind := 0; h.acq := FALSE;
+		h.waiting := FALSE; h.acq := FALSE;
 		IF (o # NIL) & (current # NIL) THEN
 			IF current.qkind # 0 THEN RemoveQueued(o, current) END;
-			IF o.owner = Kernel.monTok THEN
+			IF o.owner = Token() THEN
 				o.owner := 0; o.depth := 0;
 				ReleaseMonitor(o)
 			END
@@ -993,7 +999,7 @@ MODULE Tasks;
 		IF h.waiting THEN AbandonWait(h); RETURN END;
 		IF h.obj # NIL THEN
 			IF h.acq THEN
-				ASSERT(h.obj.owner = Kernel.monTok, 100);
+				ASSERT(h.obj.owner = Token(), 100);
 				ReleaseOne(h.obj)
 			ELSIF h.obj.depth > 0 THEN
 				DEC(h.obj.depth)
@@ -1011,17 +1017,19 @@ MODULE Tasks;
 	PROCEDURE Reconcile (VAR ctx: Ctx);
 	(* Отпустить записи вызовов, чьи кадры уже сняты трапом: mark ниже
 	   текущего указателя стека. Записи лежат в куче, поэтому переживают
-	   снятый кадр; порядок цепочки — от глубокого к внешнему. *)
+	   снятый кадр; порядок цепочки — от глубокого к внешнему.
+	   Ожидание снимается, только если снят его собственный кадр (wmark):
+	   живой Wait, только что вставший в очередь перед сном, не трогается. *)
 		VAR h, n: Hold; sp: S.ADDRESS; marker: INTEGER;
 	BEGIN
 		IF (current = NIL) OR (ctx.task = NIL) THEN RETURN END;
+		sp := S.ADR(marker);
 		h := ctx.task.holds;
 		WHILE h # NIL DO
 			n := h.next;
-			IF h.waiting THEN ReleaseHold(h) END;
+			IF h.waiting & (h.wmark < sp) THEN ReleaseHold(h) END;
 			h := n
 		END;
-		sp := S.ADR(marker);
 		WHILE (ctx.task.holds # NIL) & (ctx.task.holds.mark < sp) DO
 			h := ctx.task.holds; ctx.task.holds := h.next;
 			ReleaseHold(h);
@@ -1029,27 +1037,43 @@ MODULE Tasks;
 		END
 	END Reconcile;
 
-	PROCEDURE EnterOp (VAR ctx: Ctx);
-	(* Общая точка входа операции: убрать брошенные кадры и вернуть
-	   уборщик на стек, если трап его снял. *)
+	PROCEDURE Heal (VAR ctx: Ctx);
+	(* Вернуть уборщик на стек, если трап его снял, и убрать брошенные
+	   кадры, если уборщик отметил трап. Без трапа — две проверки:
+	   сверка на каждом входе больше не нужна. *)
 	BEGIN
-		IF current = NIL THEN RETURN END;
-		Reconcile(ctx);
 		IF ~ctx.cleanerPushed & (ctx.cleaner # NIL) THEN
 			Kernel.PushTrapCleaner(ctx.cleaner);
 			ctx.cleanerPushed := TRUE
+		END;
+		IF ctx.trapped THEN
+			ctx.trapped := FALSE;
+			Reconcile(ctx)
 		END
+	END Heal;
+
+	PROCEDURE EnterOp (VAR ctx: Ctx);
+	(* Общая точка входа операции. *)
+	BEGIN
+		IF current # NIL THEN Heal(ctx) END
 	END EnterOp;
 
 	(* --- запросы Ctx ------------------------------------------------------ *)
+
+	PROCEDURE StoppedNow (VAR c: Ctx): BOOLEAN;
+	(* Stopped без входа в операцию: вызывающий уже сделал Heal. *)
+	BEGIN
+		IF (c.task # NIL) & c.task.cancel THEN c.cancelled := TRUE END;
+		(* expired не сбрасывается: повторно часы не читаем *)
+		IF ~c.expired & (c.deadline > 0) & (Kernel.Time() >= c.deadline) THEN c.expired := TRUE END;
+		RETURN c.cancelled OR c.expired
+	END StoppedNow;
 
 	PROCEDURE (VAR c: Ctx) Stopped* (): BOOLEAN, NEW;
 	(** TRUE — задача отменена или срок истёк. *)
 	BEGIN
 		EnterOp(c);
-		IF (c.task # NIL) & c.task.cancel THEN c.cancelled := TRUE END;
-		IF (c.deadline > 0) & (Kernel.Time() >= c.deadline) THEN c.expired := TRUE END;
-		RETURN c.cancelled OR c.expired
+		RETURN StoppedNow(c)
 	END Stopped;
 
 	PROCEDURE (VAR c: Ctx) TaskOf* (): Task, NEW;
@@ -1112,23 +1136,23 @@ MODULE Tasks;
 
 	PROCEDURE AcquireEntry (VAR ctx: Ctx; o: Object; h: Hold): BOOLEAN;
 	(* Войти в занятый монитор. FALSE — задача остановлена до входа. *)
-		VAR tok: S.ADDRESS;
+		VAR tok: S.ADDRESS; marker: INTEGER;
 	BEGIN
-		tok := Kernel.monTok;
+		tok := Token();
 		WHILE o.owner # tok DO
-			IF ctx.Stopped() THEN RETURN FALSE END;
+			IF StoppedNow(ctx) THEN RETURN FALSE END;
 			IF o.owner = 0 THEN	(* проснулись без передачи, монитор свободен *)
 				o.owner := tok; o.depth := 1;
 				RETURN TRUE
 			END;
-			h.waiting := TRUE; h.qkind := entryQ;
+			h.waiting := TRUE; h.wmark := S.ADR(marker);
 			current.qkind := entryQ; current.qnext := NIL;
 			Append(o.enter, o.enterTail, current);
 			ParkAwait(ctx, NIL);
 			IF current.qkind # 0 THEN RemoveQueued(o, current) END;
-			h.waiting := FALSE; h.qkind := 0;
+			h.waiting := FALSE;
 			IF o.owner = tok THEN RETURN TRUE END;	(* передан вместе с пробуждением *)
-			IF ctx.Stopped() THEN RETURN FALSE END
+			IF StoppedNow(ctx) THEN RETURN FALSE END
 		END;
 		o.owner := tok; o.depth := 1;
 		RETURN TRUE
@@ -1139,7 +1163,7 @@ MODULE Tasks;
 	   держа монитор, чтобы Exclusive мог выйти. *)
 		VAR tok: S.ADDRESS;
 	BEGIN
-		tok := Kernel.monTok;
+		tok := Token();
 		WHILE o.owner # tok DO
 			IF o.owner = 0 THEN
 				o.owner := tok; o.depth := 1; RETURN
@@ -1151,13 +1175,26 @@ MODULE Tasks;
 		END
 	END AcquireForced;
 
+	PROCEDURE HealCurrent;
+	(* Перед сном: если уборщик отметил трап, отпустить мониторы снятых
+	   кадров, иначе задача уснула бы с чужим монитором в руках. *)
+		VAR p: CtxPtr;
+	BEGIN
+		IF (current # NIL) & (current.pctx # 0) THEN
+			p := S.VAL(CtxPtr, current.pctx);
+			Heal(p^)
+		END
+	END HealCurrent;
+
 	PROCEDURE CheckSleepHolds (except: Object);
 	(* Перед сном: каждый взятый монитор-объект, кроме except (того, в
 	   чьём Wait задача засыпает на глубине 1), должен разрешать ожидание.
 	   Быстрый путь: задача не Job или ничего не держит — одно сравнение. *)
 		VAR h: Hold;
 	BEGIN
-		IF (current = NIL) OR (current.holds = NIL) THEN RETURN END;
+		IF current = NIL THEN RETURN END;
+		HealCurrent;
+		IF current.holds = NIL THEN RETURN END;
 		h := current.holds;
 		WHILE h # NIL DO
 			IF h.acq & (h.obj # NIL) & (h.obj # except) THEN
@@ -1178,12 +1215,12 @@ MODULE Tasks;
 		IF o = NIL THEN Msg("Do: NIL object"); HALT(20) END;
 		IF current = NIL THEN Msg("Do outside a task"); HALT(22) END;
 		IF ctx.task # current THEN Msg("Do: pass of another task"); HALT(25) END;
-		EnterOp(ctx);
-		IF ctx.Stopped() THEN RETURN END;
-		tok := Kernel.monTok;
+		Heal(ctx);
+		IF StoppedNow(ctx) THEN RETURN END;
+		tok := Token();
 		h := TakeHold(ctx);
 		h.obj := o; h.next := ctx.task.holds; h.mark := S.ADR(marker);
-		h.need := {}; h.cond := NIL; h.qkind := 0; h.waiting := FALSE; h.acq := FALSE;
+		h.waiting := FALSE; h.acq := FALSE;
 		ctx.task.holds := h;
 		acq := FALSE; entered := FALSE;
 		IF o.owner = tok THEN
@@ -1197,7 +1234,7 @@ MODULE Tasks;
 		h.acq := acq;
 		IF entered THEN
 			o.Exclusive(ctx, op);
-			Reconcile(ctx);
+			Heal(ctx);	(* трап внутри Exclusive мог снять внутренние кадры *)
 			IF acq THEN ReleaseOne(o) ELSIF o.depth > 0 THEN DEC(o.depth) END
 		END;
 		IF ctx.task.holds = h THEN
@@ -1209,34 +1246,40 @@ MODULE Tasks;
 		GiveHold(ctx, h)
 	END Do;
 
-	PROCEDURE (o: Object) Wait* (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
-	(** Пред: монитор у вызывающей задачи (21), глубина 1 (23), сон с
-		удерживаемыми мониторами разрешён (26), вызов из задачи (22), ctx этой
-		задачи (25). Пост: TRUE — условие истинно, монитор у задачи;
-		FALSE — задача остановлена, монитор тоже у задачи. *)
-		VAR h: Hold; tok: S.ADDRESS; first: BOOLEAN;
+	PROCEDURE WaitCommon (o: Object; VAR ctx: Ctx; cond: Cond; need: SET): BOOLEAN;
+	(* Общее тело Wait (cond = NIL, ждём флаги need) и WaitFor (cond # NIL).
+	   Предусловия и сообщения проверяют обёртки. *)
+		VAR h: Hold; tok: S.ADDRESS; first, isCond: BOOLEAN; marker: INTEGER;
 	BEGIN
-		IF o = NIL THEN Msg("Wait: NIL object"); HALT(20) END;
-		IF current = NIL THEN Msg("Wait outside a task"); HALT(22) END;
-		IF ctx.task # current THEN Msg("Wait: pass of another task"); HALT(25) END;
-		EnterOp(ctx);
-		tok := Kernel.monTok;
+		Heal(ctx);
+		tok := Token();
 		IF o.owner # tok THEN Msg("Wait outside Exclusive"); HALT(21) END;
 		IF o.depth # 1 THEN Msg("Wait on a nested entry"); HALT(23) END;
 		h := ctx.task.holds;
 		IF (h = NIL) OR (h.obj # o) OR ~h.acq THEN
 			Msg("Wait: no Do record"); HALT(100)
 		END;
-		IF ctx.Stopped() THEN RETURN FALSE END;
+		isCond := cond # NIL;
+		IF StoppedNow(ctx) THEN RETURN FALSE END;
 		first := TRUE;
 		LOOP
-			IF (need * o.Ready()) # {} THEN RETURN TRUE END;
-			IF ctx.Stopped() THEN RETURN FALSE END;
-			h.waiting := TRUE; h.qkind := flagQ; h.need := need; h.cond := NIL;
-			current.qkind := flagQ; current.qneed := need; current.qcond := NIL;
+			IF isCond THEN
+				IF cond.Ready(o) THEN RETURN TRUE END
+			ELSIF (need * o.Ready()) # {} THEN RETURN TRUE
+			END;
+			IF StoppedNow(ctx) THEN RETURN FALSE END;
+			h.waiting := TRUE; h.wmark := S.ADR(marker);
 			current.qnext := NIL;
-			IF first THEN Append(o.flagq, o.flagTail, current)
-			ELSE Prepend(o.flagq, o.flagTail, current)
+			IF isCond THEN
+				current.qkind := condQ; current.qcond := cond; current.qneed := {};
+				IF first THEN Append(o.condq, o.condTail, current)
+				ELSE Prepend(o.condq, o.condTail, current)
+				END
+			ELSE
+				current.qkind := flagQ; current.qneed := need; current.qcond := NIL;
+				IF first THEN Append(o.flagq, o.flagTail, current)
+				ELSE Prepend(o.flagq, o.flagTail, current)
+				END
 			END;
 			first := FALSE;
 			ReleaseMonitor(o);
@@ -1248,52 +1291,32 @@ MODULE Tasks;
 				AcquireForced(o)
 			END;
 			IF current.qkind # 0 THEN RemoveQueued(o, current) END;
-			h.waiting := FALSE; h.qkind := 0;
+			h.waiting := FALSE;
 			o.depth := 1;
-			IF ctx.Stopped() THEN RETURN FALSE END
+			IF StoppedNow(ctx) THEN RETURN FALSE END
 		END
+	END WaitCommon;
+
+	PROCEDURE (o: Object) Wait* (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
+	(** Пред: монитор у вызывающей задачи (21), глубина 1 (23), сон с
+		удерживаемыми мониторами разрешён (26), вызов из задачи (22), ctx этой
+		задачи (25). Пост: TRUE — условие истинно, монитор у задачи;
+		FALSE — задача остановлена, монитор тоже у задачи. *)
+	BEGIN
+		IF o = NIL THEN Msg("Wait: NIL object"); HALT(20) END;
+		IF current = NIL THEN Msg("Wait outside a task"); HALT(22) END;
+		IF ctx.task # current THEN Msg("Wait: pass of another task"); HALT(25) END;
+		RETURN WaitCommon(o, ctx, NIL, need)
 	END Wait;
 
 	PROCEDURE (o: Object) WaitFor* (VAR ctx: Ctx; c: Cond): BOOLEAN, NEW;
 	(** То же, что Wait, но условие — объект c.Ready(o). *)
-		VAR h: Hold; tok: S.ADDRESS; first: BOOLEAN;
 	BEGIN
 		IF o = NIL THEN Msg("WaitFor: NIL object"); HALT(20) END;
 		IF c = NIL THEN Msg("WaitFor: NIL condition"); HALT(25) END;
 		IF current = NIL THEN Msg("WaitFor outside a task"); HALT(22) END;
 		IF ctx.task # current THEN Msg("WaitFor: pass of another task"); HALT(25) END;
-		EnterOp(ctx);
-		tok := Kernel.monTok;
-		IF o.owner # tok THEN Msg("WaitFor outside Exclusive"); HALT(21) END;
-		IF o.depth # 1 THEN Msg("WaitFor on a nested entry"); HALT(23) END;
-		h := ctx.task.holds;
-		IF (h = NIL) OR (h.obj # o) OR ~h.acq THEN
-			Msg("WaitFor: no Do record"); HALT(100)
-		END;
-		IF ctx.Stopped() THEN RETURN FALSE END;
-		first := TRUE;
-		LOOP
-			IF c.Ready(o) THEN RETURN TRUE END;
-			IF ctx.Stopped() THEN RETURN FALSE END;
-			h.waiting := TRUE; h.qkind := condQ; h.cond := c; h.need := {};
-			current.qkind := condQ; current.qcond := c; current.qneed := {};
-			current.qnext := NIL;
-			IF first THEN Append(o.condq, o.condTail, current)
-			ELSE Prepend(o.condq, o.condTail, current)
-			END;
-			first := FALSE;
-			ReleaseMonitor(o);
-			ParkAwait(ctx, o);
-			IF o.owner = tok THEN
-			ELSE
-				IF current.qkind # 0 THEN RemoveQueued(o, current) END;
-				AcquireForced(o)
-			END;
-			IF current.qkind # 0 THEN RemoveQueued(o, current) END;
-			h.waiting := FALSE; h.qkind := 0;
-			o.depth := 1;
-			IF ctx.Stopped() THEN RETURN FALSE END
-		END
+		RETURN WaitCommon(o, ctx, c, {})
 	END WaitFor;
 
 	(* --- дети пропуска ---------------------------------------------------- *)
@@ -1306,7 +1329,7 @@ MODULE Tasks;
 		IF ctx.task # current THEN Msg("Spawn: pass of another task"); HALT(25) END;
 		IF t = NIL THEN Msg("Spawn: NIL task"); HALT(20) END;
 		EnterOp(ctx);
-		IF ctx.Stopped() THEN Msg("Spawn: pass stopped"); RETURN END;
+		IF StoppedNow(ctx) THEN Msg("Spawn: pass stopped"); RETURN END;
 		IF ctx.group = NIL THEN
 			NEW(g); g.alive := 0; g.failed := FALSE; g.owner := NIL;
 			ctx.group := g
@@ -1326,7 +1349,7 @@ MODULE Tasks;
 		ASSERT((g.owner = NIL) OR (g.owner = ctx.task), 100);
 		g.owner := ctx.task;
 		WHILE g.alive > 0 DO
-			IF ctx.Stopped() THEN
+			IF StoppedNow(ctx) THEN
 				CancelGroup(g);
 				ParkRaw(NIL)
 			ELSE
