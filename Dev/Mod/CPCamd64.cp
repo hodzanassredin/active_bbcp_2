@@ -98,7 +98,8 @@ MODULE DevCPCamd64;
 
 		(* pointer init limits *)
 		MaxPtrs = 10; MaxPush = 4;
-		
+		ptrSlot = 8;	(* amd64: указатель и машинный слот стека — 8 байт *)
+
 		Tag0Offset = 24;
 		Mth0Offset = -8;
 		ArrDOffs = 8;
@@ -2220,10 +2221,10 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		VAR fld: DevCPT.Object; btyp: DevCPT.Struct; i, n: INTEGER;
 	BEGIN
 		IF typ.form IN {Pointer, ProcTyp} THEN
-			IF num < MaxPtrs THEN ptrTab[num] := adr DIV 4 * 4 END;
+			IF num < MaxPtrs THEN ptrTab[num] := adr DIV ptrSlot * ptrSlot END;
 			INC(num);
-			IF adr MOD 4 # 0 THEN
-				IF num < MaxPtrs THEN ptrTab[num] := adr DIV 4 * 4 + 4 END;
+			IF adr MOD ptrSlot # 0 THEN
+				IF num < MaxPtrs THEN ptrTab[num] := adr DIV ptrSlot * ptrSlot + ptrSlot END;
 				INC(num)
 			END
 		ELSIF typ.comp = Record THEN
@@ -2341,7 +2342,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				base := proc.conval.intval2;
 				Sort(ptrTab, nofptrs); i := 0; a := size + base; gaps := 0;
 				WHILE i < nofptrs DO
-					DEC(a, 4);
+					DEC(a, ptrSlot);
 					IF a # ptrTab[i] THEN a := ptrTab[i]; INC(gaps) END;
 					INC(i)
 				END;
@@ -2351,7 +2352,7 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 					IF (nofptrs > 4) THEN x := z; DevCPLamd64.MakeReg(z, AX, Pointer); DevCPLamd64.GenMove(x, z) END;
 					i := 0; a := size + base;
 					WHILE i < nofptrs DO
-						DEC(a, 4);
+						DEC(a, ptrSlot);
 						IF a # ptrTab[i] THEN AdjustStack(ptrTab[i] - a); a := ptrTab[i] END;
 						DevCPLamd64.GenPush(z); INC(i)
 					END;

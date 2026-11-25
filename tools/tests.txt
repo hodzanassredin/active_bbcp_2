@@ -14,6 +14,8 @@ Dev_devActive|proc|300|
 Dev_devYield|proc|300||^
 # Многомерные открытые массивы-параметры и динамические массивы в куче.
 Dev_devOpenArr||180|
+# Обнуление локальных указателей при входе (и указателей, и OUT-параметров).
+Dev_devPtrInit|proc|180||^
 Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
 Async_devIO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
 Async_devWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin

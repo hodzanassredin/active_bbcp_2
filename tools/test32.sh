@@ -28,6 +28,7 @@ System_devMonitors|proc|300
 Dev_devActive|proc|300
 Dev_devYield|proc|300
 Dev_devOpenArr||180
+Dev_devPtrInit|proc|180
 System_devCoTests|proc|300
 System_devUnloadGuard|proc|300
 Async_devStm|proc|300
@@ -71,6 +72,7 @@ compile_dev32() {
 			System_devBasic System_devGcStack System_devTrapStack \
 			System_devCoTests System_devTasks System_devMonitors \
 			Dev_devActive Lin_devFiles 'Dev_devYield^' Dev_devOpenArr \
+			'Dev_devPtrInit^' \
 			System_devUnloadGuardCode System_devUnloadGuard \
 			AsyncProto AsyncSelect AsyncChan Async_devStm \
 			Cas_devHash Cas_devStore Cas_devChunk Cas_devTree Cas_devChange \
