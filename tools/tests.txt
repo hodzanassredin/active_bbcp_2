@@ -64,3 +64,5 @@ Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
 Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan
 # Парные замеры задач, каналов и свободного монитора-объекта (итог обмена).
 Async_devBench|proc slow|900|AsyncSelect AsyncChan System_devCRaw System_devClock
+# Примеры Demo: задачи, мониторы-объекты, каналы, муравьи (amd64).
+Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool
