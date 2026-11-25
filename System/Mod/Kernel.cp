@@ -433,6 +433,7 @@ MODULE Kernel;
 		dirty: SET;	(** dirty recovery modules *)
 		unit: INTEGER;	(** currently active unit; used to identify which unit becomes dirty after a trap *)
 		tryCount: INTEGER;	(* counter of nested Try calls *)
+		inTryTasks: BOOLEAN;	(* открыт TryTasks *)
 		dontCollect: BOOLEAN;
 		log: ErrLog;
 		blog: BufLog;
@@ -508,6 +509,14 @@ MODULE Kernel;
 	PROCEDURE (VAR p: Platform) SetTryContext* (ctx: S.ADDRESS), NEW, EXTENSIBLE;
 	BEGIN
 	END SetTryContext;
+	PROCEDURE (VAR p: Platform) TryShared* (h: TryHandler; a, b, c: S.ADDRESS): BOOLEAN, NEW, EXTENSIBLE;
+	(** Try с контекстом в одном месте на процесс (не в кадре): стек, которому
+		этот контекст отдан (InheritTry), возвращается по трапу в текущий
+		открытый TryShared, сколько бы раз его ни открывали. Пост: FALSE —
+		платформа не поддерживает, h не вызван. *)
+	BEGIN
+		RETURN FALSE
+	END TryShared;
 	PROCEDURE (VAR p: Platform) IsReadable* (from, to: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) PrintHeaderInfo*, NEW, EMPTY;	(* EMPTY *)
 	PROCEDURE (VAR p: Platform) GetTrapInfo* (VAR pc, sp, fp: S.ADDRESS; VAR err, val: INTEGER; OUT recursive: BOOLEAN), NEW, ABSTRACT;
@@ -2729,6 +2738,48 @@ MODULE Kernel;
 			IF monitorHook # NIL THEN monitorHook.endTry(mark) END
 		END
 	END Try;
+
+	PROCEDURE TryTasks* (h, after: TryHandler; a, b, c: S.ADDRESS): BOOLEAN;
+	(** Один Try на проход планировщика задач вместо одного на задачу. h
+		исполняется под TryShared; трап на стеке задачи, получившей контекст
+		через InheritTry и не пойманный её собственным Try, возвращает
+		управление сюда, на стек вызывающего. Тогда (и после нормального
+		выхода из h) восстанавливаются цепочка уборщиков и счётчик Try стека
+		вызывающего и зовётся after(a, b, c) — до снятия мониторов этого Try.
+		Пред: TryTasks не открыт (20).
+		Пост: FALSE — платформа не поддерживает TryShared, h и after не вызваны. *)
+		VAR mark, cnt: INTEGER; ts: TrapCleaner; ok: BOOLEAN;
+	BEGIN
+		ASSERT(~inTryTasks, 20);
+		IF monitorHook # NIL THEN mark := monitorHook.beginTry() ELSE mark := 0 END;
+		ts := trapStack; INC(tryCount); cnt := tryCount;
+		inTryTasks := TRUE;
+		ok := platform.TryShared(h, a, b, c);
+		inTryTasks := FALSE;
+		trapStack := ts; tryCount := cnt;
+		IF ok THEN after(a, b, c) END;
+		DEC(tryCount);
+		IF monitorHook # NIL THEN monitorHook.endTry(mark) END;
+		RETURN ok
+	END TryTasks;
+
+	PROCEDURE InheritTry* (s: Stack);
+	(** Пред: открыт TryTasks и вызов идёт на его стеке (20), s # NIL (21).
+		Пост: стек s начнёт с контекста Try прохода планировщика: трап на нём,
+		не пойманный его собственным Try, вернётся в TryTasks. *)
+	BEGIN
+		ASSERT(inTryTasks, 20); ASSERT(s # NIL, 21);
+		s.tryContext := platform.GetTryContext(); s.tryCount := tryCount; s.trapStack := NIL
+	END InheritTry;
+
+	PROCEDURE DropMonitors*;
+	(** Пред: monTok # mainToken (20). Пост: взятия мониторов токеном monTok
+		сняты, как при выходе из Kernel.Try с отметкой 0. Зовётся после трапа
+		задачи, пойманного TryTasks, пока monTok — токен этой задачи. *)
+	BEGIN
+		ASSERT(monTok # mainToken, 20);
+		IF monitorHook # NIL THEN monitorHook.endTry(0) END
+	END DropMonitors;
 	
 	(* -------------------- Initialization --------------------- *)
 

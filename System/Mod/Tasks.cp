@@ -159,6 +159,11 @@ MODULE Tasks;
 		   ядра и не сканируется. *)
 		dir: StackDir;		(* поставщик для новых задач *)
 		dirs: StackDir;		(* поставщики, у которых есть стеки *)
+		(* Проход Step: его стек и начало, итог RunLoop. oneTry — один Kernel.Try
+		   на проход (TryTasks); FALSE — платформа его не даёт, Try на задачу. *)
+		stepStack: Kernel.Stack;
+		stepT0: LONGINT;
+		loopDone, oneTry: BOOLEAN;
 		closeT: Task; closeT0: LONGINT;	(* для CLOSE *)
 
 	PROCEDURE (t: Task) Run* (), NEW, ABSTRACT;
@@ -455,8 +460,34 @@ MODULE Tasks;
 		END
 	END WaitOwnGroup;
 
+	PROCEDURE EndBody (t: Task);
+	(* Пред: тело t вернулось (t.bodyOk) или прервано трапом (~t.bodyOk).
+	   Пост: t Finished или Cancelled. Отменённая или трапнувшая задача
+	   отменяет свою группу: дети не переживают родителя (структурная
+	   конкуренция). Ветка нормального выхода ждёт группу и потому зовётся
+	   только на стеке t; ветки трапа и отмены — и со стека планировщика. *)
+	BEGIN
+		IF t.cancel THEN
+			IF t.own # NIL THEN CancelGroup(t.own) END;
+			t.state := Cancelled
+		ELSIF ~t.bodyOk THEN
+			IF t.own # NIL THEN CancelGroup(t.own) END;
+			t.failed := TRUE;
+			t.state := Finished;
+			IF t.group # NIL THEN
+				t.group.failed := TRUE; CancelGroup(t.group)
+			END
+		ELSE
+			t.state := Finished;
+			WaitOwnGroup(t);
+			t.state := Finished	(* WaitOwnGroup ставил Parked *)
+		END
+	END EndBody;
+
 	PROCEDURE TaskBoot;
-	(** Точка входа нового стека (адрес возврата из Switch). *)
+	(** Точка входа нового стека (адрес возврата из Switch). При oneTry тело
+		идёт без своего Kernel.Try: трап возвращает управление в Kernel.TryTasks
+		прохода планировщика (Step, AfterLoop), и задачу завершает он. *)
 		VAR t: Task;
 	BEGIN
 		t := current;
@@ -465,29 +496,119 @@ MODULE Tasks;
 			t.state := Cancelled
 		ELSE
 			t.bodyOk := FALSE;
-			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TaskBody)), 0, 0, 0);
-			(* Отменённая или трапнувшая задача отменяет свою группу: дети не
-			   переживают родителя (структурная конкуренция). *)
-			IF t.cancel THEN
-				IF t.own # NIL THEN CancelGroup(t.own) END;
-				t.state := Cancelled
-			ELSIF ~t.bodyOk THEN
-				IF t.own # NIL THEN CancelGroup(t.own) END;
-				t.failed := TRUE;
-				t.state := Finished;
-				IF t.group # NIL THEN
-					t.group.failed := TRUE; CancelGroup(t.group)
-				END
+			IF oneTry THEN
+				TaskBody(0, 0, 0);
+				Kernel.DropMonitors	(* как выход из Kernel.Try: несбалансированные входы тела сняты *)
 			ELSE
-				t.state := Finished;
-				WaitOwnGroup(t);
-				t.state := Finished	(* WaitOwnGroup ставил Parked *)
-			END
+				Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TaskBody)), 0, 0, 0)
+			END;
+			EndBody(t)
 		END;
 		Services.SetTrapGuardCleanup;	(* трап внутри Do не оставляет флаг *)
 		Finish
 	END TaskBoot;
 
+	(* --- поставщики стеков ------------------------------------------------- *)
+
+	PROCEDURE (d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+	(** Пред: size > 0. Пост: TRUE — [lo, hi) новый стек не меньше size байт;
+		FALSE — памяти нет. Зовётся только при пустом пуле: стеки из пула Tasks
+		выдаёт сам. *)
+
+	PROCEDURE (d: StackDir) FreeStack- (lo, hi: S.ADDRESS), NEW, ABSTRACT;
+	(** Вернуть ядру стек, выданный NewStack. *)
+
+	PROCEDURE (d: StackDir) Drain-, NEW, EMPTY;
+	(** Пул пуст и стеков у задач нет: вернуть ядру всё, что поставщик держит. *)
+
+	PROCEDURE (d: GuardDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	BEGIN
+		RETURN Kernel.AllocStack(size, lo, hi)
+	END NewStack;
+
+	PROCEDURE (d: GuardDir) FreeStack- (lo, hi: S.ADDRESS);
+	BEGIN
+		Kernel.FreeStack(lo, hi)
+	END FreeStack;
+
+	PROCEDURE (d: SlabDir) Drain-;
+	(* Пост: невыданные стеки плиты возвращены ядру, плиты нет. *)
+	BEGIN
+		WHILE d.slabNext # d.slabEnd DO
+			Kernel.FreeStack(d.slabEnd - d.slabStep + d.slabGuard, d.slabEnd); d.slabEnd := d.slabEnd - d.slabStep
+		END;
+		d.slabNext := 0; d.slabEnd := 0
+	END Drain;
+
+	PROCEDURE (d: SlabDir) NewStack- (size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
+	(* Из плиты того же размера; иначе новой плитой (slabN стеков, сторожевые
+	   страницы ставятся при нарезке); платформа без плит — по одному. *)
+	BEGIN
+		IF (d.slabNext # d.slabEnd) & (d.slabSize # size) THEN d.Drain END;
+		IF d.slabNext = d.slabEnd THEN
+			IF ~Kernel.AllocStacks(size, slabN, d.slabNext, d.slabStep, d.slabGuard) THEN
+				d.slabNext := 0; d.slabEnd := 0;
+				RETURN Kernel.AllocStack(size, lo, hi)
+			END;
+			d.slabEnd := d.slabNext + d.slabStep * slabN; d.slabSize := size
+		END;
+		lo := d.slabEnd - d.slabStep + d.slabGuard;
+		hi := d.slabEnd; d.slabEnd := d.slabEnd - d.slabStep;
+		RETURN TRUE
+	END NewStack;
+
+	PROCEDURE (d: SlabDir) FreeStack- (lo, hi: S.ADDRESS);
+	BEGIN
+		Kernel.FreeStack(lo, hi)
+	END FreeStack;
+
+	PROCEDURE NewGuardDir* (): StackDir;
+	(** Поставщик: отдельный стек со сторожевой страницей на задачу. *)
+		VAR d: GuardDir;
+	BEGIN
+		NEW(d); RETURN d
+	END NewGuardDir;
+
+	PROCEDURE NewSlabDir* (): StackDir;
+	(** Поставщик: плиты по slabN стеков со сторожевой страницей под каждым;
+		платформа без плит — по одному. Безопасность та же, что у отдельного
+		стека: переполнение упирается в свою сторожевую страницу. *)
+		VAR d: SlabDir;
+	BEGIN
+		NEW(d); RETURN d
+	END NewSlabDir;
+
+	PROCEDURE SetStackDir* (d: StackDir);
+	(** Пред: d # NIL (трап 20). Пост: новые задачи берут стеки у d. Живые
+		задачи вернут свои стеки тому поставщику, который их выдал. *)
+	BEGIN
+		ASSERT(d # NIL, 20);
+		dir := d
+	END SetStackDir;
+
+	PROCEDURE StackDirOf* (): StackDir;
+	BEGIN
+		RETURN dir
+	END StackDirOf;
+
+	PROCEDURE StackDirOfTask* (t: Task): StackDir;
+	(** Поставщик стека t; NIL — у t нет стека. *)
+	BEGIN
+		ASSERT(t # NIL, 20);
+		IF t.lo = 0 THEN RETURN NIL ELSE RETURN t.dir END
+	END StackDirOfTask;
+
+	PROCEDURE UseGuardStacks*;
+	(** Команда: новые задачи — со стеком со сторожем. *)
+	BEGIN
+		SetStackDir(NewGuardDir())
+	END UseGuardStacks;
+
+	PROCEDURE UseSlabStacks*;
+	(** Команда: плиты со сторожем на стек (по умолчанию). *)
+	BEGIN
+		SetStackDir(NewSlabDir())
+	END UseSlabStacks;
 
 	PROCEDURE TakeStack (d: StackDir; size: INTEGER; OUT lo, hi: S.ADDRESS): BOOLEAN;
 	(* Пред: size > 0. Пост: TRUE — [lo, hi) пригоден под стек, запрошенный у d
@@ -840,10 +961,62 @@ MODULE Tasks;
 		END
 	END CheckDeadlock;
 
+	PROCEDURE RunLoop (a, b, c: S.ADDRESS);
+	(* Тело прохода Step; при oneTry — под Kernel.TryTasks. Пост: loopDone —
+	   проход закончен без трапа задачи. *)
+		VAR t: Task; now: LONGINT;
+	BEGIN
+		now := Kernel.Time();
+		LOOP
+			(* Инвариант: now — время, прочитанное после последнего переключения. *)
+			IF now - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
+				Kernel.RequestPoll; lastPoll := now
+			END;
+			(* Спящих просматриваем не чаще раза на изменившееся время. *)
+			IF now # lastWake THEN lastWake := now; WakeSleepers(now) END;
+			t := Dequeue();
+			IF t = NIL THEN CheckDeadlock; EXIT END;
+			SetCurrent(t); t.state := Running;
+			(* Первый запуск всегда отсюда (Leave его не делает): стек получает
+			   контекст Try прохода. *)
+			IF oneTry & (t.sp = t.hi - stackHead) THEN Kernel.InheritTry(t.stackRec) END;
+			SwitchTo(schedSP, t.sp, stepStack);
+			t := current; SetCurrent(NIL); direct := 0;	(* вернулась, возможно, другая задача *)
+			atomic := 0;	(* вернуться из участка можно, только кончив задачу трапом: участок брошен *)
+			IF IsDone(t) THEN Reap(t) END;
+			now := Kernel.Time();
+			IF now - stepT0 >= slice THEN EXIT END
+		END;
+		loopDone := TRUE
+	END RunLoop;
+
+	PROCEDURE AfterLoop (a, b, c: S.ADDRESS);
+	(* Зовётся Kernel.TryTasks на стеке планировщика. ~loopDone — трап задачи
+	   current, не пойманный её Try: её мониторы сняты, задача завершена как
+	   трапнувшая (или отменённая), стек убран. Трап самого планировщика
+	   (current = NIL) заканчивает проход. *)
+		VAR t: Task;
+	BEGIN
+		IF ~loopDone THEN
+			t := current;
+			IF t = NIL THEN loopDone := TRUE
+			ELSE
+				Kernel.DropMonitors;
+				t.bodyOk := FALSE;
+				IF t.state # Cancelled THEN EndBody(t) END;
+				Services.SetTrapGuardCleanup;
+				SetCurrent(NIL); direct := 0;
+				Reap(t)
+			END
+		END
+	END AfterLoop;
+
 	PROCEDURE Step*;
 	(** Исполнить готовые задачи, не дольше slice мс. Вызывается со дна
-		главного цикла (действие планировщика) или тестом. *)
-		VAR t: Task; t0, now: LONGINT; schedStack: Kernel.Stack;
+		главного цикла (действие планировщика) или тестом. Один Kernel.TryTasks
+		на проход: трап задачи возвращает сюда, задача завершается, проход
+		продолжается. Платформа без TryShared — Try на задачу (TaskBoot). *)
+		VAR here: INTEGER;	(* адрес на стеке планировщика *)
 	BEGIN
 		IF current # NIL THEN Msg("Step called from a task") END;
 		ASSERT(current = NIL, 20);
@@ -855,30 +1028,17 @@ MODULE Tasks;
 		inStep := TRUE;
 		(* Запись своего стека ищем один раз на шаг; задачи свои записи знают.
 		   Переключение обходится без поиска в реестре стеков. *)
-		schedStack := Kernel.StackOf(S.ADR(t0));
-		t0 := Kernel.Time(); now := t0;
-		LOOP
-			(* Инвариант: now — время, прочитанное после последнего переключения. *)
-			IF now - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
-				Kernel.RequestPoll; lastPoll := now
-			END;
-			(* Спящих просматриваем не чаще раза на изменившееся время. *)
-			IF now # lastWake THEN lastWake := now; WakeSleepers(now) END;
-			t := Dequeue();
-			IF t = NIL THEN CheckDeadlock; EXIT END;
-			SetCurrent(t); t.state := Running;
-			SwitchTo(schedSP, t.sp, schedStack);
-			t := current; SetCurrent(NIL); direct := 0;	(* вернулась, возможно, другая задача *)
-			atomic := 0;	(* вернуться из участка можно, только кончив задачу трапом: участок брошен *)
-			IF IsDone(t) THEN Reap(t) END;
-			now := Kernel.Time();
-			IF now - t0 >= slice THEN EXIT END
-		END;
+		stepStack := Kernel.StackOf(S.ADR(here));	(* не адрес глобала: запись стека ищется по адресу на нём *)
+		stepT0 := Kernel.Time();
+		REPEAT
+			loopDone := FALSE;
+			IF oneTry & ~Kernel.TryTasks(S.VAL(Kernel.TryHandler, S.ADR(RunLoop)), S.VAL(Kernel.TryHandler, S.ADR(AfterLoop)), 0, 0, 0) THEN oneTry := FALSE END;
+			IF ~oneTry & ~loopDone THEN RunLoop(0, 0, 0) END
+		UNTIL loopDone;
 		TrimPool;
 		inStep := FALSE;
 		IF alive > 0 THEN EnsureScheduled END
 	END Step;
-
 
 	PROCEDURE (a: SchedAction) Do;
 	BEGIN
@@ -1038,7 +1198,7 @@ BEGIN
 	NEW(sched);
 	NEW(schedHook);
 	dir := NewSlabDir();
-	slice := defaultSlice;
+	slice := defaultSlice; oneTry := TRUE;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
 	lastPoll := Kernel.Time();
 	lastWake := -1;	(* первый Step обязан просмотреть спящих *)
