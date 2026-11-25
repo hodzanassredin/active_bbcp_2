@@ -1779,20 +1779,22 @@ MODULE Kernel;
 	END TakeSegment;
 
 	PROCEDURE ReturnSegment (lo, hi: S.ADDRESS; size: INTEGER);
-	(* segKeep — в пул; иначе отложить до следующего роста (на этом куске
-	   ещё исполняется SegmentDone, munmap сейчас недопустим). *)
+	(* segKeep — в пул; иначе отложить до следующего роста. munmap здесь
+	   недопустим: SegmentDone исполняется на возвращаемом куске. Если пул
+	   и отложенный список полны, отображение остаётся за процессом. *)
 	BEGIN
 		IF segKeep THEN
 			IF segPoolN < segPoolMax THEN
 				segPool[segPoolN].lo := lo; segPool[segPoolN].hi := hi; segPool[segPoolN].size := size;
 				INC(segPoolN)
-			ELSE platform.DeallocateStackMem(lo, hi)
+			ELSIF segPendingN < segPendingMax THEN
+				segPending[segPendingN].lo := lo; segPending[segPendingN].hi := hi; segPending[segPendingN].size := size;
+				INC(segPendingN)
 			END
 		ELSE
 			IF segPendingN < segPendingMax THEN
 				segPending[segPendingN].lo := lo; segPending[segPendingN].hi := hi; segPending[segPendingN].size := size;
 				INC(segPendingN)
-			ELSE platform.DeallocateStackMem(lo, hi)
 			END
 		END
 	END ReturnSegment;
@@ -1815,7 +1817,7 @@ MODULE Kernel;
 		tp := hi - segHdr - segMeta - 8;	(* слот указателя на запись возврата *)
 		rbp := tp - 16 - paramSize;
 		IF rbp - frameSize - segSlack < lo + segReserve THEN
-			ReturnSegment(lo, hi, SHORT(hi - lo)); Trap137
+			platform.DeallocateStackMem(lo, hi); Trap137
 		END;
 		S.GET(frameAdr, a); S.PUT(rbp, a);	(* сохранённый rbp вызывающего *)
 		S.PUT(rbp + 8, cont);			(* продолжение пролога *)
@@ -1880,7 +1882,12 @@ MODULE Kernel;
 	(** Включить/выключить сегментированный стек задач (проба). size — размер
 		куска роста, reserve — запас ниже Kernel.stkLo. *)
 	BEGIN
-		IF ~on THEN FlushPending END;
+		IF ~on THEN
+			FlushPending;
+			WHILE segPoolN > 0 DO
+				DEC(segPoolN); platform.DeallocateStackMem(segPool[segPoolN].lo, segPool[segPoolN].hi)
+			END
+		END;
 		segEnabled := on; segSize := size; segReserve := reserve
 	END SetSegmentedStacks;
 

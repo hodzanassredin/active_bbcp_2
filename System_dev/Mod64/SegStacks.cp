@@ -589,4 +589,34 @@ MODULE System_devSegStacks;
 	BEGIN TryReserve(256, 2304, 4096)
 	END Reserve256;
 
+	PROCEDURE Reserve256g2k*;
+	BEGIN TryReserve(256, 2304, 2048)
+	END Reserve256g2k;
+
+	PROCEDURE ManyInfo*;
+		VAR t: Deep;
+	BEGIN
+		Begin; Tasks.SetSegmentParams(256, 2304, 2048);
+		NEW(t); t.n := 8000; Tasks.Start(t); Pump;
+		W("MANY failed="); IF Tasks.Failed(t) THEN W("yes") ELSE W("no") END;
+		W(" res="); N(t.res); W(" grows="); N(Kernel.GrowCount());
+		W(" pool="); N(Kernel.SegmentPoolCount()); W(" pending="); N(Kernel.SegmentPendingCount());
+		Console.WriteLn;
+		End
+	END ManyInfo;
+
+	PROCEDURE TestProcManySegments*;
+	(* Глубже пула кусков: первые 256 возвратов идут в пул, остальные — в
+		отложенный список; освобождать исполняемый кусок нельзя. *)
+		VAR t: Deep;
+	BEGIN
+		Begin;
+		Tasks.SetSegmentParams(256, 2304, 2048);
+		NEW(t); t.n := 8000; Tasks.Start(t); Pump;
+		UnitAssert.True(~Tasks.Failed(t), "many-segments task failed");
+		UnitAssert.EqualInt(8000 * 8001 DIV 2, t.res, "many-segments sum");
+		UnitAssert.True(Kernel.GrowCount() > 256, "more live segments than the pool holds");
+		End
+	END TestProcManySegments;
+
 END System_devSegStacks.
