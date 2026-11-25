@@ -28,6 +28,7 @@ System_devMonField|proc|300
 Dev_devActive|proc|300
 Dev_devYield|proc|300
 Dev_devOpenArr||180
+Dev_devPtrInit|proc|180
 System_devCoTests|proc|300
 System_devUnloadGuard|proc|300'
 
@@ -62,6 +63,7 @@ compile_dev32() {
 			System_devCoTests System_devTasks System_devMonitors \
 			System_devMonBase System_devMonField \
 			Dev_devActive Lin_devFiles 'Dev_devYield^' Dev_devOpenArr \
+			'Dev_devPtrInit^' \
 			System_devUnloadGuardCode System_devUnloadGuard; do
 			opt=""
 			case "$m" in *\^) opt="^"; m="${m%^}";; esac
