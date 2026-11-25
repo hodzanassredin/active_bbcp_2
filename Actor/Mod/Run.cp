@@ -6,8 +6,17 @@ MODULE ActorRun;
 	стека, поэтому, пока пул жив, планировщик не объявляет тупик. Schedule
 	будит исполнителя Unpark. Будить
 	можно только задачу в этом ожидании: задачу, ждущую внутри Receive
-	(монитор, канал), Unpark сбил бы с ожидания. Поэтому у исполнителя
-	флаг idle, поднятый ровно на время ожидания.
+	(монитор, канал), Unpark сбил бы с ожидания. Поэтому свободный
+	исполнитель стоит в списке idle ровно на время ожидания.
+
+	Ожидание в обработчике занимает исполнителя. Чтобы готовые ящики не
+	ждали, пул растёт: Schedule, положив ящик в run, берёт исполнителя из
+	idle, иначе из sleep, иначе запускает нового, пока n < limit. Нет
+	свободных и предел достигнут — ящик ждёт, limitHits считает случаи.
+	Исполнитель сверх начального числа base не ждёт в idle, а спит
+	shrinkMs в списке sleep; проснувшись по сроку без работы, он
+	завершается. Списки врезные, взять и вернуть — O(1), на письмо нет ни
+	обхода, ни выделения.
 
 	Ящик с флагом dedicated обслуживает своя задача Own; она живёт, пока
 	актор не остановлен. Отменённую Own заменяет новая при следующей
@@ -16,27 +25,94 @@ MODULE ActorRun;
 	Shutdown останавливает все акторы и завершает задачи пула без отмены.
 
 	Инвариант: каждый ящик в run стоит у исполнителя (Pending) и лежит в
-	run не более одного раза; idle => исполнитель в Tasks.ParkExternal цикла. *)
+	run не более одного раза; исполнитель в idle или sleep ждёт только в
+	своём цикле; execs[0..n-1] без пропусков. *)
 
 	IMPORT Services, Tasks, ActorCore;
 
 	CONST
 		throughput = 100;	(* писем одного ящика за вызов Process *)
 		yieldEvery = 64;	(* ящиков между уступками *)
-		maxExec = 64;
+		defaultLimit = 1024;	(* стек задачи 256 КиБ => 256 МиБ адресов *)
+		shrinkMs = 1000;	(* простой лишнего исполнителя до ухода *)
 		shutdownMs = 5000;	(* предел ожидания остановки акторов *)
 
 	TYPE
 		Pool = POINTER TO RECORD (ActorCore.Dispatcher) END;
-		Exec = POINTER TO RECORD (Tasks.Task) idle, quit: BOOLEAN END;
+		Exec = POINTER TO RECORD (Tasks.Task)
+			quit, extra: BOOLEAN;	(* extra — сверх числа из Start *)
+			inIdle, inSleep: BOOLEAN;
+			idlePrev, idleNext: Exec;
+			sleepPrev, sleepNext: Exec;
+			slot: INTEGER	(* место в execs; -1 — завершён *)
+		END;
 		Own = POINTER TO RECORD (Tasks.Task) c: ActorCore.Context; idle: BOOLEAN END;
 
 	VAR
 		execs: POINTER TO ARRAY OF Exec;	(* запас растёт вместе с пулом *)
 		n-: INTEGER;	(** число исполнителей пула; 0 — пул остановлен *)
+		base: INTEGER;	(* начальное число из Start *)
+		limit-: INTEGER;	(** предел числа исполнителей *)
+		limitHits-: LONGINT;	(** раз готовый ящик ждал из-за предела (с Start) *)
+		grown-: LONGINT;	(** создано исполнителей сверх начального числа (с Start) *)
+		shrunk-: LONGINT;	(** завершено лишних исполнителей (с Start) *)
+		idleHead: Exec; idleCount: INTEGER;	(* свободные, ждут в ParkExternal *)
+		sleepHead: Exec; sleepCount: INTEGER;	(* лишние, спят до ухода *)
 		run: POINTER TO ARRAY OF ActorCore.Context;
 		head, count: INTEGER;
 		pool: Pool;
+
+	(* --- списки свободных и спящих --------------------------------------- *)
+
+	PROCEDURE PushIdle (e: Exec);
+	BEGIN
+		e.idlePrev := NIL; e.idleNext := idleHead;
+		IF idleHead # NIL THEN idleHead.idlePrev := e END;
+		idleHead := e; e.inIdle := TRUE; INC(idleCount)
+	END PushIdle;
+
+	PROCEDURE RemoveIdle (e: Exec);
+	BEGIN
+		IF e.inIdle THEN
+			IF e.idlePrev # NIL THEN e.idlePrev.idleNext := e.idleNext ELSE idleHead := e.idleNext END;
+			IF e.idleNext # NIL THEN e.idleNext.idlePrev := e.idlePrev END;
+			e.idlePrev := NIL; e.idleNext := NIL; e.inIdle := FALSE; DEC(idleCount)
+		END
+	END RemoveIdle;
+
+	PROCEDURE TakeIdle (): Exec;
+		VAR e: Exec;
+	BEGIN
+		e := idleHead;
+		IF e # NIL THEN RemoveIdle(e) END;
+		RETURN e
+	END TakeIdle;
+
+	PROCEDURE PushSleep (e: Exec);
+	BEGIN
+		e.sleepPrev := NIL; e.sleepNext := sleepHead;
+		IF sleepHead # NIL THEN sleepHead.sleepPrev := e END;
+		sleepHead := e; e.inSleep := TRUE; INC(sleepCount)
+	END PushSleep;
+
+	PROCEDURE RemoveSleep (e: Exec);
+	BEGIN
+		IF e.inSleep THEN
+			IF e.sleepPrev # NIL THEN e.sleepPrev.sleepNext := e.sleepNext ELSE sleepHead := e.sleepNext END;
+			IF e.sleepNext # NIL THEN e.sleepNext.sleepPrev := e.sleepPrev END;
+			e.sleepPrev := NIL; e.sleepNext := NIL; e.inSleep := FALSE; DEC(sleepCount)
+		END
+	END RemoveSleep;
+
+	PROCEDURE TakeSleep (): Exec;
+		VAR e: Exec;
+	BEGIN
+		e := sleepHead;
+		IF e # NIL THEN RemoveSleep(e) END;
+		RETURN e
+	END TakeSleep;
+
+	(* --- очередь ящиков --------------------------------------------------- *)
 
 	PROCEDURE PushRun (c: ActorCore.Context);
 		VAR new: POINTER TO ARRAY OF ActorCore.Context; i, len: INTEGER;
@@ -58,19 +134,71 @@ MODULE ActorRun;
 		RETURN c
 	END PopRun;
 
+	(* --- состав пула ------------------------------------------------------ *)
+
+	PROCEDURE EnsureCap (need: INTEGER);
+	(* Пост: в execs места не меньше need; живые исполнители сохранены. *)
+		VAR a: POINTER TO ARRAY OF Exec; len, i: INTEGER;
+	BEGIN
+		IF execs = NIL THEN len := 0 ELSE len := LEN(execs^) END;
+		IF need > len THEN
+			IF len = 0 THEN len := 8 END;
+			WHILE len < need DO len := 2 * len END;
+			NEW(a, len);
+			FOR i := 0 TO n - 1 DO a[i] := execs[i] END;
+			execs := a
+		END
+	END EnsureCap;
+
+	PROCEDURE Grow;
+	(* Пост: n + 1 исполнитель, если есть место; иначе limitHits + 1. *)
+		VAR e: Exec;
+	BEGIN
+		IF n >= limit THEN INC(limitHits); RETURN END;
+		EnsureCap(n + 1);
+		NEW(e); e.quit := FALSE; e.extra := TRUE;
+		e.inIdle := FALSE; e.inSleep := FALSE;
+		e.idlePrev := NIL; e.idleNext := NIL; e.sleepPrev := NIL; e.sleepNext := NIL;
+		e.slot := n; execs[n] := e; INC(n); INC(grown);
+		Tasks.Start(e)
+	END Grow;
+
+	PROCEDURE Retire (e: Exec);
+	(* Пост: e завершён и убран из execs; последний исполнитель занял его место. *)
+		VAR i: INTEGER;
+	BEGIN
+		i := e.slot;
+		IF (i >= 0) & (i < n) & (execs[i] = e) THEN
+			DEC(n);
+			IF i # n THEN execs[i] := execs[n]; execs[i].slot := i END;
+			execs[n] := NIL
+		END;
+		e.slot := -1; e.extra := FALSE; INC(shrunk)
+	END Retire;
+
+	(* --- задачи ----------------------------------------------------------- *)
+
 	PROCEDURE (e: Exec) Run;
-		VAR c: ActorCore.Context; k: INTEGER;
+		VAR c: ActorCore.Context; k: INTEGER; t0: LONGINT;
 	BEGIN
 		k := 0;
 		LOOP
 			IF count > 0 THEN
+				RemoveIdle(e); RemoveSleep(e);
 				c := PopRun();
 				IF pool.Process(c, throughput) THEN PushRun(c) END;
 				INC(k);
 				IF k MOD yieldEvery = 0 THEN Tasks.Yield END
-			ELSIF e.quit THEN EXIT
+			ELSIF e.quit THEN
+				RemoveIdle(e); RemoveSleep(e); EXIT
+			ELSIF e.extra THEN
+				t0 := Services.Ticks();
+				PushSleep(e); Tasks.Sleep(shrinkMs); RemoveSleep(e);
+				IF (count = 0) & (Services.Ticks() - t0 >= shrinkMs) & ~e.quit & (n > base) THEN
+					Retire(e); EXIT
+				END
 			ELSE
-				e.idle := TRUE; Tasks.ParkExternal; e.idle := FALSE
+				PushIdle(e); Tasks.ParkExternal; RemoveIdle(e)
 			END
 		END
 	END Run;
@@ -92,7 +220,7 @@ MODULE ActorRun;
 	PROCEDURE (p: Pool) Schedule (c: ActorCore.Context);
 	(* Ящик dedicated: нет задачи, она завершена или это она сама
 	   (отменённая задача снимает ящик перед трапом 127) — новая Own. *)
-		VAR i: INTEGER; o: Own; h: ANYPTR;
+		VAR o: Own; h: ANYPTR; e: Exec;
 	BEGIN
 		IF c.dedicated THEN
 			h := p.Host(c);
@@ -104,26 +232,46 @@ MODULE ActorRun;
 			END
 		ELSE
 			PushRun(c);
-			i := 0;
-			WHILE (i < n) & ~execs[i].idle DO INC(i) END;
-			IF i < n THEN execs[i].idle := FALSE; Tasks.Unpark(execs[i]) END
+			IF n > 0 THEN	(* пул остановлен — ящик ждёт следующего Start *)
+				e := TakeIdle();
+				IF e = NIL THEN e := TakeSleep() END;
+				IF e # NIL THEN Tasks.Unpark(e)
+				ELSIF n < limit THEN Grow
+				ELSE INC(limitHits)
+				END
+			END
 		END
 	END Schedule;
 
 	PROCEDURE Start* (k: INTEGER);
-	(** Пред: 0 < k <= 64 (трап 20); пул остановлен (21).
+	(** Пред: 0 < k <= limit (трап 20); пул остановлен (21).
 		Пост: пул из k исполнителей установлен в ActorCore; ящики, ждавшие
-		в очереди, обслуживаются. *)
+		в очереди, обслуживаются; счётчики роста обнулены. *)
 		VAR i: INTEGER;
 	BEGIN
-		ASSERT((k > 0) & (k <= maxExec), 20); ASSERT(n = 0, 21);
-		IF (execs = NIL) OR (LEN(execs^) < k) THEN NEW(execs, k) END;
+		ASSERT((k > 0) & (k <= limit), 20); ASSERT(n = 0, 21);
+		EnsureCap(k);
+		idleHead := NIL; idleCount := 0; sleepHead := NIL; sleepCount := 0;
+		limitHits := 0; grown := 0; shrunk := 0;
 		FOR i := 0 TO k - 1 DO
-			NEW(execs[i]); execs[i].idle := FALSE; execs[i].quit := FALSE; Tasks.Start(execs[i])
+			NEW(execs[i]); execs[i].quit := FALSE; execs[i].extra := FALSE;
+			execs[i].inIdle := FALSE; execs[i].inSleep := FALSE;
+			execs[i].idlePrev := NIL; execs[i].idleNext := NIL;
+			execs[i].sleepPrev := NIL; execs[i].sleepNext := NIL;
+			execs[i].slot := i;
+			Tasks.Start(execs[i]); PushIdle(execs[i])
 		END;
-		n := k;
+		n := k; base := k;
 		ActorCore.SetDispatcher(pool)
 	END Start;
+
+	PROCEDURE SetLimit* (k: INTEGER);
+	(** Пред: k > 0 (трап 20). Пост: предел числа исполнителей k; выше
+		k пул не растёт, лишние уходят при простое. *)
+	BEGIN
+		ASSERT(k > 0, 20);
+		limit := k
+	END SetLimit;
 
 	PROCEDURE Stop*;
 	(** Пост: задачи пула отменены (трап 127 в их точке переключения);
@@ -131,8 +279,13 @@ MODULE ActorRun;
 		не затронуты. *)
 		VAR i: INTEGER;
 	BEGIN
-		FOR i := 0 TO n - 1 DO execs[i].idle := FALSE; Tasks.Cancel(execs[i]); execs[i] := NIL END;
-		n := 0
+		idleHead := NIL; idleCount := 0; sleepHead := NIL; sleepCount := 0;
+		FOR i := 0 TO n - 1 DO
+			execs[i].quit := TRUE;
+			execs[i].inIdle := FALSE; execs[i].inSleep := FALSE;
+			Tasks.Cancel(execs[i]); execs[i] := NIL
+		END;
+		n := 0; base := 0
 	END Stop;
 
 	PROCEDURE Wait;
@@ -159,7 +312,7 @@ MODULE ActorRun;
 		END;
 		FOR i := 0 TO n - 1 DO
 			execs[i].quit := TRUE;
-			IF execs[i].idle THEN execs[i].idle := FALSE; Tasks.Unpark(execs[i]) END
+			IF execs[i].inIdle OR execs[i].inSleep THEN Tasks.Unpark(execs[i]) END
 		END;
 		t0 := Services.Ticks();
 		REPEAT
@@ -173,5 +326,6 @@ MODULE ActorRun;
 	END Shutdown;
 
 BEGIN
+	limit := defaultLimit;
 	NEW(run, 64); NEW(pool)
 END ActorRun.
