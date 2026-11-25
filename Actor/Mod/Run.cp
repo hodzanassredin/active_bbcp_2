@@ -11,8 +11,12 @@ MODULE ActorRun;
 
 	Ожидание в обработчике занимает исполнителя. Чтобы готовые ящики не
 	ждали, пул растёт: Schedule, положив ящик в run, берёт исполнителя из
-	idle, иначе из sleep, иначе запускает нового, пока n < limit. Нет
-	свободных и предел достигнут — ящик ждёт, limitHits считает случаи.
+	idle, иначе из sleep, иначе назначает проверку роста через growMs.
+	Проверка видит, что все исполнители ушли в ожидание внутри
+	обработчиков (нет idle и sleep, задача каждого не Ready и не Running),
+	и запускает исполнителей по числу готовых ящиков, пока n < limit. Если
+	же кто-то работает, он сам возьмёт ящик, и проверка откладывается.
+	Предел достигнут — ящик ждёт, limitHits считает случаи.
 	Исполнитель сверх начального числа base не ждёт в idle, а спит
 	shrinkMs в списке sleep; проснувшись по сроку без работы, он
 	завершается. Списки врезные, взять и вернуть — O(1), на письмо нет ни
@@ -35,10 +39,12 @@ MODULE ActorRun;
 		yieldEvery = 64;	(* ящиков между уступками *)
 		defaultLimit = 1024;	(* стек задачи 256 КиБ => 256 МиБ адресов *)
 		shrinkMs = 1000;	(* простой лишнего исполнителя до ухода *)
+		growMs = 1;	(* задержка проверки роста: обработчик успевает уйти в ожидание *)
 		shutdownMs = 5000;	(* предел ожидания остановки акторов *)
 
 	TYPE
 		Pool = POINTER TO RECORD (ActorCore.Dispatcher) END;
+		GrowCheck = POINTER TO RECORD (Services.Action) END;
 		Exec = POINTER TO RECORD (Tasks.Task)
 			quit, extra: BOOLEAN;	(* extra — сверх числа из Start *)
 			inIdle, inSleep: BOOLEAN;
@@ -58,6 +64,7 @@ MODULE ActorRun;
 		shrunk-: LONGINT;	(** завершено лишних исполнителей (с Start) *)
 		idleHead: Exec; idleCount: INTEGER;	(* свободные, ждут в ParkExternal *)
 		sleepHead: Exec; sleepCount: INTEGER;	(* лишние, спят до ухода *)
+		growCheck: GrowCheck; armed, stopping: BOOLEAN;	(* отложенная проверка роста *)
 		run: POINTER TO ARRAY OF ActorCore.Context;
 		head, count: INTEGER;
 		pool: Pool;
@@ -176,6 +183,42 @@ MODULE ActorRun;
 		e.slot := -1; e.extra := FALSE; INC(shrunk)
 	END Retire;
 
+	PROCEDURE Arm;
+	(* Пост: проверка роста назначена на growMs вперёд (не больше одной). *)
+	BEGIN
+		IF ~armed THEN
+			armed := TRUE;
+			IF growCheck = NIL THEN NEW(growCheck) END;
+			Services.DoLater(growCheck, Services.Ticks() + growMs)
+		END
+	END Arm;
+
+	PROCEDURE (g: GrowCheck) Do;
+	(* Готовые ящики ждут, только если все исполнители ушли в ожидание
+	   внутри обработчиков: свободных и спящих нет, а состояние каждой
+	   задачи — Sleeping, Waiting или Parked. Работающий или готовый
+	   исполнитель сам возьмёт ящик, поэтому рост откладывается. *)
+		VAR i, k, add: INTEGER; waiting: BOOLEAN;
+	BEGIN
+		armed := FALSE;
+		IF stopping OR (n = 0) OR (count = 0) THEN RETURN END;
+		IF (idleCount > 0) OR (sleepCount > 0) THEN RETURN END;
+		waiting := TRUE; i := 0;
+		WHILE (i < n) & waiting DO
+			IF Tasks.State(execs[i]) IN {Tasks.New, Tasks.Ready, Tasks.Running} THEN waiting := FALSE END;
+			INC(i)
+		END;
+		IF ~waiting THEN Arm; RETURN END;
+		IF n >= limit THEN INC(limitHits); RETURN END;
+		add := count;
+		IF add > limit - n THEN add := limit - n END;
+		k := 0;
+		WHILE k < add DO Grow; INC(k) END;
+		IF count > 0 THEN
+			IF n < limit THEN Arm ELSE INC(limitHits) END
+		END
+	END Do;
+
 	(* --- задачи ----------------------------------------------------------- *)
 
 	PROCEDURE (e: Exec) Run;
@@ -184,7 +227,6 @@ MODULE ActorRun;
 		k := 0;
 		LOOP
 			IF count > 0 THEN
-				RemoveIdle(e); RemoveSleep(e);
 				c := PopRun();
 				IF pool.Process(c, throughput) THEN PushRun(c) END;
 				INC(k);
@@ -198,7 +240,8 @@ MODULE ActorRun;
 					Retire(e); EXIT
 				END
 			ELSE
-				PushIdle(e); Tasks.ParkExternal; RemoveIdle(e)
+				IF ~e.inIdle THEN PushIdle(e) END;
+				Tasks.ParkExternal; RemoveIdle(e)
 			END
 		END
 	END Run;
@@ -236,7 +279,7 @@ MODULE ActorRun;
 				e := TakeIdle();
 				IF e = NIL THEN e := TakeSleep() END;
 				IF e # NIL THEN Tasks.Unpark(e)
-				ELSIF n < limit THEN Grow
+				ELSIF n < limit THEN Arm
 				ELSE INC(limitHits)
 				END
 			END
@@ -252,6 +295,7 @@ MODULE ActorRun;
 		ASSERT((k > 0) & (k <= limit), 20); ASSERT(n = 0, 21);
 		EnsureCap(k);
 		idleHead := NIL; idleCount := 0; sleepHead := NIL; sleepCount := 0;
+		armed := FALSE; stopping := FALSE;
 		limitHits := 0; grown := 0; shrunk := 0;
 		FOR i := 0 TO k - 1 DO
 			NEW(execs[i]); execs[i].quit := FALSE; execs[i].extra := FALSE;
@@ -259,7 +303,7 @@ MODULE ActorRun;
 			execs[i].idlePrev := NIL; execs[i].idleNext := NIL;
 			execs[i].sleepPrev := NIL; execs[i].sleepNext := NIL;
 			execs[i].slot := i;
-			Tasks.Start(execs[i]); PushIdle(execs[i])
+			Tasks.Start(execs[i])
 		END;
 		n := k; base := k;
 		ActorCore.SetDispatcher(pool)
@@ -280,6 +324,7 @@ MODULE ActorRun;
 		VAR i: INTEGER;
 	BEGIN
 		idleHead := NIL; idleCount := 0; sleepHead := NIL; sleepCount := 0;
+		armed := FALSE; stopping := FALSE;
 		FOR i := 0 TO n - 1 DO
 			execs[i].quit := TRUE;
 			execs[i].inIdle := FALSE; execs[i].inSleep := FALSE;
@@ -305,6 +350,7 @@ MODULE ActorRun;
 	BEGIN
 		cur := Tasks.Current();
 		ASSERT((cur = NIL) OR ~(cur IS Exec) & ~(cur IS Own), 20);
+		stopping := TRUE;
 		IF ActorCore.dispatcher = pool THEN
 			pool.StopRoots;
 			t0 := Services.Ticks();
