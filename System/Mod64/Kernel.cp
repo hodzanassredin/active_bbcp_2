@@ -403,7 +403,9 @@ MODULE Kernel;
 		free: ARRAY N OF FreeBlock;	(* free list *)
 		sentinelBlock: FreeDesc;
 		sentinel: FreeBlock;
-		candidates: ARRAY 1024 OF LONGINT;
+		candidates: ARRAY 65536 OF LONGINT;	(* общий буфер стеков: при переполнении
+						   CheckCandidates обходит кучу, поэтому при многих стеках
+						   буфер должен быть большим; размер выбран замером *)
 		nofcand: INTEGER;
 		heapMin, heapMax: LONGINT;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)

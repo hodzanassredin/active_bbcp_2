@@ -373,7 +373,7 @@ MODULE Kernel;
 		free: ARRAY N OF FreeBlock;	(* free list *)
 		sentinelBlock: FreeDesc;
 		sentinel: FreeBlock;
-		candidates: ARRAY 1024 OF INTEGER;
+		candidates: ARRAY 65536 OF INTEGER;	(* см. System/Mod64/Kernel.cp: размер выбран замером *)
 		nofcand: INTEGER;
 		heapMin, heapMax: INTEGER;	(* границы кучи на одну сборку (ScanStack) *)
 		allocated: LONGINT;	(* bytes allocated on BlackBox heap *)
