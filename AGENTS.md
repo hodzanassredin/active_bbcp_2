@@ -288,7 +288,6 @@ code, and the checks to run before a commit.
 | `docs/kernel-plan.md` | future kernel work |
 | `docs/stacks-study.md` | task stacks: where time goes, stack depth, switching and CPU counters |
 | `docs/speed-main.md` | task speed in the main branch: stack providers, before/after measurements |
-| `docs/object-form-study.md` | monitor in a base class without language words: form, examples, measurements, limits |
 | `docs/monitor-object.md` | monitor object and pass in `Tasks`: signatures, rules, examples, measurements, divergences |
 | `docs/adr/README.md` | decision records (Russian only): options considered and why rejected |
 | `Unit/Docu/ru/Testing.md`, `Unit/Docu/Testing.md` | test rules |
