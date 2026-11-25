@@ -189,7 +189,7 @@ MODULE DevCPT;
 		   Создаётся заново на каждую компиляцию, чтобы не тащить
 		   ссылки и used-флаги прошлого модуля. *)
 		kernelScope, kernelSave: Object;
-		kPoll*, kLock*, kUnlock*, kAwait*, kLockAt*, kMonTok*, kMonTop*, kMonEnd*, kStkLo*: Object;
+		kPoll*, kLock*, kUnlock*, kAwait*, kLockAt*, kMonTok*, kMonTop*, kMonEnd*, kStkLo*, kGrowStack*: Object;
 		(* kernelScope создаётся по первому требованию (EnsureKernel):
 		   иначе каждый модуль импортировал бы "$$" — Kernel. *)
 		moduleMon: Object;	(* скрытая глобальная монитора модуля *)
@@ -1681,7 +1681,7 @@ MODULE DevCPT;
 		нужны раскрытию ACTIVE.AWAIT, [exclusive] и точкам уступки.
 		FPrintObj вычислит отпечатки по сигнатурам; они совпадут с
 		экспортом Kernel, если сигнатуры совпадают. *)
-		VAR par, par2, par3, fp, typeObj, nameMod: Object; ct: Struct; kn: BYTE;
+		VAR par, par2, par3, par4, fp, typeObj, nameMod: Object; ct: Struct; kn: BYTE;
 	BEGIN
 		(* Отпечаток CondProc включает имена «Kernel» и «CondProc»:
 		   заводим для них псевдозапись GlbMod (library # NIL — в импорт
@@ -1711,6 +1711,13 @@ MODULE DevCPT;
 		KVar("monTop", adrtyp, external, kMonTop);
 		KVar("monEnd", adrtyp, externalR, kMonEnd);
 		KVar("stkLo", adrtyp, external, kStkLo);
+		(* Граница куска пробы сегментированного стека: продолжение пролога
+		   после нехватки места (paramSize, frameSize, frameAdr, cont). *)
+		par := MakeKernelPar("paramSize", int32typ);
+		par2 := MakeKernelPar("frameSize", int32typ); par.link := par2;
+		par3 := MakeKernelPar("frameAdr", adrtyp); par2.link := par3;
+		par4 := MakeKernelPar("cont", adrtyp); par3.link := par4;
+		KProc("GrowStack", notyp, par, kGrowStack);
 		kernelScope := topScope;
 		GlbMod[nofGmod] := topScope; INC(nofGmod);
 		CloseScope

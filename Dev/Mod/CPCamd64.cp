@@ -2648,9 +2648,10 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		END
 	END UnlockExit;
 
-	PROCEDURE StackCheck (size: INTEGER);
+	PROCEDURE StackCheckTrap (size: INTEGER);
 	(** Ключ "%": трап 137, если SP - Kernel.stkLo < stackReserve + size
-		(беззнаково). Портит RAX и R11. *)
+		(беззнаково). Портит RAX и R11. Вариант для процедур с чужим
+		соглашением вызова ([ccall]): расти стеком им нельзя. *)
 		VAR x, r: DevCPLamd64.Item;
 	BEGIN
 		DevCPT.EnsureKernel;
@@ -2659,6 +2660,68 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 		GenB(49H); GenB(29H); GenB(0C3H);	(* sub r11, rax *)
 		GenB(49H); GenB(81H); GenB(0FBH); GenD(stackReserve + size);	(* cmp r11, imm32 *)
 		DevCPLamd64.GenAssert(ccAE, 137)
+	END StackCheckTrap;
+
+	PROCEDURE EmitTrampoline (realResult: BOOLEAN);
+	(** Код возврата с подставленного куска. Вход — ret процедуры:
+		rsp = низ параметров + 8 (там лежит указатель на запись возврата);
+		rcx получает её, вызываемый SegmentDone снимает кусок и возвращает
+		stkLo, затем rsp и адрес возврата берутся из записи. Результат
+		(RAX или ST0) сохраняется на время вызова. *)
+	BEGIN
+		GenB(48H); GenB(8BH); GenB(0CH); GenB(24H);	(* mov rcx,[rsp] *)
+		IF realResult THEN
+			GenB(48H); GenB(83H); GenB(0ECH); GenB(8);	(* sub rsp, 8 *)
+			GenB(0DDH); GenB(1CH); GenB(24H)			(* fstp qword [rsp] *)
+		ELSE GenB(50H)						(* push rax *)
+		END;
+		GenB(51H);						(* push rcx *)
+		GenB(48H); GenB(8BH); GenB(41H); GenB(30H);		(* mov rax,[rcx+48] *)
+		GenB(0FFH); GenB(0D0H);					(* call rax *)
+		GenB(48H); GenB(8BH); GenB(4CH); GenB(24H); GenB(0F8H);	(* mov rcx,[rsp-8] *)
+		IF realResult THEN
+			GenB(0DDH); GenB(04H); GenB(24H);			(* fld qword [rsp] *)
+			GenB(48H); GenB(83H); GenB(0C4H); GenB(8)		(* add rsp, 8 *)
+		ELSE GenB(58H)						(* pop rax *)
+		END;
+		GenB(48H); GenB(8BH); GenB(21H);			(* mov rsp,[rcx] *)
+		GenB(0FFH); GenB(61H); GenB(08H)			(* jmp qword [rcx+8] *)
+	END EmitTrampoline;
+
+	PROCEDURE StackCheck (size, params: INTEGER; realResult: BOOLEAN);
+	(** Ключ "%": проверка границы как в StackCheckTrap, но при нехватке
+		места пролог зовёт Kernel.GrowStack обычным вызовом. Аргументы:
+		размер параметров (число из ret n), размер кадра, адрес кадра F
+		(rsp после push rbp) и адрес продолжения пролога. GrowStack с
+		сегментированным режимом переходит на новый кусок и возвращает
+		управление на продолжение; без режима — трап 137. Портит RAX,
+		RDX и R11. *)
+		VAR x, r: DevCPLamd64.Item; ok: DevCPLamd64.Label;
+	BEGIN
+		DevCPT.EnsureKernel; ok := 0;
+		KVarItem(DevCPT.kStkLo, x); DevCPLamd64.MakeReg(r, AX, Pointer); DevCPLamd64.GenMove(x, r);
+		GenB(49H); GenB(89H); GenB(0E3H);	(* mov r11, rsp *)
+		GenB(49H); GenB(29H); GenB(0C3H);	(* sub r11, rax *)
+		GenB(49H); GenB(81H); GenB(0FBH); GenD(stackReserve + size);	(* cmp r11, imm32 *)
+		DevCPLamd64.GenJump(ccAE, ok, FALSE);	(* jae ok *)
+		(* Нехватка: GrowStack(paramSize, frameSize, frameAdr, cont).
+		   call next; pop r11 даёт адрес этой точки без переселения. *)
+		GenB(48H); GenB(89H); GenB(0E2H);		(* mov rdx, rsp — адрес кадра F *)
+		GenB(0E8H); GenD(0);				(* call next (следующая инструкция) *)
+		GenB(41H); GenB(5BH);				(* pop r11 *)
+		GenB(49H); GenB(83H); GenB(0C3H); GenB(24);	(* add r11, 24 — адрес cont *)
+		GenB(41H); GenB(53H);				(* push cont *)
+		GenB(52H);					(* push frameAdr *)
+		GenB(68H); GenD(size);				(* push frameSize *)
+		GenB(68H); GenD(params);			(* push paramSize *)
+		DevCPT.kGrowStack.used := TRUE;
+		x.mode := XProc; x.obj := DevCPT.kGrowStack; x.offset := 0; x.scale := 0; x.form := ProcTyp;
+		DevCPLamd64.GenCall(x);				(* call GrowStack *)
+		(* cont: рост пришёл сюда (rsp = rbp), возврат — с rsp # rbp. *)
+		GenB(48H); GenB(39H); GenB(0ECH);		(* cmp rsp, rbp *)
+		DevCPLamd64.GenJump(ccE, ok, FALSE);		(* je ok *)
+		EmitTrampoline(realResult);
+		DevCPLamd64.SetLabel(ok)
 	END StackCheck;
 
 	PROCEDURE Enter* (proc: DevCPT.Object; empty, useFpu: BOOLEAN);
@@ -2698,7 +2761,11 @@ lx	:= LONG(SHORT(ly))	y b+	y w*	x w	*
 				uwCodes[0] := 5; uwCodes[1] := 3; uwCodes[2] := 2; uwCodes[3] := 50H;
 				adr := proc.conval.intval2; size := -adr;
 				IF size < 0 THEN DevCPM.err(214); size := 256 END;
-				IF DevCPM.stackChk IN DevCPM.options THEN StackCheck(size) END;
+				IF DevCPM.stackChk IN DevCPM.options THEN
+					IF proc.sysflag = ccall THEN StackCheckTrap(size)
+					ELSE StackCheck(size, proc.conval.intval - 16, proc.typ.form IN {Real32, Real64})
+					END
+				END;
 				IF isGuarded IN proc.conval.setval THEN
 					DevCPLamd64.MakeReg(r, BX, Pointer); DevCPLamd64.GenPush(r);
 					DevCPLamd64.MakeReg(r, DI, Pointer); DevCPLamd64.GenPush(r);

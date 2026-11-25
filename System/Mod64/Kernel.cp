@@ -1696,6 +1696,17 @@ MODULE Kernel;
 		IF lo # 0 THEN platform.DeallocateStackMem(lo, hi) END
 	END FreeStack;
 
+	PROCEDURE [code] Trap137 8DH, 0F0H, 89H;	(* LEA с mod=11 недопустим: SIGILL, номер трапа 137 *)
+
+	PROCEDURE GrowStack* (paramSize, frameSize: INTEGER; frameAdr, cont: S.ADDRESS);
+	(** Пролог процедуры с ключом "%" при нехватке места (см. DevCPCamd64.StackCheck).
+		paramSize — размер параметров (число из ret n), frameSize — кадр,
+		frameAdr — rsp после push rbp, cont — продолжение пролога.
+		Пока сегментированный режим выключен — трап 137, как у прежней проверки. *)
+	BEGIN
+		Trap137
+	END GrowStack;
+
 	PROCEDURE AllocStacks* (size, n: INTEGER; OUT base: S.ADDRESS; OUT step, guard: INTEGER): BOOLEAN;
 	(** Пред: n > 0. Пост: TRUE — плита из n стеков по size со сторожевыми страницами
 		размером guard (AllocateStackSlab); FALSE — платформа плит не даёт или памяти нет. *)
