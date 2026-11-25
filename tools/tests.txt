@@ -7,6 +7,7 @@
 System_devMain|proc|900|System_devSupport System_devCRaw System_devCo System_devBasic System_devHeap System_devTrap System_devActionTrap System_devGcStack System_devTrapStack System_devInHeap
 Lin_devFiles|proc slow|600|
 System_devTasks|proc slow|900|System_devCRaw System_devClock
+System_devStackDirs|proc|600|
 System_devMonitors|proc|300|
 System_devMonField|proc|300|System_devMonBase
 Unit_devMain||180|Unit_devProbe Unit_devBadSetup Unit_devCyr
