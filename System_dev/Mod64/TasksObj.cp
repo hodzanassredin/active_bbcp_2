@@ -122,6 +122,8 @@ MODULE System_devTasksObj;
 		nextSeq, got: ARRAY producers OF INTEGER;
 		readyCalls: INTEGER;
 		allocDelta: LONGINT;
+		(* режим пробуждения: TRUE — передача монитора, FALSE — без передачи *)
+		passMode: BOOLEAN;
 		(* новые пробы: сон, Join и вход в чужой монитор под монитором *)
 		sleepDone, joinDone: INTEGER;
 		(* трап внутри Exclusive: обработчик Kernel.Try получает адрес Ctx *)
@@ -165,8 +167,27 @@ MODULE System_devTasksObj;
 
 	PROCEDURE Setup*;
 	BEGIN
+		passMode := TRUE;
 		ResetCase
 	END Setup;
+
+	PROCEDURE RunCase (p: PROCEDURE; pass: BOOLEAN);
+		VAR f0, f1: INTEGER;
+	BEGIN
+		passMode := pass; ResetCase;
+		f0 := UnitAssert.Failures();
+		p;
+		f1 := UnitAssert.Failures();
+		IF (f1 > f0) & pass THEN UnitAssert.Fail("случай: монитор передаётся")
+		ELSIF (f1 > f0) & ~pass THEN UnitAssert.Fail("случай: монитор не передаётся")
+		END
+	END RunCase;
+
+	PROCEDURE RunBoth (p: PROCEDURE);
+	BEGIN
+		RunCase(p, TRUE);
+		RunCase(p, FALSE)
+	END RunBoth;
 
 	PROCEDURE Note (id: INTEGER);
 	BEGIN
@@ -189,6 +210,11 @@ MODULE System_devTasksObj;
 	BEGIN
 		RETURN x.allow
 	END HoldsWhileWaiting;
+
+	PROCEDURE (x: Lock) TransferOnRelease (): BOOLEAN;
+	BEGIN
+		RETURN passMode
+	END TransferOnRelease;
 
 	PROCEDURE (c: YesCond) Ready (o: Tasks.Object): BOOLEAN;
 	BEGIN
@@ -297,6 +323,11 @@ MODULE System_devTasksObj;
 		RETURN s
 	END Ready;
 
+	PROCEDURE (b: Buf) TransferOnRelease (): BOOLEAN;
+	BEGIN
+		RETURN passMode
+	END TransferOnRelease;
+
 	PROCEDURE (b: Buf) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: PutOp DO
@@ -356,6 +387,11 @@ MODULE System_devTasksObj;
 		b := o(CondBuf);
 		RETURN b.count < cap
 	END Ready;
+
+	PROCEDURE (b: CondBuf) TransferOnRelease (): BOOLEAN;
+	BEGIN
+		RETURN passMode
+	END TransferOnRelease;
 
 	PROCEDURE (b: CondBuf) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
@@ -976,59 +1012,81 @@ MODULE System_devTasksObj;
 
 	(* -------------------- пробуждение без передачи ------------------------ *)
 
+	PROCEDURE CaseWakeRequeuesAtHead;
+		(* Ложное пробуждение: ждущий снова засыпает и не теряет место. *)
+		VAR x: Lock; a, b: WaitJob; n: ProbeJob;
+	BEGIN
+		NEW(x); x.flag := FALSE;
+		NEW(a); a.x := x; a.op.id := 1; Start(a); Tasks.Step;
+		NEW(b); b.x := x; b.op.id := 2; Start(b); Tasks.Step;
+		UnitAssert.EqualInt(2, Tasks.Queued(x), "двое ждут условия");
+		Tasks.Unpark(a);
+		Tasks.Step;
+		UnitAssert.EqualInt(2, Tasks.Queued(x), "разбуженный снова ждёт");
+		x.flag := TRUE;
+		NEW(n); n.x := x; Start(n);
+		UnitAssert.True(Pump(2000), "все прошли");
+		UnitAssert.EqualInt(2, orderN, "двое прошли ожидание");
+		UnitAssert.EqualInt(1, order[0], "первым — уже ждавший A");
+		UnitAssert.EqualInt(2, order[1], "вторым — B");
+		UnitAssert.True(~Tasks.Held(x), "монитор свободен")
+	END CaseWakeRequeuesAtHead;
+
 	(* -------------------- запуск обоих режимов ---------------------------- *)
 
 	PROCEDURE TestMutualExclusion*;
-	BEGIN CaseMutualExclusion END TestMutualExclusion;
+	BEGIN RunBoth(CaseMutualExclusion) END TestMutualExclusion;
 	PROCEDURE TestFifo*;
-	BEGIN CaseFifo END TestFifo;
+	BEGIN RunBoth(CaseFifo) END TestFifo;
 	PROCEDURE TestFlagFifo*;
-	BEGIN CaseFlagFifo END TestFlagFifo;
+	BEGIN RunBoth(CaseFlagFifo) END TestFlagFifo;
 	PROCEDURE TestFlagPriority*;
-	BEGIN CaseFlagPriority END TestFlagPriority;
+	BEGIN RunBoth(CaseFlagPriority) END TestFlagPriority;
 	PROCEDURE TestCondPriority*;
-	BEGIN CaseCondPriority END TestCondPriority;
+	BEGIN RunBoth(CaseCondPriority) END TestCondPriority;
 	PROCEDURE TestBufferFlags*;
-	BEGIN CaseBufferFlags END TestBufferFlags;
+	BEGIN RunBoth(CaseBufferFlags) END TestBufferFlags;
 	PROCEDURE TestBufferCond*;
-	BEGIN CaseBufferCond END TestBufferCond;
+	BEGIN RunBoth(CaseBufferCond) END TestBufferCond;
 	PROCEDURE TestReentrant*;
-	BEGIN CaseReentrant END TestReentrant;
+	BEGIN RunBoth(CaseReentrant) END TestReentrant;
 	PROCEDURE TestWaitDepth2Traps*;
-	BEGIN CaseWaitDepth2Traps END TestWaitDepth2Traps;
+	BEGIN RunBoth(CaseWaitDepth2Traps) END TestWaitDepth2Traps;
 	PROCEDURE TestForeignMonitorDenied*;
-	BEGIN CaseForeignMonitorDenied END TestForeignMonitorDenied;
+	BEGIN RunBoth(CaseForeignMonitorDenied) END TestForeignMonitorDenied;
 	PROCEDURE TestForeignMonitorAllowed*;
-	BEGIN CaseForeignMonitorAllowed END TestForeignMonitorAllowed;
+	BEGIN RunBoth(CaseForeignMonitorAllowed) END TestForeignMonitorAllowed;
 	PROCEDURE TestUncaughtTrapReleasesAll*;
-	BEGIN CaseUncaughtTrapReleasesAll END TestUncaughtTrapReleasesAll;
+	BEGIN RunBoth(CaseUncaughtTrapReleasesAll) END TestUncaughtTrapReleasesAll;
 	PROCEDURE TestCaughtTrapReleasesInner*;
-	BEGIN CaseCaughtTrapReleasesInner END TestCaughtTrapReleasesInner;
+	BEGIN RunBoth(CaseCaughtTrapReleasesInner) END TestCaughtTrapReleasesInner;
 	PROCEDURE TestCancelEntry*;
-	BEGIN CaseCancelEntry END TestCancelEntry;
+	BEGIN RunBoth(CaseCancelEntry) END TestCancelEntry;
 	PROCEDURE TestDeadlineEntry*;
-	BEGIN CaseDeadlineEntry END TestDeadlineEntry;
+	BEGIN RunBoth(CaseDeadlineEntry) END TestDeadlineEntry;
 	PROCEDURE TestCancelWait*;
-	BEGIN CaseCancelWait END TestCancelWait;
+	BEGIN RunBoth(CaseCancelWait) END TestCancelWait;
 	PROCEDURE TestDeadlineWait*;
-	BEGIN CaseDeadlineWait END TestDeadlineWait;
+	BEGIN RunBoth(CaseDeadlineWait) END TestDeadlineWait;
 	PROCEDURE TestReadyOnce*;
-	BEGIN CaseReadyOnce END TestReadyOnce;
+	BEGIN RunBoth(CaseReadyOnce) END TestReadyOnce;
 	PROCEDURE TestNoAllocation*;
-	BEGIN CaseNoAllocation END TestNoAllocation;
+	BEGIN RunBoth(CaseNoAllocation) END TestNoAllocation;
 	PROCEDURE TestSpawnJoinAll*;
-	BEGIN CaseSpawnJoinAll END TestSpawnJoinAll;
+	BEGIN RunBoth(CaseSpawnJoinAll) END TestSpawnJoinAll;
 	PROCEDURE TestSleepHoldDenied*;
-	BEGIN CaseSleepHoldDenied END TestSleepHoldDenied;
+	BEGIN RunBoth(CaseSleepHoldDenied) END TestSleepHoldDenied;
 	PROCEDURE TestSleepHoldAllowed*;
-	BEGIN CaseSleepHoldAllowed END TestSleepHoldAllowed;
+	BEGIN RunBoth(CaseSleepHoldAllowed) END TestSleepHoldAllowed;
 	PROCEDURE TestJoinHoldDenied*;
-	BEGIN CaseJoinHoldDenied END TestJoinHoldDenied;
+	BEGIN RunBoth(CaseJoinHoldDenied) END TestJoinHoldDenied;
 	PROCEDURE TestJoinHoldAllowed*;
-	BEGIN CaseJoinHoldAllowed END TestJoinHoldAllowed;
+	BEGIN RunBoth(CaseJoinHoldAllowed) END TestJoinHoldAllowed;
 	PROCEDURE TestEntryHoldDenied*;
-	BEGIN CaseEntryHoldDenied END TestEntryHoldDenied;
+	BEGIN RunBoth(CaseEntryHoldDenied) END TestEntryHoldDenied;
 	PROCEDURE TestEntryHoldAllowed*;
-	BEGIN CaseEntryHoldAllowed END TestEntryHoldAllowed;
+	BEGIN RunBoth(CaseEntryHoldAllowed) END TestEntryHoldAllowed;
+	PROCEDURE TestWakeRequeuesAtHead*;
+	BEGIN RunBoth(CaseWakeRequeuesAtHead) END TestWakeRequeuesAtHead;
 
 END System_devTasksObj.

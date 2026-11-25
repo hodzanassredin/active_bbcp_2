@@ -25,12 +25,15 @@ MODULE Async_devBenchCtx;
 
 		(* --- буфер на флагах --- *)
 
-		PutOp = RECORD (Tasks.Op) v: INTEGER END;
+		PutOp = RECORD (Tasks.Op) v, id: INTEGER END;
 		GetOp = RECORD (Tasks.Op) v: INTEGER END;
 		FlagBuf = POINTER TO RECORD (Tasks.Object)
-			ring: ARRAY cap OF INTEGER; head, tail, count: INTEGER
+			ring: ARRAY cap OF INTEGER; head, tail, count: INTEGER;
+			capacity: INTEGER;
+			puts0, puts1: INTEGER;
+			pass: BOOLEAN
 		END;
-		FlagProd = POINTER TO RECORD (Tasks.Job) b: FlagBuf; n: INTEGER END;
+		FlagProd = POINTER TO RECORD (Tasks.Job) b: FlagBuf; id, n: INTEGER END;
 		FlagCons = POINTER TO RECORD (Tasks.Job) b: FlagBuf; n: INTEGER END;
 
 		(* --- буфер на Cond --- *)
@@ -39,16 +42,19 @@ MODULE Async_devBenchCtx;
 		NotFull = POINTER TO RECORD (Tasks.Cond) END;
 		CondBuf = POINTER TO RECORD (Tasks.Object)
 			ring: ARRAY cap OF INTEGER; head, tail, count: INTEGER;
+			capacity: INTEGER;
+			puts0, puts1: INTEGER;
+			pass: BOOLEAN;
 			ne: NotEmpty; nf: NotFull
 		END;
-		CondProd = POINTER TO RECORD (Tasks.Job) b: CondBuf; n: INTEGER END;
+		CondProd = POINTER TO RECORD (Tasks.Job) b: CondBuf; id, n: INTEGER END;
 		CondCons = POINTER TO RECORD (Tasks.Job) b: CondBuf; n: INTEGER END;
 
 		(* --- ждущие с ложным условием: новый монитор --- *)
 
 		WaitOp = RECORD (Tasks.Op) c: FalseCond END;
 		FalseCond = POINTER TO RECORD (Tasks.Cond) END;
-		WaitObj = POINTER TO RECORD (Tasks.Object) END;
+		WaitObj = POINTER TO RECORD (Tasks.Object) pass: BOOLEAN END;
 		WaitJob = POINTER TO RECORD (Tasks.Job) o: WaitObj; c: FalseCond END;
 		DriveJob = POINTER TO RECORD (Tasks.Job)
 			o: WaitObj; n: INTEGER; ns, allocs, switches: LONGINT
@@ -151,11 +157,16 @@ MODULE Async_devBenchCtx;
 
 	(* -------------------- буфер на флагах --------------------------------- *)
 
+	PROCEDURE (b: FlagBuf) TransferOnRelease (): BOOLEAN;
+	BEGIN
+		RETURN b.pass
+	END TransferOnRelease;
+
 	PROCEDURE (b: FlagBuf) Ready (): SET;
 		VAR s: SET;
 	BEGIN
 		s := {};
-		IF b.count < cap THEN INCL(s, 0) END;
+		IF b.count < b.capacity THEN INCL(s, 0) END;
 		IF b.count > 0 THEN INCL(s, 1) END;
 		RETURN s
 	END Ready;
@@ -163,24 +174,25 @@ MODULE Async_devBenchCtx;
 	PROCEDURE (b: FlagBuf) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: PutOp DO
-			WHILE b.count = cap DO
+			WHILE b.count = b.capacity DO
 				IF ~b.Wait(ctx, {0}) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.v;
-			b.tail := (b.tail + 1) MOD cap; INC(b.count)
+			b.tail := (b.tail + 1) MOD b.capacity; INC(b.count);
+			IF op.id = 1 THEN INC(b.puts1) ELSE INC(b.puts0) END
 		| op: GetOp DO
 			WHILE b.count = 0 DO
 				IF ~b.Wait(ctx, {1}) THEN RETURN END
 			END;
 			op.v := b.ring[b.head];
-			b.head := (b.head + 1) MOD cap; DEC(b.count)
+			b.head := (b.head + 1) MOD b.capacity; DEC(b.count)
 		END
 	END Exclusive;
 
 	PROCEDURE (j: FlagProd) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; op: PutOp;
 	BEGIN
-		FOR i := 1 TO j.n DO op.v := i; j.b.Do(ctx, op) END
+		FOR i := 1 TO j.n DO op.v := i; op.id := j.id; j.b.Do(ctx, op) END
 	END Body;
 
 	PROCEDURE (j: FlagCons) Body- (VAR ctx: Tasks.Ctx);
@@ -189,13 +201,47 @@ MODULE Async_devBenchCtx;
 		FOR i := 1 TO j.n DO j.b.Do(ctx, op); sum := op.v END
 	END Body;
 
-	PROCEDURE BufferFlag*;
+	PROCEDURE FlagMode (pass: BOOLEAN; capacity, n: INTEGER; IN name: ARRAY OF CHAR);
 		VAR b: FlagBuf; p: FlagProd; c: FlagCons; t0: LONGINT;
 	BEGIN
 		NEW(b); b.head := 0; b.tail := 0; b.count := 0;
-		NEW(p); p.b := b; p.n := bufN; NEW(c); c.b := b; c.n := bufN;
-		t0 := Now(); Start(p); Start(c); Finish("buffer-flag", bufN, t0)
-	END BufferFlag;
+		b.capacity := capacity; b.pass := pass; b.puts0 := 0; b.puts1 := 0;
+		NEW(p); p.b := b; p.id := 0; p.n := n; NEW(c); c.b := b; c.n := n;
+		t0 := Now(); Start(p); Start(c); Finish(name, n, t0)
+	END FlagMode;
+
+	PROCEDURE BufferFlagMode (pass: BOOLEAN; IN name: ARRAY OF CHAR);
+	BEGIN FlagMode(pass, cap, bufN, name) END BufferFlagMode;
+
+	PROCEDURE BufferFlag*;
+	BEGIN BufferFlagMode(FALSE, "buffer-flag") END BufferFlag;
+	PROCEDURE BufferFlagPass*;
+	BEGIN BufferFlagMode(TRUE, "buffer-flag-pass") END BufferFlagPass;
+	PROCEDURE BufferFlagWake*;
+	BEGIN BufferFlagMode(FALSE, "buffer-flag-wake") END BufferFlagWake;
+	PROCEDURE Buffer1FlagPass*;
+	BEGIN FlagMode(TRUE, 1, bufN, "buffer1-flag-pass") END Buffer1FlagPass;
+	PROCEDURE Buffer1FlagWake*;
+	BEGIN FlagMode(FALSE, 1, bufN, "buffer1-flag-wake") END Buffer1FlagWake;
+
+	PROCEDURE FairFlag (pass: BOOLEAN; IN name: ARRAY OF CHAR);
+		VAR b: FlagBuf; p0, p1: FlagProd; c: FlagCons; t0: LONGINT;
+	BEGIN
+		NEW(b); b.head := 0; b.tail := 0; b.count := 0;
+		b.capacity := cap; b.pass := pass; b.puts0 := 0; b.puts1 := 0;
+		NEW(p0); p0.b := b; p0.id := 0; p0.n := bufN DIV 2;
+		NEW(p1); p1.b := b; p1.id := 1; p1.n := bufN DIV 2;
+		NEW(c); c.b := b; c.n := bufN;
+		t0 := Now(); Start(p0); Start(p1); Start(c);
+		Finish(name, bufN, t0);
+		W("FAIR "); W(name); W(" put0="); N(b.puts0); W(" put1="); N(b.puts1);
+		Console.WriteLn
+	END FairFlag;
+
+	PROCEDURE FairFlagPass*;
+	BEGIN FairFlag(TRUE, "fair-flag-pass") END FairFlagPass;
+	PROCEDURE FairFlagWake*;
+	BEGIN FairFlag(FALSE, "fair-flag-wake") END FairFlagWake;
 
 	(* -------------------- буфер на Cond ----------------------------------- *)
 
@@ -208,8 +254,13 @@ MODULE Async_devBenchCtx;
 	PROCEDURE (c: NotFull) Ready (o: Tasks.Object): BOOLEAN;
 		VAR b: CondBuf;
 	BEGIN
-		b := o(CondBuf); RETURN b.count < cap
+		b := o(CondBuf); RETURN b.count < b.capacity
 	END Ready;
+
+	PROCEDURE (b: CondBuf) TransferOnRelease (): BOOLEAN;
+	BEGIN
+		RETURN b.pass
+	END TransferOnRelease;
 
 	PROCEDURE (b: CondBuf) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
@@ -218,20 +269,21 @@ MODULE Async_devBenchCtx;
 				IF ~b.WaitFor(ctx, b.nf) THEN RETURN END
 			END;
 			b.ring[b.tail] := op.v;
-			b.tail := (b.tail + 1) MOD cap; INC(b.count)
+			b.tail := (b.tail + 1) MOD b.capacity; INC(b.count);
+			IF op.id = 1 THEN INC(b.puts1) ELSE INC(b.puts0) END
 		| op: GetOp DO
 			WHILE ~b.ne.Ready(b) DO
 				IF ~b.WaitFor(ctx, b.ne) THEN RETURN END
 			END;
 			op.v := b.ring[b.head];
-			b.head := (b.head + 1) MOD cap; DEC(b.count)
+			b.head := (b.head + 1) MOD b.capacity; DEC(b.count)
 		END
 	END Exclusive;
 
 	PROCEDURE (j: CondProd) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; op: PutOp;
 	BEGIN
-		FOR i := 1 TO j.n DO op.v := i; j.b.Do(ctx, op) END
+		FOR i := 1 TO j.n DO op.v := i; op.id := j.id; j.b.Do(ctx, op) END
 	END Body;
 
 	PROCEDURE (j: CondCons) Body- (VAR ctx: Tasks.Ctx);
@@ -240,14 +292,46 @@ MODULE Async_devBenchCtx;
 		FOR i := 1 TO j.n DO j.b.Do(ctx, op); sum := op.v END
 	END Body;
 
-	PROCEDURE BufferCond*;
+	PROCEDURE CondMode (pass: BOOLEAN; capacity, n: INTEGER; IN name: ARRAY OF CHAR);
 		VAR b: CondBuf; p: CondProd; c: CondCons; t0: LONGINT;
 	BEGIN
 		NEW(b); b.head := 0; b.tail := 0; b.count := 0;
+		b.capacity := capacity; b.pass := pass; b.puts0 := 0; b.puts1 := 0;
 		NEW(b.ne); NEW(b.nf);
-		NEW(p); p.b := b; p.n := bufN; NEW(c); c.b := b; c.n := bufN;
-		t0 := Now(); Start(p); Start(c); Finish("buffer-cond", bufN, t0)
-	END BufferCond;
+		NEW(p); p.b := b; p.id := 0; p.n := n; NEW(c); c.b := b; c.n := n;
+		t0 := Now(); Start(p); Start(c); Finish(name, n, t0)
+	END CondMode;
+
+	PROCEDURE BufferCond*;
+	BEGIN CondMode(FALSE, cap, bufN, "buffer-cond") END BufferCond;
+	PROCEDURE BufferCondPass*;
+	BEGIN CondMode(TRUE, cap, bufN, "buffer-cond-pass") END BufferCondPass;
+	PROCEDURE BufferCondWake*;
+	BEGIN CondMode(FALSE, cap, bufN, "buffer-cond-wake") END BufferCondWake;
+	PROCEDURE Buffer1CondPass*;
+	BEGIN CondMode(TRUE, 1, bufN, "buffer1-cond-pass") END Buffer1CondPass;
+	PROCEDURE Buffer1CondWake*;
+	BEGIN CondMode(FALSE, 1, bufN, "buffer1-cond-wake") END Buffer1CondWake;
+
+	PROCEDURE FairCond (pass: BOOLEAN; IN name: ARRAY OF CHAR);
+		VAR b: CondBuf; p0, p1: CondProd; c: CondCons; t0: LONGINT;
+	BEGIN
+		NEW(b); b.head := 0; b.tail := 0; b.count := 0;
+		b.capacity := cap; b.pass := pass; b.puts0 := 0; b.puts1 := 0;
+		NEW(b.ne); NEW(b.nf);
+		NEW(p0); p0.b := b; p0.id := 0; p0.n := bufN DIV 2;
+		NEW(p1); p1.b := b; p1.id := 1; p1.n := bufN DIV 2;
+		NEW(c); c.b := b; c.n := bufN;
+		t0 := Now(); Start(p0); Start(p1); Start(c);
+		Finish(name, bufN, t0);
+		W("FAIR "); W(name); W(" put0="); N(b.puts0); W(" put1="); N(b.puts1);
+		Console.WriteLn
+	END FairCond;
+
+	PROCEDURE FairCondPass*;
+	BEGIN FairCond(TRUE, "fair-cond-pass") END FairCondPass;
+	PROCEDURE FairCondWake*;
+	BEGIN FairCond(FALSE, "fair-cond-wake") END FairCondWake;
 
 	(* -------------------- ждущие с ложным условием: новый ----------------- *)
 
@@ -255,6 +339,11 @@ MODULE Async_devBenchCtx;
 	BEGIN
 		RETURN FALSE
 	END Ready;
+
+	PROCEDURE (o: WaitObj) TransferOnRelease (): BOOLEAN;
+	BEGIN
+		RETURN o.pass
+	END TransferOnRelease;
 
 	PROCEDURE (o: WaitObj) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
@@ -290,10 +379,10 @@ MODULE Async_devBenchCtx;
 		driveSwitches := Tasks.Switches() - s0
 	END Body;
 
-	PROCEDURE ExitWait (useCond: BOOLEAN; waiters, exits: INTEGER; IN name: ARRAY OF CHAR);
+	PROCEDURE ExitWait (pass, useCond: BOOLEAN; waiters, exits: INTEGER; IN name: ARRAY OF CHAR);
 		VAR o: WaitObj; w: WaitJob; d: DriveJob; i: INTEGER; t0: LONGINT; ok: BOOLEAN;
 	BEGIN
-		NEW(o);
+		NEW(o); o.pass := pass;
 		FOR i := 1 TO waiters DO
 			NEW(w); w.o := o;
 			IF useCond THEN NEW(w.c) END;
@@ -311,17 +400,29 @@ MODULE Async_devBenchCtx;
 	END ExitWait;
 
 	PROCEDURE ExitFlag10*;
-	BEGIN ExitWait(FALSE, 10, 100000, "exit-flag-10") END ExitFlag10;
+	BEGIN ExitWait(TRUE, FALSE, 10, 100000, "exit-flag-10-pass") END ExitFlag10;
 	PROCEDURE ExitFlag100*;
-	BEGIN ExitWait(FALSE, 100, 20000, "exit-flag-100") END ExitFlag100;
+	BEGIN ExitWait(TRUE, FALSE, 100, 20000, "exit-flag-100-pass") END ExitFlag100;
 	PROCEDURE ExitFlag1000*;
-	BEGIN ExitWait(FALSE, 1000, 2000, "exit-flag-1000") END ExitFlag1000;
+	BEGIN ExitWait(TRUE, FALSE, 1000, 2000, "exit-flag-1000-pass") END ExitFlag1000;
 	PROCEDURE ExitCond10*;
-	BEGIN ExitWait(TRUE, 10, 100000, "exit-cond-10") END ExitCond10;
+	BEGIN ExitWait(TRUE, TRUE, 10, 100000, "exit-cond-10-pass") END ExitCond10;
 	PROCEDURE ExitCond100*;
-	BEGIN ExitWait(TRUE, 100, 20000, "exit-cond-100") END ExitCond100;
+	BEGIN ExitWait(TRUE, TRUE, 100, 20000, "exit-cond-100-pass") END ExitCond100;
 	PROCEDURE ExitCond1000*;
-	BEGIN ExitWait(TRUE, 1000, 2000, "exit-cond-1000") END ExitCond1000;
+	BEGIN ExitWait(TRUE, TRUE, 1000, 2000, "exit-cond-1000-pass") END ExitCond1000;
+	PROCEDURE ExitFlag10Wake*;
+	BEGIN ExitWait(FALSE, FALSE, 10, 100000, "exit-flag-10-wake") END ExitFlag10Wake;
+	PROCEDURE ExitFlag100Wake*;
+	BEGIN ExitWait(FALSE, FALSE, 100, 20000, "exit-flag-100-wake") END ExitFlag100Wake;
+	PROCEDURE ExitFlag1000Wake*;
+	BEGIN ExitWait(FALSE, FALSE, 1000, 2000, "exit-flag-1000-wake") END ExitFlag1000Wake;
+	PROCEDURE ExitCond10Wake*;
+	BEGIN ExitWait(FALSE, TRUE, 10, 100000, "exit-cond-10-wake") END ExitCond10Wake;
+	PROCEDURE ExitCond100Wake*;
+	BEGIN ExitWait(FALSE, TRUE, 100, 20000, "exit-cond-100-wake") END ExitCond100Wake;
+	PROCEDURE ExitCond1000Wake*;
+	BEGIN ExitWait(FALSE, TRUE, 1000, 2000, "exit-cond-1000-wake") END ExitCond1000Wake;
 
 	(* -------------------- то же на старом AsyncObject --------------------- *)
 
