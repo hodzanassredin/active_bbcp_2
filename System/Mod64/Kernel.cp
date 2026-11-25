@@ -80,7 +80,11 @@ MODULE Kernel;
 		FP = 5;	(* register number of frame pointer *)
 		ML = 3;	(* register which holds the module list at program start *)
 
-		N = 128 DIV 16;	(* free lists *)
+		N = 512 DIV 16;	(* free lists: свой список на каждый размер до 512 байт,
+			больше — последний, общий. Один список на всё больше 128 байт
+			делал выделение зависимым от длины списка: смена размера записи
+			задачи меняла цену создания (docs/speed-main.md). *)
+		NW = (N + 15) DIV 16;	(* 16-битных слов битовой карты непустых списков *)
 
 		(* Шаг 2а: индекс кластеров для InHeap. Кластеры кучи лежат в
 		   отсортированном по адресу массиве; InHeap ищет двоичным поиском
@@ -401,6 +405,7 @@ MODULE Kernel;
 		environ*: INTEGER;
 		
 		free: ARRAY N OF FreeBlock;	(* free list *)
+		nonEmpty: ARRAY NW OF SET;	(* бит i — free[i] не пуст: поиск бакета не идёт по пустым *)
 		sentinelBlock: FreeDesc;
 		sentinel: FreeBlock;
 		candidates: ARRAY 1024 OF LONGINT;
@@ -2575,6 +2580,43 @@ MODULE Kernel;
 		RETURN NIL
 	END FinChainHit;
 
+	PROCEDURE MarkBucket (i: INTEGER);
+	(* Пост: бакет i отмечен непустым. *)
+	BEGIN
+		INCL(nonEmpty[i DIV 16], i MOD 16)
+	END MarkBucket;
+
+	PROCEDURE UnmarkBucket (i: INTEGER);
+	(* Пост: free[i] пуст — бакет не отмечен. *)
+	BEGIN
+		ASSERT(free[i] = sentinel, 33);
+		EXCL(nonEmpty[i DIV 16], i MOD 16)
+	END UnmarkBucket;
+
+	PROCEDURE FirstBucket (from: INTEGER): INTEGER;
+	(* Пост: наименьший i >= from, у которого free[i] не пуст; N — нет такого.
+	   Номер бита в 16-битном слове — делением пополам, без обхода битов. *)
+		VAR w, k, x, n: INTEGER; m: SET;
+	BEGIN
+		w := from DIV 16; k := from MOD 16;
+		WHILE w < NW DO
+			m := nonEmpty[w];
+			IF m # {} THEN
+				m := m * {k..15};
+				IF m # {} THEN
+					x := ORD(m); n := 0;
+					IF x MOD 256 = 0 THEN INC(n, 8); x := x DIV 256 END;
+					IF x MOD 16 = 0 THEN INC(n, 4); x := x DIV 16 END;
+					IF x MOD 4 = 0 THEN INC(n, 2); x := x DIV 4 END;
+					IF x MOD 2 = 0 THEN INC(n) END;
+					RETURN w * 16 + n
+				END
+			END;
+			INC(w); k := 0
+		END;
+		RETURN N
+	END FirstBucket;
+
 	PROCEDURE Insert (blk: FreeBlock; size: INTEGER);	(* insert block in free list *)
 		VAR i: INTEGER;
 	BEGIN
@@ -2582,7 +2624,8 @@ MODULE Kernel;
 		IF debug THEN ASSERT(FinChainHit(S.VAL(LONGINT, blk), S.VAL(LONGINT, blk) + size) = NIL, 32) END;	(* free-блок накрыл живой FList-узел *)
 		blk.size := size - 8; blk.tag := S.VAL(Type, S.ADR(blk.size));	(* 64-бит: stored = total - 8 (было -4) *)
 		i := MIN(N - 1, (blk.size DIV 16));
-		blk.next := free[i]; free[i] := blk
+		blk.next := free[i]; free[i] := blk;
+		MarkBucket(i)
 	END Insert;
 
 	PROCEDURE Sweep (dealloc: BOOLEAN);
@@ -2591,6 +2634,8 @@ MODULE Kernel;
 		cluster := root; last := NIL; allocated := 0;
 		i := N;
 		REPEAT DEC(i); free[i] := sentinel UNTIL i = 0;
+		i := NW;
+		REPEAT DEC(i); nonEmpty[i] := {} UNTIL i = 0;
 		WHILE cluster # NIL DO
 			blk := S.VAL(Block, S.VAL(LONGINT, cluster) + 24);
 			end := S.VAL(LONGINT, blk) + (cluster.size - 24) DIV 16 * 16;
@@ -2626,7 +2671,8 @@ MODULE Kernel;
 			DEC(i);
 			b := free[i]; fblk := sentinel;
 			WHILE b # sentinel DO t := b; b := t.next; t.next := fblk; fblk := t END;
-			free[i] := fblk
+			free[i] := fblk;
+			IF fblk # sentinel THEN INCL(nonEmpty[i DIV 16], i MOD 16) END
 		UNTIL i = 0;
 		gcGoal := allocated + MAX(allocated * gcPercent DIV 100, gcMinGrowth)
 	END Sweep;
@@ -2701,30 +2747,48 @@ MODULE Kernel;
 		b := free[i]; l := NIL;
 		WHILE b.size < s DO l := b; b := b.next END;
 		IF b # sentinel THEN
-			IF l = NIL THEN free[i] := b.next ELSE l.next := b.next END
+			IF l = NIL THEN free[i] := b.next ELSE l.next := b.next END;
+			IF free[i] = sentinel THEN UnmarkBucket(i) END
 		ELSE b := NIL
 		END;
 		RETURN b
 	END OldBlock;
 
 	PROCEDURE GetOldFreeBlock (size: INTEGER; OUT fb: FreeBlock);	(* size MOD 16 = 0 *)
-		VAR b, l: FreeBlock; s, i: INTEGER;
+		VAR b, l: FreeBlock; s, i, i0: INTEGER;
 	BEGIN
 		IF debug & (watcher # NIL) THEN watcher(3) END;
 		s := size - 8;	(* free size field = total - 8 *)
-		i := MIN(N - 1, s DIV 16);
+		i0 := MIN(N - 1, s DIV 16);
 		(* 64-бит: остаток a = b.size - s: a = 16 нельзя ни Insert (минимум 32), ни absorb
-		   (Next его не видит — sweep проваливается в sliver и падает) — такой блок пропускаем.
-		   При промахе ОБЯЗАТЕЛЬНО идём в следующий бакет: иначе sliver-блок в низком
-		   бакете навсегда затеняет большие блоки старших бакетов (шторм кластеров, Tut-2 hang) *)
+		   (Next его не видит — sweep проваливается в sliver и падает). До 512 байт
+		   у каждого размера свой бакет, поэтому бакет i0+1 — это ровно блоки с
+		   остатком 16: весь бакет не годится и пропускается. Битовая карта
+		   nonEmpty ведёт сразу к следующему непустому бакету, а не по пустым:
+		   цена выдачи не зависит от того, сколько списков пусто. *)
 		b := NIL;
-		WHILE (b = NIL) & (i < N) DO
-			l := NIL; b := free[i];
-			WHILE (b # sentinel) & ((b.size < s) OR (b.size - s = 16)) DO l := b; b := b.next END;
-			IF b # sentinel THEN
-				IF l = NIL THEN free[i] := b.next ELSE l.next := b.next END
-			ELSE
-				b := NIL; INC(i)
+		IF i0 < N - 1 THEN	(* точный класс: любой блок списка годится *)
+			i := i0;
+			IF (i MOD 16) IN nonEmpty[i DIV 16] THEN
+				b := free[i]; ASSERT(b # sentinel, 34);
+				free[i] := b.next; IF free[i] = sentinel THEN UnmarkBucket(i) END
+			END
+		END;
+		IF b = NIL THEN
+			IF i0 < N - 1 THEN
+				i := FirstBucket(i0 + 1);
+				IF (i = i0 + 1) & (i0 + 1 < N - 1) THEN i := FirstBucket(i0 + 2) END	(* остаток 16 *)
+			ELSE i := i0	(* общий бакет больше 512: перебрать список *)
+			END;
+			WHILE (b = NIL) & (i < N) DO
+				l := NIL; b := free[i];
+				WHILE (b # sentinel) & ((b.size < s) OR (b.size - s = 16)) DO l := b; b := b.next END;
+				IF b # sentinel THEN
+					IF l = NIL THEN free[i] := b.next ELSE l.next := b.next END;
+					IF free[i] = sentinel THEN UnmarkBucket(i) END
+				ELSE
+					b := NIL; i := FirstBucket(i + 1)
+				END
 			END
 		END;
 		fb := b
@@ -2742,7 +2806,8 @@ MODULE Kernel;
 			b := free[i]; l := NIL;
 			WHILE (b # sentinel) & (S.VAL(LONGINT, b) + b.size # s) DO l := b; b := b.next END;
 			IF b # sentinel THEN
-				IF l = NIL THEN free[i] := b.next ELSE l.next := b.next END
+				IF l = NIL THEN free[i] := b.next ELSE l.next := b.next END;
+				IF free[i] = sentinel THEN UnmarkBucket(i) END
 			ELSE b := NIL
 			END;
 			INC(i)
@@ -3156,6 +3221,8 @@ MODULE Kernel;
 		i := N;
 
 		REPEAT DEC(i); free[i] := sentinel UNTIL i = 0;
+		i := NW;
+		REPEAT DEC(i); nonEmpty[i] := {} UNTIL i = 0;
 		(* debug := TRUE; *)
 		IF monoClusterMem THEN
 			AllocateCluster(1, root);
@@ -3166,6 +3233,7 @@ MODULE Kernel;
 			free[i].next := sentinel;
 			free[i].size := (root.size - 24) DIV 16 * 16 - 8;
 			free[i].tag:=S.VAL(Type, S.ADR(free[i].size));
+			INCL(nonEmpty[i DIV 16], i MOD 16);
 			(* IF debug THEN ;DumpFree; END *)
 		END;
 		(*
