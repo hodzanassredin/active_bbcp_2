@@ -4,7 +4,8 @@ MODULE System_devSegStacks;
 	Kernel.GrowStack. Задачи начинают со стека segBase и растут кусками
 	segGrowth; переход проверяется счётчиком Kernel.GrowCount. *)
 
-	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert;
+	IMPORT S := SYSTEM, ACTIVE, Kernel, Tasks, UnitAssert, System_devCRaw, System_devClock,
+		Console, Strings;
 
 	CONST
 		reserve = 2 * 1024;
@@ -16,20 +17,26 @@ MODULE System_devSegStacks;
 
 	TYPE
 		Pair = RECORD a, b, c, d: INTEGER END;
+		Cell = POINTER TO RECORD x: INTEGER END;
 
 		Deep = POINTER TO RECORD (Tasks.Task) n, res: INTEGER END;
 		Params = POINTER TO RECORD (Tasks.Task)
-			v, varV, arr, rec, nested: INTEGER; real: REAL
+			v, varV, arr, rec, nested: INTEGER; real: REAL; loOk: BOOLEAN
 		END;
 		Yielder = POINTER TO RECORD (Tasks.Task) lo: S.ADDRESS; ok: BOOLEAN END;
 		Gcer = POINTER TO RECORD (Tasks.Task) ok: BOOLEAN END;
 		Tryer = POINTER TO RECORD (Tasks.Task) ok: BOOLEAN; err: INTEGER END;
 		Canceller = POINTER TO RECORD (Tasks.Task) state: INTEGER END;
 		Smasher = POINTER TO RECORD (Tasks.Task) END;
+		Waiter = POINTER TO RECORD (Tasks.Task) cell: Cell; done: BOOLEAN END;
+		Setter = POINTER TO RECORD (Tasks.Task) cell: Cell END;
+		Hot = POINTER TO RECORD (Tasks.Task) n: INTEGER; ns, grows: LONGINT END;
+		Once = POINTER TO RECORD (Tasks.Task) END;
 
 	VAR
 		oldDir: Tasks.StackDir;
 		oldDefault: INTEGER;
+		onceCount: INTEGER;
 
 	PROCEDURE Begin;
 	BEGIN
@@ -132,26 +139,29 @@ MODULE System_devSegStacks;
 	END Outer;
 
 	PROCEDURE DiveParams (t: Params; guard: INTEGER);
-		VAR a: ARRAY 8 OF INTEGER; arr: ARRAY 8 OF INTEGER; p: Pair; i: INTEGER;
+		VAR a: ARRAY 8 OF INTEGER; arr: ARRAY 8 OF INTEGER; p: Pair; i: INTEGER; lo0: S.ADDRESS;
 	BEGIN
 		a[0] := guard; i := 1;
 		WHILE i < 8 DO a[i] := i; INC(i) END;
 		IF (guard > 0) & (SHORT(S.ADR(a) - Kernel.stkLo) > near) THEN DiveParams(t, guard - 1)
 		ELSE
+			lo0 := Kernel.stkLo;
 			t.v := TakeValue(5);
+			IF Kernel.stkLo # lo0 THEN t.loOk := FALSE END;
 			t.varV := 10; TakeVar(t.varV);
 			i := 0; WHILE i < 8 DO arr[i] := i; INC(i) END;
 			t.arr := TakeArr(arr);
 			p.a := 1; p.b := 2; p.c := 3; p.d := 4;
 			t.rec := TakePair(p);
 			t.real := TakeReal(2.5);
-			Outer(t.nested)
+			Outer(t.nested);
+			IF Kernel.stkLo # lo0 THEN t.loOk := FALSE END
 		END
 	END DiveParams;
 
 	PROCEDURE (t: Params) Run;
 	BEGIN
-		DiveParams(t, 1000)
+		t.loOk := TRUE; DiveParams(t, 1000)
 	END Run;
 
 	PROCEDURE TestProcParamsAcrossBoundary*;
@@ -169,6 +179,7 @@ MODULE System_devSegStacks;
 		UnitAssert.EqualInt(10, t.rec, "record value");
 		UnitAssert.EqualReal(5.0, t.real, 0.0001, "REAL result");
 		UnitAssert.EqualInt(8, t.nested, "static link");
+		UnitAssert.True(t.loOk, "stkLo restored after every return");
 		UnitAssert.True(Kernel.GrowCount() >= 6, "each call crossed a boundary");
 		End
 	END TestProcParamsAcrossBoundary;
@@ -299,6 +310,57 @@ MODULE System_devSegStacks;
 		End
 	END TestProcTryTrapOnLowerSegment;
 
+	(* --- AWAIT на нижнем куске --------------------------------------------- *)
+
+	PROCEDURE [exclusive] (c: Cell) Wait*, NEW;
+	(** Ждёт, пока x станет больше нуля. Условие AWAIT — скрытая вложенная
+		процедура со статической связью на кадр Wait: Monitors читает его из
+		чужой задачи, поэтому кадр не должен переезжать. *)
+	BEGIN
+		ACTIVE.AWAIT(c.x > 0)
+	END Wait;
+
+	PROCEDURE [exclusive] (c: Cell) Set*, NEW;
+	BEGIN
+		c.x := 1
+	END Set;
+
+	PROCEDURE DiveAwait (t: Waiter; depth: INTEGER);
+		VAR a: ARRAY 8 OF INTEGER;
+	BEGIN
+		a[0] := depth;
+		IF depth > 0 THEN DiveAwait(t, depth - 1)
+		ELSE
+			t.cell.Wait;	(* кадр Wait лежит на нижнем куске *)
+			t.done := TRUE
+		END
+	END DiveAwait;
+
+	PROCEDURE (t: Waiter) Run;
+	BEGIN
+		DiveAwait(t, deepN)
+	END Run;
+
+	PROCEDURE (t: Setter) Run;
+	BEGIN
+		t.cell.Set
+	END Run;
+
+	PROCEDURE TestProcAwaitDeep*;
+	(* Задача ждёт в [exclusive] на нижнем куске; другая задача ставит
+		условие, и Monitors вычисляет его по кадру, лежащему в куске. *)
+		VAR w: Waiter; s: Setter; c: Cell;
+	BEGIN
+		Begin;
+		NEW(c); NEW(w); w.cell := c; NEW(s); s.cell := c;
+		Tasks.Start(w); Tasks.Start(s); Pump;
+		UnitAssert.True(~Tasks.Failed(w), "waiter failed");
+		UnitAssert.True(~Tasks.Failed(s), "setter failed");
+		UnitAssert.True(w.done, "AWAIT condition read from the lower segment");
+		UnitAssert.True(Kernel.GrowCount() > 0, "waited on a grown segment");
+		End
+	END TestProcAwaitDeep;
+
 	(* --- отмена на нижнем куске -------------------------------------------- *)
 
 	PROCEDURE DiveCancel (t: Canceller; depth: INTEGER);
@@ -318,8 +380,7 @@ MODULE System_devSegStacks;
 		t.state := 0; DiveCancel(t, deepN)
 	END Run;
 
-	PROCEDURE TestProcCancelDeep*;
-	(* Отмена задачи, запаркованной на нижнем куске: трап 127 в точке
+	PROCEDURE TestProcCancelDeep*;	(* Отмена задачи, запаркованной на нижнем куске: трап 127 в точке
 		ожидания, задача Cancelled, куски возвращены и не портят следующие. *)
 		VAR t: Canceller; c: Deep;
 	BEGIN
@@ -378,5 +439,154 @@ MODULE System_devSegStacks;
 		UnitAssert.EqualInt(100 * 101 DIV 2, c.res, "neighbour result");
 		End
 	END TestProcCanarySegmented;
+
+	(* --- замеры ------------------------------------------------------------ *)
+
+	PROCEDURE W (IN s: ARRAY OF CHAR);
+	BEGIN
+		Console.WriteStr(s)
+	END W;
+
+	PROCEDURE N (x: LONGINT);
+		VAR s: ARRAY 32 OF CHAR;
+	BEGIN
+		Strings.IntToString(x, s); W(s)
+	END N;
+
+	PROCEDURE PumpLong;
+		VAR t0: LONGINT;
+	BEGIN
+		t0 := Kernel.Time();
+		WHILE (Tasks.Count() > 0) & (Kernel.Time() - t0 < 120000) DO Tasks.Step END
+	END PumpLong;
+
+	PROCEDURE Empty (x: INTEGER): INTEGER;
+	BEGIN
+		RETURN x + 1
+	END Empty;
+
+	PROCEDURE Leaf (x: INTEGER): INTEGER;
+		VAR a: ARRAY 120 OF INTEGER; i: INTEGER;
+	BEGIN
+		i := 0; WHILE i < 120 DO a[i] := i; INC(i) END;
+		RETURN x + a[0] + 1
+	END Leaf;
+
+	PROCEDURE HotDive (t: Hot; guard: INTEGER);
+		VAR a: ARRAY 8 OF INTEGER; i, x: INTEGER; t0: LONGINT;
+	BEGIN
+		a[0] := guard;
+		IF (guard > 0) & (SHORT(S.ADR(a) - Kernel.stkLo) > near) THEN HotDive(t, guard - 1)
+		ELSE
+			Kernel.ResetGrowCount(); x := 0;
+			t0 := System_devClock.now(); i := 0;
+			WHILE i < t.n DO x := Leaf(x); INC(i) END;
+			t.ns := System_devClock.now() - t0;
+			t.grows := Kernel.GrowCount()
+		END
+	END HotDive;
+
+	PROCEDURE (t: Hot) Run;
+	BEGIN
+		HotDive(t, 1000)
+	END Run;
+
+	PROCEDURE BenchCall*;
+	(** Цена обычного проверенного вызова против вызова, каждый раз
+		переходящего на новый кусок: с запасным куском и без. *)
+		VAR t: Hot; i, x: INTEGER; t0, dt: LONGINT;
+	BEGIN
+		Begin;
+		x := 0; t0 := System_devClock.now();
+		i := 0; WHILE i < 10000000 DO x := Empty(x); INC(i) END;
+		dt := System_devClock.now() - t0;
+		W("BENCH call ops=10000000 nsPerOp="); N(dt DIV 10000000); Console.WriteLn;
+		Tasks.SegmentKeep(TRUE);
+		NEW(t); t.n := 1000000; Tasks.Start(t); PumpLong;
+		W("BENCH boundary-spare ops="); N(t.n); W(" nsPerOp="); N(t.ns DIV t.n);
+		W(" grows="); N(t.grows); Console.WriteLn;
+		Tasks.SegmentKeep(FALSE);
+		NEW(t); t.n := 1000000; Tasks.Start(t); PumpLong;
+		W("BENCH boundary-pending ops="); N(t.n); W(" nsPerOp="); N(t.ns DIV t.n);
+		W(" grows="); N(t.grows); Console.WriteLn;
+		Tasks.SegmentKeep(TRUE);
+		End
+	END BenchCall;
+
+	PROCEDURE (t: Once) Run;
+	BEGIN
+		INC(onceCount)
+	END Run;
+
+	PROCEDURE MassN (n: INTEGER);
+	(* n задач со стартовым стеком base у поставщика SegDir: создание,
+	   память, отображения, исполнение. *)
+		VAR i: INTEGER; t: Once; t0, t1, t2: LONGINT; r0, r1, v0, v1: LONGINT;
+	BEGIN
+		Begin;
+		onceCount := 0;
+		r0 := System_devCRaw.c_rss(); v0 := System_devCRaw.c_vmas();
+		t0 := System_devClock.now();
+		i := 0;
+		WHILE i < n DO
+			NEW(t); Tasks.SetStackSize(t, base); Tasks.Start(t); INC(i)
+		END;
+		t1 := System_devClock.now(); r1 := System_devCRaw.c_rss(); v1 := System_devCRaw.c_vmas();
+		W("BENCH segtasks n="); N(n); W(" stack="); N(base);
+		W(" createMs="); N((t1 - t0) DIV 1000000); W(" nsPerTask="); N((t1 - t0) DIV n);
+		W(" rssMB="); N((r1 - r0) DIV (1024 * 1024)); W(" vmas="); N(v1); Console.WriteLn;
+		PumpLong; t2 := System_devClock.now();
+		W("BENCH segtasks-run n="); N(n); W(" runMs="); N((t2 - t1) DIV 1000000);
+		W(" done="); N(onceCount); Console.WriteLn;
+		End
+	END MassN;
+
+	PROCEDURE Mass10k*;
+	BEGIN MassN(10000)
+	END Mass10k;
+
+	PROCEDURE Mass100k*;
+	BEGIN MassN(100000)
+	END Mass100k;
+
+	PROCEDURE Mass1m*;
+	BEGIN MassN(1000000)
+	END Mass1m;
+
+	PROCEDURE TryReserve (r, b, g: INTEGER);
+		VAR t: Deep; oldD: Tasks.StackDir; oldDef: INTEGER;
+	BEGIN
+		oldD := Tasks.StackDirOf(); oldDef := Tasks.DefaultStackSize();
+		Tasks.SetSegmentParams(r, b, g); Kernel.ResetGrowCount();
+		NEW(t); t.n := deepN; Tasks.Start(t); PumpLong;
+		W("RESERVE reserve="); N(r); W(" base="); N(b);
+		W(" failed="); IF Tasks.Failed(t) THEN W("yes") ELSE W("no") END;
+		W(" res="); N(t.res); W(" grows="); N(Kernel.GrowCount()); Console.WriteLn;
+		Tasks.StopSegmentedStacks; Tasks.SetStackDir(oldD); Tasks.SetDefaultStackSize(oldDef)
+	END TryReserve;
+
+	PROCEDURE Reserve1k*;
+	BEGIN TryReserve(1024, 3072, 4096)
+	END Reserve1k;
+
+	PROCEDURE Reserve1536*;
+	BEGIN TryReserve(1536, 3584, 4096)
+	END Reserve1536;
+
+	PROCEDURE Reserve2k*;
+	BEGIN TryReserve(2048, 4096, 4096)
+	END Reserve2k;
+
+	PROCEDURE Reserve768*;
+	BEGIN TryReserve(768, 2816, 4096)
+	END Reserve768;
+
+	PROCEDURE Reserve512*;
+	BEGIN TryReserve(512, 2560, 4096)
+	END Reserve512;
+
+	PROCEDURE Reserve256*;
+	BEGIN TryReserve(256, 2304, 4096)
+	END Reserve256;
 
 END System_devSegStacks.

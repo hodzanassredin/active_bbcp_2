@@ -28,4 +28,4 @@ System_devStackChk|proc|300||%
 System_devSchedTrap|proc|300||
 System_devStackDirs|proc|300|System_devStackPlain|%
 # Проба сегментированного стека: рост кусками из пролога ключа %.
-System_devSegStacks|proc|600||%
+System_devSegStacks|proc|600|System_devCRaw System_devClock|%

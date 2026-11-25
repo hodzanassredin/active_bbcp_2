@@ -48,7 +48,10 @@ while [ $pass -lt 3 ]; do
 done
 
 out="${TMPDIR:-/tmp}/unit-$$.out"
-printf 'UnitRunner.Run %s %s quit\n' "$MOD" "$MARKS" | timeout -k 5 "$TMO" "$BB/tools/run64.sh" >"$out" 2>&1
+{
+	[ -n "${BB_PRE:-}" ] && printf '%s\n' "$BB_PRE"
+	printf 'UnitRunner.Run %s %s quit\n' "$MOD" "$MARKS"
+} | timeout -k 5 "$TMO" "$BB/tools/run64.sh" >"$out" 2>&1
 rc=$?
 
 # Строки отчёта — в stdout пользователя; служебные (TRAP REPORT) не прячем.
