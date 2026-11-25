@@ -1945,6 +1945,20 @@ MODULE Kernel;
 		RETURN NewStack(lo, hi, FALSE)
 	END RegisterStack;
 
+	PROCEDURE RelinkStack* (s: Stack; lo, hi: S.ADDRESS);
+	(** Вернуть в реестр запись s, снятую UnregisterStack, для стека
+		[lo, hi): повторный запуск задачи не создаёт запись заново.
+		Пред: на стеке никто не исполняется, lo/hi — его границы. *)
+	BEGIN
+		IF s = NIL THEN RETURN END;
+		s.lo := lo; s.hi := hi;
+		s.sp := hi; s.fp := 0;
+		s.tryContext := 0; s.trapStack := NIL; s.tryCount := 0;
+		s.prev := NIL; s.next := stacks;
+		IF stacks # NIL THEN stacks.prev := s END;
+		stacks := s
+	END RelinkStack;
+
 	PROCEDURE RegisterSignalStack* (lo, hi: S.ADDRESS): Stack;
 	(** Сигнальный стек (sigaltstack). *)
 	BEGIN

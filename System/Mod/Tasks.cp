@@ -148,8 +148,13 @@ MODULE Tasks;
 
 		CtxPtr = POINTER TO Ctx;
 
-		(* Задача с пропуском: Run реализован здесь, тело пишет наследник. *)
-		Job* = POINTER TO ABSTRACT RECORD (Task) END;
+		(* Задача с пропуском: Run реализован здесь, тело пишет наследник.
+		   cleaner и holdFree переживают запуск: повторный Start той же
+		   задачи не выделяет память. *)
+		Job* = POINTER TO ABSTRACT RECORD (Task)
+			cleaner: Cleaner;
+			holdFree: Hold
+		END;
 
 		(* Запись кучи спящих. Действительна, пока t спит этим сном:
 		   t.state = Sleeping и t.sleepSeq = seq; иначе устарела (задачу
@@ -598,7 +603,12 @@ MODULE Tasks;
 		size := StackSizeOf(t);
 		IF ~TakeStack(size, lo, hi) THEN RETURN FALSE END;
 		t.lo := lo; t.hi := hi;
-		t.stackRec := Kernel.RegisterStack(lo, hi);
+		IF t.stackRec = NIL THEN
+			t.stackRec := Kernel.RegisterStack(lo, hi)
+		ELSE
+			(* запись прошлого запуска: привязать к стеку заново *)
+			Kernel.RelinkStack(t.stackRec, lo, hi)
+		END;
 		IF t.stackRec = NIL THEN GiveStack(size, lo, hi); t.lo := 0; RETURN FALSE END;
 		(* 13 нулевых слотов регистров (обнуляются ниже: стек из пула не пуст), адрес входа,
 		   8 байт запаса: sp % 16 = 8, после 13 pop и ret rsp % 16 = 8 *)
@@ -642,12 +652,13 @@ MODULE Tasks;
 	PROCEDURE Reap (t: Task);
 	(** Освободить стек завершённой задачи (уже на главном стеке) и убрать
 		её из списка всех задач: иначе завершённые задачи и всё, на что они
-		ссылаются, живут до конца процесса. *)
+		ссылаются, живут до конца процесса. Запись реестра стека остаётся
+		в задаче: повторный запуск привяжет её к стеку заново без NewRec. *)
 	BEGIN
 		IF t.prev = NIL THEN all := t.next ELSE t.prev.next := t.next END;
 		IF t.next # NIL THEN t.next.prev := t.prev END;
 		t.next := NIL; t.prev := NIL;
-		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec); t.stackRec := NIL END;
+		IF t.stackRec # NIL THEN Kernel.UnregisterStack(t.stackRec) END;
 		GiveStack(StackSizeOf(t), t.lo, t.hi);
 		t.lo := 0; t.hi := 0;
 		WakeWaiters(t);
@@ -1423,6 +1434,10 @@ MODULE Tasks;
 			IF ctx.group.alive > 0 THEN CancelGroup(ctx.group) END;
 			ctx.group.owner := NIL
 		END;
+		(* Свободные записи вызовов переживают запуск: повторный Run без
+		   выделений. ctx.task = NIL — пропуск уже погашен. *)
+		IF ctx.task # NIL THEN ctx.task(Job).holdFree := ctx.free END;
+		ctx.free := NIL;
 		ctx.task := NIL
 	END FinishCtx;
 
@@ -1451,9 +1466,12 @@ MODULE Tasks;
 	BEGIN
 		ctx.task := t; ctx.group := NIL;
 		ctx.cancelled := FALSE; ctx.expired := FALSE;
-		ctx.free := NIL; ctx.deadline := 0;
+		ctx.deadline := 0;
 		ctx.trapped := FALSE; ctx.cleanerPushed := FALSE;
-		NEW(cleaner); cleaner.ctxAdr := S.ADR(ctx); ctx.cleaner := cleaner;
+		cleaner := t.cleaner;
+		IF cleaner = NIL THEN NEW(cleaner); t.cleaner := cleaner END;
+		cleaner.ctxAdr := S.ADR(ctx); ctx.cleaner := cleaner;
+		ctx.free := t.holdFree; t.holdFree := NIL;
 		t.pctx := S.ADR(ctx);
 		Kernel.PushTrapCleaner(cleaner); ctx.cleanerPushed := TRUE;
 		t.Body(ctx);
