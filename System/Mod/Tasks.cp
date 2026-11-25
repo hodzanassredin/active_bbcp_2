@@ -1006,6 +1006,7 @@ MODULE Tasks;
 				IF t.state # Cancelled THEN EndBody(t) END;
 				Services.SetTrapGuardCleanup;
 				SetCurrent(NIL); direct := 0;
+				atomic := 0;	(* участок, в котором задача кончилась трапом, брошен *)
 				Reap(t)
 			END
 		END
