@@ -13,6 +13,8 @@ Unit_devMain||180|Unit_devProbe Unit_devBadSetup Unit_devCyr
 Check_devMain|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
 Dev_devActive|proc|300|
 Dev_devYield|proc|300||^
+# Многомерные открытые массивы-параметры и динамические массивы в куче.
+Dev_devOpenArr||180|
 Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
 Async_devIO|proc|600|AsyncIO AsyncSelect AsyncChan AsyncOnce
 Async_devWorkers|proc|300|LinThreads LinNative AsyncWork AsyncWorkLin
