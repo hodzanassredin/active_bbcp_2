@@ -131,6 +131,7 @@ MODULE ActorCore;
 			watching: Watcher;	(* за кем следит этот актор (Watch) *)
 			user, sys: Queue;
 			held: Queue;	(* отказы детей, отложенные, пока актор приостановлен *)
+			stash: Queue;	(* письма, отложенные обработчиком (Stash) *)
 			state: INTEGER;
 			suspended, scheduled, running: BOOLEAN;
 			failed: BOOLEAN;	(* остановка — решение надзора после отказа *)
@@ -509,6 +510,16 @@ MODULE ActorCore;
 
 	(* --- переходы жизненного цикла ---------------------------------------- *)
 
+	PROCEDURE Merge (c: Context);
+	(* Пост: отложенные письма — в начале ящика в прежнем порядке, за ними прежние письма ящика. *)
+		VAR m: Msg; s: Ref;
+	BEGIN
+		IF c.stash.count > 0 THEN
+			WHILE c.user.count > 0 DO Pop(c.user, m, s); Push(c.stash, m, s) END;
+			c.user := c.stash; c.stash.ring := NIL; c.stash.head := 0; c.stash.count := 0
+		END
+	END Merge;
+
 	PROCEDURE CancelTimer (c: Context);
 	BEGIN
 		IF c.rtTimer # NIL THEN Services.RemoveAction(c.rtTimer) END;
@@ -525,6 +536,7 @@ MODULE ActorCore;
 		ASSERT((c.state = stopping) & (c.nChildren = 0), 100);
 		Lifecycle(c, stoppedM);
 		c.state := stopped; c.actor := NIL; c.beh := NIL; DEC(live);
+		WHILE c.stash.count > 0 DO Pop(c.stash, m, s); Dead(m, s) END;
 		WHILE c.user.count > 0 DO Pop(c.user, m, s); Dead(m, s) END;
 		WHILE c.sys.count > 0 DO
 			Pop(c.sys, m, s);
@@ -552,12 +564,13 @@ MODULE ActorCore;
 
 	PROCEDURE FinishRestart (c: Context);
 	(* Пред: state = restarting, детей нет. Пост: новый экземпляр от
-	   фабрики получил Started; письма ящика сохранены. Трап фабрики или
+	   фабрики получил Started; письма ящика сохранены, отложенные (Stash) —
+	   в его начале. Трап фабрики или
 	   NIL от неё — отказ c с actor = NIL. Отмена задачи в фабрике — c
 	   остаётся в restarting, повтор фабрики первым в очереди. *)
 		VAR r: INTEGER;
 	BEGIN
-		c.actor := NIL; c.beh := NIL;
+		c.actor := NIL; c.beh := NIL; Merge(c);
 		r := Invoke(c, callNew, NIL);
 		IF r = cancelTrap THEN c.actor := NIL; PushFront(c.sys, newS, NIL); RETURN END;
 		c.state := alive; c.suspended := FALSE;
@@ -899,6 +912,27 @@ MODULE ActorCore;
 		ASSERT(InHandler(c), 20);
 		c.beh := b
 	END Become;
+
+	PROCEDURE (c: Context) Stash*, NEW;
+	(** Отложить письмо в обработке: обработчик сейчас не может его принять.
+		Пред: вызов из обработчика c, обрабатывающего пользовательское
+		письмо (не шаг жизненного цикла) — трап 20.
+		Пост: письмо и его отправитель отложены; Unstash вернёт их в ящик.
+		Перезапуск возвращает отложенные в начало ящика, остановка делает
+		их мёртвыми письмами. *)
+	BEGIN
+		ASSERT(InHandler(c) & (c.callKind = callUser) & (c.callMsg # NIL), 20);
+		Push(c.stash, c.callMsg, c.sender)
+	END Stash;
+
+	PROCEDURE (c: Context) Unstash*, NEW;
+	(** Пред: вызов из обработчика c — трап 20.
+		Пост: отложенные письма — в начале ящика в порядке Stash, с прежними
+		отправителями; следующим обработчик получит первое из них. *)
+	BEGIN
+		ASSERT(InHandler(c), 20);
+		Merge(c)
+	END Unstash;
 
 	(* --- создание и общие операции ---------------------------------------- *)
 

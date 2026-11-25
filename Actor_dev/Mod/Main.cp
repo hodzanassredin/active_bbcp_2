@@ -35,6 +35,8 @@ MODULE Actor_devMain;
 		END;
 		Silent = POINTER TO RECORD (ActorCore.Actor) END;
 		Negate = POINTER TO RECORD (ActorCore.Behavior) END;
+		(* копит Num, пока закрыт; Swap открывает, Boom2 трапует (перезапуск) *)
+		Gate = POINTER TO RECORD (ActorCore.Actor) open: BOOLEAN END;
 
 		Driver = POINTER TO RECORD (Tasks.Task) body: PROCEDURE END;
 
@@ -842,6 +844,70 @@ MODULE Actor_devMain;
 		END;
 		RETURN FALSE
 	END FindAsk;
+
+	(* --- отложенные письма (Stash) ------------------------------------------ *)
+
+	PROCEDURE NewNum (n: INTEGER): Num;
+		VAR m: Num;
+	BEGIN
+		NEW(m); m.n := n; RETURN m
+	END NewNum;
+
+	PROCEDURE (a: Gate) Receive (c: ActorCore.Context; m: Msg);
+	BEGIN
+		IF m IS Swap THEN a.open := TRUE; c.Unstash
+		ELSIF m IS Boom2 THEN HALT(44)
+		ELSIF m IS Num THEN
+			IF ~a.open THEN c.Stash
+			ELSIF nLog < logLen THEN log[nLog] := m(Num).n; INC(nLog)
+			END
+		ELSIF m IS Get THEN c.Respond(NewNum(nLog))
+		END
+	END Receive;
+
+	PROCEDURE NewGate (): ActorCore.Actor;
+		VAR a: Gate;
+	BEGIN
+		NEW(a); RETURN a
+	END NewGate;
+
+	PROCEDURE StashBody;
+	BEGIN
+		ActorCore.Tell(target, NewNum(1)); ActorCore.Tell(target, NewNum(2));
+		ActorCore.Tell(target, swap); ActorCore.Tell(target, NewNum(3));
+		AskInt(target, 2000)
+	END StashBody;
+
+	PROCEDURE TestStashKeepsOrder*;
+	(* отложенные письма возвращаются в начало ящика в прежнем порядке *)
+	BEGIN
+		target := ActorCore.Spawn(NIL, ActorCore.NewProps(NewGate), "");
+		UnitAssert.True(Drive(StashBody, 2000), "driver finished");
+		UnitAssert.EqualInt(3, askVal, "all three counted");
+		UnitAssert.True((log[0] = 1) & (log[1] = 2) & (log[2] = 3), "order 1, 2, 3")
+	END TestStashKeepsOrder;
+
+	PROCEDURE StashRestartBody;
+	BEGIN
+		ActorCore.Tell(target, NewNum(1)); ActorCore.Tell(target, NewNum(2));
+		ActorCore.Tell(target, boom2); ActorCore.Tell(target, swap); ActorCore.Tell(target, NewNum(3));
+		AskInt(target, 2000)
+	END StashRestartBody;
+
+	PROCEDURE TestRestartReturnsStash*;
+	(* перезапуск возвращает отложенные письма в начало ящика: новый
+		экземпляр получает их первыми и в прежнем порядке *)
+		VAR p: ActorCore.Props;
+	BEGIN
+		kidProps := ActorCore.NewProps(NewGate); nKids := 1; kids[0] := NIL;
+		p := ActorCore.NewProps(NewSup); p.strategy := NewStrategy(0, ActorCore.Restart, ActorCore.Restart);
+		IF ActorCore.Spawn(NIL, p, "") = NIL THEN END;
+		Idle(20); target := kids[0];
+		UnitAssert.True(target # NIL, "gate started");
+		UnitAssert.True(Drive(StashRestartBody, 2000), "driver finished");
+		UnitAssert.EqualInt(3, askVal, "stashed letters survive restart");
+		UnitAssert.True((log[0] = 1) & (log[1] = 2) & (log[2] = 3), "order 1, 2, 3")
+	END TestRestartReturnsStash;
 
 	PROCEDURE TestCancelledAskLeavesNoReplyAddress*;
 		VAR d: Driver; name: ActorCore.Name;
