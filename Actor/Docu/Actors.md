@@ -110,17 +110,29 @@ An actor has no task of its own. Mailboxes with work are served by an *executor*
 `ActorRun` pool that takes a mailbox from the shared queue, calls `Dispatcher.Process` and returns
 the mailbox to the queue if letters remain in it. `ActorRun.Start(n)` creates n executors; in one
 call of `Process` an actor handles all system messages and up to a hundred user messages. A
-thousand actors therefore occupy a thousand mailboxes and as many stacks as there are executors in
-the pool.
+thousand actors therefore occupy a thousand mailboxes and as many stacks as the pool has executors
+at the moment.
 
 The handler of an actor may wait: sleep, receive from a channel, ask another actor with `Ask`.
 While it waits, one rule holds: one handler per actor at a time. The mailbox of a waiting actor is
 marked busy, and the next letter to this actor is given neither to this executor nor to another
-one. The price of the rule is a busy executor. Suppose the pool has four executors and four actors
-fall asleep in `Receive` for a second at once: a fifth actor that received a letter waits a second,
-although its work takes a microsecond. The test `TestBusyActorGetsNoSecondMessage` checks both sides
-of the rule: two `Nap` letters to one actor are handled one after another, and a letter to a second
-actor is handled during the first nap.
+one. Waiting is allowed and costs one stack per simultaneously waiting handler. The pool grows: if
+a ready mailbox found no free executor, and a millisecond later all executors are still waiting
+inside handlers, `ActorRun` starts executors in the number of ready mailboxes. If some executor is
+working, it takes the mailbox itself: a queue of letters posted in a row is served by the same
+number of tasks. Suppose the pool has four executors and four actors fall asleep in `Receive` for a
+second at once: a fifth actor that received a letter does not wait a second — the pool starts a
+fifth executor, and the work goes at once. The test `TestBusyActorGetsNoSecondMessage` checks both
+sides of the rule: two `Nap` letters to one actor are handled one after another, and a letter to a
+second actor is handled during the first nap.
+
+The default limit on the number of executors is 1024. A task stack occupies 256 KiB of virtual
+space, so the limit is 256 MiB of addresses with a guard page; physical memory is spent only on
+touched pages. `ActorRun.SetLimit` changes the limit, `ActorRun.n` is the current number of
+executors. At the limit ready mailboxes wait until an executor becomes free, and `ActorRun.limitHits` counts how many
+times a ready mailbox found no executor because of the limit. An extra executor ends after a second
+of idleness, and the pool returns to the number from `Start`; `ActorRun.grown` and
+`ActorRun.shrunk` count executors started and ended above that number.
 
 An actor that needs to wait all the time gets a task of its own: `Props.dedicated := TRUE`. Only
 that task serves its mailbox, and the pool executors stay free; in the test
@@ -1124,20 +1136,32 @@ DEFINITION ActorRun;
 
 	VAR
 		n-: INTEGER;
+		limit-: INTEGER;
+		limitHits-: LONGINT;
+		grown-: LONGINT;
+		shrunk-: LONGINT;
 
 	PROCEDURE Start (k: INTEGER);
+	PROCEDURE SetLimit (k: INTEGER);
 	PROCEDURE Stop;
 	PROCEDURE Shutdown;
 
 END ActorRun.
 ```
 
-`n` is the number of executors in the pool; 0 — the pool is stopped.
+`n` is the number of executors in the pool; 0 — the pool is stopped. `limit` is the limit on the
+number of executors, `limitHits` is how many times a ready mailbox found no executor because of the
+limit, `grown` and `shrunk` are how many executors were started and ended above the number from
+`Start`. The counters are counted from the last `Start`.
 
 **PROCEDURE Start (k: INTEGER)**
-Pre: `0 < k <= 64` — trap 20; the pool is stopped — trap 21.
+Pre: `0 < k <= limit` — trap 20; the pool is stopped — trap 21.
 Post: a pool of `k` executors is installed in `ActorCore`; mailboxes that waited in the queue are
-served.
+served; the growth counters are reset.
+
+**PROCEDURE SetLimit (k: INTEGER)**
+Pre: `k > 0` — trap 20.
+Post: `limit = k`; the pool does not grow above `k`; executors above the number from `Start` end when idle.
 
 **PROCEDURE Stop**
 Post: the pool tasks are cancelled (trap 127 at their switch point); mailboxes with work wait for the
