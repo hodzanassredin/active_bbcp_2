@@ -334,6 +334,7 @@ code, and the checks to run before a commit.
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |
+| `docs/gc-many-stacks.md` | GC with many sleeping tasks: cause of the quadratic cost, shared candidate buffer, before/after measurements |
 | `docs/kernel-plan.md` | future kernel work |
 | `docs/stacks-study.md` | task stacks: where time goes, stack depth, switching and CPU counters |
 | `docs/adr/README.md` | decision records (Russian only): options considered and why rejected |
