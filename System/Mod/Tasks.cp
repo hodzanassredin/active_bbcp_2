@@ -26,11 +26,6 @@ MODULE Tasks;
 	Неделимый участок (BeginAtomic/EndAtomic) запрещает точки
 	переключения: на нём держится транзакция AsyncStm.
 
-	Мониторы ([exclusive], ACTIVE.AWAIT) реализует модуль Monitors; ему
-	этот модуль отдаёт крючок Kernel.Scheduler: токен задачи, ожидание
-	монитора и пробуждение передачей монитора. Ожидание монитора не
-	трогает пользовательский флаг пробуждения Park/Unpark.
-
 	Ограничения:
 	- одна нить ОС;
 	- вытеснения нет: отмена и Yield работают только в точках ожидания;
@@ -38,7 +33,7 @@ MODULE Tasks;
 	  ссылаются в чужой стек» сводится к проверке, что сам объект задачи
 	  не лежит на стеке. *)
 
-	IMPORT S := SYSTEM, Taskarch, Kernel, Monitors, Services, Models, Console, Strings;
+	IMPORT S := SYSTEM, Taskarch, Kernel, Services, Models, Console, Strings;
 
 	CONST
 		nameLen = 64;
@@ -49,7 +44,6 @@ MODULE Tasks;
 		slabN = 64;		(* стеков в плите (Kernel.AllocStacks) *)
 		word = Taskarch.word;
 		defaultSlice = 5;	(* мс на шаг планировщика *)
-		pollPeriod = 5;		(* мс: как часто ключ уступки поднимает флаг Poll *)
 		heapArity = 4;		(* детей у узла кучи спящих *)
 		heapMin = 64;		(* начальная длина кучи и запас перед уплотнением *)
 		closeDrain = 1000;	(* мс: сколько CLOSE доводит отменённые задачи до конца *)
@@ -190,7 +184,6 @@ MODULE Tasks;
 		END;
 
 		SchedAction = POINTER TO RECORD (Services.Action) END;
-		Sched = POINTER TO RECORD (Kernel.Scheduler) END;
 
 	VAR
 		all, readyHead, readyTail: Task;
@@ -207,12 +200,10 @@ MODULE Tasks;
 		current: Task;
 		schedSP: S.ADDRESS;
 		sched: SchedAction;	(* действие планировщика Services *)
-		schedHook: Sched;	(* крючок Kernel.Scheduler *)
 		scheduled, inStep: BOOLEAN;
 		schedAt: LONGINT;	(* срок назначенного шага; смысл имеет при scheduled *)
 		alive: INTEGER;		(* незавершённых задач *)
 		slice: LONGINT;
-		lastPoll: LONGINT;	(* когда Kernel.RequestPoll поднимался последний раз *)
 		lastWake: LONGINT;	(* время последнего просмотра спящих в Step *)
 		direct: INTEGER;	(* прямых переключений с последнего возврата в Step *)
 		switches: LONGINT;	(* переключений стека, диагностика *)
@@ -275,13 +266,9 @@ MODULE Tasks;
 	END SwitchTo;
 
 	PROCEDURE SetCurrent (t: Task);
-	(* Пост: current = t; Kernel.monTok — адрес t^ (Kernel.mainToken при
-	   t = NIL); взятия мониторов быстрым путём прежнего токена отданы
-	   таблице Monitors до смены токена. *)
+	(* Пост: current = t. *)
 	BEGIN
-		IF Kernel.monTop # Kernel.monBase THEN Kernel.FlushMonitors END;
-		current := t;
-		IF t # NIL THEN Kernel.monTok := S.ADR(t^) ELSE Kernel.monTok := Kernel.mainToken END
+		current := t
 	END SetCurrent;
 
 	(* --- очереди ---------------------------------------------------------- *)
@@ -570,8 +557,7 @@ MODULE Tasks;
 		ELSE
 			t.bodyOk := FALSE;
 			IF oneTry THEN
-				TaskBody(0, 0, 0);
-				Kernel.DropMonitors	(* как выход из Kernel.Try: несбалансированные входы тела сняты *)
+				TaskBody(0, 0, 0)
 			ELSE
 				Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(TaskBody)), 0, 0, 0)
 			END;
@@ -951,19 +937,6 @@ MODULE Tasks;
 		CheckWait("Park")
 	END ParkExternal;
 
-	PROCEDURE ParkMonitor;
-	(** Ожидание монитора (крючок Kernel.Scheduler.park): до пробуждения
-		передачей монитора, отмены или постороннего Unpark. Флаг wake не
-		читается и не сбрасывается: пользовательское пробуждение остаётся
-		следующему Park. Monitors ждёт в цикле «пока не владелец». *)
-	BEGIN
-		CheckWait("monitor wait");
-		CheckSleepHolds(NIL);
-		current.state := Parked;
-		Leave;
-		CheckWait("monitor wait")
-	END ParkMonitor;
-
 	PROCEDURE Unpark* (t: Task);
 	(** Пред: t # NIL (трап 20). Пост: t разбужена, если ждёт; иначе
 		её следующий Park вернётся сразу. *)
@@ -1182,9 +1155,8 @@ MODULE Tasks;
 	END GiveHold;
 
 	PROCEDURE Token (): S.ADDRESS;
-	(* Токен текущей задачи — адрес её записи. Поле Kernel.monTok хранит то
-	   же значение, но им пользуются Monitors и старая проба AsyncObject;
-	   монитору-объекту достаточно самой задачи. *)
+	(* Токен текущей задачи — адрес её записи: монитор-объект различает
+	   владельцев по нему. *)
 	BEGIN
 		IF current = NIL THEN RETURN 0 ELSE RETURN S.ADR(current^) END
 	END Token;
@@ -1748,8 +1720,7 @@ MODULE Tasks;
 		IF (alive > 0) & (readyHead = NIL) & (nExternal = 0) & (NextDeadline() < 0) THEN
 			IF ~deadlocked THEN
 				deadlocked := TRUE;
-				Msg("deadlock: no ready tasks and no wake-up deadlines");
-				Monitors.DumpMonitors
+				Msg("deadlock: no ready tasks and no wake-up deadlines")
 			END
 		ELSE
 			deadlocked := FALSE
@@ -1764,9 +1735,6 @@ MODULE Tasks;
 		now := Kernel.Time();
 		LOOP
 			(* Инвариант: now — время, прочитанное после последнего переключения. *)
-			IF now - lastPoll >= pollPeriod THEN	(* ключ точек уступки *)
-				Kernel.RequestPoll; lastPoll := now
-			END;
 			(* Спящих просматриваем не чаще раза на изменившееся время. *)
 			IF now # lastWake THEN lastWake := now; WakeSleepers(now) END;
 			t := Dequeue();
@@ -1796,7 +1764,6 @@ MODULE Tasks;
 			t := current;
 			IF t = NIL THEN loopDone := TRUE
 			ELSE
-				Kernel.DropMonitors;
 				t.bodyOk := FALSE;
 				(* трап снял кадры Body задачи с пропуском: отпустить её мониторы-объекты *)
 				IF t.pctx # 0 THEN FinishTaskPass(t) END;
@@ -1954,68 +1921,26 @@ MODULE Tasks;
 		END
 	END List;
 
-(* --- крючок планировщика для ядра ------------------------------------- *)
-
-	PROCEDURE (s: Sched) park;
-	BEGIN
-		ParkMonitor
-	END park;
-
-	PROCEDURE (s: Sched) unpark (a: S.ADDRESS);
-	(** Пробуждение ядром (передача монитора): НЕ трогать пользовательский
-		флаг wake — иначе следующий Tasks.Park вернулся бы сразу, не дождавшись
-		своего события. *)
-		VAR t: Task;
-	BEGIN
-		IF a # 0 THEN
-			t := S.VAL(Task, a);
-			IF t.state IN {Sleeping, Waiting, Parked} THEN MakeReady(t) END
-		END
-	END unpark;
-
-	PROCEDURE (s: Sched) name (a: S.ADDRESS; OUT name: ARRAY OF CHAR);
-	BEGIN
-		IF a = 0 THEN name := "?"
-		ELSE GetName(S.VAL(Task, a), name)
-		END
-	END name;
-
-	PROCEDURE (s: Sched) poll (): BOOLEAN;
-	(** Уступка из Kernel.Poll: только в задаче, вне каркаса и вне
-		монитора. Отмена проверяется в Yield (CheckWait): Poll — тоже
-		точка отмены. *)
-	BEGIN
-		IF (current # NIL) & (atomic = 0) & ~InFramework() & (Monitors.LockDepth() = 0) THEN
-			Yield; RETURN TRUE
-		ELSE
-			RETURN FALSE
-		END
-	END poll;
-
 BEGIN
 	NEW(sched);
-	NEW(schedHook);
 	dir := NewSlabDir();
 	slice := defaultSlice; oneTry := TRUE;
 	scheduled := FALSE; inStep := FALSE; deadlocked := FALSE;
-	lastPoll := Kernel.Time();
 	lastWake := -1;	(* первый Step обязан просмотреть спящих *)
-	Kernel.SetScheduler(schedHook)
 CLOSE
 	(* Выгрузка/завершение мира: в ядре не должно остаться указателей на
 	   процедуры этого модуля, а стеки живых задач надо вернуть платформе.
 	   Сначала живые задачи отменяются и доводятся до конца: трап 127 в
-	   точке ожидания снимает их мониторы (Kernel.Try в TaskBoot, endTry) и
-	   записи в очередях Monitors (purge), пока их кадры ещё на живых стеках.
-	   Задача, которая не дошла до конца за closeDrain мс (поймала 127 и
-	   ждёт дальше), остаётся, её стек освобождается как есть. *)
+	   точке ожидания отпускает мониторы-объекты (FinishTaskPass), пока
+	   кадры задач ещё на живых стеках. Задача, которая не дошла до конца
+	   за closeDrain мс (поймала 127 и ждёт дальше), остаётся, её стек
+	   освобождается как есть. *)
 	IF (current = NIL) & ~inStep THEN
 		closeT := all; WHILE closeT # NIL DO Cancel(closeT); closeT := closeT.next END;
 		closeT0 := Kernel.Time();
 		WHILE (alive > 0) & (Kernel.Time() - closeT0 < closeDrain) DO Step END
 	END;
 	Services.RemoveAction(sched);
-	Kernel.SetScheduler(NIL);
 	WHILE all # NIL DO
 		IF all.stackRec # NIL THEN Kernel.UnregisterStack(all.stackRec); all.stackRec := NIL END;
 		IF all.dir # NIL THEN GiveStack(all.dir, StackSizeOf(all), all.lo, all.hi); DEC(all.dir.live) END;

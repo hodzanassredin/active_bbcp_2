@@ -13,14 +13,11 @@ MODULE Dev_devPtrInit;
 	записей, массив указателей, процедурная переменная, запись [align2] с
 	невыровненным указателем, большой кадр (ветка size >= stackAllocLimit),
 	больше MaxPtrs указателей (ветка InitPtrs2 с GenStrStore), вложенная
-	процедура со статической связью, [exclusive]-процедура и OUT-параметры
-	(указатель, запись с указателями, [nil]). Прямое чтение p = NIL
-	дублируется чтением через VAR-параметр и IN-параметр-запись.
+	процедура со статической связью и OUT-параметры (указатель, запись с
+	указателями, [nil]). Прямое чтение p = NIL дублируется чтением через
+	VAR-параметр и IN-параметр-запись. *)
 
-	Модуль компилируется с ключом точек уступки "^": пролог тот же, но
-	проверяются и процедуры с точками уступки. *)
-
-	IMPORT ACTIVE, S := SYSTEM, Kernel, UnitAssert;
+	IMPORT S := SYSTEM, Kernel, UnitAssert;
 
 	CONST
 		dirtyLim = 512;	(* LONGINT: больше самого большого проверяемого кадра *)
@@ -170,7 +167,7 @@ MODULE Dev_devPtrInit;
 			& (r.a8 = NIL) & (r.a9 = NIL) & (r.a10 = NIL) & (r.a11 = NIL)
 	END RecMany;
 
-	(* ---------- вложенная процедура и [exclusive] ---------- *)
+	(* ---------- вложенная процедура ---------- *)
 
 	PROCEDURE Outer (): BOOLEAN;
 		VAR p: PInt;
@@ -182,11 +179,6 @@ MODULE Dev_devPtrInit;
 
 	BEGIN RETURN (p = NIL) & Inner()
 	END Outer;
-
-	PROCEDURE [exclusive] Excl (): BOOLEAN;
-		VAR p: PInt;
-	BEGIN RETURN p = NIL
-	END Excl;
 
 	(* ---------- OUT-параметры ----------
 	   Тела пусты: обнулять должен пролог вызываемого (InitPtrs2), иначе
@@ -266,11 +258,10 @@ MODULE Dev_devPtrInit;
 		Dirty; UnitAssert.True(RecMany(), "запись с 12 указателями")
 	END TestBigAndMany;
 
-	PROCEDURE TestNestedExclusive*;
+	PROCEDURE TestNested*;
 	BEGIN
-		Dirty; UnitAssert.True(Outer(), "вложенная процедура и статическая связь");
-		Dirty; UnitAssert.True(Excl(), "[exclusive]-процедура")
-	END TestNestedExclusive;
+		Dirty; UnitAssert.True(Outer(), "вложенная процедура и статическая связь")
+	END TestNested;
 
 	PROCEDURE TestOut*;
 		VAR p: PInt; r: OnePtr; m: Ptrs12; canary: LONGINT; pk: Packed;

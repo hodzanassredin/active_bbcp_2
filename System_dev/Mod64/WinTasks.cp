@@ -4,8 +4,7 @@ MODULE System_devWinTasks;
 	Отдельный модуль, а не System_devTasks: тот импортирует System_devCo с
 	ucontext/libtest64.so, которых на Windows нет. Здесь только
 	переносимая часть: стеки задач (VirtualAlloc + PAGE_NOACCESS),
-	переключение, Yield, мониторы Kernel.Lock/Await/Unlock, изоляция
-	трапа и Join. *)
+	переключение, Yield, монитор-объект Tasks.Object, изоляция трапа и Join. *)
 
 	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert, Console, Strings;
 
@@ -14,16 +13,20 @@ MODULE System_devWinTasks;
 
 	TYPE
 		Counter = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
-		Producer = POINTER TO RECORD (Tasks.Task) END;
-		Consumer = POINTER TO RECORD (Tasks.Task) END;
 		Bad = POINTER TO RECORD (Tasks.Task) END;
 		Good = POINTER TO RECORD (Tasks.Task) END;
 		Sleeper = POINTER TO RECORD (Tasks.Task) woke: BOOLEAN END;
 		Joiner = POINTER TO RECORD (Tasks.Task) target: Tasks.Task; done: BOOLEAN END;
-		Buf = POINTER TO RECORD item: ARRAY cap OF INTEGER; head, tail, n: INTEGER END;
+		BufObj = POINTER TO RECORD (Tasks.Object)
+			item: ARRAY cap OF INTEGER; head, tail, n: INTEGER
+		END;
+		PutOp = RECORD (Tasks.Op) x: INTEGER END;
+		GetOp = RECORD (Tasks.Op) x: INTEGER END;
+		Producer = POINTER TO RECORD (Tasks.Job) b: BufObj END;
+		Consumer = POINTER TO RECORD (Tasks.Job) b: BufObj END;
 
 	VAR
-		b: Buf;
+		b: BufObj;
 		produced, consumed, sum, goodCount: INTEGER;
 		dlg: ARRAY 64 OF CHAR;
 
@@ -49,59 +52,57 @@ MODULE System_devWinTasks;
 		UnitAssert.EqualInt(100, a.n + b.n, "both tasks counted all turns")
 	END TestProcYield;
 
-	PROCEDURE NotFull (frame: S.ADDRESS): BOOLEAN;
+	PROCEDURE (b: BufObj) Ready (): SET;
+		VAR s: SET;
 	BEGIN
-		RETURN b.n < cap
-	END NotFull;
+		s := {};
+		IF b.n < cap THEN INCL(s, 0) END;
+		IF b.n > 0 THEN INCL(s, 1) END;
+		RETURN s
+	END Ready;
 
-	PROCEDURE NotEmpty (frame: S.ADDRESS): BOOLEAN;
+	PROCEDURE (b: BufObj) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
-		RETURN b.n > 0
-	END NotEmpty;
+		WITH op: PutOp DO
+			WHILE b.n = cap DO
+				IF ~b.Await(ctx, {0}) THEN RETURN END
+			END;
+			b.item[b.tail] := op.x;
+			b.tail := (b.tail + 1) MOD cap; INC(b.n)
+		| op: GetOp DO
+			WHILE b.n = 0 DO
+				IF ~b.Await(ctx, {1}) THEN RETURN END
+			END;
+			op.x := b.item[b.head];
+			b.head := (b.head + 1) MOD cap; DEC(b.n)
+		ELSE
+			HALT(20)
+		END
+	END Exclusive;
 
-	PROCEDURE Put (x: INTEGER);
+	PROCEDURE (p: Producer) Body- (VAR ctx: Tasks.Ctx);
+		VAR i: INTEGER; op: PutOp;
 	BEGIN
-		Kernel.Lock(b);
-		Kernel.Await(NotFull, 0, b);
-		b.item[b.tail] := x;
-		b.tail := (b.tail + 1) MOD cap;
-		INC(b.n);
-		Kernel.Unlock(b)
-	END Put;
-
-	PROCEDURE Get (OUT x: INTEGER);
-	BEGIN
-		Kernel.Lock(b);
-		Kernel.Await(NotEmpty, 0, b);
-		x := b.item[b.head];
-		b.head := (b.head + 1) MOD cap;
-		DEC(b.n);
-		Kernel.Unlock(b)
-	END Get;
-
-	PROCEDURE (p: Producer) Run;
-		VAR i: INTEGER;
-	BEGIN
-		FOR i := 1 TO 100 DO Put(i) END;
+		FOR i := 1 TO 100 DO op.x := i; p.b.Do(ctx, op) END;
 		produced := 1
-	END Run;
+	END Body;
 
-	PROCEDURE (c: Consumer) Run;
-		VAR i, x: INTEGER;
+	PROCEDURE (c: Consumer) Body- (VAR ctx: Tasks.Ctx);
+		VAR i: INTEGER; op: GetOp;
 	BEGIN
 		FOR i := 1 TO 100 DO
-			Get(x);
-			IF x # i THEN consumed := -1000 END;
-			INC(sum, x); INC(consumed)
+			op.x := 0; c.b.Do(ctx, op);
+			IF op.x # i THEN consumed := -1000 END;
+			INC(sum, op.x); INC(consumed)
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE TestProcProducerConsumer*;
 		VAR p: Producer; c: Consumer;
 	BEGIN
 		NEW(b); b.head := 0; b.tail := 0; b.n := 0;
 		produced := 0; consumed := 0; sum := 0;
-		NEW(p); NEW(c); Tasks.Start(p); Tasks.Start(c);
+		NEW(p); p.b := b; NEW(c); c.b := b; Tasks.Start(p); Tasks.Start(c);
 		UnitAssert.True(Pump(10000), "buffer tasks finish");
 		UnitAssert.EqualInt(1, produced, "producer finished");
 		UnitAssert.EqualInt(100, consumed, "consumer got all items in order");

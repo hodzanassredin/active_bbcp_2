@@ -35,8 +35,6 @@ MODULE Kernel;
 	IMPORT S := SYSTEM, COM;
 
 	CONST
-		mainToken* = 1;	(** токен главного стека в monTok: адреса задач выровнены, 1 с ними не совпадёт *)
-		monStkLen = 64;	(* взятий быстрым путём без возврата в Monitors *)
 		strictStackSweep = TRUE;
 		(* Правило запуска сборки (как GOGC): при нехватке свободного блока
 		   NewBlock собирает, только если с прошлой сборки выделено не меньше
@@ -240,23 +238,6 @@ MODULE Kernel;
 			trapped: BOOLEAN
 		END;
 
-		(* Мониторы реализует обычный модуль Monitors. Ядро зовёт реализацию
-		   через объект-крючок; сигнатуры экспортируемых Lock/Unlock/Await
-		   совпадают с Kernel. *)
-		CondProc* = PROCEDURE (frame: S.ADDRESS): BOOLEAN;
-
-		MonitorHook* = POINTER TO ABSTRACT RECORD END;
-
-		(* Крючок планировщика: реализация в Tasks. *)
-		Scheduler* = POINTER TO ABSTRACT RECORD END;
-
-		(* Взятие монитора быстрым путём: объект и смещение его поля владельца
-		   (скрытое поле "@mon" или сама скрытая переменная монитора модуля). *)
-		MonEntry = RECORD
-			obj: ANYPTR;	(* корень сборщика, пока взятие на стеке *)
-			off: S.ADDRESS
-		END;
-
 		(* Реестр стеков. Одна запись на любой стек: главный, задача,
 		   сигнальный. *)
 		Stack* = POINTER TO StackDesc;
@@ -359,7 +340,7 @@ MODULE Kernel;
 		END;
 
 	VAR
-		platform-: POINTER [untagged] TO Platform;	(* read-only: диагностика Monitors *)
+		platform-: POINTER [untagged] TO Platform;	(* read-only: диагностика задач *)
 		baseStack: INTEGER;	(* modList, root, and baseStack must be together for remote debugging *)
 		root: Cluster;	(* cluster list *)
 		modList-: Module;	(* root of module list *)
@@ -394,25 +375,6 @@ MODULE Kernel;
 		mainStack: Stack;
 		mainStackRec: StackDesc;	(* статическая запись: регистрация до кучи *)
 
-		(* Крючки: мониторы ставит Monitors, планировщик — Tasks. *)
-		monitorHook: MonitorHook;
-		(** Быстрый путь [exclusive] (код порождает компилятор):
-			monTok — токен исполняемого кода (адрес записи задачи или mainToken),
-			пишет планировщик при смене задачи;
-			[monBase, monTop) — взятия быстрым путём текущего токена,
-			по записи MonEntry; monEnd — предел.
-			Инвариант: поле владельца объекта равно monTok тогда и только тогда,
-			когда объект лежит в [monBase, monTop); 2 — монитором управляет
-			таблица Monitors; 0 — свободен и записи в таблице нет. *)
-		monTok*, monTop*: S.ADDRESS;
-		monBase-, monEnd-: S.ADDRESS;
-		monStk: ARRAY monStkLen OF MonEntry;
-		sched-: Scheduler;	(* read-only: Monitors читает токен/park/unpark/name *)
-		pollWanted: BOOLEAN;
-
-		(* Вычисление чужого условия внутри Unlock/Await. *)
-		quietCleanup: INTEGER;	(* >0 — трап в чужом условии *)
-
 		trapViewer, trapChecker: Handler;
 		guarded: BOOLEAN; (** guarded => trap viewer (reporter) should not be called; this suppresses trap reporting *)
 		static, inDll, terminating: BOOLEAN;
@@ -439,20 +401,6 @@ MODULE Kernel;
 		blog: BufLog;
 
 		bootInfo-: BootInfo;
-
-	PROCEDURE (h: MonitorHook) lock* (obj: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) lockAt* (obj, off: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) flush*, NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) unlock* (obj: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) await* (cond: CondProc; frame, obj: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) beginTry* (): INTEGER, NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) endTry* (mark: INTEGER), NEW, ABSTRACT;
-	PROCEDURE (h: MonitorHook) purge*, NEW, ABSTRACT;
-
-	PROCEDURE (s: Scheduler) park*, NEW, ABSTRACT;
-	PROCEDURE (s: Scheduler) unpark* (task: S.ADDRESS), NEW, ABSTRACT;
-	PROCEDURE (s: Scheduler) name* (task: S.ADDRESS; OUT name: ARRAY OF CHAR), NEW, ABSTRACT;
-	PROCEDURE (s: Scheduler) poll* (): BOOLEAN, NEW, ABSTRACT;
 
 	PROCEDURE (VAR p: Platform) PageSize* (): INTEGER, NEW, ABSTRACT;
 	PROCEDURE (VAR p: Platform) ProtectMemRead* (addr: S.ADDRESS; size: INTEGER): BOOLEAN, NEW, ABSTRACT;
@@ -1503,12 +1451,6 @@ MODULE Kernel;
 	PROCEDURE [code] RETI (): LONGINT;
 	PROCEDURE [code] RETR (): REAL;
 
-	(* Вызвать условие ждущего с кадром в BX (статическая связь CP):
-	   cond — в AX, frame — в стеке.
-	   pop ecx; push ebx; mov ebx,ecx; push ecx; call eax; pop ebx. *)
-	PROCEDURE [code] CallCond* (cond: CondProc; frame: S.ADDRESS): BOOLEAN
-		059H, 053H, 089H, 0CBH, 051H, 0FFH, 0D0H, 05BH;
-
 	(*
 		type				par
 		32 bit scalar	value
@@ -2016,19 +1958,11 @@ MODULE Kernel;
 		END
 	END UnregisterStack;
 
-	PROCEDURE FlushMonitors*;
-	(** Пост: monTop = monBase; взятия быстрым путём переданы таблице
-		Monitors на токен monTok. Зовётся до смены monTok и до ухода со стека. *)
-	BEGIN
-		IF (monTop # monBase) & (monitorHook # NIL) THEN monitorHook.flush END
-	END FlushMonitors;
-
 	PROCEDURE SwitchSave* (s: Stack);
 	(** Сохранить состояние исполнения текущего стека перед переключением.
 		s — запись текущего стека; NIL — найти её по указателю стека. *)
 		VAR sp, fpp: S.ADDRESS; ar: AdrRef;
 	BEGIN
-		IF monTop # monBase THEN FlushMonitors END;	(* взятия быстрым путём — этого стека *)
 		S.GETREG(SP, sp);
 		IF s = NIL THEN s := StackOf(sp) END;
 		IF s # NIL THEN
@@ -2204,8 +2138,6 @@ MODULE Kernel;
 		RETURN TRUE
 	END MarkLocals;
 
-	(* -------------------- крючки мониторов и планировщика ----------------- *)
-
 	PROCEDURE InHeapAddr (p: LONGINT): BOOLEAN;
 	(* p внутри какого-либо кластера кучи? *)
 		VAR c: Cluster;
@@ -2219,67 +2151,6 @@ MODULE Kernel;
 	END InHeapAddr;
 
 	PROCEDURE ^ Try* (h: TryHandler; a, b, c: INTEGER);
-
-	PROCEDURE SetMonitorHook* (h: MonitorHook);
-	BEGIN
-		monitorHook := h
-	END SetMonitorHook;
-
-	PROCEDURE SetScheduler* (s: Scheduler);
-	BEGIN
-		sched := s
-	END SetScheduler;
-
-	PROCEDURE SetQuiet* (on: BOOLEAN);
-	BEGIN
-		IF on THEN INC(quietCleanup) ELSE DEC(quietCleanup) END
-	END SetQuiet;
-
-	PROCEDURE MonitorFail (IN what: ARRAY OF CHAR);
-	BEGIN
-		IF (platform # NIL) & (platform.String # NIL) THEN
-			platform.String("Kernel: "); platform.String(what);
-			platform.String(": monitors module is not loaded"); platform.Ln
-		END;
-		HALT(20)
-	END MonitorFail;
-
-	PROCEDURE RequestPoll*;
-	BEGIN
-		pollWanted := TRUE
-	END RequestPoll;
-
-	PROCEDURE Poll*;
-	BEGIN
-		IF pollWanted & (sched # NIL) THEN
-			IF sched.poll() THEN pollWanted := FALSE END
-		END
-	END Poll;
-
-	PROCEDURE LockAt* (obj: S.ADDRESS; off: INTEGER);
-	(** Медленный путь [exclusive] с полем владельца: obj + off — поле. *)
-	BEGIN
-		IF monitorHook # NIL THEN monitorHook.lockAt(obj, off)
-		ELSE MonitorFail("Lock") END
-	END LockAt;
-
-	PROCEDURE Lock* (obj: ANYPTR);
-	BEGIN
-		IF monitorHook # NIL THEN monitorHook.lock(S.VAL(S.ADDRESS, obj))
-		ELSE MonitorFail("Lock") END
-	END Lock;
-
-	PROCEDURE Unlock* (obj: ANYPTR);
-	BEGIN
-		IF monitorHook # NIL THEN monitorHook.unlock(S.VAL(S.ADDRESS, obj))
-		ELSE MonitorFail("Unlock") END
-	END Unlock;
-
-	PROCEDURE Await* (cond: CondProc; frame: S.ADDRESS; obj: ANYPTR);
-	BEGIN
-		IF monitorHook # NIL THEN monitorHook.await(cond, frame, S.VAL(S.ADDRESS, obj))
-		ELSE MonitorFail("Await") END
-	END Await;
 
 	PROCEDURE MarkFinObj;
 		VAR f: FList;
@@ -2725,19 +2596,14 @@ MODULE Kernel;
 	PROCEDURE TrapCleanup (_, __, ___: INTEGER);
 		VAR t: TrapCleaner; u: INTEGER;
 	BEGIN
-		(* quietCleanup > 0: трап в чужом условии (EvalCond). *)
-		IF quietCleanup = 0 THEN
-			(*INCL(dirty, cleanup);*)
-			u := unit; unit := cleanup;
-			WHILE trapStack # NIL DO
-				t := trapStack; trapStack := trapStack.next; t.Cleanup
-			END;
-			IF (trapChecker # NIL) & (err # silentTrap) THEN trapChecker END;
-			(* задача, трапнувшая в ожидании, уходит из очередей мониторов *)
-			IF monitorHook # NIL THEN monitorHook.purge END;
-			unit := u
-			(*EXCL(dirty, cleanup)*)
-		END
+		(*INCL(dirty, cleanup);*)
+		u := unit; unit := cleanup;
+		WHILE trapStack # NIL DO
+			t := trapStack; trapStack := trapStack.next; t.Cleanup
+		END;
+		IF (trapChecker # NIL) & (err # silentTrap) THEN trapChecker END;
+		unit := u
+		(*EXCL(dirty, cleanup)*)
 	END TrapCleanup;
 
 	PROCEDURE SetTrapGuard* (on: BOOLEAN);
@@ -2746,16 +2612,11 @@ MODULE Kernel;
 	END SetTrapGuard;
 
 	PROCEDURE Try* (h: TryHandler; a, b, c: INTEGER);
-	(** Мониторы реализует модуль Monitors: крючок запоминает глубину цепочки
-		взятий и при трапе снимает всё, взятое внутри h. *)
-		VAR mark: INTEGER;
 	BEGIN
 		IF ~platform.initialized THEN
 			log.String('Fatal: No Platform hook installed into Kernel'); log.Ln; Quit(1)
 		ELSE
-			IF monitorHook # NIL THEN mark := monitorHook.beginTry() ELSE mark := 0 END;
-			INC(tryCount); platform.Try(h, a, b, c); DEC(tryCount);
-			IF monitorHook # NIL THEN monitorHook.endTry(mark) END
+			INC(tryCount); platform.Try(h, a, b, c); DEC(tryCount)
 		END
 	END Try;
 
@@ -2768,10 +2629,9 @@ MODULE Kernel;
 		вызывающего и зовётся after(a, b, c) — до снятия мониторов этого Try.
 		Пред: TryTasks не открыт (20).
 		Пост: FALSE — платформа не поддерживает TryShared, h и after не вызваны. *)
-		VAR mark, cnt: INTEGER; ts: TrapCleaner; ok: BOOLEAN;
+		VAR cnt: INTEGER; ts: TrapCleaner; ok: BOOLEAN;
 	BEGIN
 		ASSERT(~inTryTasks, 20);
-		IF monitorHook # NIL THEN mark := monitorHook.beginTry() ELSE mark := 0 END;
 		ts := trapStack; INC(tryCount); cnt := tryCount;
 		inTryTasks := TRUE;
 		ok := platform.TryShared(h, a, b, c);
@@ -2779,7 +2639,6 @@ MODULE Kernel;
 		trapStack := ts; tryCount := cnt;
 		IF ok THEN after(a, b, c) END;
 		DEC(tryCount);
-		IF monitorHook # NIL THEN monitorHook.endTry(mark) END;
 		RETURN ok
 	END TryTasks;
 
@@ -2792,15 +2651,6 @@ MODULE Kernel;
 		s.tryContext := platform.GetTryContext(); s.tryCount := tryCount; s.trapStack := NIL
 	END InheritTry;
 
-	PROCEDURE DropMonitors*;
-	(** Пред: monTok # mainToken (20). Пост: взятия мониторов токеном monTok
-		сняты, как при выходе из Kernel.Try с отметкой 0. Зовётся после трапа
-		задачи, пойманного TryTasks, пока monTok — токен этой задачи. *)
-	BEGIN
-		ASSERT(monTok # mainToken, 20);
-		IF monitorHook # NIL THEN monitorHook.endTry(0) END
-	END DropMonitors;
-	
 	(* -------------------- Initialization --------------------- *)
 
 	PROCEDURE InitFpu;	(* COMPILER DEPENDENT *)
@@ -2902,24 +2752,20 @@ MODULE Kernel;
 				INC(trapCount);
 				InitFpu;
 
-				(* Трап в чужом условии (EvalCond) не печатается: он будет
-				   переадресован ждущей задаче и напечатан уже там. *)
-				IF quietCleanup = 0 THEN
-					SigRepHeader(pc, fp, sp, err, recursive);
-					IF ~(defLogger IN dirty) THEN LogThisStack(pc, fp) END;
-					SigRepFooter();
+				SigRepHeader(pc, fp, sp, err, recursive);
+				IF ~(defLogger IN dirty) THEN LogThisStack(pc, fp) END;
+				SigRepFooter();
 
-					(* Фатален только трап, который не ловит ни один Kernel.Try. *)
-					IF (err # silentTrap) & (trapViewer = NIL) & (tryCount = 0) THEN
-						platform.FatalError(trapMessage, blog.buf)
-					END
+				(* Фатален только трап, который не ловит ни один Kernel.Try. *)
+				IF (err # silentTrap) & (trapViewer = NIL) & (tryCount = 0) THEN
+					platform.FatalError(trapMessage, blog.buf)
 				END;
 
 				IF (err = keyboardInterrupt) & (tryCount = 0) THEN
 					log.String("SIGINT received, preparing to quit"); log.Ln; Quit(1)
 				ELSE
 					IF ~(cleanup IN dirty) THEN Try(TrapCleanup, -1, -1, -1) END;
-					IF ~(viewer IN dirty) & (quietCleanup = 0) THEN Try(Report, -1, -1, -1) END
+					IF ~(viewer IN dirty) THEN Try(Report, -1, -1, -1) END
 				END
 				
 			END
@@ -3016,8 +2862,6 @@ MODULE Kernel;
 	
 BEGIN
 	IF modList = NIL THEN	(* only once *)
-		monTok := mainToken; monBase := S.ADR(monStk[0]); monTop := monBase;
-		monEnd := monBase + monStkLen * SIZE(MonEntry);
 		IF bootInfo # NIL THEN
 			modList := bootInfo.modList	(* boot loader initializes the bootInfo struct *)
 		ELSE

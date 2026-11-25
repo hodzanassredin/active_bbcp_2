@@ -1,27 +1,24 @@
 MODULE System_devPerf;
 (** Замеры для отчёта по ревью (не входят в tools/test.sh).
 
-	Locks*     — 1 млн пар Kernel.Lock/Unlock без соперников.
 	Sleepers*  — 10 000 спящих задач + 1 активная, 100 000 переключений:
 	             стоимость линейного WakeSleepers на каждой итерации Step.
 
-	Запуск: echo 'System_devPerf.Locks' | tools/run64.sh (и то же для
-	Sleepers). Наносекунды — System_devClock (на amd64 clock_gettime). *)
+	Запуск: echo 'System_devPerf.Sleepers' | tools/run64.sh.
+	Наносекунды — System_devClock (на amd64 clock_gettime). *)
 
 	IMPORT Kernel, Tasks, System_devClock, Console, Strings;
 
 	CONST
-		pairs = 1000000;
 		sleepers = 10000;
 		switches = 100000;
 		stackSize = 64 * 1024;
 
 	TYPE
-		Box = POINTER TO RECORD x: INTEGER END;
 		Sleeper = POINTER TO RECORD (Tasks.Task) END;
 		Spinner = POINTER TO RECORD (Tasks.Task) done: BOOLEAN END;
 
-	VAR box: Box; spinner: Spinner; started: INTEGER;
+	VAR spinner: Spinner; started: INTEGER;
 
 	PROCEDURE W (IN s: ARRAY OF CHAR);
 	BEGIN
@@ -33,22 +30,6 @@ MODULE System_devPerf;
 	BEGIN
 		Strings.IntToString(x, s); W(s)
 	END N;
-
-	PROCEDURE Locks*;
-		VAR i: INTEGER; t0, t1, ns: LONGINT;
-	BEGIN
-		NEW(box);
-		t0 := System_devClock.now();
-		FOR i := 1 TO pairs DO
-			Kernel.Lock(box); Kernel.Unlock(box)
-		END;
-		t1 := System_devClock.now();
-		ns := t1 - t0;
-		W("BENCH locks pairs="); N(pairs);
-		W(" ns="); N(ns);
-		W(" nsPerPair="); N(ns DIV pairs);
-		Console.WriteLn
-	END Locks;
 
 	PROCEDURE (t: Sleeper) Run;
 	BEGIN

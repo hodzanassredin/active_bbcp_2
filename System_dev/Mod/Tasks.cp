@@ -8,7 +8,7 @@ MODULE System_devTasks;
 	tools/unit.sh гонит модуль отдельным процессом. Нагрузка на 10 тыс.
 	задач помечена TestSlow… и включается в манифесте marks=proc,slow. *)
 
-	IMPORT S := SYSTEM, ACTIVE, Kernel, Monitors, Services, Tasks, UnitAssert, System_devClock, Console, Strings;
+	IMPORT S := SYSTEM, Kernel, Services, Tasks, UnitAssert, System_devClock, Console, Strings;
 
 	CONST
 		benchStack = 64 * 1024;
@@ -34,19 +34,14 @@ MODULE System_devTasks;
 		Probe = POINTER TO RECORD (Tasks.Task) END;
 		GroupChild = POINTER TO RECORD (Tasks.Task) END;
 		GroupTrapChild = POINTER TO RECORD (Tasks.Task) END;
-		ProbeBox = POINTER TO RECORD n: INTEGER END;
-		LockHolder = POINTER TO RECORD (Tasks.Task) mon: ProbeBox END;
-		LockProbe = POINTER TO RECORD (Tasks.Task) mon: ProbeBox; got: BOOLEAN END;
 		Prod = POINTER TO RECORD (Tasks.Task) END;
 		Cons = POINTER TO RECORD (Tasks.Task) END;
 		Phil = POINTER TO RECORD (Tasks.Task) id: INTEGER END;
 		LongSleeper = POINTER TO RECORD (Tasks.Task) ms: INTEGER END;
 		Resleeper = POINTER TO RECORD (Tasks.Task) wakes: INTEGER END;
 		Churner = POINTER TO RECORD (Tasks.Task) wakes: INTEGER END;
-		YieldLocker = POINTER TO RECORD (Tasks.Task) mon: ProbeBox; got, parkedBack: BOOLEAN END;
 		Joiner = POINTER TO RECORD (Tasks.Task) target: Tasks.Task; done: BOOLEAN END;
 		SelfJoiner = POINTER TO RECORD (Tasks.Task) target: Tasks.Task END;
-		Unparker = POINTER TO RECORD (Tasks.Task) target: Tasks.Task; sawReady: BOOLEAN END;
 		FlagSleeper = POINTER TO RECORD (Tasks.Task) flag: BOOLEAN END;
 		TrapParent = POINTER TO RECORD (Tasks.Task) child: LongSleeper END;
 		TwoGroups = POINTER TO RECORD (Tasks.Task) long: LongSleeper; same: BOOLEAN END;
@@ -56,12 +51,16 @@ MODULE System_devTasks;
 		Spinner = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
 		StopSleeper = POINTER TO RECORD (Tasks.Task) END;
 		CountYielder = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
-		Room = POINTER TO RECORD inside, overlaps, visits: INTEGER END;
-		Visitor = POINTER TO RECORD (Tasks.Task) room: Room END;
+		Room = POINTER TO RECORD (Tasks.Object) inside, overlaps, visits: INTEGER END;
+		VisitOp = RECORD (Tasks.Op) END;
+		Visitor = POINTER TO RECORD (Tasks.Job) room: Room END;
 		(* Семантика Kernel.Try задачи (docs/stacks-study.md, Э1). *)
 		TryYielder = POINTER TO RECORD (Tasks.Task) caught, after, entered, leaked: INTEGER END;
-		MonTrapper = POINTER TO RECORD (Tasks.Task) box: ProbeBox END;
-		MonTaker = POINTER TO RECORD (Tasks.Task) box: ProbeBox; got: BOOLEAN END;
+		Box = POINTER TO RECORD (Tasks.Object) END;
+		CrashOp = RECORD (Tasks.Op) END;
+		TakeOp = RECORD (Tasks.Op) END;
+		MonTrapper = POINTER TO RECORD (Tasks.Job) box: Box END;
+		MonTaker = POINTER TO RECORD (Tasks.Job) box: Box; got: BOOLEAN END;
 		LateBad = POINTER TO RECORD (Tasks.Task) yields: INTEGER; calm: BOOLEAN END;
 
 		Fork = RECORD free: BOOLEAN; waiter: Tasks.Task END;
@@ -471,44 +470,6 @@ MODULE System_devTasks;
 		UnitAssert.True(Pump(2000), "listed task finished")
 	END TestProcList;
 
-	(* --- флаг wake не должен протекать в ожидание монитора ------------- *)
-
-	PROCEDURE (h: LockHolder) Run;
-	BEGIN
-		Kernel.Lock(h.mon);
-		Tasks.Sleep(50);
-		Kernel.Unlock(h.mon)
-	END Run;
-
-	PROCEDURE (p: LockProbe) Run;
-	BEGIN
-		Tasks.Park;		(* сюда придёт Unpark *)
-		Kernel.Lock(p.mon);	(* монитор занят держателем *)
-		p.got := TRUE;
-		Kernel.Unlock(p.mon)
-	END Run;
-
-	PROCEDURE TestProcParkWakeFlag*;
-	(** Unpark будит Park; флаг wake должен быть съеден этим пробуждением.
-		Если он остаётся, следующий Park (внутри Kernel.Lock) вернётся
-		сразу, и Lock трапнет «woken without the monitor». *)
-		VAR mon: ProbeBox; h: LockHolder; p: LockProbe; ok: BOOLEAN;
-	BEGIN
-		NEW(mon); NEW(h); h.mon := mon;
-		Tasks.Start(h);
-		WHILE ~Monitors.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
-		UnitAssert.True(Monitors.IsLocked(mon), "holder took the monitor");
-		NEW(p); p.mon := mon; Tasks.Start(p);
-		Tasks.Step;	(* probe ушёл в Park *)
-		UnitAssert.True(Tasks.State(p) = Tasks.Parked, "probe parked");
-		Tasks.Unpark(p);
-		ok := Pump(5000);
-		UnitAssert.True(ok, "tasks finished");
-		UnitAssert.True(~Tasks.Failed(p), "probe survived the monitor wait");
-		UnitAssert.True(p.got, "probe acquired the monitor");
-		UnitAssert.True(~Monitors.IsLocked(mon), "monitor released")
-	END TestProcParkWakeFlag;
-
 	(* --- очередь спящих --------------------------------------------------- *)
 
 	PROCEDURE (t: LongSleeper) Run;
@@ -584,22 +545,6 @@ MODULE System_devTasks;
 		Tasks.Cancel(a);
 		UnitAssert.True(Pump(2000), "tasks finished")
 	END TestProcCompactWhileSleeping;
-
-	PROCEDURE (t: YieldLocker) Run;
-	BEGIN
-		Tasks.Yield;	(* пока готова, главный стек зовёт Unpark *)
-		Kernel.Lock(t.mon);	(* монитор держит LockHolder *)
-		t.got := TRUE;
-		Kernel.Unlock(t.mon);
-		Tasks.Park;	(* пробуждение, пришедшее до ожидания монитора, не теряется *)
-		t.parkedBack := TRUE
-	END Run;
-
-	PROCEDURE (t: Unparker) Run;
-	BEGIN
-		t.sawReady := Tasks.State(t.target) = Tasks.Ready;
-		Tasks.Unpark(t.target)
-	END Run;
 
 	PROCEDURE (t: Parker) Run;
 	BEGIN
@@ -677,40 +622,6 @@ MODULE System_devTasks;
 		Tasks.Cancel(s);
 		UnitAssert.True(Pump(2000), "tasks finished")
 	END TestProcUnparkOutsideTaskReschedules;
-
-	PROCEDURE TestProcUnparkReadyThenLock*;
-	(** Unpark готовой задачи не делает ожидание монитора холостым, а сам
-		остаётся пользователю: следующий Park возвращается сразу.
-		Очередь: b уступает, u будит готовую b, b входит в занятый монитор. *)
-		VAR mon: ProbeBox; h: LockHolder; b: YieldLocker; u: Unparker;
-	BEGIN
-		NEW(mon); NEW(h); h.mon := mon; Tasks.Start(h);
-		WHILE ~Monitors.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
-		NEW(b); b.mon := mon; Tasks.Start(b);
-		NEW(u); u.target := b; Tasks.Start(u);
-		UnitAssert.True(Pump(3000), "tasks finished");
-		UnitAssert.True(u.sawReady, "locker was ready when woken");
-		UnitAssert.True(~Tasks.Failed(b), "monitor wait survived the early Unpark");
-		UnitAssert.True(b.got, "locker acquired the monitor");
-		UnitAssert.True(b.parkedBack, "user wake was kept for Park")
-	END TestProcUnparkReadyThenLock;
-
-	PROCEDURE TestProcUnparkInEnterQueue*;
-	(** Unpark задачи из очереди входа монитора — ложное пробуждение:
-		задача ждёт дальше и получает монитор от владельца. *)
-		VAR mon: ProbeBox; h: LockHolder; b: YieldLocker;
-	BEGIN
-		NEW(mon); NEW(h); h.mon := mon; Tasks.Start(h);
-		WHILE ~Monitors.IsLocked(mon) & (Tasks.Count() > 0) DO Tasks.Step END;
-		NEW(b); b.mon := mon; Tasks.Start(b);
-		Tasks.Step; Tasks.Step;	(* Yield, затем Lock: b в очереди входа *)
-		UnitAssert.True(Tasks.State(b) = Tasks.Parked, "locker waits for the monitor");
-		Tasks.Unpark(b);
-		UnitAssert.True(Pump(3000), "tasks finished");
-		UnitAssert.True(~Tasks.Failed(b), "spurious wake is not an error");
-		UnitAssert.True(b.got, "locker acquired the monitor");
-		UnitAssert.True(b.parkedBack, "user wake was kept for Park")
-	END TestProcUnparkInEnterQueue;
 
 	PROCEDURE (t: Joiner) Run;
 	BEGIN
@@ -866,23 +777,23 @@ MODULE System_devTasks;
 		UnitAssert.True(~Tasks.Failed(a) & ~Tasks.Failed(c), "neighbours not failed")
 	END TestProcDirectFinishAndTrap;
 
-	PROCEDURE [exclusive] (r: Room) Visit, NEW;
+	PROCEDURE (r: Room) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 		VAR i: INTEGER;
 	BEGIN
 		INC(r.inside);
 		IF r.inside > 1 THEN INC(r.overlaps) END;
 		FOR i := 1 TO 3 DO Tasks.Yield END;
 		DEC(r.inside); INC(r.visits)
-	END Visit;
+	END Exclusive;
 
-	PROCEDURE (t: Visitor) Run;
-		VAR i: INTEGER;
+	PROCEDURE (t: Visitor) Body- (VAR ctx: Tasks.Ctx);
+		VAR i: INTEGER; op: VisitOp;
 	BEGIN
-		FOR i := 1 TO 20 DO t.room.Visit; Tasks.Yield END
-	END Run;
+		FOR i := 1 TO 20 DO t.room.Do(ctx, op); Tasks.Yield END
+	END Body;
 
 	PROCEDURE TestProcDirectMonitorToken*;
-	(** Задача уступает внутри исключающей процедуры прямо соседке; соседка
+	(** Задача уступает внутри монитора-объекта прямо соседке; соседка
 		видит свой токен, а не токен владельца, и ждёт выхода. *)
 		VAR r: Room; v: ARRAY 3 OF Visitor; i: INTEGER;
 	BEGIN
@@ -891,7 +802,7 @@ MODULE System_devTasks;
 		UnitAssert.True(Pump(2000), "all finished");
 		UnitAssert.EqualInt(0, r.overlaps, "never two inside");
 		UnitAssert.EqualInt(60, r.visits, "all visits done");
-		UnitAssert.EqualInt(0, Monitors.LockDepth(), "main stack holds no monitor")
+		UnitAssert.True(~Tasks.Held(r), "monitor free")
 	END TestProcDirectMonitorToken;
 
 	(* --- семантика Kernel.Try задачи (Э1) ---------------------------------- *)
@@ -919,17 +830,26 @@ MODULE System_devTasks;
 		END
 	END Run;
 
-	PROCEDURE (t: MonTrapper) Run;
+	PROCEDURE (b: Box) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
-		Kernel.Lock(t.box); Tasks.Yield; Tasks.Yield;
-		NilCrash
-	END Run;
+		IF op IS CrashOp THEN
+			Tasks.Yield; Tasks.Yield;
+			NilCrash
+		END
+	END Exclusive;
 
-	PROCEDURE (t: MonTaker) Run;
+	PROCEDURE (t: MonTrapper) Body- (VAR ctx: Tasks.Ctx);
+		VAR op: CrashOp;
+	BEGIN
+		t.box.Do(ctx, op)
+	END Body;
+
+	PROCEDURE (t: MonTaker) Body- (VAR ctx: Tasks.Ctx);
+		VAR op: TakeOp;
 	BEGIN
 		Tasks.Yield;
-		Kernel.Lock(t.box); t.got := TRUE; Kernel.Unlock(t.box)
-	END Run;
+		t.box.Do(ctx, op); t.got := TRUE
+	END Body;
 
 	PROCEDURE (t: LateBad) Run;
 		VAR i: INTEGER;
@@ -959,7 +879,7 @@ MODULE System_devTasks;
 	PROCEDURE TestProcTrapReleasesTaskMonitor*;
 	(** Монитор, взятый в теле трапнувшей задачи, освобождён: ждущая его
 		задача входит, главный стек мониторов не держит. *)
-		VAR m: MonTrapper; k: MonTaker; box: ProbeBox;
+		VAR m: MonTrapper; k: MonTaker; box: Box;
 	BEGIN
 		NEW(box);
 		NEW(m); m.box := box; Tasks.Start(m);
@@ -967,8 +887,7 @@ MODULE System_devTasks;
 		UnitAssert.True(Pump(2000), "finished");
 		UnitAssert.True(Tasks.Failed(m), "holder trapped");
 		UnitAssert.True(k.got & ~Tasks.Failed(k), "waiter entered after the trap");
-		UnitAssert.True(~Monitors.IsLocked(box), "monitor free");
-		UnitAssert.EqualInt(0, Monitors.LockDepth(), "main stack holds no monitor")
+		UnitAssert.True(~Tasks.Held(box), "monitor free")
 	END TestProcTrapReleasesTaskMonitor;
 
 	PROCEDURE TestProcUserTryAcrossSwitches*;
