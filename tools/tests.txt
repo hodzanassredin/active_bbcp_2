@@ -26,6 +26,8 @@ Async_devProtocol|proc|300|AsyncProto AsyncSelect AsyncChan AsyncOnce
 Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan AsyncOnce
 System_devUnload|proc|600|System_devUnloadCode AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads
 System_devUnloadGuard|proc|300|System_devUnloadGuardCode
+# Проба общего стека с копированием участка в кучу (Copy/Mod64, amd64).
+Copy_devStack|proc slow|900|CopyStack System_devCRaw|
 # Примеры Demo: задачи, мониторы, каналы, муравьи (amd64).
 Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool
 # Хранилище по содержимому Cas: SHA-256, блоки, нарезка, деревья, наборы изменений.

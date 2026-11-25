@@ -688,6 +688,8 @@ MODULE LinLibc ["libc.so.6"];
 		PROCEDURE [ccall] mprotect* (adr: PtrVoid; len: size_t; prot: intFlags): int;
 
 	PROCEDURE [ccall] calloc* (nmemb: size_t; size: size_t): PtrVoid;
+	PROCEDURE [ccall] memcpy* (dest, src: PtrVoid; n: size_t): PtrVoid;
+	PROCEDURE [ccall] memset* (dest: PtrVoid; c: int; n: size_t): PtrVoid;
 (*	(* ANSI C 89 *)
 		PROCEDURE [ccall] malloc* (size: size_t): PtrVoid;
 *)

@@ -18,6 +18,8 @@
 #include <time.h>
 #include <sys/resource.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #define GUARD 4096
@@ -108,6 +110,20 @@ long test64_minflt (void) {
 	struct rusage ru;
 	if (getrusage (RUSAGE_SELF, &ru) != 0) return 0;
 	return ru.ru_minflt;
+}
+
+/* Резидентная память процесса в байтах (VmRSS из /proc/self/status). */
+long test64_rss (void) {
+	FILE *f;
+	char line[256];
+	long kb = -1;
+	f = fopen ("/proc/self/status", "r");
+	if (f == NULL) return -1;
+	while (fgets (line, sizeof line, f) != NULL) {
+		if (strncmp (line, "VmRSS:", 6) == 0) { sscanf (line + 6, "%ld", &kb); break; }
+	}
+	fclose (f);
+	return kb < 0 ? -1 : kb * 1024;
 }
 
 /* Окно счётчиков perf stat --control fd:CTL,ACK -D -1: фаза phase замера

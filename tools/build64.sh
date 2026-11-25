@@ -51,6 +51,9 @@ echo "build64: компиляция подсистем:$subs"
 	# поэтому идут до неё.
 	echo "DevCompiler64.CompileThis Taskarch"
 	echo "DevCompiler64.CompileThis Tasks"
+	# Проба общего стека с копированием участка: только amd64, в обход
+	# CompileSubs (файл лежит в Copy/Mod64, а обход читает <Sub>/Mod).
+	echo "DevCompiler64.CompileThis CopyStack"
 	echo "DevCompiler64.CompileThis LinThreads"
 	echo "DevCompiler64.CompileThis LinNative"
 	# Async — отдельным вызовом: ей нужны Tasks, LinNative и LinThreads,
