@@ -85,9 +85,9 @@ srv.Accept(client, res);                       (* completes the handshake *)
   (`CryptoAosBigNumbers.NewRand`) reads the same source but cannot report a failure through its
   signature; the review records this as a remaining limitation.
 - Network lengths are checked before any copy; malformed handshake data produces an alert and a
-  closed connection, not an `ASSERT`. A handshake message whose type does not match the current
-  state is rejected with `UnexpectedMessage`. SSLv2 `ClientHello` (both the record type 128 and
-  handshake type 30) is rejected.
+  closed connection, not an `ASSERT`. Where the sequence depends on the peer's choice, the
+  handshake type is checked against the state; an unexpected type is an alert. SSLv2 `ClientHello`
+  (both the record type 128 and handshake type 30) is rejected.
 
 ## Limitations
 
@@ -102,6 +102,8 @@ srv.Accept(client, res);                       (* completes the handshake *)
   exposed to a local high-resolution timing attacker.
 - Session resumption and renegotiation are supported only as far as the original A2 code did;
   the server does not implement TLS 1.3 tickets.
+- A handshake message must fit in one TLS record; fragmentation across records is rejected. The
+  server has no handshake timeout, so a silent client holds `Accept`.
 - There is no system CA store. `CryptoTLSStream` uses the default context and therefore rejects
   every certificate until the caller configures trusted roots through the direct
   `CryptoTLS.NewContext` API.
