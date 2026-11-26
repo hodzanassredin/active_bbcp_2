@@ -188,6 +188,16 @@ the driver executes `Ready` in the order "save (`RaftStorage.Save`) → send →
 A storage failure breaks the node: it stops answering and stops itself; it is brought back by a new
 `Start` after `ActorNet.Up`, with the state from the storage. Example: `ObxRaft0`.
 
+`RaftNode.Status` gives the owner what an outside driver needs: the role, term, leader hint, the last
+index and its term, the commit and applied indexes, and the storage-failure flag. The driver of a
+process reads it to follow an election. A cluster of three or five `blackbox-console` processes on
+`ActorNetTcp` is the scenario `tools/test-cluster.sh`: elections, writes, `kill -9` of the leader,
+re-election, restart of the node with the same `RaftKvStorage`, agreement of the logs. A separate
+client process sends `Propose` one operation at a time; the script stops it after a fixed number of
+confirmed commands, kills the leader, and the client continues from the new leader with the same
+operation number. Over loopback TCP with storage in memory the client confirms about 930 commands per
+second; the numbers are in `docs/measurements.md`.
+
 ### Journal of persistent actors
 
 `RaftJournal` turns Raft into an `ActorJournal.Journal`. The state machine `RaftJournal.Machine` keeps a
@@ -291,6 +301,14 @@ majority does not confirm a write (Append returns through the new leader once th
 majority). The mutation `RaftJournal.mutNoWait` (answering "written" without waiting) is caught by this
 scenario.
 
+`tools/test-cluster.sh` runs the cluster in separate processes: three and five nodes on `ActorNetTcp`
+inside one network namespace, addresses and capabilities distributed by files of the run directory.
+The script checks that the client's confirmed commands are applied (the state machine returns their
+count), kills the leader, measures the time until the next leader writes its status, restarts the node
+with the same storage, and waits until every node reports the same last index, term and commit index.
+The same scenario runs with two network namespaces joined by a veth pair (`--veth`), which stands for
+two machines.
+
 ## Cost
 
 `Raft_devBench.Run` was measured on 26.11.2026: 3 nodes in one process, a FIFO network without faults,
@@ -313,11 +331,12 @@ measured.
 
 ## What is missing
 
-- The `RaftNode` actor is tested on `ActorNetMem` (with faults) and in the examples; it was not run on
-  `ActorNetTcp` between processes.
-- The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`; `ActorGrain` was not tested
-  on it. The journal state machine's
-  snapshot is all accepted commands in a row; there is no separate truncation for it.
+- The `RaftNode` actor runs on `ActorNetTcp` between processes in `tools/test-cluster.sh` (elections,
+  `kill -9` of the leader, restart with the same storage), without partitions and without membership
+  changes.
+- The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`; `ActorGrain` is tested on
+  it only in the process scenario of `tools/test-cluster.sh`, without partitions. The journal state
+  machine's snapshot is all accepted commands in a row; there is no separate truncation for it.
 - Membership commands are in the core (`RaftCore.AddServer`, `RemoveServer`) and in the model; the actor
   driver `RaftNode` does not accept them yet. `Config.n` is the initial number of voters; peers up to
   `RaftCore.maxNodes` can be given. Addresses and keys of the members are not part of Raft.
@@ -342,8 +361,13 @@ fields `id`, `n`, `term`, `vote`, `role`, `leader`, `last`, `commit`, `applied`,
 `SetExpiry`, `Count`, `Has`), `New`, `Encode`, `Decode`.
 `RaftStorage`: `Storage` (`Save`, `Compact`, `Load`), `NewMem`. `RaftKvStorage`: `New(db)`.
 `RaftNode`: `NewConfig`, `Start`, `Config` (`peers`, `tickMs`, `electionTicks`, `sessionExpiry`,
-`compactEvery`, `seed`, `actor`), messages `Tick`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`),
+`compactEvery`, `seed`, `actor`), `Status`, messages `Tick`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`),
 `Caps`.
 `RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`tickMs`, `timeoutMs`, `giveUpMs`,
 `timeoutTicks`, `giveUpTicks`, `Close`), `Tick(c)`, mutations `mutNoWait`, `mutNoExpected`.
 `RaftSm.StateMachine.Query` is the read for `RaftNode.Query`.
+
+`RaftNode.Status(cfg; OUT role, term, leader, last, lastTerm, commit, applied: INTEGER; OUT broken: BOOLEAN)`
+reports the role (`RaftCore.follower`, `candidate`, `leader`; `none` before the storage is read), the
+term, the leader hint, the last index and its term, the commit and applied indexes and the
+storage-failure flag. It changes nothing; a driver calls it between switch points.

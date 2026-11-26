@@ -233,6 +233,7 @@ tools/check-examples.sh --run # examples in documentation against modules and lo
 tools/check-links.py          # relative links in .md
 tools/check-reject.sh         # negative checks of ordinary language rules on Tasks
 tools/test-mpi.sh             # computon MPI transport, optional
+tools/test-cluster.sh         # ActorNet and Raft in separate processes, TCP
 tools/test-resolver.sh        # resolver without network, optional
 tools/test-robust.sh          # RobustParallel facade, optional
 tools/gui-world.sh            # .odc texts for Help -> Examples

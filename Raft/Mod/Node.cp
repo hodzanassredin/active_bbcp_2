@@ -473,4 +473,27 @@ MODULE RaftNode;
 		RETURN ActorCore.Spawn(NIL, p, cfg.net.name)
 	END Start;
 
+	PROCEDURE Status* (cfg: Config; OUT role, term, leader, last, lastTerm, commit, applied: INTEGER;
+		OUT broken: BOOLEAN);
+	(** Наблюдение за узлом: роль (RaftCore.follower/candidate/leader; none —
+		узел ещё не прочитал хранилище), срок, подсказка о лидере, последняя
+		запись журнала и её срок, зафиксированный и применённый индексы,
+		признак отказа хранилища. Пред: cfg # NIL — 20. Пост: значения на
+		момент вызова; чтение состояния узла не меняет. *)
+	BEGIN
+		ASSERT(cfg # NIL, 20);
+		role := Core.none; term := 0; leader := Core.none;
+		last := 0; lastTerm := 0; commit := 0; applied := 0; broken := FALSE;
+		IF cfg.actor # NIL THEN
+			broken := cfg.actor.broken;
+			IF cfg.actor.nd # NIL THEN
+				role := cfg.actor.nd.role; term := cfg.actor.nd.term; leader := cfg.actor.nd.leader;
+				last := cfg.actor.nd.last; commit := cfg.actor.nd.commit; applied := cfg.actor.nd.applied;
+				IF last > cfg.actor.nd.snapIndex THEN lastTerm := Core.TermAt(cfg.actor.nd, last)
+				ELSIF last = cfg.actor.nd.snapIndex THEN lastTerm := cfg.actor.nd.snapTerm
+				END
+			END
+		END
+	END Status;
+
 END RaftNode.
