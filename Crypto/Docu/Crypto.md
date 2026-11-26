@@ -193,7 +193,10 @@ srv.Accept(client, res);                       (* completes the handshake *)
 
 ## Limitations
 
-- TLS 1.3 is not implemented.
+- TLS 1.3 is not implemented. The TLS 1.2 client and server support only
+  `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` by default (the legacy CBC suite only when enabled
+  explicitly); ECDHE-ECDSA, AES-256-GCM, ChaCha20-Poly1305, P-256/P-384 groups and the new
+  signature algorithms are not yet wired into TLS.
 - The TLS handshake still uses X25519 and RSA certificates; the new ECDSA/RSA-PSS/Ed25519
   X.509 support is not yet wired into TLS. Compressed SEC1 points, P-521 and the other named
   curves are not implemented.

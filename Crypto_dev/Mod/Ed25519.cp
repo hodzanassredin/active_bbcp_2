@@ -69,6 +69,15 @@ MODULE Crypto_devEd25519;
 			0, FALSE, "Ed25519 rejects S = L")
 	END TestRFC8032;
 
+	PROCEDURE TestShort*;
+		(** Слишком короткие ключ или подпись отвергаются без чтения за границей. *)
+		VAR pub, sig, msg: ARRAY 32 OF SHORTCHAR;
+	BEGIN
+		pub := ""; sig := ""; msg := "";
+		UnitAssert.True(~CryptoEd25519.Verify(pub, msg, 0, sig),
+			"Ed25519 rejects short key and signature")
+	END TestShort;
+
 	PROCEDURE VerifyHex (IN pubHex, msgHex, sigHex: ARRAY OF SHORTCHAR; msgLen: INTEGER;
 			expected: BOOLEAN; IN what: ARRAY OF CHAR);
 		VAR pub, msg, sig: ARRAY 64 OF SHORTCHAR;

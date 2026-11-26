@@ -261,6 +261,9 @@ MODULE CryptoEd25519;
 			i : INTEGER;
 			buf : ARRAY 32 OF SHORTCHAR;
 	BEGIN
+		IF (LEN(pub) < 32) OR (LEN(sig) < 64) THEN
+			RETURN FALSE
+		END;
 		FOR i := 32 TO 63 DO buf[i - 32] := sig[i] END;
 		IF ~LessThanL(buf) THEN RETURN FALSE END;   (* S < L *)
 		IF ~Decode(pub, a) THEN RETURN FALSE END;
