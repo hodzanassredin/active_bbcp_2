@@ -85,6 +85,10 @@ MODULE System_devTasksObj;
 		JoinHoldJob = POINTER TO RECORD (Tasks.Job) x: Lock; child: Tasks.Task; done: BOOLEAN END;
 		CrossJob = POINTER TO RECORD (Tasks.Job) x, y: Lock; done: BOOLEAN END;
 		SetJob = POINTER TO RECORD (Tasks.Job) x: Lock; v: BOOLEAN END;
+		(* Выходит из монитора и сразу смотрит очередь ждущих. *)
+		ReleaseCheckJob = POINTER TO RECORD (Tasks.Job)
+			x: Lock; queuedAfter: INTEGER; done: BOOLEAN
+		END;
 		WaitJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: WaitOp END;
 		CondWaitJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: CondWaitOp END;
 		NeedJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: NeedOp END;
@@ -97,6 +101,9 @@ MODULE System_devTasksObj;
 			x: Lock; deadline: LONGINT; done, cancelled, expired: BOOLEAN
 		END;
 		DeadlineJob = POINTER TO RECORD (Tasks.Job) x: Lock; op: WaitOp; expired: BOOLEAN END;
+		(* ParkCtx с внешним ожиданием и сроком: срок обязан разбудить,
+		   а признак внешнего ожидания — сняться. *)
+		ExtDeadlineJob = POINTER TO RECORD (Tasks.Job) expired, parked: BOOLEAN END;
 		AllocJob = POINTER TO RECORD (Tasks.Job) x: Lock END;
 		ProbeJob = POINTER TO RECORD (Tasks.Job) x: Lock END;
 		SpawnJob = POINTER TO RECORD (Tasks.Job) n: INTEGER END;
@@ -505,6 +512,15 @@ MODULE System_devTasksObj;
 		j.x.Do(ctx, op)
 	END Body;
 
+	PROCEDURE (j: ReleaseCheckJob) Body- (VAR ctx: Tasks.Ctx);
+		VAR op: SetOp;
+	BEGIN
+		op.v := TRUE;
+		j.x.Do(ctx, op);
+		j.queuedAfter := Tasks.Queued(j.x);
+		j.done := TRUE
+	END Body;
+
 	PROCEDURE (j: WaitJob) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		j.x.Do(ctx, j.op)
@@ -568,6 +584,14 @@ MODULE System_devTasksObj;
 		j.x.Do(ctx, j.op);
 		j.expired := ctx.expired;
 		bodyDone := TRUE
+	END Body;
+
+	PROCEDURE (j: ExtDeadlineJob) Body- (VAR ctx: Tasks.Ctx);
+	BEGIN
+		Tasks.SetDeadline(ctx, 5);
+		j.expired := ~Tasks.ParkCtx(ctx, TRUE);
+		j.parked := TRUE;
+		Tasks.Park	(* без срока: разбудить может только отмена *)
 	END Body;
 
 	PROCEDURE (j: ProbeJob) Body- (VAR ctx: Tasks.Ctx);
@@ -955,6 +979,42 @@ MODULE System_devTasksObj;
 		UnitAssert.EqualInt(0, Tasks.Queued(x), "очередь пуста")
 	END CaseDeadlineWait;
 
+	PROCEDURE CaseReleaseQueue;
+	(* Отпускание монитора снимает выбранного ждущего с очереди: сразу после
+	   выхода из Do, до его первого шага, Tasks.Queued(x) уже ноль. *)
+		VAR x: Lock; w: WaitJob; r: ReleaseCheckJob;
+	BEGIN
+		NEW(x); x.flag := FALSE;
+		NEW(w); w.x := x; w.op.id := 0; w.op.result := TRUE;
+		Start(w); Tasks.Step;
+		UnitAssert.EqualInt(1, Tasks.Queued(x), "ждущий в очереди флагов");
+		NEW(r); r.x := x; r.queuedAfter := -1; r.done := FALSE;
+		Start(r); Tasks.Step;
+		UnitAssert.True(r.done, "отпускающая задача вышла из Do");
+		UnitAssert.EqualInt(0, r.queuedAfter, "ждущий снят с очереди при отпускании");
+		UnitAssert.True(Pump(1000), "задачи завершились")
+	END CaseReleaseQueue;
+
+	PROCEDURE CaseParkCtxDeadlineAccounting;
+	(* ParkCtx с внешним ожиданием: срок будит задачу, а признак внешнего
+	   ожидания снимается — иначе простой Park после него не считается
+	   тупиком. *)
+		VAR j: ExtDeadlineJob; steps: INTEGER; t0: LONGINT;
+	BEGIN
+		NEW(j); j.expired := FALSE; j.parked := FALSE;
+		Start(j);
+		steps := 0; t0 := Kernel.Time();
+		WHILE ~j.parked & (Kernel.Time() - t0 < 1000) DO
+			Tasks.Step; INC(steps)
+		END;
+		Tasks.Step;	(* проход без готовых: CheckDeadlock обновляет признак *)
+		UnitAssert.True(j.expired, "срок остановил внешнее ожидание");
+		UnitAssert.True(j.parked, "задача дошла до простого Park");
+		UnitAssert.True(Tasks.Deadlocked(), "истёкшее внешнее ожидание не считается внешним");
+		Tasks.Cancel(j);
+		UnitAssert.True(Pump(2000), "задача завершилась")
+	END CaseParkCtxDeadlineAccounting;
+
 	PROCEDURE CaseReadyOnce;
 		(* Пустые очереди не зовут Ready; один выход при ждущем — ровно раз. *)
 		VAR x: Lock; a: AllocJob; w: WaitJob; n: ProbeJob; t0: LONGINT;
@@ -1220,6 +1280,12 @@ MODULE System_devTasksObj;
 	BEGIN RunBoth(CaseCancelWait) END TestCancelWait;
 	PROCEDURE TestDeadlineWait*;
 	BEGIN RunBoth(CaseDeadlineWait) END TestDeadlineWait;
+	PROCEDURE TestParkCtxDeadlineAccounting*;
+	BEGIN RunBoth(CaseParkCtxDeadlineAccounting) END TestParkCtxDeadlineAccounting;
+
+	PROCEDURE TestReleaseQueue*;
+	BEGIN RunBoth(CaseReleaseQueue) END TestReleaseQueue;
+
 	PROCEDURE TestReadyOnce*;
 	BEGIN RunBoth(CaseReadyOnce) END TestReadyOnce;
 	PROCEDURE TestNoAllocation*;
