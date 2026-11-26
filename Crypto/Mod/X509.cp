@@ -694,6 +694,7 @@ MODULE CryptoX509;
 			c : Certificate;
 			r : Streams.StringReader;
 			root, tbs, sigAlg, sigVal, d, alg, spki, ext : ASN1.Triplet;
+			innerHash : ARRAY 16 OF SHORTCHAR;
 			len0 : AO.SIZE;
 			ok : BOOLEAN;
 	BEGIN
@@ -766,7 +767,7 @@ MODULE CryptoX509;
 			RETURN NIL
 		END;
 		(* Внутренний AlgorithmIdentifier должен совпасть с внешним. *)
-		IF ~AlgHashName(d, c.hashName) THEN
+		IF ~AlgHashName(d, innerHash) OR (innerHash # c.hashName) THEN
 			res := ErrMalformed;
 			RETURN NIL
 		END;

@@ -207,7 +207,8 @@ MODULE Crypto_devX509;
 		expired := X509.ReadPemChain(ExpiredPem, res);
 		UnitAssert.NotNil(expired, "legacy verify: expired parsed");
 		IF expired # NIL THEN
-			UnitAssert.True(~X509.Verify(expired, {}), "legacy verify rejects expired")
+			UnitAssert.True(~X509.Verify(expired, {}), "legacy verify rejects expired");
+			UnitAssert.True(X509.Verify(expired, {X509.AllowOutdated}), "AllowOutdated skips dates")
 		END
 	END TestLegacyVerify;
 
@@ -411,6 +412,44 @@ MODULE Crypto_devX509;
 			END
 		END
 	END TestTampered;
+
+	PROCEDURE TestAlgMismatch*;
+		(* Внешний и внутренний AlgorithmIdentifier должны совпадать.
+		   Меняем последнее вхождение OID sha256WithRSAEncryption на
+		   sha1WithRSAEncryption: длины DER не меняются. *)
+		VAR leaf, bad : X509.Certificate; res : AO.SIGNED32;
+			der : ARRAY 8192 OF SHORTCHAR; oid : ARRAY 9 OF SHORTCHAR;
+			i, j, len, last : AO.SIZE; found : BOOLEAN;
+	BEGIN
+		oid[0] := 2AX; oid[1] := 86X; oid[2] := 48X; oid[3] := 86X;
+		oid[4] := 0F7X; oid[5] := 0DX; oid[6] := 01X; oid[7] := 01X; oid[8] := 0BX;
+		leaf := X509.ReadPemChain(LeafPem, res);
+		UnitAssert.NotNil(leaf, "alg mismatch: leaf parsed");
+		IF leaf # NIL THEN
+			len := leaf.rawLen;
+			UnitAssert.True((len > 0) & (len < LEN(der)), "alg mismatch: raw fits");
+			FOR i := 0 TO len - 1 DO der[i] := leaf.raw^[i] END;
+			last := -1;
+			i := 0;
+			WHILE i + 9 <= len DO
+				found := TRUE;
+				j := 0;
+				WHILE found & (j < 9) DO
+					IF der[i + j] # oid[j] THEN found := FALSE END;
+					INC(j)
+				END;
+				IF found THEN last := i END;
+				INC(i)
+			END;
+			UnitAssert.True(last >= 0, "alg mismatch: outer OID found");
+			IF last >= 0 THEN
+				der[last + 8] := 05X;
+				bad := X509.ReadCert(der, 0, len, res);
+				UnitAssert.True(bad = NIL, "algorithm mismatch rejected");
+				UnitAssert.EqualInt(X509.ErrMalformed, res, "algorithm mismatch code")
+			END
+		END
+	END TestAlgMismatch;
 
 	PROCEDURE DecodeOk (IN hex: ARRAY OF SHORTCHAR): BOOLEAN;
 		VAR der: ARRAY 32 OF SHORTCHAR; r: Streams.StringReader;
