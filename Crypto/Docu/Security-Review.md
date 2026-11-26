@@ -24,6 +24,7 @@
 | 9. X.509: ограничения пути и расширения | исправлено | `f4ae77de`, `8b9d6d8c` | `Crypto_devX509` (`TestNoCA`, `TestPathLen`, `TestKeyUsage`, `TestCriticalExtension`, `TestCycle`, `TestAlgMismatch`) |
 | SHA-384/512, HMAC-SHA-384/512, HKDF | сделано | `crypto-fix` | `Crypto_devSHA512`, `Crypto_devHMAC`, `Crypto_devHKDF`, `Vectors/check.py` |
 | P-256/P-384: ECDH и ECDSA (RFC 6979) | сделано | `crypto-fix` | `Crypto_devEC`, `Crypto_devECDSA`, NIST CAVP, RFC 6979, Wycheproof, `Vectors/check.py` |
+| AES-256-GCM, ChaCha20-Poly1305 | сделано | `crypto-fix` | `Crypto_devGcm` (`TestAES256`), `Crypto_devChaCha20`, RFC 8439, `Vectors/check.py` |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -321,6 +322,10 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 | P-256/P-384: поле и точка | `ec-mont-sub`, `ec-formula`, `ec-digit`, `ec-oncurve`, `ec-window`, `ec-inrange`, `ec-mont-zero`, `ec384-a`, `ec384-nbits` | `Crypto_devEC` (все красные; `ec384-nbits` покраснел после того, как векторы P-384 стали полной длины — с короткими скалярами старшие 128 бит не проверялись) |
 | ECDH | `ecdh-novalidate`, `ecdh-noprivcheck`, `ecdh-wrongpoint`, `ecdh-zero` | три красные; `ecdh-zero` эквивалентна: на проверенной точке простого порядка общий секрет ноль только у бесконечности, а её отвергает `Validate` |
 | ECDSA RFC 6979 | `ecdsa-sep`, `ecdsa-swap`, `ecdsa-sformula`, `ecdsa-u1`, `ecdsa-compare`, `ecdsa-range` | пять красные; `ecdsa-range` на выбранных векторах эквивалентна (r=0 и s=n отвергаются арифметикой, r=p не совпадает), но проверка диапазона оставлена по RFC 6979/ECDSA |
+| AES-256-GCM | `aes256` | `Crypto_devGcm.TestAES256` (красная) |
+| ChaCha20 | `chacha-qr`, `chacha-sigma`, `chacha-counter`, `chacha-inc` | `Crypto_devChaCha20` (все четыре красные) |
+| Poly1305 | `poly-clamp`, `poly-fullbit`, `poly-mul`, `poly-addmask`, `poly-final5` | четыре красные; `poly-final5` (+5 → +4 в окончательном приведении) на выбранных векторах не меняет тег и остаётся эквивалентной без случая на границе приведения |
+| ChaCha20-Poly1305 AEAD | `aead-tag`, `aead-pad`, `aead-lens` | все три красные |
 
 Порча `uls-signed-compare` (возврат сравнения через XOR старшего бита) тест не
 краснит: на этом компиляторе эта форма эквивалентна явным ветвям, поэтому замена

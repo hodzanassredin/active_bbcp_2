@@ -94,3 +94,5 @@ Crypto_devPRF||180|CryptoTLS CryptoOsRandom CryptoUtils CryptoFortuna CryptoFort
 Crypto_devEC||300|CryptoEC CryptoUtils CryptoAosCompat
 # ECDSA P-256/P-384: RFC 6979, проверка подписи, отказы при подделке.
 Crypto_devECDSA|slow|600|CryptoHashes CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoHMAC CryptoUtils CryptoAosCompat CryptoEC CryptoECDSA
+# ChaCha20-Poly1305 (RFC 8439): блок, поток, MAC, AEAD и длины не кратные блоку.
+Crypto_devChaCha20||180|CryptoChaCha20 CryptoUtils CryptoAosCompat

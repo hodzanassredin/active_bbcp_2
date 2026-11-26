@@ -105,4 +105,25 @@ MODULE Crypto_devGcm;
 		UnitAssert.True(res # 0, "GCM tampered ciphertext rejected")
 	END TestTampered;
 
+	PROCEDURE TestAES256*;
+		(** AES-256-GCM: NIST SP 800-38D, случай с нулевым ключом. *)
+		VAR key, iv, plain, aad, cipher, tag, wantC, wantT: ARRAY 64 OF SHORTCHAR;
+			g: CryptoGcm.GcmMode; c: CryptoCiphers.Cipher; res: INTEGER; i: INTEGER;
+	BEGIN
+		FOR i := 0 TO 31 DO key[i] := 0X END;
+		FOR i := 0 TO 11 DO iv[i] := 0X END;
+		FOR i := 0 TO 15 DO plain[i] := 0X; aad[i] := 0X END;
+		CryptoUtils.Hex2Bin("CEA7403D4D606B6E074EC5D3BAF39D18", 0, wantC, 0, 16);
+		CryptoUtils.Hex2Bin("D0D1C8A799996BF0265B98B5D48AB919", 0, wantT, 0, 16);
+		c := CryptoCiphers.NewCipher("CryptoAES");
+		c.InitKey(key, 256);
+		NEW(g);
+		g.Init(c, iv, 12);
+		g.Encrypt(plain, aad, 0, 16, 0, 128, cipher, tag, 0);
+		UnitAssert.True(Equal(cipher, wantC, 16), "AES-256-GCM ciphertext");
+		UnitAssert.True(Equal(tag, wantT, 16), "AES-256-GCM tag");
+		g.Decrypt(cipher, aad, tag, 0, 16, 0, 128, plain, 0, res);
+		UnitAssert.EqualInt(0, res, "AES-256-GCM tag accepted")
+	END TestAES256;
+
 END Crypto_devGcm.

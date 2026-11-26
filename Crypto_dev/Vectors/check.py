@@ -143,6 +143,47 @@ if have_crypto:
         got = AESGCM(key_b).encrypt(iv_b, pt, aad_b or None)
         if got != ct + tag_b:
             fail(f"gcm {key[:8]}: {got.hex().upper()} != {(ct + tag_b).hex().upper()}")
+
+    # ChaCha20 / Poly1305 / AEAD (RFC 8439)
+    from cryptography.hazmat.primitives.ciphers import Cipher as CChacha
+    from cryptography.hazmat.primitives.ciphers.algorithms import ChaCha20
+    from cryptography.hazmat.primitives.poly1305 import Poly1305
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    for row in rows("chacha.txt"):
+        kind = row[0]
+        key_b = unhex(row[1])
+        if kind == "block":
+            nonce_b = unhex(row[2])
+            n16 = int(row[3]).to_bytes(4, "little") + nonce_b
+            want = unhex(row[4])
+            enc = CChacha(ChaCha20(key_b, n16), mode=None).encryptor()
+            got = enc.update(b"\0" * len(want))
+            if got != want:
+                fail(f"chacha block: {got.hex()} != {want.hex()}")
+        elif kind == "stream":
+            nonce_b = unhex(row[2])
+            n16 = int(row[3]).to_bytes(4, "little") + nonce_b
+            plain = unhex(row[4])
+            want = unhex(row[5])
+            enc = CChacha(ChaCha20(key_b, n16), mode=None).encryptor()
+            got = enc.update(plain)
+            if got != want:
+                fail(f"chacha stream: {got.hex()} != {want.hex()}")
+        elif kind == "poly":
+            msg = unhex(row[2])
+            want = unhex(row[3])
+            got = Poly1305.generate_tag(key_b, msg)
+            if got != want:
+                fail(f"poly1305: {got.hex()} != {want.hex()}")
+        else:  # aead | key | nonce | aad | plain | cipher | tag
+            nonce_b = unhex(row[2])
+            aad = unhex(row[3])
+            plain = unhex(row[4])
+            want = unhex(row[5]) + unhex(row[6])
+            got = ChaCha20Poly1305(key_b).encrypt(nonce_b, plain, aad or None)
+            if got != want:
+                fail(f"chacha aead: {got.hex().upper()} != {want.hex().upper()}")
     vals = {}
     for line in open(f"{BASE}/x25519.txt", encoding="utf-8"):
         line = line.strip()

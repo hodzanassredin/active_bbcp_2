@@ -19,7 +19,7 @@ The support modules keep the names of the A2 sources:
 |---|---|
 | A2 compatibility | `CryptoAosCompat`, `CryptoAosBIT`, `CryptoAosBigNumbers`, `CryptoAosRandom`, `CryptoAosStreams`, `CryptoAosStrings`, `CryptoAosRealConversions` |
 | Host support | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
-| Primitives | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
+| Primitives | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm`, `CryptoChaCha20` |
 | Hashes and MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
 | Public key | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoASN1`, `CryptoX509` |
 | Random | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
@@ -43,6 +43,16 @@ ok := CryptoHKDF.Expand("CryptoSHA256", prk, 32, info, infoLen, okm, okmLen)
 
 `CryptoHMAC` uses the block size of the underlying hash, so a key longer than the block is hashed
 once and the inner and outer pads have the size of the hash block.
+
+`CryptoGcm` works with AES-128 and AES-256: `InitKey(key, 256)` selects the 14-round key schedule.
+`CryptoChaCha20` provides ChaCha20, Poly1305 and the combined `ChaCha20-Poly1305` AEAD named in
+RFC 8439. The AEAD takes a 32-byte key, a 12-byte nonce and additional data, and returns a
+16-byte tag:
+
+```componentpascal
+CryptoChaCha20.Encrypt(key, nonce, aad, aadLen, plain, plainLen, cipher, tag);
+ok := CryptoChaCha20.Decrypt(key, nonce, aad, aadLen, cipher, plainLen, tag, plain)
+```
 
 Elliptic-curve keys use `CryptoEC` for P-256 and P-384. A point is decoded from the uncompressed
 SEC1 form (`0x04 || X || Y`), decoded and validated before use, and ECDH returns the x-coordinate
@@ -117,8 +127,10 @@ srv.Accept(client, res);                       (* completes the handshake *)
 - A rejected `Finished`, a `ChangeCipherSpec` with a wrong value and a record with a bad GCM tag
   close the connection; `ReceiveFinished` returns the result and the handshake state is not
   advanced to `Established`.
-- Secret comparisons use `CryptoUtils.EqualBytesCT`: the record MAC, the GCM tag, `Finished` and
-  the PKCS#1 encoded message are not compared with an early exit. `CryptoHKDF` builds on
+- Secret comparisons use `CryptoUtils.EqualBytesCT`: the record MAC, the GCM tag, the
+  ChaCha20-Poly1305 tag, `Finished` and the PKCS#1 encoded message are not compared with an early
+  exit. Poly1305 uses 26-bit limbs and 64-bit accumulators; the final reduction selects between
+  the two candidates with a mask. `CryptoHKDF` builds on
   `CryptoHMAC`, so HMAC-SHA-256, HMAC-SHA-384 and HMAC-SHA-512 use the 128-byte block of SHA-384
   and SHA-512 and the 64-byte block of SHA-256.
 - P-256 and P-384 use the complete projective addition formulas of Renes, Costello and Batina.
@@ -178,7 +190,7 @@ from `tools/build32.sh` and `tools/test32.sh`.
 ## Tests
 
 Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
-`Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`,
+`Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devX509`,
 `Crypto_devPKCS1` and `Crypto_devPRF`.
 `tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files

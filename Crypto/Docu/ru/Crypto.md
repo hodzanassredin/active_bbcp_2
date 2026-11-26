@@ -19,7 +19,7 @@
 |---|---|
 | Совместимость с A2 | `CryptoAosCompat`, `CryptoAosBIT`, `CryptoAosBigNumbers`, `CryptoAosRandom`, `CryptoAosStreams`, `CryptoAosStrings`, `CryptoAosRealConversions` |
 | Поддержка хоста | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
-| Примитивы | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
+| Примитивы | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm`, `CryptoChaCha20` |
 | Хеши и MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
 | Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoASN1`, `CryptoX509` |
 | Случайные числа | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
@@ -43,6 +43,15 @@ ok := CryptoHKDF.Expand("CryptoSHA256", prk, 32, info, infoLen, okm, okmLen)
 
 `CryptoHMAC` использует размер блока лежащего в основе хеша: ключ длиннее блока хешируется один
 раз, а внутренние и внешние дополнения имеют размер блока хеша.
+
+`CryptoGcm` работает с AES-128 и AES-256: `InitKey(key, 256)` выбирает расписание на 14 раундов.
+`CryptoChaCha20` даёт ChaCha20, Poly1305 и общий AEAD `ChaCha20-Poly1305` по RFC 8439. AEAD
+принимает ключ 32 байта, nonce 12 байт и дополнительные данные, а возвращает тег 16 байт:
+
+```componentpascal
+CryptoChaCha20.Encrypt(key, nonce, aad, aadLen, plain, plainLen, cipher, tag);
+ok := CryptoChaCha20.Decrypt(key, nonce, aad, aadLen, cipher, plainLen, tag, plain)
+```
 
 Ключи на эллиптических кривых обслуживает `CryptoEC` для P-256 и P-384. Точка читается из
 несжатой формы SEC1 (`0x04 || X || Y`), проверяется и только потом используется; ECDH
@@ -118,7 +127,8 @@ srv.Accept(client, res);                       (* завершает рукоп�
   GCM закрывают соединение: `ReceiveFinished` возвращает результат, и состояние
   рукопожатия не переводится в `Established`.
 - Секреты сравниваются через `CryptoUtils.EqualBytesCT`: MAC записи, тег GCM, `Finished` и
-  PKCS#1-блок не сравниваются с ранним выходом. `CryptoHKDF` строится на `CryptoHMAC`, поэтому
+  PKCS#1-блок не сравниваются с ранним выходом. Poly1305 использует 26-битные разряды и
+  64-битные накопители; окончательное приведение выбирает из двух кандидатов маской. `CryptoHKDF` строится на `CryptoHMAC`, поэтому
   HMAC-SHA-256, HMAC-SHA-384 и HMAC-SHA-512 используют блок 128 байт у SHA-384 и SHA-512 и блок
   64 байта у SHA-256.
 - P-256 и P-384 используют полные проективные формулы сложения Ренеса, Костелло и Батины. У них
@@ -177,7 +187,7 @@ srv.Accept(client, res);                       (* завершает рукоп�
 ## Тесты
 
 Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
-`Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`,
+`Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devX509`,
 `Crypto_devPKCS1`, `Crypto_devPRF`. Их
 запускает `tools/test.sh` по списку `tools/tests.txt`. Эталонные значения также лежат файлами с
