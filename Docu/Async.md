@@ -1100,8 +1100,8 @@ read set and a second log entry.
 commit: the log is cleared, and the tasks waiting for the written variables are woken. A trap is
 rollback of the log from the end to the start and passing the number on through `HALT` with the
 same number (`HALT` accepts only a constant, so the number is chosen by a `CASE` statement).
-`Retry` is a trap too, but a quiet one: number 126 under `Kernel.SetQuiet`, without a kernel report;
-`Atomically` recognises it by `Kernel.err`.
+`Retry` is a trap too, but a quiet one: number 128 is the kernel's `silentTrap`, and no report is
+printed for it; `Atomically` recognises it by `Kernel.err`.
 
 `OrElse` opens a new level: it remembers the log length and takes a new level number, so the first
 write in the branch puts into the log the value at the start of the branch. After a `Retry` of the

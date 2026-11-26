@@ -4,7 +4,7 @@ This example implements a simple stock ticker. The curve which is displayed show
 
 			
 
-What this example shows is the use of actions. Services.Actions  are objects whose Do  procedures are executed in a delayed fashion, when the system is idle. An action which re-installs itself whenever it is invoked as in this example operates as a non-preemptive background task.
+What this example shows is the use of actions. An action (`Services.Action`) is an object whose `Do` procedure is executed in a delayed fashion, when the system is idle. An action which re-installs itself whenever it is invoked as in this example operates as a non-preemptive background task.
 
  "ObxTickers.Deposit; StdCmds.Open"
 
