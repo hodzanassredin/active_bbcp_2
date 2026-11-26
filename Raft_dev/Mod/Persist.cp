@@ -154,7 +154,7 @@ MODULE Raft_devPersist;
 		VAR out: Core.Bytes; dup: BOOLEAN; s: Collect; res: INTEGER;
 	BEGIN
 		WHILE (refApplied < dlast) & (decided[refApplied + 1].term # -1) DO
-			INC(refApplied); ref.Apply(refApplied, decided[refApplied].data, out, dup)
+			INC(refApplied); ref.Apply(refApplied, decided[refApplied].term, decided[refApplied].data, out, dup)
 		END;
 		NEW(s); ref.sm(RaftJournal.Machine).mem.Read("acct", nev + 1, s, res)
 	END Advance;
@@ -347,15 +347,16 @@ MODULE Raft_devPersist;
 		END
 	END Save;
 
-	PROCEDURE (s: Flaky) Compact (index, term: INTEGER; snap: Core.Bytes; OUT res: INTEGER);
+	PROCEDURE (s: Flaky) Compact (index, term: INTEGER; snap: Core.Bytes;
+		voters, learners: SET; OUT res: INTEGER);
 	BEGIN
-		s.inner.Compact(index, term, snap, res)
+		s.inner.Compact(index, term, snap, voters, learners, res)
 	END Compact;
 
-	PROCEDURE (s: Flaky) Load (OUT term, vote, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
-		OUT log: Core.Entries; OUT last, res: INTEGER);
+	PROCEDURE (s: Flaky) Load (OUT term, vote, commit, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
+		OUT log: Core.Entries; OUT last, res: INTEGER; OUT voters, learners: SET; OUT hasConf: BOOLEAN);
 	BEGIN
-		s.inner.Load(term, vote, snapIndex, snapTerm, snap, log, last, res)
+		s.inner.Load(term, vote, commit, snapIndex, snapTerm, snap, log, last, res, voters, learners, hasConf)
 	END Load;
 
 	PROCEDURE Index (IN name: ARRAY OF CHAR): INTEGER;
@@ -739,7 +740,7 @@ MODULE Raft_devPersist;
 	(* автомат не сверяет expected: два воплощения пишут вперемешку *)
 		VAR f: INTEGER;
 	BEGIN
-		RaftJournal.mutations := {RaftJournal.mutNoExpected}; Caught("mutNoExpected", 200, 9, f)
+		RaftJournal.mutations := {RaftJournal.mutNoExpected}; Caught("mutNoExpected", 200, 8, f)
 	END TestMutNoExpected;
 
 	PROCEDURE Report (count, steps: INTEGER; mut, pmut: SET);

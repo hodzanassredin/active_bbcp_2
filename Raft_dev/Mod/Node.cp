@@ -174,15 +174,16 @@ MODULE Raft_devNode;
 		END
 	END Save;
 
-	PROCEDURE (s: Flaky) Compact (index, term: INTEGER; snap: Core.Bytes; OUT res: INTEGER);
+	PROCEDURE (s: Flaky) Compact (index, term: INTEGER; snap: Core.Bytes;
+		voters, learners: SET; OUT res: INTEGER);
 	BEGIN
-		s.inner.Compact(index, term, snap, res)
+		s.inner.Compact(index, term, snap, voters, learners, res)
 	END Compact;
 
-	PROCEDURE (s: Flaky) Load (OUT term, vote, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
-		OUT log: Core.Entries; OUT last, res: INTEGER);
+	PROCEDURE (s: Flaky) Load (OUT term, vote, commit, snapIndex, snapTerm: INTEGER; OUT snap: Core.Bytes;
+		OUT log: Core.Entries; OUT last, res: INTEGER; OUT voters, learners: SET; OUT hasConf: BOOLEAN);
 	BEGIN
-		s.inner.Load(term, vote, snapIndex, snapTerm, snap, log, last, res)
+		s.inner.Load(term, vote, commit, snapIndex, snapTerm, snap, log, last, res, voters, learners, hasConf)
 	END Load;
 
 	PROCEDURE Index (IN name: ARRAY OF CHAR): INTEGER;

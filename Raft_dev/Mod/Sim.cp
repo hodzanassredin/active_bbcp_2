@@ -14,13 +14,18 @@ MODULE Raft_devSim;
 	  записи 1 .. i у них одинаковы;
 	- полнота лидера: новый лидер хранит все зафиксированные записи;
 	- безопасность автомата: зафиксированное и применённое на любом узле
-	  под индексом i — одна и та же запись, и она не меняется;
-	- в конце, после лечения сети, кластер снова фиксирует команды. *)
+	  под индексом i — одна и та же запись, и она не меняется (в том числе
+	  не заменяется в журнале узла задним числом);
+	- в конце, после лечения сети, кластер снова фиксирует команды.
+
+	Режимы: PreVote и CheckQuorum (RandomRun), смена состава по одному
+	узлу (MembershipRun: начальный состав меньше числа узлов, узел входит
+	учеником и становится избирателем после догона). *)
 
 	IMPORT Strings, Dialog, Log, KvPages, KvDb, KvFault, Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, UnitAssert;
 
 	CONST
-		maxN = 5;
+		maxN = Core.maxNodes;
 		poolSize = 4000;
 		maxTerm = 100000;
 		electionTicks = 10;
@@ -38,7 +43,7 @@ MODULE Raft_devSim;
 		Op = RECORD kind, inv, resp, v: INTEGER; done: BOOLEAN END;
 
 	VAR
-		n: INTEGER;
+		n: INTEGER;	(* всего узлов в прогоне *)
 		sms: ARRAY maxN OF RaftSm.Sessions;
 		cl: ARRAY nClients OF Client;
 		ops: POINTER TO ARRAY OF Op; nops*: INTEGER;
@@ -51,6 +56,7 @@ MODULE Raft_devSim;
 		rate: ARRAY maxN OF INTEGER;	(* темп часов: тиков за ход *)
 		checked: ARRAY maxN OF INTEGER;	(* до какого индекса сверена фиксация узла *)
 		wasLeader: ARRAY maxN OF BOOLEAN;
+		wasLearner: ARRAY maxN OF BOOLEAN;
 		blocked: ARRAY maxN, maxN OF BOOLEAN;
 		pool: ARRAY poolSize OF Core.Msg; np: INTEGER;
 		leaderOf: POINTER TO ARRAY OF INTEGER;
@@ -64,6 +70,12 @@ MODULE Raft_devSim;
 		batch: INTEGER;
 		ok: BOOLEAN; why: ARRAY 256 OF CHAR;
 		proposals, commits*: INTEGER;
+		(* режимы *)
+		initVoters, initLearners: SET;
+		preVoteOn, checkQuorumOn, membershipOn: BOOLEAN;
+		sessionExpiry: INTEGER;
+		confChanges, removes: INTEGER;
+		promoted: BOOLEAN;
 
 	PROCEDURE Rand (k: INTEGER): INTEGER;
 	BEGIN
@@ -81,10 +93,10 @@ MODULE Raft_devSim;
 	END Violation;
 
 	PROCEDURE Same (IN a, b: Core.Entry): BOOLEAN;
-	(* одна и та же запись: срок и байты команды (после Kv указатели другие) *)
+	(* одна и та же запись: срок, вид, узел и байты команды (после Kv указатели другие) *)
 		VAR k: INTEGER;
 	BEGIN
-		IF a.term # b.term THEN RETURN FALSE END;
+		IF (a.term # b.term) OR (a.kind # b.kind) OR (a.node # b.node) THEN RETURN FALSE END;
 		IF (a.data = NIL) OR (b.data = NIL) THEN RETURN a.data = b.data END;
 		IF LEN(a.data^) # LEN(b.data^) THEN RETURN FALSE END;
 		k := 0; WHILE (k < LEN(a.data^)) & (a.data[k] = b.data[k]) DO INC(k) END;
@@ -207,13 +219,19 @@ MODULE Raft_devSim;
 	END Crash;
 
 	PROCEDURE Restart (i: INTEGER);
-		VAR cnt: Counter; db: KvDb.Db; res, t, v, si, st, last: INTEGER; log: Core.Entries; snap: Core.Bytes;
+		VAR cnt: Counter; db: KvDb.Db; res, t, v, cm, si, st, last: INTEGER; log: Core.Entries; snap: Core.Bytes;
+			voters, learners: SET; hasConf: BOOLEAN;
 	BEGIN
 		INC(restarts[i]);
 		IF onKv THEN KvDb.Open(kvs[i], db, res); ASSERT(res = KvDb.ok, 60); disk[i] := RaftKvStorage.New(db) END;
-		disk[i].Load(t, v, si, st, snap, log, last, res); ASSERT(res = RaftStorage.ok, 61);
+		disk[i].Load(t, v, cm, si, st, snap, log, last, res, voters, learners, hasConf); ASSERT(res = RaftStorage.ok, 61);
 		nodes[i] := Core.New(i, n, seed * 7919 + restarts[i] * 31, electionTicks, t, v, si, st, snap, log, last);
-		NEW(cnt); sms[i] := RaftSm.New(cnt); sms[i].Restore(snap); checked[i] := si;
+		IF hasConf THEN Core.SetConfig(nodes[i], voters, learners)
+		ELSE Core.SetConfig(nodes[i], initVoters, initLearners)
+		END;
+		Core.SetCommit(nodes[i], cm);
+		Core.SetFeatures(nodes[i], preVoteOn, checkQuorumOn);
+		NEW(cnt); sms[i] := RaftSm.New(cnt); sms[i].Restore(snap); sms[i].SetExpiry(sessionExpiry); checked[i] := si;
 		Core.SetBatch(nodes[i], batch)
 	END Restart;
 
@@ -235,7 +253,7 @@ MODULE Raft_devSim;
 			IF r.snap # NIL THEN sms[i].Restore(r.snap); INC(installs) END;
 			FOR k := r.applyLo TO r.applyHi DO
 				Core.EntryAt(nd, k, e); Decide(k, e);
-				sms[i].Apply(k, e.data, out, dup); Applied(i, k, e.data, out)
+				sms[i].Apply(k, e.term, e.data, out, dup); Applied(i, k, e.data, out)
 			END;
 			FOR k := 0 TO r.nreads - 1 DO
 				FOR c := 0 TO nClients - 1 DO
@@ -248,7 +266,7 @@ MODULE Raft_devSim;
 			IF (compactEvery > 0) & (nd.applied = nd.commit) & (nd.applied - nd.snapIndex >= compactEvery) THEN
 				(* снимок и усечение журнала: только применённое и зафиксированное *)
 				snap := sms[i].Snapshot(); Core.Compact(nd, nd.applied, snap);
-				disk[i].Compact(nd.snapIndex, nd.snapTerm, snap, res);
+				disk[i].Compact(nd.snapIndex, nd.snapTerm, snap, nd.snapVoters, nd.snapLearners, res);
 				IF res # RaftStorage.ok THEN Crash(i); RETURN END
 			END;
 			ServeReads(i)
@@ -256,6 +274,25 @@ MODULE Raft_devSim;
 	END Process;
 
 	(* --- инварианты ------------------------------------------------------ *)
+
+	PROCEDURE StepAt (i: INTEGER; m: Core.Msg);
+	(* принять письмо узлом i; зафиксированный хвост не должен измениться *)
+		VAR old: INTEGER; e, e2: Core.Entry; had: BOOLEAN;
+	BEGIN
+		had := FALSE; old := 0;
+		IF (nodes[i] # NIL) & (nodes[i].commit > nodes[i].snapIndex) & (nodes[i].commit <= nodes[i].last) THEN
+			old := nodes[i].commit; Core.EntryAt(nodes[i], old, e); had := TRUE
+		END;
+		Core.Step(nodes[i], m);
+		IF had & (nodes[i] # NIL) & (old > nodes[i].snapIndex) THEN
+			IF nodes[i].last < old THEN Violation("усечён зафиксированный хвост", old)
+			ELSE
+				Core.EntryAt(nodes[i], old, e2);
+				IF ~Same(e, e2) THEN Violation("зафиксированная запись заменена", old) END
+			END
+		END;
+		Process(i)
+	END StepAt;
 
 	PROCEDURE CheckLeader (i: INTEGER);
 		VAR nd: Core.Node; k: INTEGER; e: Core.Entry;
@@ -292,6 +329,16 @@ MODULE Raft_devSim;
 			IF (k <= nd.last) & (k > nd.snapIndex) THEN Core.EntryAt(nd, k, e); Decide(k, e) END
 		END;
 		IF nd.commit > checked[i] THEN checked[i] := nd.commit END;
+		(* зафиксированная запись не заменяется: сверяем запись узла под
+		   старшим решённым индексом не выше commit — при подмене хвоста
+		   (в том числе ошибкой смены состава) она другая *)
+		k := nd.commit; IF k > nd.last THEN k := nd.last END;
+		IF k > dlast THEN k := dlast END;
+		WHILE (k > nd.snapIndex) & (decided[k].term = -1) DO DEC(k) END;
+		IF k > nd.snapIndex THEN
+			Core.EntryAt(nd, k, e);
+			IF ~Same(decided[k], e) THEN Violation("зафиксированная запись заменена", k) END
+		END;
 		IF nd.commit > maxCommit THEN INC(commits, nd.commit - maxCommit); maxCommit := nd.commit END
 	END CheckCommit;
 
@@ -307,11 +354,19 @@ MODULE Raft_devSim;
 		END
 	END CheckMatching;
 
+	PROCEDURE NoteMembership (i: INTEGER);
+		VAR nd: Core.Node;
+	BEGIN
+		nd := nodes[i];
+		IF i IN nd.learners THEN wasLearner[i] := TRUE END;
+		IF wasLearner[i] & (i IN nd.voters) THEN promoted := TRUE END
+	END NoteMembership;
+
 	PROCEDURE CheckAll;
 		VAR i, j: INTEGER;
 	BEGIN
 		FOR i := 0 TO n - 1 DO
-			IF nodes[i] # NIL THEN CheckLeader(i); CheckCommit(i) END
+			IF nodes[i] # NIL THEN CheckLeader(i); CheckCommit(i); NoteMembership(i) END
 		END;
 		FOR i := 0 TO n - 1 DO
 			FOR j := i + 1 TO n - 1 DO
@@ -334,7 +389,7 @@ MODULE Raft_devSim;
 			NEW(c); c^ := m^; c.next := NIL; pool[np] := c; INC(np)
 		END;
 		IF (nodes[m.to] # NIL) & ~blocked[m.from, m.to] & ~(lossy & (Rand(100) < 4)) THEN
-			Core.Step(nodes[m.to], m); Process(m.to)
+			StepAt(m.to, m)
 		END
 	END Deliver;
 
@@ -389,6 +444,11 @@ MODULE Raft_devSim;
 		FOR i := 0 TO maxN - 1 DO FOR j := 0 TO maxN - 1 DO blocked[i, j] := FALSE END END
 	END Heal;
 
+	PROCEDURE Block (a, b: INTEGER);
+	BEGIN
+		blocked[a, b] := TRUE; blocked[b, a] := TRUE
+	END Block;
+
 	PROCEDURE Partition;
 		VAR i, j, a, b, k: INTEGER; side: ARRAY maxN OF BOOLEAN;
 	BEGIN
@@ -404,6 +464,28 @@ MODULE Raft_devSim;
 		END
 	END Partition;
 
+	PROCEDURE TryMembership;
+	(* случайная смена состава: добавить не входящий узел или удалить входящий *)
+		VAR l, id, k: INTEGER;
+	BEGIN
+		l := Rand(n);
+		IF nodes[l] # NIL THEN
+			IF (nodes[l].role # Core.leader) & (nodes[l].leader # Core.none) THEN l := nodes[l].leader END;
+			IF (nodes[l] # NIL) & (nodes[l].role = Core.leader) THEN
+				k := Rand(3); id := Rand(n);
+				IF k = 0 THEN
+					IF (id IN nodes[l].voters) OR (id IN nodes[l].learners) THEN
+						IF Core.RemoveServer(nodes[l], id) > 0 THEN INC(removes); INC(confChanges); Process(l) END
+					END
+				ELSE
+					IF ~(id IN nodes[l].voters) & ~(id IN nodes[l].learners) THEN
+						IF Core.AddServer(nodes[l], id) > 0 THEN INC(confChanges); Process(l) END
+					END
+				END
+			END
+		END
+	END TryMembership;
+
 	PROCEDURE Move;
 		VAR k, i: INTEGER;
 	BEGIN
@@ -411,7 +493,10 @@ MODULE Raft_devSim;
 		IF (k < 700) & (np > 0) THEN	(* сеть быстрее часов: до трёх писем за ход *)
 			Deliver; IF np > 0 THEN Deliver END; IF np > 0 THEN Deliver END
 		ELSIF k < 850 THEN TickOne
-		ELSIF k < 950 THEN IF lossy OR (Rand(10) = 0) THEN ClientMove END
+		ELSIF k < 950 THEN
+			IF membershipOn & (Rand(8) = 0) THEN TryMembership
+			ELSIF lossy OR (Rand(10) = 0) THEN ClientMove
+			END
 		ELSIF ~lossy THEN TickOne
 		ELSIF k < 950 + 5 * harsh THEN i := Rand(n); IF nodes[i] # NIL THEN Crash(i) END
 		ELSIF k < 985 THEN i := Rand(n); IF nodes[i] = NIL THEN Restart(i) END
@@ -449,32 +534,55 @@ MODULE Raft_devSim;
 		END
 	END CheckHistory;
 
-	PROCEDURE Init (size: INTEGER; s: LONGINT);
+	PROCEDURE InitConf (size, initial: INTEGER; s: LONGINT);
 		VAR i: INTEGER;
 	BEGIN
+		ASSERT((initial > 0) & (initial <= size) & (size <= maxN), 70);
 		n := size; seed := s; x := s * 2654435761 + 88172645463325252;
 		ok := TRUE; why := ""; np := 0; dlast := 0; maxCommit := 0; proposals := 0; commits := 0;
 		now := 0; nextCtx := 0; crashNext := -1; nops := 0; NEW(ops, 256);
+		initVoters := {}; FOR i := 0 TO initial - 1 DO INCL(initVoters, i) END;
+		initLearners := {}; confChanges := 0; removes := 0; promoted := FALSE;
 		FOR i := 0 TO nClients - 1 DO cl[i].state := idle; cl[i].seq := 0 END;
 		NEW(decided, 64); decided[0].term := 0;
 		NEW(leaderOf, maxTerm); FOR i := 0 TO maxTerm - 1 DO leaderOf[i] := Core.none END;
 		installs := 0; compactEvery := 0; IF Rand(2) = 0 THEN compactEvery := 5 + Rand(20) END;
 		harsh := 1 + Rand(3); batch := 1 + Rand(4); IF batch = 4 THEN batch := 64 END;
 		Heal;
-		FOR i := 0 TO n - 1 DO
+		FOR i := 0 TO size - 1 DO
 			IF onKv THEN kvs[i] := KvFault.New() ELSE disk[i] := RaftStorage.NewMem() END;
-			restarts[i] := 0; checked[i] := 0; wasLeader[i] := FALSE;
+			restarts[i] := 0; checked[i] := 0; wasLeader[i] := FALSE; wasLearner[i] := FALSE;
 			rate[i] := 1 + Rand(3);
 			Restart(i)
 		END
+	END InitConf;
+
+	PROCEDURE Setup (total, initial: INTEGER; s: LONGINT; pv, cq, memb: BOOLEAN; exp: INTEGER);
+	(* режим прогона и начальный состав: избиратели 0 .. initial-1 *)
+	BEGIN
+		preVoteOn := pv; checkQuorumOn := cq; membershipOn := memb; sessionExpiry := exp;
+		InitConf(total, initial, s)
+	END Setup;
+
+	PROCEDURE Init (size: INTEGER; s: LONGINT);
+	(* как раньше: весь состав избиратели, без PreVote/CheckQuorum *)
+	BEGIN
+		Setup(size, size, s, FALSE, FALSE, FALSE, 0)
 	END Init;
 
-	PROCEDURE Run* (size: INTEGER; s: LONGINT; steps: INTEGER; OUT res: BOOLEAN; OUT msg: ARRAY OF CHAR);
-	(** Один прогон: steps ходов со сбоями, затем лечение и проверка живости.
-		Пост: res — инварианты держались и кластер снова фиксирует; msg — что нарушено. *)
+	PROCEDURE Features (pv, cq: BOOLEAN);
+	(* переключить PreVote/CheckQuorum у всех живых узлов (сценарии:
+	   выборы ставятся без них, затем механизм включается) *)
+		VAR i: INTEGER;
+	BEGIN
+		preVoteOn := pv; checkQuorumOn := cq;
+		FOR i := 0 TO n - 1 DO IF nodes[i] # NIL THEN Core.SetFeatures(nodes[i], pv, cq) END END
+	END Features;
+
+	PROCEDURE RunCommon (steps: INTEGER; OUT res: BOOLEAN; OUT msg: ARRAY OF CHAR);
 		VAR k, i, before: INTEGER;
 	BEGIN
-		Init(size, s); lossy := TRUE;
+		lossy := TRUE;
 		k := 0;
 		WHILE ok & (k < steps) DO Move; CheckAll; INC(k) END;
 		IF ok THEN	(* живость: сеть цела, все подняты, без потерь *)
@@ -486,7 +594,24 @@ MODULE Raft_devSim;
 		END;
 		IF ok THEN CheckHistory END;
 		res := ok; msg := why$
+	END RunCommon;
+
+	PROCEDURE Run* (size: INTEGER; s: LONGINT; steps: INTEGER; OUT res: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(** Один прогон: steps ходов со сбоями, затем лечение и проверка живости.
+		PreVote и CheckQuorum включены, состав постоянен.
+		Пост: res — инварианты держались и кластер снова фиксирует; msg — что нарушено. *)
+	BEGIN
+		Setup(size, size, s, TRUE, TRUE, FALSE, 0);
+		RunCommon(steps, res, msg)
 	END Run;
+
+	PROCEDURE RunM (total, initial: INTEGER; s: LONGINT; steps: INTEGER; OUT res: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(** То же со сменой состава: всего total узлов, начальные избиратели
+		0 .. initial-1; смена — по одному узлу через журнал. *)
+	BEGIN
+		Setup(total, initial, s, TRUE, TRUE, TRUE, 0);
+		RunCommon(steps, res, msg)
+	END RunM;
 
 	PROCEDURE Seeds (size, from, count, steps: INTEGER; mut: SET; OUT found: INTEGER; OUT msg: ARRAY OF CHAR);
 	(* found — зерно первого провала или -1 *)
@@ -500,6 +625,18 @@ MODULE Raft_devSim;
 		END;
 		Core.mutations := {}
 	END Seeds;
+
+	PROCEDURE SeedsM (total, initial, from, count, steps: INTEGER; mut: SET; OUT found: INTEGER; OUT msg: ARRAY OF CHAR);
+		VAR s: INTEGER; r: BOOLEAN;
+	BEGIN
+		Core.mutations := mut; found := -1; msg := ""; s := from;
+		WHILE (found < 0) & (s < from + count) DO
+			RunM(total, initial, s, steps, r, msg);
+			IF ~r THEN found := s END;
+			INC(s)
+		END;
+		Core.mutations := {}
+	END SeedsM;
 
 	PROCEDURE Teardown*;
 	BEGIN
@@ -533,6 +670,40 @@ MODULE Raft_devSim;
 		UnitAssert.True(f < 0, msg)
 	END TestOnKv;
 
+	PROCEDURE TestMembershipRandom*;
+	(** Смена состава вместе с разрывами, падениями и снимками. *)
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		SeedsM(5, 3, 1, 200, 2000, {}, f, msg);
+		UnitAssert.True(f < 0, msg)
+	END TestMembershipRandom;
+
+	PROCEDURE TestMembershipFive*;
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		SeedsM(7, 5, 1000, 60, 2000, {}, f, msg);
+		UnitAssert.True(f < 0, msg)
+	END TestMembershipFive;
+
+	PROCEDURE TestMembershipChangesHappen*;
+	(** Прогон действительно вводит и выводит узлы: ученик догоняет и
+		становится избирателем. *)
+		VAR r: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		RunM(5, 3, 1, 2000, r, msg);
+		UnitAssert.True(r, msg);
+		UnitAssert.True(confChanges > 0, "смена состава началась");
+		UnitAssert.True(promoted, "ученик стал избирателем после догона")
+	END TestMembershipChangesHappen;
+
+	PROCEDURE TestMembershipOnKv*;
+	(** Состав переживает выключение питания: хранится в снимке Kv. *)
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		onKv := TRUE; SeedsM(5, 3, 1, 20, 1500, {}, f, msg); onKv := FALSE;
+		UnitAssert.True(f < 0, msg)
+	END TestMembershipOnKv;
+
 	PROCEDURE TestReplayIsExact*;
 		VAR r: BOOLEAN; msg: ARRAY 256 OF CHAR; c1, c2, p1: INTEGER;
 	BEGIN
@@ -552,6 +723,34 @@ MODULE Raft_devSim;
 		IF f >= 0 THEN Log.String("мутация " + d$ + " поймана: " + msg$); Log.Ln END
 	END Caught;
 
+	PROCEDURE RunOff (size: INTEGER; s: LONGINT; steps: INTEGER; OUT res: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(* прогон без PreVote и CheckQuorum: старые мутации видны лучше *)
+	BEGIN
+		Setup(size, size, s, FALSE, FALSE, FALSE, 0);
+		RunCommon(steps, res, msg)
+	END RunOff;
+
+	PROCEDURE SeedsOff (size, from, count, steps: INTEGER; mut: SET; OUT found: INTEGER; OUT msg: ARRAY OF CHAR);
+		VAR s: INTEGER; r: BOOLEAN;
+	BEGIN
+		Core.mutations := mut; found := -1; msg := ""; s := from;
+		WHILE (found < 0) & (s < from + count) DO
+			RunOff(size, s, steps, r, msg);
+			IF ~r THEN found := s END;
+			INC(s)
+		END;
+		Core.mutations := {}
+	END SeedsOff;
+
+	PROCEDURE CaughtOff (mut, size, count: INTEGER);
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR; d: ARRAY 16 OF CHAR;
+	BEGIN
+		SeedsOff(size, 1, count, 1500, {mut}, f, msg);
+		Strings.IntToString(mut, d);
+		UnitAssert.True(f >= 0, "мутация " + d$ + " не поймана без PreVote");
+		IF f >= 0 THEN Log.String("мутация " + d$ + " поймана: " + msg$); Log.Ln END
+	END CaughtOff;
+
 	(* --- рисунок 8 статьи по сценарию ----------------------------------- *)
 
 	PROCEDURE Flush (from, to: INTEGER);
@@ -564,7 +763,7 @@ MODULE Raft_devSim;
 				m := pool[k];
 				IF (m.from = from) & (m.to = to) THEN
 					DEC(np); FOR j := k TO np - 1 DO pool[j] := pool[j + 1] END; pool[np] := NIL;
-					IF nodes[to] # NIL THEN Core.Step(nodes[to], m); Process(to) END;
+					IF nodes[to] # NIL THEN StepAt(to, m) END;
 					again := TRUE
 				ELSE INC(k)
 				END
@@ -585,7 +784,7 @@ MODULE Raft_devSim;
 		k := 0; WHILE (k < np) & ~((pool[k].from = from) & (pool[k].to = to)) DO INC(k) END;
 		IF k < np THEN
 			m := pool[k]; DEC(np); FOR j := k TO np - 1 DO pool[j] := pool[j + 1] END; pool[np] := NIL;
-			IF nodes[to] # NIL THEN Core.Step(nodes[to], m); Process(to) END;
+			IF nodes[to] # NIL THEN StepAt(to, m) END;
 			CheckAll
 		END
 	END DeliverOne;
@@ -765,7 +964,7 @@ MODULE Raft_devSim;
 		Log.String("рисунок 8: " + msg); Log.Ln
 	END TestMutFigure8;
 
-	PROCEDURE TestMutStaleRead*; BEGIN Caught(Core.mutStaleRead, 3, 300) END TestMutStaleRead;
+	PROCEDURE TestMutStaleRead*; BEGIN CaughtOff(Core.mutStaleRead, 3, 300) END TestMutStaleRead;
 	PROCEDURE TestMutNoDedup*; BEGIN Caught(Core.mutNoDedup, 3, 300) END TestMutNoDedup;
 
 	PROCEDURE TestClientsComplete*;
@@ -781,8 +980,368 @@ MODULE Raft_devSim;
 	PROCEDURE TestMutNoUpToDate*; BEGIN Caught(Core.mutNoUpToDate, 3, 300) END TestMutNoUpToDate;
 	PROCEDURE TestMutSendBeforeSync*; BEGIN Caught(Core.mutSendBeforeSync, 3, 1000) END TestMutSendBeforeSync;
 	PROCEDURE TestMutNoTruncate*; BEGIN Caught(Core.mutNoTruncate, 5, 300) END TestMutNoTruncate;
-	PROCEDURE TestMutDoubleVote*; BEGIN Caught(Core.mutDoubleVote, 3, 300) END TestMutDoubleVote;
+	PROCEDURE TestMutDoubleVote*; BEGIN CaughtOff(Core.mutDoubleVote, 3, 600) END TestMutDoubleVote;
 	PROCEDURE TestMutApplyUncommitted*; BEGIN Caught(Core.mutApplyUncommitted, 3, 300) END TestMutApplyUncommitted;
+
+	(* --- PreVote и CheckQuorum ------------------------------------------ *)
+
+	PROCEDURE Quiet (rounds: INTEGER);
+	(* все узлы тикают, письма доставляются без потерь; проверка инвариантов *)
+		VAR r, i: INTEGER;
+	BEGIN
+		FOR r := 1 TO rounds DO
+			FOR i := 0 TO n - 1 DO IF nodes[i] # NIL THEN Core.Tick(nodes[i]); Process(i) END END;
+			WHILE np > 0 DO Deliver END;
+			CheckAll
+		END
+	END Quiet;
+
+	PROCEDURE PreVoteScenario (mut: SET; OUT deposed: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(* лидер 0 с составом 0,1,2; узел 2 изолирован дольше тайм-аута;
+	   после лечения узел 2 не должен свергнуть лидера *)
+		VAR t: INTEGER;
+	BEGIN
+		Core.mutations := mut;
+		Setup(3, 3, 21, FALSE, FALSE, FALSE, 0); lossy := FALSE; compactEvery := 0;
+		Elect(0, 1); Replicate(0, 1, 4); Replicate(0, 2, 4);
+		Features(TRUE, TRUE);
+		Block(2, 0); Block(2, 1);
+		FOR t := 1 TO 400 DO Core.Tick(nodes[2]); Process(2) END;	(* письма копятся: доставки нет *)
+		Heal;
+		Quiet(200);
+		deposed := nodes[0].role # Core.leader;
+		msg := why$
+	END PreVoteScenario;
+
+	PROCEDURE TestPreVoteKeepsLeader*;
+		VAR d: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		PreVoteScenario({}, d, msg);
+		UnitAssert.True(~d, "вернувшийся узел сверг лидера с PreVote")
+	END TestPreVoteKeepsLeader;
+
+	PROCEDURE TestMutNoPreVote*;
+		VAR d: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		PreVoteScenario({Core.mutNoPreVote}, d, msg);
+		UnitAssert.True(d, "выборы без PreVote не свергли лидера")
+	END TestMutNoPreVote;
+
+	PROCEDURE TestMutPreVoteIgnoreLeader*;
+		VAR d: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		PreVoteScenario({Core.mutPreVoteIgnoreLeader}, d, msg);
+		UnitAssert.True(d, "предвыборы вопреки слышимому лидеру не свергли лидера")
+	END TestMutPreVoteIgnoreLeader;
+
+	PROCEDURE TestMutPreVoteAdoptTerm*;
+		VAR d: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		PreVoteScenario({Core.mutPreVoteAdoptTerm}, d, msg);
+		UnitAssert.True(d, "принятый срок предвыборов не сверг лидера")
+	END TestMutPreVoteAdoptTerm;
+
+	PROCEDURE QuorumIsolated (mut: SET; OUT steppedDown: BOOLEAN);
+	(* лидер 0 один: 1 и 2 отрезаны; большинства нет — полномочия слагаются *)
+		VAR t: INTEGER;
+	BEGIN
+		Core.mutations := mut;
+		Setup(3, 3, 22, FALSE, FALSE, FALSE, 0); lossy := FALSE; compactEvery := 0;
+		Elect(0, 1); Replicate(0, 1, 3); Replicate(0, 2, 3);
+		Features(TRUE, TRUE);
+		Block(0, 1); Block(0, 2);
+		FOR t := 1 TO 100 DO Core.Tick(nodes[0]); Process(0) END;
+		steppedDown := nodes[0].role # Core.leader;
+		DropAll
+	END QuorumIsolated;
+
+	PROCEDURE TestCheckQuorumStepsDown*;
+		VAR d: BOOLEAN;
+	BEGIN
+		QuorumIsolated({}, d); Core.mutations := {};
+		UnitAssert.True(d, "лидер без большинства не сложил полномочия")
+	END TestCheckQuorumStepsDown;
+
+	PROCEDURE TestMutNoCheckQuorum*;
+		VAR d: BOOLEAN;
+	BEGIN
+		QuorumIsolated({Core.mutNoCheckQuorum}, d); Core.mutations := {};
+		UnitAssert.True(~d, "без CheckQuorum лидер в меньшинстве слагает полномочия")
+	END TestMutNoCheckQuorum;
+
+	PROCEDURE TestMutCheckQuorumEver*;
+	(* считать прежние ответы без срока давности: лидер в меньшинстве не
+	   слагает полномочия *)
+		VAR d: BOOLEAN;
+	BEGIN
+		QuorumIsolated({Core.mutCheckQuorumEver}, d); Core.mutations := {};
+		UnitAssert.True(~d, "давний ответ засчитан кворумом — лидер не сложил полномочия")
+	END TestMutCheckQuorumEver;
+
+	PROCEDURE QuorumStrict (mut: SET; OUT steppedDown: BOOLEAN);
+	(* 2 из 3 отвечают: верный CheckQuorum доволен большинством, строгий — нет *)
+		VAR t: INTEGER;
+	BEGIN
+		Core.mutations := mut;
+		Setup(3, 3, 24, FALSE, FALSE, FALSE, 0); lossy := FALSE; compactEvery := 0;
+		Elect(0, 1); Replicate(0, 1, 3); Replicate(0, 2, 3);
+		Features(TRUE, TRUE);
+		Block(0, 2);
+		FOR t := 1 TO 100 DO Core.Tick(nodes[0]); Process(0); Flush(0, 1); Flush(1, 0) END;
+		steppedDown := nodes[0].role # Core.leader;
+		DropAll
+	END QuorumStrict;
+
+	PROCEDURE TestCheckQuorumMajority*;
+		VAR d: BOOLEAN;
+	BEGIN
+		QuorumStrict({}, d); Core.mutations := {};
+		UnitAssert.True(~d, "лидер с большинством сложил полномочия")
+	END TestCheckQuorumMajority;
+
+	PROCEDURE TestMutCheckQuorumStrict*;
+		VAR d: BOOLEAN;
+	BEGIN
+		QuorumStrict({Core.mutCheckQuorumStrict}, d); Core.mutations := {};
+		UnitAssert.True(d, "строгий CheckQuorum не сложил полномочия без ответа всех")
+	END TestMutCheckQuorumStrict;
+
+	(* --- смена состава --------------------------------------------------- *)
+
+	PROCEDURE ConfBarrier (mut: SET; OUT refused, allowed: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(* лидер 0 срока 1 ещё не зафиксировал запись своего срока; смена состава
+	   должна быть отложена до фиксации (исправление ошибки 2015 года) *)
+		VAR idx: INTEGER;
+	BEGIN
+		Core.mutations := mut;
+		Setup(5, 4, 25, FALSE, FALSE, FALSE, 0); lossy := FALSE; compactEvery := 0;
+		Elect2(0, 1, 2);	(* большинство 3 из 4: 0, 1, 2; пустая запись не доставлена *)
+		idx := Core.AddServer(nodes[0], 4);
+		refused := idx = 0;
+		IF refused THEN
+			Replicate(0, 1, 4); Replicate(0, 2, 4); DropAll;	(* фиксируем пустую запись срока 1 *)
+			allowed := Core.AddServer(nodes[0], 4) > 0; Process(0)
+		ELSE allowed := TRUE
+		END;
+		msg := why$;
+		Core.mutations := {}
+	END ConfBarrier;
+
+	PROCEDURE TestConfBarrier*;
+		VAR r, a: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		ConfBarrier({}, r, a, msg);
+		UnitAssert.True(r, "смена состава начата до фиксации записи своего срока");
+		UnitAssert.True(a, "после фиксации запись состава не принята");
+		UnitAssert.True(ok, msg)
+	END TestConfBarrier;
+
+	PROCEDURE TestMutNoConfBarrier*;
+		VAR r, a: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		ConfBarrier({Core.mutNoConfBarrier}, r, a, msg);
+		UnitAssert.True(~r, "без барьера смена состава отложена")
+	END TestMutNoConfBarrier;
+
+	PROCEDURE TestMutNoCommitRestore*;
+	(* забытый на перезапуске commit откатывает узел к составу старше
+	   журнала; два таких узла выбирают лидера без зафиксированных записей *)
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		SeedsM(5, 3, 1, 200, 2000, {Core.mutNoCommitRestore}, f, msg);
+		UnitAssert.True(f >= 0, "потеря commit на перезапуске не поймана");
+		IF f >= 0 THEN Log.String("потеря commit поймана: " + msg$); Log.Ln END
+	END TestMutNoCommitRestore;
+
+	PROCEDURE LearnerCatchUp (mut: SET; OUT firstLearner, thenVoter, caught: BOOLEAN);
+	(* узел 3 отстал; входит учеником, догоняет и только тогда становится избирателем *)
+		VAR i, k, t, idx: INTEGER; body: ARRAY 1 OF BYTE;
+	BEGIN
+		Core.mutations := mut;
+		Setup(4, 3, 27, FALSE, FALSE, FALSE, 0); lossy := FALSE; compactEvery := 0;
+		Elect(0, 1); Replicate(0, 1, 3); Replicate(0, 2, 3);
+		body[0] := ORD("i");
+		FOR k := 1 TO 30 DO
+			idx := Core.Propose(nodes[0], RaftSm.Encode(1, k, body, 1)); Process(0);
+			Flush(0, 1); Flush(1, 0); Flush(0, 2); Flush(2, 0)
+		END;
+		Replicate(0, 1, 2); Replicate(0, 2, 2);
+		IF Core.AddServer(nodes[0], 3) = 0 THEN HALT(73) END;
+		Process(0);
+		(* запись состава вступает в силу по фиксации старым большинством *)
+		Replicate(0, 1, 4); Replicate(0, 2, 4);
+		firstLearner := Core.IsLearner(nodes[0], 3) & ~Core.IsVoter(nodes[0], 3);
+		idx := nodes[0].commit;
+		t := 0;
+		REPEAT
+			Core.Tick(nodes[0]); Process(0);
+			Flush(0, 3); Flush(3, 0); Flush(0, 1); Flush(1, 0); Flush(0, 2); Flush(2, 0);
+			CheckAll; INC(t)
+		UNTIL Core.IsVoter(nodes[0], 3) OR (t > 500) OR ~ok;
+		thenVoter := Core.IsVoter(nodes[0], 3);
+		caught := thenVoter & (nodes[3].last >= idx)
+	END LearnerCatchUp;
+
+	PROCEDURE TestLearnerCatchUp*;
+		VAR l, v, c: BOOLEAN;
+	BEGIN
+		LearnerCatchUp({}, l, v, c); Core.mutations := {};
+		UnitAssert.True(l, "новый узел введён избирателем до догона");
+		UnitAssert.True(v, "ученик не стал избирателем после догона");
+		UnitAssert.True(c, "новый избиратель отстал от commit")
+	END TestLearnerCatchUp;
+
+	PROCEDURE TestMutNoLearner*;
+		VAR l, v, c: BOOLEAN;
+	BEGIN
+		LearnerCatchUp({Core.mutNoLearner}, l, v, c); Core.mutations := {};
+		UnitAssert.True(~l, "без ученика отставший узел сразу избиратель")
+	END TestMutNoLearner;
+
+	PROCEDURE RemoveLeader (mut: SET; OUT steppedDown, effective: BOOLEAN; OUT msg: ARRAY OF CHAR);
+	(* лидер 0 удаляет сам себя: после фиксации слагает полномочия, 1 и 2
+	   выбирают нового лидера и фиксируют запись *)
+		VAR t: INTEGER;
+	BEGIN
+		Core.mutations := mut;
+		Setup(3, 3, 28, FALSE, FALSE, FALSE, 0); lossy := FALSE; compactEvery := 0;
+		Elect(0, 1); Replicate(0, 1, 3); Replicate(0, 2, 3);
+		IF Core.RemoveServer(nodes[0], 0) = 0 THEN HALT(74) END;
+		Process(0);
+		Replicate(0, 1, 5); Replicate(0, 2, 5); CheckAll;
+		steppedDown := nodes[0].role # Core.leader;
+		effective := ~Core.IsVoter(nodes[0], 0);	(* лидер применил удаление по фиксации *)
+		(* новый лидер из 1,2 *)
+		Elect(1, 2);
+		t := 0;
+		WHILE (nodes[1].role # Core.leader) & (t < 50) DO
+			Core.Tick(nodes[1]); Process(1); Flush(1, 2); Flush(2, 1); INC(t)
+		END;
+		UnitAssert.True(nodes[1].role = Core.leader, "после удаления лидера выбран новый");
+		IF Core.Propose(nodes[1], NIL) = 0 THEN HALT(75) END;
+		Process(1); Flush(1, 2); Flush(2, 1);
+		msg := why$;
+		Core.mutations := {}
+	END RemoveLeader;
+
+	PROCEDURE TestRemoveLeaderStepsDown*;
+		VAR s, e: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		RemoveLeader({}, s, e, msg);
+		UnitAssert.True(s, "удалённый лидер не сложил полномочия");
+		UnitAssert.True(e, "удаление не изменило состав");
+		UnitAssert.True(ok, msg)
+	END TestRemoveLeaderStepsDown;
+
+	PROCEDURE TestMutNoStepDownRemoved*;
+		VAR s, e: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		RemoveLeader({Core.mutNoStepDownRemoved}, s, e, msg);
+		UnitAssert.True(~s, "удалённый лидер сложил полномочия вопреки мутации")
+	END TestMutNoStepDownRemoved;
+
+	PROCEDURE TestMutRemoveNoEffect*;
+		VAR s, e: BOOLEAN; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		RemoveLeader({Core.mutRemoveNoEffect}, s, e, msg);
+		UnitAssert.True(~e, "удаление из состава не изменило состав")
+	END TestMutRemoveNoEffect;
+
+	(* --- сеансы клиентов ------------------------------------------------- *)
+
+	PROCEDURE ExpireScenario (mut: SET; OUT evicted: BOOLEAN);
+		VAR cnt: Counter; r: Core.Bytes; dup: BOOLEAN; empty: ARRAY 1 OF BYTE;
+	BEGIN
+		Core.mutations := mut;
+		NEW(cnt); sms[0] := RaftSm.New(cnt); sms[0].SetExpiry(5);
+		sms[0].Apply(1, 1, RaftSm.Encode(1, 1, empty, 0), r, dup);
+		sms[0].Apply(2, 10, RaftSm.Encode(2, 1, empty, 0), r, dup);	(* 1 + 5 < 10: вытеснить 1 *)
+		evicted := ~sms[0].Has(1) & sms[0].Has(2);
+		Core.mutations := {}
+	END ExpireScenario;
+
+	PROCEDURE TestSessionsExpire*;
+		VAR e: BOOLEAN;
+	BEGIN
+		ExpireScenario({}, e);
+		UnitAssert.True(e, "старый сеанс не вытеснен")
+	END TestSessionsExpire;
+
+	PROCEDURE TestMutNoSessionExpire*;
+		VAR e: BOOLEAN;
+	BEGIN
+		ExpireScenario({Core.mutNoSessionExpire}, e);
+		UnitAssert.True(~e, "без вытеснения старый сеанс вытеснен")
+	END TestMutNoSessionExpire;
+
+	PROCEDURE ExpireCurrentScenario (mut: SET; OUT v: INTEGER);
+	(* повтор в следующем сроке: сеанс не вытесняется — операция не применяется дважды *)
+		VAR cnt: Counter; r: Core.Bytes; dup: BOOLEAN; empty: ARRAY 1 OF BYTE;
+	BEGIN
+		Core.mutations := mut;
+		NEW(cnt); sms[0] := RaftSm.New(cnt); sms[0].SetExpiry(5);
+		sms[0].Apply(1, 1, RaftSm.Encode(1, 1, empty, 0), r, dup);
+		sms[0].Apply(1, 2, RaftSm.Encode(1, 1, empty, 0), r, dup);
+		v := cnt.v;
+		Core.mutations := {}
+	END ExpireCurrentScenario;
+
+	PROCEDURE TestSessionsRetry*;
+		VAR v: INTEGER;
+	BEGIN
+		ExpireCurrentScenario({}, v);
+		UnitAssert.EqualInt(v, 1, "повтор применён дважды")
+	END TestSessionsRetry;
+
+	PROCEDURE TestMutExpireCurrent*;
+		VAR v: INTEGER;
+	BEGIN
+		ExpireCurrentScenario({Core.mutExpireCurrent}, v);
+		UnitAssert.EqualInt(v, 2, "вытеснение текущего срока не дало двойного применения")
+	END TestMutExpireCurrent;
+
+	PROCEDURE SessionTermScenario (mut: SET; OUT v: INTEGER);
+	(* срок последней работы обновляется: клиент, работавший в сроке 8, не
+	   вытесняется в сроке 10 при expiry = 5 *)
+		VAR cnt: Counter; r: Core.Bytes; dup: BOOLEAN; empty: ARRAY 1 OF BYTE;
+	BEGIN
+		Core.mutations := mut;
+		NEW(cnt); sms[0] := RaftSm.New(cnt); sms[0].SetExpiry(5);
+		sms[0].Apply(1, 1, RaftSm.Encode(1, 1, empty, 0), r, dup);
+		sms[0].Apply(2, 8, RaftSm.Encode(1, 2, empty, 0), r, dup);
+		sms[0].Apply(3, 10, RaftSm.Encode(2, 1, empty, 0), r, dup);
+		sms[0].Apply(4, 10, RaftSm.Encode(1, 2, empty, 0), r, dup);
+		v := cnt.v;
+		Core.mutations := {}
+	END SessionTermScenario;
+
+	PROCEDURE TestSessionTermUpdated*;
+		VAR v: INTEGER;
+	BEGIN
+		SessionTermScenario({}, v);
+		UnitAssert.EqualInt(v, 3, "активный сеанс вытеснен или повтор применён")
+	END TestSessionTermUpdated;
+
+	PROCEDURE TestMutSessionTermStale*;
+		VAR v: INTEGER;
+	BEGIN
+		SessionTermScenario({Core.mutSessionTermStale}, v);
+		UnitAssert.EqualInt(v, 4, "без обновления срока сеанс не вытеснен")
+	END TestMutSessionTermStale;
+
+	PROCEDURE TestSessionsSnapshotTerm*;
+	(* срок сеанса переживает снимок: после восстановления сеанс не вытесняется *)
+		VAR s2: RaftSm.Sessions; snap: Core.Bytes; cnt, cnt2: Counter; r: Core.Bytes; dup: BOOLEAN;
+			empty: ARRAY 1 OF BYTE;
+	BEGIN
+		Core.mutations := {};
+		NEW(cnt); sms[0] := RaftSm.New(cnt); sms[0].SetExpiry(5);
+		sms[0].Apply(1, 8, RaftSm.Encode(1, 1, empty, 0), r, dup);
+		snap := sms[0].Snapshot();
+		NEW(cnt2); s2 := RaftSm.New(cnt2); s2.SetExpiry(5); s2.Restore(snap);
+		s2.Apply(2, 10, RaftSm.Encode(2, 1, empty, 0), r, dup);
+		UnitAssert.True(s2.Has(1), "срок сеанса потерян в снимке")
+	END TestSessionsSnapshotTerm;
 
 	(* --- команды --------------------------------------------------------- *)
 
@@ -795,6 +1354,63 @@ MODULE Raft_devSim;
 		IF f < 0 THEN Log.String("Raft long: ok") ELSE Log.String("Raft long: FAIL " + msg) END;
 		Log.Ln
 	END Long;
+
+	PROCEDURE LongMembership*;
+	(** Длинный прогон со сменой состава: 1000 зёрен по 3000 ходов. *)
+		VAR f: INTEGER; msg: ARRAY 256 OF CHAR;
+	BEGIN
+		SeedsM(5, 3, 1, 1000, 3000, {}, f, msg);
+		IF f < 0 THEN SeedsM(7, 5, 100000, 300, 3000, {}, f, msg) END;
+		IF f < 0 THEN Log.String("Raft membership long: ok") ELSE Log.String("Raft membership long: FAIL " + msg) END;
+		Log.Ln
+	END LongMembership;
+
+	PROCEDURE WriteSet (s: SET);
+		VAR i: INTEGER;
+	BEGIN
+		Log.String("{");
+		FOR i := 0 TO maxN - 1 DO IF i IN s THEN Log.Int(i); Log.String(" ") END END;
+		Log.String("}")
+	END WriteSet;
+
+	PROCEDURE ReplayM*;
+	(** Повтор прогона со сменой состава: RAFT_SEED, RAFT_N (всего узлов),
+		RAFT_INIT (начальных избирателей), RAFT_STEPS. *)
+		VAR s, nn: ARRAY 32 OF CHAR; v, sz, ini, r, st, k, i: INTEGER; res: BOOLEAN; msg: ARRAY 256 OF CHAR;
+			e: Core.Entry;
+	BEGIN
+		Dialog.GetPar("RAFT_SEED", s, r); Strings.StringToInt(s, v, r);
+		Dialog.GetPar("RAFT_N", nn, r); Strings.StringToInt(nn, sz, r); IF r # 0 THEN sz := 5 END;
+		Dialog.GetPar("RAFT_INIT", nn, r); Strings.StringToInt(nn, ini, r); IF r # 0 THEN ini := 3 END;
+		Dialog.GetPar("RAFT_STEPS", nn, r); Strings.StringToInt(nn, st, r); IF r # 0 THEN st := 2000 END;
+		RunM(sz, ini, v, st, res, msg);
+		IF res THEN Log.String("ok") ELSE Log.String(msg) END;
+		Log.String(" смен "); Log.Int(confChanges); Log.String(", удалений "); Log.Int(removes);
+		IF promoted THEN Log.String(", ученик стал избирателем") END;
+		Log.String(", зафиксировано "); Log.Int(commits); Log.Ln;
+		FOR v := 0 TO sz - 1 DO
+			IF nodes[v] # NIL THEN
+				Log.Int(v); Log.String(": роль"); Log.Int(nodes[v].role); Log.String(" срок"); Log.Int(nodes[v].term);
+				Log.String(" лидер"); Log.Int(nodes[v].leader); Log.String(" last"); Log.Int(nodes[v].last);
+				Log.String(" commit"); Log.Int(nodes[v].commit); Log.String(" изб"); Log.Int(Core.CountVoters(nodes[v]));
+				IF Core.IsVoter(nodes[v], v) THEN Log.String(" (избиратель)") END;
+				IF Core.IsLearner(nodes[v], v) THEN Log.String(" (ученик)") END;
+				Log.String(" voters"); WriteSet(nodes[v].voters);
+				Log.String(" learners"); WriteSet(nodes[v].learners);
+				Log.String(" snapV"); WriteSet(nodes[v].snapVoters);
+				Log.String(" conf"); Log.Int(nodes[v].confIndex); Log.String("/"); Log.Int(nodes[v].commit);
+				Log.String(" tick"); Log.Int(nodes[v].ticks); Log.String(" leadEl"); Log.Int(nodes[v].leaderElapsed);
+				Log.String(" timeout"); Log.Int(nodes[v].timeout); Log.Ln;
+				Log.String("    журнал:"); k := nodes[v].last - 8; IF k <= nodes[v].snapIndex THEN k := nodes[v].snapIndex + 1 END;
+				FOR i := k TO nodes[v].last DO
+					Core.EntryAt(nodes[v], i, e);
+					Log.String(" "); Log.Int(i); Log.String(":"); Log.Int(e.term); Log.String("k"); Log.Int(e.kind);
+					IF e.kind # Core.entryNormal THEN Log.String("/"); Log.Int(e.node) END
+				END;
+				Log.Ln
+			END
+		END
+	END ReplayM;
 
 	PROCEDURE Replay*;
 	(** Повтор одного прогона: RAFT_SEED=<зерно>, RAFT_N=<3|5>, RAFT_STEPS=<ходов, 2000>. *)
@@ -813,7 +1429,8 @@ MODULE Raft_devSim;
 			IF nodes[v] # NIL THEN
 				Log.Int(v); Log.String(": роль"); Log.Int(nodes[v].role); Log.String(" срок"); Log.Int(nodes[v].term);
 				Log.String(" голос"); Log.Int(nodes[v].vote); Log.String(" лидер"); Log.Int(nodes[v].leader);
-				Log.String(" last"); Log.Int(nodes[v].last); Log.String(" commit"); Log.Int(nodes[v].commit); Log.Ln
+				Log.String(" last"); Log.Int(nodes[v].last); Log.String(" commit"); Log.Int(nodes[v].commit);
+				Log.String(" избирателей"); Log.Int(Core.CountVoters(nodes[v])); Log.Ln
 			END
 		END
 	END Replay;

@@ -177,9 +177,10 @@ MODULE Raft_devJournal;
 
 	PROCEDURE Stored (i: INTEGER): BOOLEAN;
 	(* хранилище узла i содержит последнюю команду клиента журнала *)
-		VAR t, v, si, st, last, res, k, c, q: INTEGER; snap: Core.Bytes; log: Core.Entries;
+		VAR t, v, cm, si, st, last, res, k, c, q: INTEGER; snap: Core.Bytes; log: Core.Entries;
+			voters, learners: SET; hasConf: BOOLEAN;
 	BEGIN
-		disks[i].Load(t, v, si, st, snap, log, last, res);
+		disks[i].Load(t, v, cm, si, st, snap, log, last, res, voters, learners, hasConf);
 		FOR k := 1 TO last - si DO
 			RaftSm.Decode(log[k].data, c, q);
 			IF (c = journal.id) & (q = journal.seq) THEN RETURN TRUE END

@@ -209,8 +209,7 @@ add 5 -> sum 5 (entry 2)
 add 3 -> sum 8 (entry 3)
 read -> sum 8
 node A crashes
-leader: node C
-  node B: not the leader, ask node C
+leader: node B
 add 4 -> sum 12 (entry 5)
 read -> sum 12
 node A is back: term 2, applied up to entry 5, sum 12
@@ -228,13 +227,12 @@ The read (`Query`) does not write to the log: the leader asked a majority whethe
 leader (ReadIndex) and answered with the sum once the state machine had caught up with what was
 committed.
 
-Node A crashed. After the timeout B and C elected a new leader — C. The client asked B out of habit;
-B answered "not the leader" and named C, and the client repeated the command at C. The sum 12 shows
-that nothing committed before the crash was lost.
+Node A crashed. After the timeout B and C elected a new leader — B. The client asked B out of habit;
+B was the leader and answered. The sum 12 shows that nothing committed before the crash was lost.
 
 A came back from its storage (`RaftNode.Start` after `ActorNet.Up`): the term and the log come from
 the disk, the state machine starts empty. The leader sent the missing entry 5, A applied entries
 1 .. 5 and got the same sum 12.
 
-In this example we saw an election, a write answered after commit, a linearizable read, the leader
-hint and a crashed node catching up.
+In this example we saw an election, a write answered after commit, a linearizable read, and a crashed
+node catching up.

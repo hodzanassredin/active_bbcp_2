@@ -32,7 +32,10 @@ MODULE RaftNode;
 	(broken); поднимают его новым Spawn — состояние берётся из хранилища.
 	Отказ обработчика (трап) по умолчанию — тоже остановка.
 
-	Состав кластера задаётся при создании и не меняется (граница этапа). *)
+	Состав кластера хранится в ядре (RaftCore.voters/learners) и переживает
+	перезапуск в снимке хранилища; PreVote и CheckQuorum включены. Команды
+	смены состава (RaftCore.AddServer/RemoveServer) водитель пока не
+	принимает: это граница этапа, смена состава проверена в модели. *)
 
 	IMPORT Services, Stores, ActorCore, ActorNet, Core := RaftCore, RaftSm, RaftStorage;
 
@@ -104,7 +107,7 @@ MODULE RaftNode;
 
 		(** Устройство узла. *)
 		ConfigDesc* = RECORD
-			id*, n*: INTEGER;	(** номер узла и размер кластера *)
+			id*, n*: INTEGER;	(** номер узла и начальное число избирателей 0 .. n-1 *)
 			net*: ActorNet.Node;	(** узел ActorNet, на котором живёт актор *)
 			peers*: Caps;	(** пропуски узлов-акторов; свой — не нужен *)
 			storage*: RaftStorage.Storage;	(** переживает перезапуск узла *)
@@ -112,6 +115,7 @@ MODULE RaftNode;
 			electionTicks*: INTEGER;	(** по умолчанию 10 *)
 			tickMs*: INTEGER;	(** > 0 — свои часы, мс на тик *)
 			seed*: LONGINT;
+			sessionExpiry*: INTEGER;	(** сроков без работы до вытеснения сеанса; 0 — не вытеснять *)
 			compactEvery*: INTEGER;	(** снимок после стольких применённых записей; 0 — без снимков *)
 			actor-: Node;	(** последнее воплощение актора узла *)
 			starts: INTEGER
@@ -147,6 +151,20 @@ MODULE RaftNode;
 		WHILE (k < len) & ~rd.cancelled DO rd.ReadByte(b[k]); INC(k) END
 	END ReadBytes;
 
+	PROCEDURE SetToInt (s: SET): INTEGER;
+		VAR i, x: INTEGER;
+	BEGIN
+		x := 0; FOR i := 0 TO Core.maxNodes - 1 DO IF i IN s THEN x := x + ASH(1, i) END END;
+		RETURN x
+	END SetToInt;
+
+	PROCEDURE IntToSet (x: INTEGER): SET;
+		VAR i: INTEGER; s: SET;
+	BEGIN
+		s := {}; FOR i := 0 TO Core.maxNodes - 1 DO IF ASH(x, -i) MOD 2 # 0 THEN INCL(s, i) END END;
+		RETURN s
+	END IntToSet;
+
 	PROCEDURE (w: Wire) Write- (VAR wr: Stores.Writer);
 		VAR m: Core.Msg; k: INTEGER;
 	BEGIN
@@ -155,12 +173,16 @@ MODULE RaftNode;
 		wr.WriteInt(m.index); wr.WriteInt(m.logTerm); wr.WriteInt(m.commit);
 		wr.WriteBool(m.ok); wr.WriteInt(m.match); wr.WriteInt(m.ctx);
 		wr.WriteInt(m.n);
-		FOR k := 0 TO m.n - 1 DO wr.WriteInt(m.ents[k].term); WriteBytes(wr, m.ents[k].data) END;
-		WriteBytes(wr, m.snap)
+		FOR k := 0 TO m.n - 1 DO
+			wr.WriteInt(m.ents[k].term); wr.WriteInt(m.ents[k].kind); wr.WriteInt(m.ents[k].node);
+			WriteBytes(wr, m.ents[k].data)
+		END;
+		WriteBytes(wr, m.snap);
+		wr.WriteInt(SetToInt(m.voters)); wr.WriteInt(SetToInt(m.learners))
 	END Write;
 
 	PROCEDURE (w: Wire) Read- (VAR rd: Stores.Reader);
-		VAR m: Core.Msg; k: INTEGER;
+		VAR m: Core.Msg; k, s: INTEGER;
 	BEGIN
 		NEW(m); w.m := m;
 		rd.ReadInt(m.kind); rd.ReadInt(m.from); rd.ReadInt(m.to); rd.ReadInt(m.term);
@@ -170,8 +192,13 @@ MODULE RaftNode;
 		IF rd.cancelled OR (m.n < 0) OR (m.n > maxEnts) THEN m.n := 0; rd.TurnIntoAlien(Stores.alienComponent); RETURN END;
 		IF m.n > 0 THEN NEW(m.ents, m.n) END;
 		k := 0;
-		WHILE (k < m.n) & ~rd.cancelled DO rd.ReadInt(m.ents[k].term); ReadBytes(rd, m.ents[k].data); INC(k) END;
-		ReadBytes(rd, m.snap)
+		WHILE (k < m.n) & ~rd.cancelled DO
+			rd.ReadInt(m.ents[k].term); rd.ReadInt(m.ents[k].kind); rd.ReadInt(m.ents[k].node);
+			ReadBytes(rd, m.ents[k].data); INC(k)
+		END;
+		ReadBytes(rd, m.snap);
+		rd.ReadInt(s); m.voters := IntToSet(s);
+		rd.ReadInt(s); m.learners := IntToSet(s)
 	END Read;
 
 	PROCEDURE (m: Propose) Write- (VAR wr: Stores.Writer);
@@ -288,7 +315,7 @@ MODULE RaftNode;
 	BEGIN
 		WHILE m # NIL DO
 			nx := m.next; m.next := NIL;
-			IF (m.to >= 0) & (m.to < a.cfg.n) & (m.to # a.cfg.id) THEN
+			IF (m.to >= 0) & (m.to < Core.maxNodes) & (m.to # a.cfg.id) THEN
 				r := a.Peer(m.to);
 				IF r # NIL THEN NEW(w); w.m := m; c.Tell(r, w) END
 			END;
@@ -319,7 +346,7 @@ MODULE RaftNode;
 			IF r.snap # NIL THEN a.sm.Restore(r.snap); snapIndex := r.snapIndex END;
 			FOR k := r.applyLo TO r.applyHi DO
 				Core.EntryAt(nd, k, e);
-				a.sm.Apply(k, e.data, out, dup);
+				a.sm.Apply(k, e.term, e.data, out, dup);
 				IF tracer # NIL THEN tracer.Applied(a.cfg.id, k, e) END;
 				a.Applied(c, k, e.data, out)
 			END;
@@ -331,7 +358,7 @@ MODULE RaftNode;
 			Core.Advance(nd, r);
 			IF (a.cfg.compactEvery > 0) & (nd.applied = nd.commit) & (nd.applied - nd.snapIndex >= a.cfg.compactEvery) THEN
 				snap := a.sm.Snapshot(); Core.Compact(nd, nd.applied, snap);
-				a.cfg.storage.Compact(nd.snapIndex, nd.snapTerm, snap, res);
+				a.cfg.storage.Compact(nd.snapIndex, nd.snapTerm, snap, nd.snapVoters, nd.snapLearners, res);
 				IF res # RaftStorage.ok THEN a.Break(c); RETURN END
 			END
 		END;
@@ -341,13 +368,16 @@ MODULE RaftNode;
 	(* --- входы ------------------------------------------------------------------ *)
 
 	PROCEDURE (a: Node) Start (c: ActorCore.Context), NEW;
-		VAR cfg: Config; t, v, si, st, last, res: INTEGER; snap: Bytes; log: Core.Entries;
+		VAR cfg: Config; t, v, cm, si, st, last, res: INTEGER; snap: Bytes; log: Core.Entries;
+			voters, learners: SET; hasConf: BOOLEAN;
 	BEGIN
 		cfg := a.cfg; INC(cfg.starts);
-		cfg.storage.Load(t, v, si, st, snap, log, last, res);
+		cfg.storage.Load(t, v, cm, si, st, snap, log, last, res, voters, learners, hasConf);
 		IF res # RaftStorage.ok THEN a.Break(c); RETURN END;
 		a.nd := Core.New(cfg.id, cfg.n, cfg.seed * 7919 + cfg.starts * 31, cfg.electionTicks, t, v, si, st, snap, log, last);
-		a.sm := RaftSm.New(cfg.newSm()); a.sm.Restore(snap);
+		IF hasConf THEN Core.SetConfig(a.nd, voters, learners) END;
+		Core.SetCommit(a.nd, cm);
+		a.sm := RaftSm.New(cfg.newSm()); a.sm.Restore(snap); a.sm.SetExpiry(cfg.sessionExpiry);
 		IF cfg.tickMs > 0 THEN
 			NEW(a.clock); a.clock.to := c; a.clock.ms := cfg.tickMs;
 			Services.DoLater(a.clock, Services.Ticks() + cfg.tickMs)
@@ -396,8 +426,8 @@ MODULE RaftNode;
 		ELSIF m IS Tick THEN Core.Tick(a.nd); a.Pump(c)
 		ELSIF m IS Wire THEN
 			x := m(Wire).m;
-			IF (x # NIL) & (x.to = a.cfg.id) & (x.from >= 0) & (x.from < a.cfg.n) & (x.from # a.cfg.id)
-				& (x.kind >= Core.voteReq) & (x.kind <= Core.snapReq) THEN
+			IF (x # NIL) & (x.to = a.cfg.id) & (x.from >= 0) & (x.from < Core.maxNodes) & (x.from # a.cfg.id)
+				& (x.kind >= Core.voteReq) & (x.kind <= Core.prevoteResp) THEN
 				Core.Step(a.nd, x); a.Pump(c)
 			END
 		ELSIF m IS Propose THEN a.OnPropose(c, m(Propose))
@@ -415,14 +445,17 @@ MODULE RaftNode;
 
 	PROCEDURE NewConfig* (id, n: INTEGER; net: ActorNet.Node; storage: RaftStorage.Storage;
 		newSm: PROCEDURE (): RaftSm.StateMachine): Config;
-	(** Пред: 0 <= id < n <= RaftCore.maxNodes — 20; net, storage, newSm # NIL — 21.
-		Пост: устройство с electionTicks = 10, без своих часов и снимков; пропуски пусты. *)
+	(** Пред: 0 <= id < RaftCore.maxNodes, 0 < n <= RaftCore.maxNodes — 20;
+		net, storage, newSm # NIL — 21. n — начальное число избирателей
+		0 .. n-1; узел с id >= n входит в состав только записью состава.
+		Пост: устройство с electionTicks = 10, сеансами в 1000 сроков, без
+		своих часов и снимков; пропуски пусты. *)
 		VAR cfg: Config;
 	BEGIN
-		ASSERT((id >= 0) & (id < n) & (n <= Core.maxNodes), 20);
+		ASSERT((id >= 0) & (id < Core.maxNodes) & (n > 0) & (n <= Core.maxNodes), 20);
 		ASSERT((net # NIL) & (storage # NIL) & (newSm # NIL), 21);
 		NEW(cfg); cfg.id := id; cfg.n := n; cfg.net := net; cfg.storage := storage; cfg.newSm := newSm;
-		cfg.electionTicks := 10; cfg.seed := 1;
+		cfg.electionTicks := 10; cfg.seed := 1; cfg.sessionExpiry := 1000;
 		RETURN cfg
 	END NewConfig;
 
