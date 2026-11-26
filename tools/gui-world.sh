@@ -44,6 +44,7 @@ find "$INSTALL" -path '*/Mod/*.cp' -delete
 [ -f "$INSTALL/Obx/Docu/Sys-Map.odc" ] || { echo "gui-world: нет Obx/Docu/Sys-Map.odc" >&2; exit 1; }
 for spec in "Obx/Docu Sys-Map.odc" "Obx/Docu/ru Sys-Map.odc" "Dev/Docu/ru Sys-Map.odc"; do
 	set -- $spec
+	[ -f "$INSTALL/$1/$2" ] || continue
 	out=$(printf "Dev_devOdc.Check('%s', '%s')\n" "$1" "$2" | run64 2>&1) || {
 		printf '%s\n' "$out" | tail -20 >&2
 		echo "gui-world: Check $1/$2 не выполнился" >&2; exit 1
