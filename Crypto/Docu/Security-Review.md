@@ -27,6 +27,7 @@
 | AES-256-GCM, ChaCha20-Poly1305 | сделано | `crypto-fix` | `Crypto_devGcm` (`TestAES256`), `Crypto_devChaCha20`, RFC 8439, `Vectors/check.py` |
 | RSA-PSS | сделано | `crypto-fix` | `Crypto_devPSS`, Wycheproof, `Vectors/check.py` |
 | Ed25519 (проверка) | сделано | `crypto-fix` | `Crypto_devEd25519`, RFC 8032, Wycheproof, `Vectors/check.py` |
+| X.509: ECDSA, RSA-PSS, Ed25519, смешанные цепочки | сделано | `crypto-fix` | `Crypto_devX509Modern`, `Crypto_devX509` |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -330,6 +331,7 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 | ChaCha20-Poly1305 AEAD | `aead-tag`, `aead-pad`, `aead-lens` | все три красные |
 | RSA-PSS | `pss-mgf`, `pss-hcompare`, `pss-dbmask`, `pss-sign`, `pss-zerobits` | четыре красные; `pss-zerobits` на выбранных 2048-битных векторах эквивалентна (старшие биты db[0] оказались нулевыми) |
 | Ed25519 | `ed-lessL`, `ed-sign`, `ed-nibble`, `ed-pointeq`, `ed-addD`, `ed-hashR` | `ed-pointeq` по одной оси не краснеет (X уже различается); при возврате `TRUE` из всего сравнения — красная. Остальные пять красные |
+| X.509: алгоритмы подписи и ключи | `x509-ecdsa-skip`, `x509-pss-skip`, `x509-ed-skip`, `x509-pss-type`, `x509-ec-curve`, `x509-ed-oid`, `x509-ecdsa-hash`, `x509-int-zero` | все восемь красные (`Crypto_devX509Modern`) |
 
 Порча `uls-signed-compare` (возврат сравнения через XOR старшего бита) тест не
 краснит: на этом компиляторе эта форма эквивалентна явным ветвям, поэтому замена
@@ -370,7 +372,7 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 - Фрагментация handshake-сообщений по нескольким записям не поддержана: `ReceiveHandshake`
   отвергает сообщение, не влезшее в запись. У `Accept` нет таймаута рукопожатия:
   молчащий клиент занимает сервер.
-- Только RSA-сертификаты и X25519; ECDSA, AES-256-GCM и другие группы не добавлены.
+- X.509 поддерживает RSA PKCS#1, RSA-PSS, ECDSA и Ed25519, но TLS использует только RSA-сертификаты и X25519. Подпись Ed25519 не реализована; проверка есть.
 - Возобновление сессий и пересогласование — в объёме исходного кода A2, без тикетов
   TLS 1.3 и без отдельного аудита. Сервер принимает новый `ClientHello` в состоянии
   `Established`, но не разбирает расширения `ClientHello` и не сверяет

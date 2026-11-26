@@ -20,6 +20,7 @@ Component Pascal. Те же значения зашиты в модулях `Cry
 | `chacha.txt` | RFC 8439: блок ChaCha20, поток, Poly1305, AEAD | IETF Trust |
 | `pss-wycheproof.txt` | Wycheproof `rsa_pss_2048_sha256_mgf1_32_test.json`, выбранные случаи | Apache License 2.0 |
 | `ed25519-wycheproof.txt` | Wycheproof `ed25519_test.json`, выбранные случаи; векторы RFC 8032 в `Crypto_devEd25519` | Apache License 2.0 |
+| `x509/modern/` | сертификаты ECDSA P-256/P-384, RSA-PSS, Ed25519 и смешанная цепочка; `make-modern.py` и `make-modern-data.py` пересоздают `Crypto_devX509ModernData`; ключи удалены | CC0 / public domain |
 | `x509/` | сертификаты сгенерированы для этого репозитория (CA, лист, просроченный); ключи удалены | CC0 / public domain |
 | `x509/chains/` | цепочки для проверки пути: промежуточные CA, `CA:FALSE`-издатель, `pathLen`, `keyUsage`, критичное расширение, цикл; `generate-chains.sh` пересоздаёт их, `make-data.py` собирает `Crypto_devX509Data` | CC0 / public domain |
 

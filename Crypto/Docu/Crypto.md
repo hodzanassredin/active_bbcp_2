@@ -127,6 +127,9 @@ srv.Accept(client, res);                       (* completes the handshake *)
 - The default cipher suite list contains only `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. CBC,
   3DES, RC4, NULL and RSA key transport remain in the code and can be enabled explicitly with
   `Policy.SetCipherSuites`; they are not offered by default.
+- X.509 supports RSA PKCS#1 v1.5, RSA-PSS, ECDSA with P-256/P-384 and Ed25519 signatures, and
+  RSA, EC (P-256/P-384) and Ed25519 public keys in SPKI. A chain may mix these algorithms; each
+  link is checked with the key type of its issuer.
 - The client verifies the certificate chain to a trusted root, the validity period of every
   link (including the root), `basicConstraints CA`, `keyUsage keyCertSign` when the extension is
   present, `pathLenConstraint` and unknown critical extensions. A certificate with the same name
@@ -170,6 +173,14 @@ srv.Accept(client, res);                       (* completes the handshake *)
   bit set; `Verify` rejects `S >= L`, which removes the signature malleability of `S + L`. The
   extended-coordinate addition formula is complete for the curve, so the same sequence handles
   doubling and the neutral element.
+- X.509 accepts RSA-PSS only with an explicit hash, MGF1 over the same hash and a salt equal to
+  the hash length; other parameters give `ErrUnsupported`. An ECDSA signature is parsed from DER
+  as two positive integers (a leading zero is allowed, a negative value is rejected) and checked
+  against the curve of the issuer key; a hash whose length does not match the curve is refused.
+  For Ed25519 the TBS bytes are verified directly.
+- A certificate whose `AlgorithmIdentifier` names an unsupported or unknown signature algorithm is
+  rejected on read. The inner and outer signature algorithms of the certificate must match,
+  including the PSS salt length.
 - Keys and nonces come from `CryptoOsRandom`, which reads `/dev/urandom`; the Fortuna generator
   mixes fresh OS entropy on every request. PKCS#1 padding and the TLS pre-master secret abort if
   the source is unavailable instead of using predictable bytes. Prime generation
@@ -183,9 +194,9 @@ srv.Accept(client, res);                       (* completes the handshake *)
 ## Limitations
 
 - TLS 1.3 is not implemented.
-- X.509 certificates are RSA-only; the TLS handshake uses X25519. `CryptoEC` supports P-256 and
-  P-384 for ECDH and ECDSA and `CryptoEd25519` verifies Ed25519, but they are not yet part of
-  X.509 or TLS. Compressed SEC1 points, P-521 and the other named curves are not implemented.
+- The TLS handshake still uses X25519 and RSA certificates; the new ECDSA/RSA-PSS/Ed25519
+  X.509 support is not yet wired into TLS. Compressed SEC1 points, P-521 and the other named
+  curves are not implemented.
 - Ed25519 signing is not implemented. RSA-PSS uses a fixed salt length equal to the hash length;
   other salt lengths are not accepted. PKCS#1 v1.5 signatures remain the default for X.509.
 - CRL, OCSP and certificate transparency are not checked. The trust decision is the configured
@@ -216,6 +227,7 @@ from `tools/build32.sh` and `tools/test32.sh`.
 Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
+`Crypto_devX509Modern`,
 `Crypto_devPKCS1` and `Crypto_devPRF`.
 `tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files
 with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies
