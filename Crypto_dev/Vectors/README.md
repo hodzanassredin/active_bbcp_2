@@ -15,6 +15,7 @@ Component Pascal. Те же значения зашиты в модулях `Cry
 | `x25519.txt` | RFC 7748, раздел 6.1 | IETF Trust |
 | `prf.txt` | RFC 5246, P_SHA256; значения посчитаны независимо на Python/hmac | IETF Trust |
 | `x509/` | сертификаты сгенерированы для этого репозитория (CA, лист, просроченный); ключи удалены | CC0 / public domain |
+| `x509/chains/` | цепочки для проверки пути: промежуточные CA, `CA:FALSE`-издатель, `pathLen`, `keyUsage`, критичное расширение, цикл; `generate-chains.sh` пересоздаёт их, `make-data.py` собирает `Crypto_devX509Data` | CC0 / public domain |
 
 `check.py` требует `cryptography` для AES и X25519; без него эти
 группы пропускаются, хеши/HMAC/PRF проверяются всегда.

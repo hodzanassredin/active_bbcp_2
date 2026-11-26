@@ -42,6 +42,7 @@ MODULE CryptoX509;
 		OidRsaEncryption = "2A864886F70D010101";
 		OidSubjectAltName = "551D11";
 		OidBasicConstraints = "551D13";
+		OidKeyUsage = "551D0F";
 		OidCommonName = "550403";
 		OidCountry = "550406";
 		OidOrganisation = "55040A";
@@ -77,6 +78,11 @@ MODULE CryptoX509;
 			subjectRaw* : POINTER TO ARRAY OF SHORTCHAR;
 			subjectLen* : AO.SIGNED32;
 			isCA* : BOOLEAN;
+			hasPathLen* : BOOLEAN;	(* basicConstraints содержит pathLenConstraint *)
+			pathLen* : AO.SIGNED32;
+			keyUsagePresent* : BOOLEAN;
+			keyCertSign* : BOOLEAN;
+			critUnsupported* : BOOLEAN;	(* критичное расширение, которого мы не знаем *)
 			sanCount* : AO.SIGNED32;
 			sanValue* : ARRAY MaxSans OF POINTER TO ARRAY OF SHORTCHAR;
 			sanLen* : ARRAY MaxSans OF AO.SIGNED32;
@@ -574,56 +580,110 @@ MODULE CryptoX509;
 	END AddSan;
 
 	PROCEDURE ParseExtensions (ext : ASN1.Triplet; cert : Certificate; VAR res : AO.SIGNED32);
-		VAR exts, e, oid, val, gns, gn : ASN1.Triplet; r : Streams.StringReader; len0 : AO.SIZE;
+		VAR exts, e, oid, critT, val, gns, gn : ASN1.Triplet; r : Streams.StringReader;
+			len0 : AO.SIZE; crit : BOOLEAN;
 	BEGIN
-		IF (ext = NIL) OR (ext.child = NIL) OR (ext.child.child = NIL) THEN
+		IF (ext = NIL) OR (ext.child = NIL) THEN
 			res := ErrMalformed;
 			RETURN
 		END;
 		exts := ext.child;
+		IF (exts.class # ASN1.ASN1Universal) OR (exts.tag # ASN1.Sequence) THEN
+			res := ErrMalformed;
+			RETURN
+		END;
 		e := exts.child;
 		WHILE e # NIL DO
+			IF (e.class # ASN1.ASN1Universal) OR (e.tag # ASN1.Sequence) THEN
+				res := ErrMalformed;
+				RETURN
+			END;
+			(* Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+			   extnValue OCTET STRING } *)
 			oid := e.child;
+			crit := FALSE;
 			val := NIL;
 			IF oid # NIL THEN
-				val := oid.next;
-				WHILE (val # NIL) & ~((val.class = ASN1.ASN1Universal) & (val.tag = ASN1.String)) DO
-					val := val.next
+				critT := oid.next;
+				IF (critT # NIL) & (critT.class = ASN1.ASN1Universal) & (critT.tag = ASN1.Boolean) THEN
+					crit := critT.bvalue;
+					critT := critT.next
+				END;
+				IF (critT # NIL) & (critT.class = ASN1.ASN1Universal) & (critT.tag = ASN1.String) THEN
+					val := critT
 				END
 			END;
-			IF (oid # NIL) & (val # NIL) & (val.svalue # NIL) THEN
-				IF OidIs(oid, OidSubjectAltName, 3) THEN
-					NEW(r);
-					r.InitStringReader(LEN(val.svalue^));
-					r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
-					gns := ASN1.Decode(r, 0, len0);
-					IF (gns # NIL) & gns.ok THEN
-						gn := gns.child;
-						WHILE gn # NIL DO
-							IF (gn.class = ASN1.ASN1Context) & ~gn.constructed & (gn.svalue # NIL) THEN
-								IF gn.tag MOD 32 = 2 THEN
-									AddSan(cert, gn.svalue, LEN(gn.svalue^), FALSE)
-								ELSIF gn.tag MOD 32 = 7 THEN
-									AddSan(cert, gn.svalue, LEN(gn.svalue^), TRUE)
-								END
-							END;
-							gn := gn.next
+			IF (oid = NIL) OR (val = NIL) OR (val.svalue = NIL) THEN
+				res := ErrMalformed;
+				RETURN
+			END;
+			IF OidIs(oid, OidSubjectAltName, 3) THEN
+				NEW(r);
+				r.InitStringReader(LEN(val.svalue^));
+				r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
+				gns := ASN1.Decode(r, 0, len0);
+				IF (gns = NIL) OR ~gns.ok OR (gns.class # ASN1.ASN1Universal) OR (gns.tag # ASN1.Sequence) THEN
+					res := ErrMalformed;
+					RETURN
+				END;
+				gn := gns.child;
+				WHILE gn # NIL DO
+					IF (gn.class = ASN1.ASN1Context) & ~gn.constructed & (gn.svalue # NIL) THEN
+						IF gn.tag MOD 32 = 2 THEN
+							AddSan(cert, gn.svalue, LEN(gn.svalue^), FALSE)
+						ELSIF gn.tag MOD 32 = 7 THEN
+							AddSan(cert, gn.svalue, LEN(gn.svalue^), TRUE)
 						END
-					ELSE
-						res := ErrMalformed
-					END
-				ELSIF OidIs(oid, OidBasicConstraints, 3) THEN
-					NEW(r);
-					r.InitStringReader(LEN(val.svalue^));
-					r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
-					gns := ASN1.Decode(r, 0, len0);
-					IF (gns # NIL) & gns.ok & (gns.child # NIL) THEN
-						gn := gns.child;
-						IF (gn.class = ASN1.ASN1Universal) & (gn.tag = ASN1.Boolean) THEN
-							cert.isCA := gn.bvalue
-						END
-					END
+					END;
+					gn := gn.next
 				END
+			ELSIF OidIs(oid, OidBasicConstraints, 3) THEN
+				(* BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+				   pathLenConstraint INTEGER OPTIONAL } *)
+				NEW(r);
+				r.InitStringReader(LEN(val.svalue^));
+				r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
+				gns := ASN1.Decode(r, 0, len0);
+				IF (gns = NIL) OR ~gns.ok OR (gns.class # ASN1.ASN1Universal) OR (gns.tag # ASN1.Sequence) THEN
+					res := ErrMalformed;
+					RETURN
+				END;
+				gn := gns.child;
+				IF (gn # NIL) & (gn.class = ASN1.ASN1Universal) & (gn.tag = ASN1.Boolean) THEN
+					cert.isCA := gn.bvalue;
+					gn := gn.next
+				END;
+				IF (gn # NIL) & (gn.class = ASN1.ASN1Universal) & (gn.tag = ASN1.Integer) THEN
+					IF gn.length > 4 THEN
+						res := ErrMalformed;
+						RETURN
+					END;
+					cert.hasPathLen := TRUE;
+					cert.pathLen := gn.ivalue;
+					gn := gn.next
+				END;
+				IF gn # NIL THEN
+					res := ErrMalformed;
+					RETURN
+				END
+			ELSIF OidIs(oid, OidKeyUsage, 3) THEN
+				(* KeyUsage ::= BIT STRING; keyCertSign — бит 5 (маска 04H). *)
+				NEW(r);
+				r.InitStringReader(LEN(val.svalue^));
+				r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
+				gns := ASN1.Decode(r, 0, len0);
+				IF (gns = NIL) OR ~gns.ok OR (gns.class # ASN1.ASN1Universal) OR (gns.tag # ASN1.BitString) THEN
+					res := ErrMalformed;
+					RETURN
+				END;
+				cert.keyUsagePresent := TRUE;
+				IF (gns.svalue # NIL) & (LEN(gns.svalue^) > 0) THEN
+					cert.keyCertSign := (ORD(gns.svalue^[0]) DIV 4 MOD 2) = 1
+				END
+			ELSIF crit THEN
+				(* RFC 5280, 4.2: неизвестное критичное расширение
+				   делает сертификат непригодным. *)
+				cert.critUnsupported := TRUE
 			END;
 			e := e.next
 		END
@@ -655,6 +715,11 @@ MODULE CryptoX509;
 		NEW(c);
 		c.sanCount := 0;
 		c.isCA := FALSE;
+		c.hasPathLen := FALSE;
+		c.pathLen := 0;
+		c.keyUsagePresent := FALSE;
+		c.keyCertSign := FALSE;
+		c.critUnsupported := FALSE;
 		c.version := 1;
 		(* Полная DER-запись и подписанная часть. *)
 		IF root.raw # NIL THEN
@@ -923,7 +988,7 @@ MODULE CryptoX509;
 
 	PROCEDURE MatchDNS (IN pattern, host : ARRAY OF SHORTCHAR;
 			pOfs, plen, hOfs, hlen : AO.SIZE): BOOLEAN;
-		VAR i : AO.SIZE; ok : BOOLEAN;
+		VAR i : AO.SIZE; ok, hasDot : BOOLEAN;
 	BEGIN
 		IF (plen <= 0) OR (hlen <= 0) OR (pOfs < 0) OR (hOfs < 0)
 			OR (pOfs + plen > LEN(pattern)) OR (hOfs + hlen > LEN(host)) THEN
@@ -932,6 +997,15 @@ MODULE CryptoX509;
 		(* Один шаблон '*' в начале: ровно одна метка. *)
 		IF pattern[pOfs] = '*' THEN
 			IF (plen < 3) OR (pattern[pOfs + 1] # '.') THEN
+				RETURN FALSE
+			END;
+			(* RFC 6125, 6.4.3: шаблон не может покрывать домен
+			   верхнего уровня — после "*." нужно не меньше двух меток. *)
+			hasDot := FALSE;
+			FOR i := pOfs + 2 TO pOfs + plen - 1 DO
+				IF pattern[i] = '.' THEN hasDot := TRUE END
+			END;
+			IF ~hasDot THEN
 				RETURN FALSE
 			END;
 			i := 0;
@@ -1030,11 +1104,48 @@ MODULE CryptoX509;
 		RETURN MatchHost(cert, host)
 	END HostOk;
 
+	(* Годится ли сертификат как издатель: CA, keyCertSign, длина пути,
+	   сроки и отсутствие непонятных критичных расширений. walk — число
+	   промежуточных сертификатов между листом и этим издателем. *)
+	PROCEDURE CheckIssuer (issuer : Certificate; walk : AO.SIZE; flags : SET;
+			VAR err : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		IF issuer = NIL THEN
+			err := ErrUntrusted;
+			RETURN FALSE
+		END;
+		IF issuer.critUnsupported THEN
+			err := ErrUnsupported;
+			RETURN FALSE
+		END;
+		IF ~issuer.isCA THEN
+			err := ErrNoCA;
+			RETURN FALSE
+		END;
+		IF issuer.keyUsagePresent & ~issuer.keyCertSign THEN
+			err := ErrNoCA;
+			RETURN FALSE
+		END;
+		IF issuer.hasPathLen & (issuer.pathLen < walk) THEN
+			err := ErrNoCA;
+			RETURN FALSE
+		END;
+		err := CheckDate(issuer, flags);
+		RETURN err = Ok
+	END CheckIssuer;
+
+	PROCEDURE SelfIssued (c : Certificate): BOOLEAN;
+	BEGIN
+		RETURN (c # NIL) & (c.subjectRaw # NIL) & (c.issuerRaw # NIL)
+			& SameBytes(c.subjectRaw^, c.issuerRaw^, c.subjectLen, c.issuerLen)
+	END SelfIssued;
+
 	(* Цепочка: лист -> издатели из chain (может включать лист) -> корень
-	   из roots. Проверяются подписи, сроки и флаг CA у издателей. *)
+	   из roots. Проверяются подписи, сроки, basicConstraints/keyUsage,
+	   pathLenConstraint и непонятные критичные расширения. *)
 	PROCEDURE VerifyChain* (leaf, chain, rootsList : Certificate; IN host : ARRAY OF SHORTCHAR;
 			flags : SET; VAR err : AO.SIGNED32): BOOLEAN;
-		VAR current, issuer, pool : Certificate; depth : AO.SIZE;
+		VAR current, issuer, pool : Certificate; depth, intermediates : AO.SIZE;
 	BEGIN
 		err := Ok;
 		IF leaf = NIL THEN
@@ -1043,7 +1154,12 @@ MODULE CryptoX509;
 		END;
 		current := leaf;
 		depth := 0;
+		intermediates := 0;
 		REPEAT
+			IF current.critUnsupported THEN
+				err := ErrUnsupported;
+				RETURN FALSE
+			END;
 			err := CheckDate(current, flags);
 			IF err # Ok THEN
 				RETURN FALSE
@@ -1068,12 +1184,7 @@ MODULE CryptoX509;
 				err := ErrBadSignature;
 				RETURN FALSE
 			END;
-			IF ~issuer.isCA THEN
-				err := ErrNoCA;
-				RETURN FALSE
-			END;
-			err := CheckDate(issuer, flags);
-			IF err # Ok THEN
+			IF ~CheckIssuer(issuer, intermediates, flags, err) THEN
 				RETURN FALSE
 			END;
 			IF InList(issuer, rootsList) THEN
@@ -1082,6 +1193,11 @@ MODULE CryptoX509;
 				END;
 				err := ErrHostname;
 				RETURN FALSE
+			END;
+			(* pathLenConstraint считает только несамоподписанные
+			   промежуточные сертификаты (RFC 5280, 6.1.4). *)
+			IF ~SelfIssued(issuer) THEN
+				INC(intermediates)
 			END;
 			current := issuer;
 			INC(depth);
