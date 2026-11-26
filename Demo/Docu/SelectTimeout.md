@@ -1,5 +1,7 @@
 # Обзор на примерах: DemoSelectTimeout
 
+<!-- check-examples: numbers-vary -->
+
 Выбор с тайм-аутом.
 
 Задача ждёт сообщения, но не дольше заданного срока. В Go это `case <-time.After(d)` внутри
