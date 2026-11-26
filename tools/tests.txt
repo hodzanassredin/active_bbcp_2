@@ -66,6 +66,10 @@ Kv_devTasks|proc|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 Kv_devBench|proc slow|300|KvPages KvStore KvFault KvLin KvTree KvDb Kv_devModel
 # Ожидания библиотеки: Once, встреча, буфер, ящик, выбор, отсутствие выделений.
 Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
+# События первого класса: базовые, комбинаторы, nack, отмена, случайные деревья.
+Async_devEvents|proc|300|AsyncSelect AsyncChan AsyncEvent
+# Примеры событий Obx: обмен, буфер, отмена, мультикаст, срок, философы.
+Obx_devEvents|proc|300|AsyncSelect AsyncChan AsyncEvent ObxEvent0 ObxEvent1 ObxEvent2 ObxEvent3 ObxEvent4 ObxEvent5
 # Транзакционная память: откат, Retry, OrElse, ожидание, цена.
 Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan
 # Парные замеры задач, каналов и свободного монитора-объекта (итог обмена).

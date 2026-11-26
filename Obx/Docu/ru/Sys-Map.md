@@ -22,6 +22,14 @@
 [ObxChan1](Chan1.md)  [docu](Chan1.md)/[sources](../../Mod64/Chan1.cp)		ограниченный буфер даёт производителю забежать вперёд
 [ObxChan2](Chan2.md)  [docu](Chan2.md)/[sources](../../Mod64/Chan2.cp)		почтовый ящик: отправка не ждёт
 [ObxSelect0](Select0.md)  [docu](Select0.md)/[sources](../../Mod64/Select0.cp)		выбор с тайм-аутом
+
+События
+[ObxEvent0](Event0.md)  [docu](Event0.md)/[sources](../../Mod64/Event0.cp)		канал обмена: две задачи меняются значениями за одну синхронизацию
+[ObxEvent1](Event1.md)  [docu](Event1.md)/[sources](../../Mod64/Event1.cp)		буферизованный канал из встреч на сервере
+[ObxEvent2](Event2.md)  [docu](Event2.md)/[sources](../../Mod64/Event2.cp)		сервер и отмена клиента через withNack
+[ObxEvent3](Event3.md)  [docu](Event3.md)/[sources](../../Mod64/Event3.cp)		мультикаст: выбор решает первого получателя, действие — второго
+[ObxEvent4](Event4.md)  [docu](Event4.md)/[sources](../../Mod64/Event4.cp)		срок, построенный при синхронизации, через Guard
+[ObxEvent5](Event5.md)  [docu](Event5.md)/[sources](../../Mod64/Event5.cp)		обедающие философы: официант выдаёт две вилки выбором
 [ObxProto0](Proto0.md)  [docu](Proto0.md)/[sources](../../Mod64/Proto0.cp)		протокол диалога, проверка при каждой отправке
 [ObxOnce](Once.md)  [docu](Once.md)/[sources](../../Mod64/Once.cp)		однократная переменная
 [ObxStm0](Stm0.md)  [docu](Stm0.md)/[sources](../../Mod64/Stm0.cp)		транзакция: трап в переводе не теряет денег

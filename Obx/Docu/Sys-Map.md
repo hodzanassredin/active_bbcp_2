@@ -95,6 +95,14 @@ Tasks, monitors and channels
 [ObxChan1](Chan1.md)  [docu](Chan1.md)/[sources](../Mod64/Chan1.cp)		a bounded buffer lets the producer run ahead
 [ObxChan2](Chan2.md)  [docu](Chan2.md)/[sources](../Mod64/Chan2.cp)		mailbox: sending does not wait
 [ObxSelect0](Select0.md)  [docu](Select0.md)/[sources](../Mod64/Select0.cp)		selection with a timeout
+
+Events
+[ObxEvent0](Event0.md)  [docu](Event0.md)/[sources](../Mod64/Event0.cp)		a swap channel: two tasks exchange values in one synchronization
+[ObxEvent1](Event1.md)  [docu](Event1.md)/[sources](../Mod64/Event1.cp)		a buffered channel built from meetings by a server
+[ObxEvent2](Event2.md)  [docu](Event2.md)/[sources](../Mod64/Event2.cp)		a server and client cancellation through withNack
+[ObxEvent3](Event3.md)  [docu](Event3.md)/[sources](../Mod64/Event3.cp)		multicast: a choice picks the first receiver, the action the second
+[ObxEvent4](Event4.md)  [docu](Event4.md)/[sources](../Mod64/Event4.cp)		a deadline built at synchronization time by Guard
+[ObxEvent5](Event5.md)  [docu](Event5.md)/[sources](../Mod64/Event5.cp)		dining philosophers: a waiter grants two forks by a choice
 [ObxProto0](Proto0.md)  [docu](Proto0.md)/[sources](../Mod64/Proto0.cp)		dialogue protocol, a check on every send
 [ObxOnce](Once.md)  [docu](Once.md)/[sources](../Mod64/Once.cp)		a once variable
 [ObxStm0](Stm0.md)  [docu](Stm0.md)/[sources](../Mod64/Stm0.cp)		transaction: a trap in a transfer loses no money

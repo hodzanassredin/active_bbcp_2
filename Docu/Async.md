@@ -367,6 +367,186 @@ Selection among two rendezvous channels costs 315–400 ns per operation, among 
 (`select2`, `select8`, `docs/measurements.md`, section 2.5). Selection without a timeout allocates no
 memory.
 
+### 5.1. Events
+
+A selection with `AsyncChan.Select` is a flat array built at the call site; its result is an index.
+That is enough for one wait, but not when waits are passed as values: a server combines its own wait
+with a wait received from a client, and a procedure returns "a receive from this channel" while the
+caller adds a deadline.
+
+An *event* is a value of type `AsyncEvent.Event` that describes a wait. `AsyncEvent.Sync(e)`
+performs it and returns the result: the message of a receive, the value produced by an action, or
+`NIL` for a send, a timeout, a signal, `Always` and a notification. The base events are built by:
+
+```
+AsyncEvent.Send(c, m)          (* send m to channel c *)
+AsyncEvent.Recv(c)             (* receive from c *)
+AsyncEvent.Timeout(ms)         (* ms ms from the start of the synchronization *)
+AsyncEvent.Signal(sig)         (* readiness of an external AsyncSelect.Signal *)
+AsyncEvent.Always()            (* ready at once *)
+AsyncEvent.Never()             (* never ready *)
+AsyncEvent.Choose(events)      (* one of the events, by order *)
+AsyncEvent.Wrap(e, action)     (* pass the result through action.Do *)
+AsyncEvent.Guard(builder)      (* build the event at synchronization *)
+AsyncEvent.WithNack(e, nack)   (* notification if e loses *)
+```
+
+`Choose` combines events into one wait and may be nested to any depth. Its order is the order of the
+flat alternatives in `Select`: among ready branches the first wins, a ready receive or send beats a
+timeout even when the timeout is earlier, and `Always` is ready when the check reaches it. `Never`
+contributes an alternative that never decides. The limit is the limit of `Select`: at most 32 atomic
+operations in one synchronization; a larger tree traps with code 23.
+
+An action of `Wrap` runs after the decision and only in the winning branch, from the inner event
+outward. The action is an object with the method `Do`; it may wait, as the send in a swap channel
+does. Its value becomes the result of the event, so nested wraps transform the result from the inside
+out.
+
+`Guard` calls `Builder.Make` at every synchronization, once for each occurrence of the guard in the
+tree. This gives a fresh channel or a fresh timeout at the moment of the wait; a deadline event
+reused for two calls computes the time left to the same absolute deadline anew each time.
+
+`WithNack(e, nack)` returns the event `e` and the notification `nack`. The notification fires when
+the branch of `e` loses the choice, when the synchronization is stopped by cancellation or a
+deadline, and when a trap aborts it. The notification is an ordinary event: it can be chosen
+together with others, and another task can synchronize on it. It has no memory, as in Concurrent
+ML: if nobody waits when it fires, it is lost. Hopac's `withNackJob` returns a promise that
+remembers the outcome; here the notification is an event, and a later wait waits for the next loss.
+
+A synchronization is one `AsyncSelect.Select` under the tree. A plain channel event allocates no
+memory; `Wrap` and `WithNack` take their records from free lists, and `Guard` builds only what its
+builder builds. `SyncCtx`
+is the counterpart of `SelectCtx`: a stopped pass returns `FALSE` and fires the notifications of all
+losing branches; a trap is passed on after the notifications. A synchronization outside a task traps
+with code 20, as a selection does.
+
+```
+MODULE ObxEvent0;
+(** Канал обмена: два процесса отдают друг другу значения одним событием.
+
+	Идея из Concurrent ML (Reppy): канал передаёт пару «значение и канал
+	ответа». Синхронизация — выбор из двух ветвей: принять чужое
+	предложение и ответить в чужой канал либо послать своё и дождаться
+	ответа. Канал ответа создаётся заново на каждую синхронизацию, поэтому
+	событие строит Guard. *)
+
+	IMPORT Services, Tasks, AsyncSelect, AsyncChan, AsyncEvent, Console;
+
+	TYPE
+		NumMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
+
+		SwapMsg = POINTER TO RECORD (AsyncSelect.Msg)
+			n: INTEGER;
+			reply: AsyncChan.Chan
+		END;
+
+		TakeAction = POINTER TO RECORD (AsyncEvent.Action)
+			n: INTEGER
+		END;
+
+		AwaitAction = POINTER TO RECORD (AsyncEvent.Action)
+			reply: AsyncChan.Chan
+		END;
+
+		SwapBuilder = POINTER TO RECORD (AsyncEvent.Builder)
+			c: AsyncChan.Chan; n: INTEGER
+		END;
+
+		Swapper = POINTER TO RECORD (Tasks.Task)
+			c: AsyncChan.Chan; n, got: INTEGER; done: BOOLEAN
+		END;
+
+	VAR
+		(** Результаты последнего обмена: кто что получил. *)
+		First*, Second*: INTEGER;
+
+	PROCEDURE Num (n: INTEGER): NumMsg;
+		VAR m: NumMsg;
+	BEGIN
+		NEW(m); m.n := n;
+		RETURN m
+	END Num;
+
+	PROCEDURE (a: TakeAction) Do (m: AsyncSelect.Msg; OUT y: AsyncSelect.Msg);
+		VAR r: NumMsg;
+	BEGIN
+		WITH m: SwapMsg DO
+			m.reply.Send(Num(a.n));	(* ответ в канал чужого предложения *)
+			NEW(r); r.n := m.n; y := r
+		ELSE y := NIL
+		END
+	END Do;
+
+	PROCEDURE (a: AwaitAction) Do (m: AsyncSelect.Msg; OUT y: AsyncSelect.Msg);
+		VAR r: AsyncSelect.Msg;
+	BEGIN
+		a.reply.Recv(r); y := r
+	END Do;
+
+	PROCEDURE (b: SwapBuilder) Make (OUT e: AsyncEvent.Event);
+		VAR reply: AsyncChan.Chan; offer: SwapMsg;
+			take: TakeAction; await: AwaitAction;
+			evs: ARRAY 2 OF AsyncEvent.Event;
+	BEGIN
+		reply := AsyncChan.NewChan();
+		NEW(offer); offer.n := b.n; offer.reply := reply;
+		NEW(take); take.n := b.n;
+		NEW(await); await.reply := reply;
+		evs[0] := AsyncEvent.Wrap(AsyncEvent.Recv(b.c), take);
+		evs[1] := AsyncEvent.Wrap(AsyncEvent.Send(b.c, offer), await);
+		e := AsyncEvent.Choose(evs)
+	END Make;
+
+	PROCEDURE Swap (c: AsyncChan.Chan; n: INTEGER): INTEGER;
+		VAR b: SwapBuilder; m: AsyncSelect.Msg;
+	BEGIN
+		NEW(b); b.c := c; b.n := n;
+		m := AsyncEvent.Sync(AsyncEvent.Guard(b));
+		WITH m: NumMsg DO RETURN m.n ELSE RETURN -1 END
+	END Swap;
+
+	PROCEDURE (s: Swapper) Run;
+	BEGIN
+		s.got := Swap(s.c, s.n); s.done := TRUE
+	END Run;
+
+	PROCEDURE Do*;
+		VAR c: AsyncChan.Chan; a, b: Swapper;
+	BEGIN
+		c := AsyncChan.NewChan();
+		NEW(a); a.c := c; a.n := 1; a.done := FALSE;
+		NEW(b); b.c := c; b.n := 2; b.done := FALSE;
+		Tasks.Start(a); Tasks.Start(b);
+		WHILE ~(a.done & b.done) DO Services.actionHook.Step END;
+		First := a.got; Second := b.got;
+		Console.WriteStr("ObxEvent0: a=");
+		IF First = 2 THEN Console.WriteStr("2") ELSE Console.WriteStr("?") END;
+		Console.WriteStr(" b=");
+		IF Second = 1 THEN Console.WriteStr("1") ELSE Console.WriteStr("?") END;
+		Console.WriteLn
+	END Do;
+
+END ObxEvent0.
+```
+
+The command `ObxEvent0.Do` prints `ObxEvent0: a=2 b=1`: the first task gave 1 and received 2, the
+second gave 2 and received 1. The action of a winning branch waits in a rendezvous, so a
+synchronization ends only after both values have changed hands.
+
+Events differ from Concurrent ML and Hopac in several ways. Component Pascal has no closures, so
+`Wrap` and `Guard` take objects with the methods `Do` and `Make`. `WithNack` takes an event, not a
+thunk; `Guard` supplies the lazy construction: `WithNack(Guard(builder), nack)`. The notification is
+an event without memory, as in CML, and not a one-shot promise as in Hopac. There is one OS thread
+and no preemption: an action that waits is a switch point, and a task runs one synchronization at a
+time. `Choose` is ordered as `Select` is; CML leaves the order of `choose` unspecified, while Hopac's
+`Alt.choose` tries alternatives in order. A synchronization starts from a task; there is no
+non-blocking poll of an event. `Sync` with ready branches returns without a switch, but it still goes
+through `Select` and therefore requires a task.
+
+The cost of a synchronization is the cost of `Select` plus a walk of the tree; this guide gives no
+separate measurement for events. `AsyncSelect` is not modified by events, and section 2.5 describes
+its measurements.
+
 ## 6. Dialogue Protocol
 
 A client and a server talk over a channel: the client says hello, sends data, says goodbye. If the
@@ -1008,6 +1188,10 @@ A blocking channel operation and a selection allocate no memory: wait records ar
 lists. The measured numbers and their conditions are collected in `docs/measurements.md`, sections
 2.5 and 5.
 
+An event synchronization goes through `AsyncSelect.Select` and is limited by its 32 alternatives. A
+plain channel event allocates no memory; `Wrap` and `WithNack` reuse records from free lists, and
+`Guard` builds only what its builder builds.
+
 ## 13. Implementation
 
 This section describes how the behaviour of the previous sections is obtained; it does not define
@@ -1115,6 +1299,37 @@ flag is a foreign `Unpark`, it is given back to the task after the wait, as in `
 waking, the task removes itself from the lists of the other variables. `Wait` is a trap cleaner
 (`Kernel.PushTrapCleaner`), so cancellation in `Park` also removes the records, and the variable
 does not hold a cancelled task.
+
+### 13.6. Events
+
+`AsyncEvent` turns an event tree into one array of alternatives. An internal method `Collect` walks
+the tree and appends an `AsyncSelect.Op` for every leaf: send and receive refer to the channel core,
+a timeout carries milliseconds, a signal names an `AsyncSelect.Signal`, and `Always` and `Never` use
+two shared signals whose `Arm` returns `TRUE` and `FALSE`. `Choose` walks its children in order;
+`Wrap` and `WithNack` put a step record on the path of their subtree; `Guard` calls `Make` and walks
+the result. The walk stops after 32 leaves, and the synchronization then traps with code 23.
+
+The array is padded to 32 with a `Never` alternative, because `Select` takes the length of the array
+and not a count of alternatives. A step is a record with a kind: an action of `Wrap` or a commit mark
+of `WithNack`; steps are linked from the leaf outward. When `Select` returns the winner, the commit
+marks on the winner's path are set first, then the notifications of the unmarked `WithNack` branches
+fire, then the actions run from the leaf outward. A trap in an action therefore does not make the
+chosen branch lose: its mark is already set. Notifications fire after the mark and before the
+actions, so a losing partner learns about the decision before the winner's action can wait.
+
+A notification is an `AsyncSelect.Signal` of its own for every occurrence in a synchronization: it
+registers the decision context in the owner's waiter list, and `Fire` wakes every waiter registered
+at that moment and clears the list. An occurrence that was not armed is not in the list. The signals
+of the same synchronization are disarmed before the notifications fire, so a branch cannot notify
+itself.
+
+`Sync` and `SyncCtx` execute the walk and the `Select` under `Kernel.Try`. A trap is caught there,
+the uncommitted notifications fire, and `HALT` passes the trap on with the same number (a number
+greater than 128 as 128); `Kernel.err` is turned into a constant by a `CASE` statement, as in
+`AsyncStm`. `SyncCtx` gets −1 from `SelectCtx` when the pass is stopped and fires every
+notification. Steps, notifications and their signals are records from free lists, so repeated
+synchronizations do not allocate; a synchronization without `Wrap` and `WithNack` takes nothing from
+the lists.
 
 ## 14. Interface
 
@@ -1788,3 +2003,117 @@ Post: a variable with the value `x`.
 **PROCEDURE (v: IntVar) Get (): INTEGER**, **Set (x: INTEGER)** and the same for `BoolVar`, `RealVar`,
 `RefVar`
 `Get` is `Read(v)` and the value; `Set` is `Write(v)` and the store of the value.
+
+### 14.10. AsyncEvent
+
+```
+DEFINITION AsyncEvent;
+
+	IMPORT AsyncSelect, Tasks;
+
+	TYPE
+		Event = POINTER TO EXTENSIBLE RECORD END;
+
+		Action = POINTER TO ABSTRACT RECORD
+			(a: Action) Do- (x: AsyncSelect.Msg; OUT y: AsyncSelect.Msg), NEW, ABSTRACT
+		END;
+
+		Builder = POINTER TO ABSTRACT RECORD
+			(b: Builder) Make- (OUT e: Event), NEW, ABSTRACT
+		END;
+
+	PROCEDURE Send (c: AsyncSelect.Core; m: AsyncSelect.Msg): Event;
+	PROCEDURE Recv (c: AsyncSelect.Core): Event;
+	PROCEDURE Timeout (ms: LONGINT): Event;
+	PROCEDURE Signal (sig: AsyncSelect.Signal): Event;
+	PROCEDURE Always (): Event;
+	PROCEDURE Never (): Event;
+	PROCEDURE Choose (events: ARRAY OF Event): Event;
+	PROCEDURE Wrap (e: Event; a: Action): Event;
+	PROCEDURE Guard (b: Builder): Event;
+	PROCEDURE WithNack (e: Event; OUT nack: Event): Event;
+	PROCEDURE NackWaiters (e: Event): INTEGER;
+	PROCEDURE Sync (e: Event): AsyncSelect.Msg;
+	PROCEDURE SyncCtx (VAR ctx: Tasks.Ctx; e: Event; OUT x: AsyncSelect.Msg): BOOLEAN;
+
+END AsyncEvent.
+```
+
+`Event` is an opaque event value; the constructors of the module build it. `Action` and `Builder` are
+extension points for `Wrap` and `Guard`.
+
+**TYPE Event**
+An event. Its internals are private; an event is passed, stored and synchronized, not inspected.
+
+**PROCEDURE (a: Action) Do (x: AsyncSelect.Msg; OUT y: AsyncSelect.Msg)**
+NEW, ABSTRACT
+The action of a wrap. Called after the choice, only in the winning branch; `x` is the result of the
+inner event, `y` is the new result. The action may wait.
+
+**PROCEDURE (b: Builder) Make (OUT e: Event)**
+NEW, ABSTRACT
+Builds the event of a guard. Called once for each occurrence of the guard in the synchronization.
+
+**PROCEDURE Send (c: AsyncSelect.Core; m: AsyncSelect.Msg): Event**
+Pre: `c # NIL` — 20.
+Post: an event that sends `m` into `c`; its result is `NIL`.
+
+**PROCEDURE Recv (c: AsyncSelect.Core): Event**
+Pre: `c # NIL` — 20.
+Post: an event that receives from `c`; its result is the message.
+
+**PROCEDURE Timeout (ms: LONGINT): Event**
+Post: an event that fires `ms` ms after the start of the synchronization; `ms <= 0` fires at once.
+Its result is `NIL`.
+
+**PROCEDURE Signal (sig: AsyncSelect.Signal): Event**
+Pre: `sig # NIL` — 20.
+Post: an event of readiness of `sig`; its result is `NIL`.
+
+**PROCEDURE Always (): Event**
+Post: an event that is ready when the check reaches it.
+
+**PROCEDURE Never (): Event**
+Post: an event that never fires.
+
+**PROCEDURE Choose (events: ARRAY OF Event): Event**
+Pre: every element `# NIL` — 20.
+Post: an event of one of the branches, in order; an empty array gives `Never`. The flattened tree
+of a synchronization holds at most 32 atomic operations — trap 23 in `Sync`.
+
+**PROCEDURE Wrap (e: Event; a: Action): Event**
+Pre: `e # NIL` — 20; `a # NIL` — 21.
+Post: the event `e`; if its branch wins, the result is passed through `a.Do`.
+
+**PROCEDURE Guard (b: Builder): Event**
+Pre: `b # NIL` — 21.
+Post: an event built by `b.Make` at every synchronization; `Make` is called once per occurrence.
+
+**PROCEDURE WithNack (e: Event; OUT nack: Event): Event**
+Pre: `e # NIL` — 20.
+Post: the event `e`; `nack` is a notification that fires when the branch of `e` loses the choice or
+the synchronization is stopped by cancellation or a deadline, or aborted by a trap. The notification
+has no memory and can be synchronized like any event.
+
+**PROCEDURE NackWaiters (e: Event): INTEGER**
+Diagnostics: how many tasks are waiting for the notification `e` at this moment. `-1` means `e` is
+not a notification or the list of waiters cannot be walked to the end, which indicates corruption. An
+ordinary program does not need the procedure: a notification has no memory, so waiting for it makes
+sense only at the moment it fires.
+
+**PROCEDURE Sync (e: Event): AsyncSelect.Msg**
+Performs one branch of the event and returns its result.
+Pre: call from a task — 20 (`Select`); `e # NIL` — 20; at most 32 atomic operations in the tree —
+23; `Make` returned `NIL` — 22. The protocol rejected a send — trap 21 after the offers are
+withdrawn.
+Post: exactly one branch is performed; for a receive the result is the message, for a send, a
+timeout, a signal, `Always` and a notification it is `NIL`. Losing branches have not run and their
+offers are withdrawn; notifications of losing branches have fired; a trap inside the synchronization
+is passed on with the same number (a number greater than 128 as 128) after the notifications fire.
+
+**PROCEDURE SyncCtx (VAR ctx: Tasks.Ctx; e: Event; OUT x: AsyncSelect.Msg): BOOLEAN**
+The same as `Sync` for a pass.
+Pre: `ctx` is the pass of this task — 25 (`SelectCtx`); the rest as in `Sync`.
+Post: `TRUE` — one branch is performed, `x` is its result; `FALSE` — the pass is stopped by
+cancellation or a deadline and no branch is performed, `x = NIL`; the notifications of all losing
+branches have fired in both cases.

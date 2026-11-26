@@ -3,8 +3,8 @@
 BlackBox Component Builder 2.0 (bbcb2) is a development framework for Component Pascal
 (description in `Docu/CP-Lang.md`). Sources are UTF-8 `.cp` files. This fork adds module `Tasks`:
 cooperative tasks on their own stacks, the monitor object `Tasks.Object`, the pass `Tasks.Ctx`,
-groups and `Spawn`. The repository also contains the `Async` library (channels, selection,
-transactions, OS worker threads, computons), `Actor`, the content store `Cas`, the key-value store
+groups and `Spawn`. The repository also contains the `Async` library (channels, selection and
+events, transactions, OS worker threads, computons), `Actor`, the content store `Cas`, the key-value store
 `Kv`, the replicated log `Raft`, the `RobustParallel` facade and the `Demo`/`Obx/Mod64` examples.
 The language itself is not extended.
 
@@ -299,7 +299,7 @@ code, and the checks to run before a commit.
 | File | Content |
 |---|---|
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | `Tasks` module |
-| `Docu/ru/Async.md`, `Docu/Async.md` | channels, selection, transactions, workers, computons |
+| `Docu/ru/Async.md`, `Docu/Async.md` | channels, selection and events, transactions, workers, computons |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | actors, supervision, journals, nodes |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | content-addressed block store |
 | `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | key-value store |
