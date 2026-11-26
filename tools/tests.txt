@@ -16,6 +16,8 @@ Check_devMain|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
 Dev_devOpenArr||180|
 # Обнуление локальных указателей при входе (и указателей, и OUT-параметров).
 Dev_devPtrInit|proc|180|
+# Конвертер справки .md → .odc: атрибуты разметки, ссылки, запись и чтение .odc.
+Dev_devOdcTest||180|Dev_devOdc
 # Монитор-объект и пропуск в Tasks: флаги, Cond, повторный вход, трап, отмена, Spawn.
 System_devTasksObj|proc|300|
 # Случайные расписания задач: модель буфера, инварианты монитора, сборщик.
