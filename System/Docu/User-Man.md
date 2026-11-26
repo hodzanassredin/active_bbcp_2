@@ -1,6 +1,9 @@
 BlackBox Component Builder
 User Manual
 
+> Это руководство исходного BlackBox Component Builder. В этой ветке часть команд
+> переименована или отсутствует; действующие команды — в меню и в исходниках `Std/Mod`.
+
 
 Contents
 
