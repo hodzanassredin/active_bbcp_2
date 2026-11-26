@@ -318,3 +318,5 @@
 - membership2 сдал (дефект: устаревший ответ воплощения — исправлен барьером свежести fresh/qLast, ADR 0035; модель на RaftJournal 100/2000 зёрен), моя порча «свежесть один раз» поймана. membership влит: 60/60, examples 0, links 0, cluster 3/3.
 
 - 26.11: этап 3 (cryptofix2) принят: мои порчи pathLen `<`→`<=` и игнор критичного расширения пойманы; test 58/58, TLS PASS, примеры 0 расхождений, ссылки 0. Влит в main-obx 4e0c1dc1. Запущен этап 3б crypto-modern (.work/ds/cryptomodern) в active_bb-cryptofix.
+- 26.11: 3б п.1–5 сданы (e40a5d4b..467190a6), test 66/66; моя порча Ed25519 S<L поймана, PSS разделитель 0x01 ВЫЖИЛ → cryptomodern2 (п.0 + TLS п.6–8) запущен; в main-obx не вливал.
+- 27.11: 3б TLS 1.2 (29b9af09..9d523f1e) принят: порча ChaCha nonce поймана test-crypto-tls; SuiteCompatible=TRUE — server-auto-suite ПОВИС (нет таймаута), не упал; чисто: test 66/66, TLS PASS, примеры 0, ссылки 0. Влит в main-obx. Запущен cryptotls13 (TLS 1.3 + таймауты test-crypto-tls).
