@@ -136,7 +136,7 @@ Kernel.Try/Start recovery uses RtlCaptureContext and a restored exception contex
 see the runtime documentation for tests and restrictions. Unwind metadata remains a description of stack
 reconstruction, not an automatic catch handler or foreign-frame cleanup mechanism.
 
-For dynamically loaded OCF modules, [StdLoader AMD64](../../Std/Docu/Loader-x64.md)
+For dynamically loaded OCF modules, [StdLoader AMD64](../../Std/Docu/Loader.md)
 parses UW64 and calls Kernel.RegisterCode. WinKernel registers a persistent
 RUNTIME_FUNCTION table with RtlAddFunctionTable and removes it with
 RtlDeleteFunctionTable before freeing code/table storage. Static LinkPeExe64
