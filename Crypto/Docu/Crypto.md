@@ -2,14 +2,16 @@
 
 `Crypto` is the cryptographic library ported from the ETH Oberon A2 System. It provides hashes,
 message authentication, block and stream ciphers, authenticated encryption, big-number arithmetic,
-Diffie-Hellman, RSA, X25519, X.509 parsing and a TLS 1.2 client. The TLS client is used through
-`CryptoTLSStream`, a `CommStreams` protocol: `Paket` selects it by the name `"CryptoTLSStream"` for
-HTTPS.
+Diffie-Hellman, RSA, X25519, X.509 parsing and TLS 1.3 and 1.2 clients and servers. The TLS client
+is used through `CryptoTLSStream`, a `CommStreams` protocol: `Paket` selects it by the name
+`"CryptoTLSStream"` for HTTPS.
 
-The subsystem has both the TLS 1.2 client and the TLS 1.2 server. The client verifies the server
-certificate chain up to a configured trusted root, the validity period and the server name
-(SAN/CN), and checks the `ServerKeyExchange` signature. The server can request and verify a client
-certificate; this is the basis of the mutual authentication used by cluster nodes.
+The client verifies the server certificate chain up to a configured trusted root, the validity
+period and the server name (SAN/CN), and checks the `ServerKeyExchange` signature in TLS 1.2 or
+the `CertificateVerify` signature over the transcript hash and context string in TLS 1.3. The
+server can request and verify a client certificate; this is the basis of the mutual authentication
+used by cluster nodes. The default policy offers TLS 1.3 and then TLS 1.2 with ECDHE and AEAD; the
+server selects 1.3 when the client offers it.
 
 ## Modules
 
@@ -127,6 +129,38 @@ ECDHE-ECDSA suites.
 
 ## Security
 
+- The TLS 1.3 client and server (RFC 8446) use `TLS_AES_128_GCM_SHA256`,
+  `TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256`. The key schedule is HKDF only:
+  `HKDF-Extract` and `HKDF-Expand-Label` with the labels `derived`, `c hs traffic`,
+  `s hs traffic`, `c ap traffic`, `s ap traffic`, `finished`, `key`, `iv` and `traffic upd`.
+  The schedule hash is SHA-256 or SHA-384 according to the suite. The client sends a `key_share`
+  for X25519 and, after a `HelloRetryRequest`, for secp256r1 or secp384r1; the server accepts a
+  share for any of the three. `supported_versions` lists 1.3 and 1.2.
+- In TLS 1.3 `CertificateVerify` signs 64 spaces, `TLS 1.3, server CertificateVerify` (or
+  `client`), a zero byte and the transcript hash without the `CertificateVerify` itself.
+  `rsa_pss_rsae_sha256/384`, `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384` and `ed25519`
+  are accepted; Ed25519 is verified but not signed. `Finished` is HMAC with the `finished` key
+  over the transcript hash; the client `Finished` covers the transcript including the server
+  `Finished`, and the application secrets do too.
+- `HelloRetryRequest` is recognised by the `SHA-256("HelloRetryRequest")` random. Following
+  RFC 8446 §4.4.1, the transcript replaces ClientHello1 with the synthetic `message_hash`
+  message. The client repeats the `ClientHello` with the same random and session id but a
+  `key_share` for the requested group; a second HRR is rejected. The server uses a supplied
+  `key_share` when it can, otherwise answers with HRR, and on the second `ClientHello` checks
+  that the suite and group did not change.
+- Downgrade signal, RFC 8446 §4.1.3: a server that supports 1.3 but negotiates 1.2 puts
+  `DOWNGRD\x01` in the last 8 bytes of `ServerHello.random` (`\x00` for 1.1 and below). A client
+  that offered 1.3 aborts with `illegal_parameter` when it sees that marker. A missing marker is
+  the normal answer of a server that supports only 1.2.
+- `KeyUpdate` is handled after the handshake: the `traffic upd` secret replaces the read keys,
+  and on `request_update=1` the peer first sends its own `KeyUpdate` under the old keys and then
+  updates its write keys. The record sequence number restarts in every epoch.
+- TLS 1.3 records travel in an outer `application_data`: the plaintext is data || inner type,
+  the nonce is `iv XOR seq`, and the additional data is the outer type, version `0303` and the
+  ciphertext length including the tag. GCM and ChaCha20-Poly1305 tags are compared in constant
+  time.
+- 0-RTT and PSK are not implemented: `pre_shared_key` and `early_data` are not sent or accepted,
+  and `NewSessionTicket` is ignored (the session is not resumed).
 - The TLS 1.2 client and server use ECDHE on X25519, secp256r1 or secp384r1 and AEAD records.
   The default policy offers ECDHE-ECDSA and ECDHE-RSA with AES-128-GCM-SHA256,
   AES-256-GCM-SHA384 and ChaCha20-Poly1305-SHA256 (six suites). CBC, 3DES, RC4, NULL and RSA
@@ -210,11 +244,13 @@ ECDHE-ECDSA suites.
 
 ## Limitations
 
-- TLS 1.3 is not implemented.
-- The TLS 1.2 handshake supports uncompressed points on X25519, secp256r1 and secp384r1; P-521,
-  compressed points and the other named curves are not implemented. The extended master secret,
-  session tickets, secure renegotiation and 0-RTT/PSK are not implemented; an empty
-  `renegotiation_info` is sent and any renegotiation is refused.
+- The TLS 1.2 and 1.3 handshakes support uncompressed points on X25519, secp256r1 and secp384r1;
+  P-521, compressed points and the other named curves are not implemented. The extended master
+  secret, session tickets, secure renegotiation, 0-RTT and PSK are not implemented; in 1.2 an
+  empty `renegotiation_info` is sent and any renegotiation is refused, in 1.3 `NewSessionTicket`
+  is ignored.
+- TLS 1.3 has no 0-RTT, PSK, post-handshake authentication or early data; a client certificate
+  is requested only in the main handshake. The 1.3 server serves RSA and ECDSA certificates.
 - Ed25519 signing is not implemented (verification is). RSA-PSS uses a fixed salt length equal to
   the hash length; other salt lengths are not accepted. The built-in server signs with RSA-PSS or
   ECDSA according to its certificate and does not serve an Ed25519 certificate.
@@ -225,8 +261,8 @@ ECDHE-ECDSA suites.
   exponentiation in `CryptoAosBigNumbers` is data-dependent. This is documented in the security
   review and is acceptable for the cluster threat model; it is not suitable for a shared server
   exposed to a local high-resolution timing attacker.
-- Session resumption and renegotiation are supported only as far as the original A2 code did;
-  the server does not implement TLS 1.3 tickets.
+- TLS 1.2 session resumption and renegotiation are supported only as far as the original A2 code
+  did; TLS 1.3 resumption is not supported and a server `NewSessionTicket` is not stored.
 - A handshake message must fit in one TLS record; fragmentation across records is rejected. The
   server has no handshake timeout, so a silent client holds `Accept`.
 - There is no system CA store. `CryptoTLSStream` uses the default context and therefore rejects
@@ -247,28 +283,40 @@ Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
 `Crypto_devX509Modern`,
-`Crypto_devPKCS1` and `Crypto_devPRF`.
+`Crypto_devPKCS1`, `Crypto_devPRF` and `Crypto_devTLS13`.
 `tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files
 with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies
 them with an independent Python implementation.
 
+`Crypto_devTLS13` checks the TLS 1.3 key schedule against the simple handshake of RFC 8448 byte
+by byte: early/derived/handshake/master secrets, client and server handshake and application
+traffic secrets, record keys and ivs, and the server and client `Finished`. The RFC messages are
+embedded in `Crypto_devTLS13Data` (generated by `Crypto_dev/Vectors/make-tls13-rfc8448.py`; the
+source values are in `Vectors/tls13-rfc8448.txt`). SHA-384, transcript binding of secrets and
+`Finished`, and the separation of the `key` and `iv` labels are checked separately.
+
 The TLS handshake needs a peer process, so it has a separate scenario:
 `tools/test-crypto-tls.sh` creates a CA, an intermediate CA, a `CA:FALSE` issuer, RSA, ECDSA
-P-256 and ECDSA P-384 server certificates, client, expired, wrong-host and expired-root
+P-256/P-384 and Ed25519 server certificates, client, expired, wrong-host and expired-root
 certificates in a temporary directory, runs the client against `openssl s_server -rev` and the
-server against `openssl s_client`, checks the matrix of ECDHE-RSA/ECDHE-ECDSA × AES-128/256-GCM
-and ChaCha20-Poly1305 × x25519/secp256r1/secp384r1 in both directions, checks mutual
-authentication with RSA and ECDSA server certificates, and requires refusal (without a process
-trap) for an untrusted CA, an expired certificate or intermediate root, a wrong name, a
-`CA:FALSE` issuer, a forged `ServerKeyExchange` signature (RSA PKCS#1, RSA-PSS and ECDSA), a bad
-`Finished`, a wrong `ChangeCipherSpec`, a corrupted AES-GCM or ChaCha20-Poly1305 tag, a group the
-client did not offer, a secp256r1 point outside the curve, an oversized signature length, a bad
-certificate length, an impossible extension length, a missing `ServerKeyExchange`, a zero X25519
-public key, an SSLv2 `ClientHello` and an unknown handshake type. `tools/crypto_tls_lib.py`,
-`crypto_tls_fake.py` and `crypto_tls_client.py` are the Python peers used for the cases that need
-a correct handshake transcript: bad `Finished`, bad `ChangeCipherSpec`, corrupted record tag,
-zero X25519 point and a bad or good `CertificateVerify`. `Crypto_devTLS` and
-`Crypto_devTLSServer` are not in `tools/tests.txt`, because without a peer they cannot run.
+server against `openssl s_client`, and checks the TLS 1.3 matrices (three suites × three client
+groups with HRR and three server groups × RSA/ECDSA certificates, Ed25519 `CertificateVerify`)
+and the TLS 1.2 matrix of ECDHE-RSA/ECDHE-ECDSA × AES-128/256-GCM and ChaCha20-Poly1305 ×
+x25519/secp256r1/secp384r1 in both directions. It checks mutual authentication with RSA and
+ECDSA server certificates and requires refusal (without a process trap) for an untrusted CA, an
+expired certificate or intermediate root, a wrong name, a `CA:FALSE` issuer, a forged
+`ServerKeyExchange` signature (RSA PKCS#1, RSA-PSS and ECDSA), a bad `Finished`, a wrong
+`ChangeCipherSpec`, a corrupted AES-GCM or ChaCha20-Poly1305 tag, a group the client did not
+offer, a secp256r1 point outside the curve, an oversized signature length, a bad certificate
+length, an impossible extension length, a missing `ServerKeyExchange`, a zero X25519 public key,
+an SSLv2 `ClientHello` and an unknown handshake type. For TLS 1.3 it also covers `KeyUpdate`,
+`HelloRetryRequest` (including a repeated HRR), a `CertificateVerify` with the wrong context, a
+corrupted `Finished`, keys derived from a corrupted transcript, and the `DOWNGRD` marker in a 1.2
+answer. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py`, `crypto_tls13_fake.py` and
+`crypto_tls_client.py` are the Python peers used for the cases that need a correct handshake
+transcript: bad `Finished`, bad `ChangeCipherSpec`, corrupted record tag, zero X25519 point, a
+bad or good `CertificateVerify`, `KeyUpdate` and HRR. `Crypto_devTLS` and `Crypto_devTLSServer`
+are not in `tools/tests.txt`, because without a peer they cannot run.
 
 
 ### Public hosts (manual, network)
@@ -276,19 +324,20 @@ zero X25519 point and a bad or good `CertificateVerify`. `Crypto_devTLS` and
 `tools/test-crypto-hosts.sh` (not in `tools/test.sh`) compiles `Crypto_devHosts`, loads the system
 CA bundle (`/etc/ssl/certs/ca-certificates.crt` by default), connects to a list of public HTTPS
 hosts and sends `GET / HTTP/1.0`. For each host it prints the negotiated version, cipher suite,
-ECDHE group, handshake signature scheme and the first response line. The run of 2026-11-26
-connected to all eight hosts over TLS 1.2:
+ECDHE group, handshake signature scheme and the first response line. The run of 2026-11-27
+connected to all eight hosts over TLS 1.3; microsoft.com requested secp256r1 with
+`HelloRetryRequest` because the client's first share is x25519:
 
-| Host | Suite | Group | Signature |
-|---|---|---|---|
-| google.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| cloudflare.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| github.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| letsencrypt.org | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| wikipedia.org | ECDHE-ECDSA-AES256-GCM-SHA384 | x25519 | ecdsa_secp256r1_sha256 |
-| microsoft.com | ECDHE-RSA-AES256-GCM-SHA384 | secp256r1 | rsa_pss_rsae_sha256 |
-| apple.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| amazon.com | ECDHE-RSA-AES128-GCM-SHA256 | x25519 | rsa_pss_rsae_sha256 |
+| Host | Version | Suite | Group | Signature |
+|---|---|---|---|---|
+| google.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| cloudflare.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| github.com | TLS 1.3 | TLS_AES_128_GCM_SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| letsencrypt.org | TLS 1.3 | TLS_AES_128_GCM_SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| wikipedia.org | TLS 1.3 | TLS_AES_128_GCM_SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| microsoft.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | secp256r1 | rsa_pss_rsae_sha256 |
+| apple.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| amazon.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | rsa_pss_rsae_sha256 |
 
 The run exposed and fixed the following: `sha384WithRSAEncryption`/`sha512WithRSAEncryption`
 certificate signatures were rejected; PKCS#1 DigestInfo knew only MD5/SHA-1/SHA-256, so SHA-384

@@ -30,7 +30,10 @@ MODULE Crypto_devHosts;
 	PROCEDURE SuiteName (suite : INTEGER; VAR name : ARRAY OF CHAR);
 	BEGIN
 		CASE suite OF
-			0C02BH : name := "ECDHE-ECDSA-AES128-GCM-SHA256"
+			1301H : name := "TLS_AES_128_GCM_SHA256"
+		|       1302H : name := "TLS_AES_256_GCM_SHA384"
+		|       1303H : name := "TLS_CHACHA20_POLY1305_SHA256"
+		|       0C02BH : name := "ECDHE-ECDSA-AES128-GCM-SHA256"
 		|       0C02CH : name := "ECDHE-ECDSA-AES256-GCM-SHA384"
 		|       0C02FH : name := "ECDHE-RSA-AES128-GCM-SHA256"
 		|       0C030H : name := "ECDHE-RSA-AES256-GCM-SHA384"

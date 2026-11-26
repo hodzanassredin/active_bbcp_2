@@ -51,14 +51,18 @@ MODULE Crypto_devPRF;
 		VAR suites : ARRAY 20 OF AO.SIGNED32; n : AO.SIZE;
 	BEGIN
 		TLS.DefaultSuites(suites, n);
-		UnitAssert.EqualInt(6, n, "six default suites");
-		IF n >= 6 THEN
-			UnitAssert.EqualInt(0C02CH, suites[0], "default 1: ECDHE-ECDSA-AES256-GCM-SHA384");
-			UnitAssert.EqualInt(0C030H, suites[1], "default 2: ECDHE-RSA-AES256-GCM-SHA384");
-			UnitAssert.EqualInt(0CCA9H, suites[2], "default 3: ECDHE-ECDSA-CHACHA20-POLY1305-SHA256");
-			UnitAssert.EqualInt(0CCA8H, suites[3], "default 4: ECDHE-RSA-CHACHA20-POLY1305-SHA256");
-			UnitAssert.EqualInt(0C02BH, suites[4], "default 5: ECDHE-ECDSA-AES128-GCM-SHA256");
-			UnitAssert.EqualInt(0C02FH, suites[5], "default 6: ECDHE-RSA-AES128-GCM-SHA256")
+		UnitAssert.EqualInt(9, n, "nine default suites");
+		IF n >= 9 THEN
+			(* TLS 1.3 идёт первой, затем ECDHE+AEAD TLS 1.2. *)
+			UnitAssert.EqualInt(1302H, suites[0], "default 1: TLS_AES_256_GCM_SHA384");
+			UnitAssert.EqualInt(1303H, suites[1], "default 2: TLS_CHACHA20_POLY1305_SHA256");
+			UnitAssert.EqualInt(1301H, suites[2], "default 3: TLS_AES_128_GCM_SHA256");
+			UnitAssert.EqualInt(0C02CH, suites[3], "default 4: ECDHE-ECDSA-AES256-GCM-SHA384");
+			UnitAssert.EqualInt(0C030H, suites[4], "default 5: ECDHE-RSA-AES256-GCM-SHA384");
+			UnitAssert.EqualInt(0CCA9H, suites[5], "default 6: ECDHE-ECDSA-CHACHA20-POLY1305-SHA256");
+			UnitAssert.EqualInt(0CCA8H, suites[6], "default 7: ECDHE-RSA-CHACHA20-POLY1305-SHA256");
+			UnitAssert.EqualInt(0C02BH, suites[7], "default 8: ECDHE-ECDSA-AES128-GCM-SHA256");
+			UnitAssert.EqualInt(0C02FH, suites[8], "default 9: ECDHE-RSA-AES128-GCM-SHA256")
 		END
 	END TestDefaults;
 

@@ -1,8 +1,8 @@
-# Crypto64 — обзор безопасности (2026-11-26)
+# Crypto64 — обзор безопасности (2026-11-27)
 
 Объект: `Crypto` (порт bbext/Crypto64). Метод: чтение исходников, эталонные векторы,
 отрицательные тесты и прогоны против `openssl` в обе стороны, порча кода под новые
-тесты. Исходный обзор от 2026-08-19 сохранён по смыслу: ниже по каждой находке указано,
+тесты. Обзор дополнен TLS 1.3 (клиент и сервер, RFC 8446/8448). Исходный обзор от 2026-08-19 сохранён по смыслу: ниже по каждой находке указано,
 что сделано, каким тестом это покрыто и что осталось.
 
 Векторы лежат файлами в `Crypto_dev/Vectors` с источником и лицензией; независимая
@@ -29,6 +29,8 @@
 | Ed25519 (проверка) | сделано | `crypto-fix` | `Crypto_devEd25519`, RFC 8032, Wycheproof, `Vectors/check.py` |
 | X.509: ECDSA, RSA-PSS, Ed25519, смешанные цепочки | сделано | `crypto-fix` | `Crypto_devX509Modern`, `Crypto_devX509` |
 | TLS 1.2: ECDHE-ECDSA/RSA, AES-128/256-GCM, ChaCha20-Poly1305, x25519/secp256r1/secp384r1, PSS/ECDSA | сделано | `crypto-fix` | `tools/test-crypto-tls.sh` (матрица 30 пар в обе стороны), `Crypto_devTLS`, `Crypto_devTLSServer` |
+| TLS 1.3: ключевое расписание HKDF, HRR, EE/Cert/CV/Finished, KeyUpdate, сигнал понижения, три набора | сделано | `crypto-fix` | `Crypto_devTLS13` (RFC 8448 побайтно), `tools/test-crypto-tls.sh` (матрица 1.3 в обе стороны, HRR, KeyUpdate, отказы), `crypto_tls13_fake.py` |
+| TLS 1.3: версия и набор по умолчанию (1.3, затем 1.2 ECDHE-AEAD) | сделано | `crypto-fix` | матрица `test-crypto-tls.sh`, ручной прогон хостов |
 | Публичные HTTPS-хосты | сделано, 8/8 | `crypto-fix` | `tools/test-crypto-hosts.sh` (ручной), исправления sha384/512 RSA, SameAnchor, SAN, PEM-набора — см. раздел ниже |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
@@ -257,14 +259,73 @@ ECDSA-сертификата — группу, равную кривой сер�
 | `X509.ReadPemEcPrivateKey`: выравнивание скаляра | слева → справа | эквивалентна: openssl пишет скаляр ровно `4n` байт, ветка дополнения на этих векторах не срабатывает |
 | `CryptoPSS.Encode`: буферы `db`/`dbMask` | `MaxModulusBytes` → `2*MaxHash+8` | поймана: `TestSign2048` трапом |
 
+## TLS 1.3: КЛИЕНТ И СЕРВЕР (ЭТАП 3б, П. 7)
+
+Клиент и сервер TLS 1.3 работают с `TLS_AES_128_GCM_SHA256`,
+`TLS_AES_256_GCM_SHA384` и `TLS_CHACHA20_POLY1305_SHA256`; ключевое расписание
+построено только на HKDF (`Extract`, `Expand-Label`, `Derive-Secret`). Клиент
+шлёт `key_share` для x25519, а после `HelloRetryRequest` — для secp256r1 или
+secp384r1; сервер выбирает группу из присланного `key_share`, иначе отвечает
+`HelloRetryRequest`. Клиент повторяет
+`ClientHello` с тем же random и legacy_session_id; по RFC 8446 §4.4.1 первый
+`ClientHello` заменяется в транскрипте синтетическим `message_hash`, иначе
+`Finished` не сходится с OpenSSL. `EncryptedExtensions`, `Certificate`,
+`CertificateVerify` и `Finished` идут под handshake-ключами; application-секреты
+снимаются с транскрипта вместе с серверным `Finished`. `CertificateVerify`
+подписывает 64 пробела, контекстную строку `TLS 1.3, server CertificateVerify`
+(или `client`), ноль и хеш транскрипта без самого сообщения. Принимаются
+`rsa_pss_rsae_sha256/384`, `ecdsa_secp256r1_sha256`,
+`ecdsa_secp384r1_sha384` и `ed25519` (только проверка). `KeyUpdate` обновляет
+секрет `traffic upd` и номер записи; на `request_update=1` ответ уходит под
+старыми ключами. Сервер, умеющий 1.3, но согласовавший 1.2, ставит `DOWNGRD\x01`
+в конец `ServerHello.random`; клиент, предлагавший 1.3, отвергает такую метку,
+но принимает её отсутствие (сервер, умеющий только 1.2). 0-RTT и PSK не
+реализованы; `NewSessionTicket` игнорируется.
+
+Порчи (каждая — отдельный прогон; проверка — сценарий
+`tools/test-crypto-tls.sh` или `Crypto_devTLS13`):
+
+| Место | Порча | Результат |
+|---|---|---|
+| `HKDFExpandLabel`: префикс `"tls13 "` | первый байт `74` → `00` | поймана: `Crypto_devTLS13` (5 проверок красных) |
+| `HKDFExpandLabel`: длина label в info | `6 + labelLen` → `labelLen` | поймана: `Crypto_devTLS13` |
+| `DeriveHandshakeSecrets13`: контекст `derived` | `SHA(empty)` → пустая строка | поймана: клиент 1.3 с openssl |
+| `TLS13HashName`: SHA-256 | `'2'` → `'3'` (`CryptoSHA356`) | поймана: клиент с `TLS_AES_128_GCM_SHA256` |
+| `ReplaceClientHelloWithHash13`: тип сообщения | `0xFE` → `0x01` | поймана: HRR против openssl (`-groups secp256r1`) |
+| `ReceiveCertificateVerify13`: контекст | `server` → `client` | поймана: клиент 1.3 с openssl |
+| `ReceiveCertificateVerify13`: проверка подписи | `IF ~TLSVerify(...)` → `IF FALSE` | поймана: `fake13-badcv` |
+| `ReceiveFinished` (1.3): сравнение `verify_data` | `IF ~EqualBytesCT(...)` → `IF FALSE` | поймана: `fake13-badfinished` |
+| `ReceiveFinished` (1.3): базовый секрет | `serverHsSecret` → `clientHsSecret` | поймана: клиент 1.3 с openssl |
+| `ReceiveServerHello`: группа из HRR | `ksGroup` → `GroupX25519` | поймана: HRR против openssl |
+| `SendClientHello`: `key_share` после HRR | всегда `GroupX25519` | поймана: HRR против openssl |
+| `HasDowngradeSentinel` | `RETURN FALSE` | поймана: `fake-downgrade` |
+| `ReceiveServerHello`: проверка метки | отвергать любой 1.2 | поймана: клиент 1.2 против openssl |
+| `SendServerHello`: последний байт метки | `01` → `00` | поймана: `server sentinel` (разбор `ServerHello.random`) |
+| `ReceiveKeyUpdate`: обновление read-секрета | вызов убран | поймана: `fake13-keyupdate` |
+| `ReceiveKeyUpdate`: порядок | ключи записи обновляются до ответа | поймана: `fake13-keyupdate` (ответ под старыми ключами) |
+| `BuildNonce13`: XOR с номером записи | убран | поймана: клиент 1.3 (первая же запись) |
+| `BuildAAD13`: длина | ciphertext+tag → plaintext | поймана: клиент 1.3 |
+| `ReceiveHandshake`: транскрипт | пропуск `Certificate` | поймана: клиент 1.3 (CertificateVerify) |
+| `TranscriptHash13`: длина | `transcriptLen` → `transcriptLen - 1` | поймана: клиент 1.3 |
+| `TLS13FinishedFromHash`: вход HMAC | `digestLen` → `digestLen - 1` | поймана: клиент 1.3 |
+| `SendCertificateVerify13`: контекст сервера | `server` → `client` | поймана: сервер 1.3 (openssl отвергает подпись) |
+
+Механизмы: ключевое расписание — 4 порчи, транскрипт — 3, `CertificateVerify`
+(контекстная строка и проверка) — 3, `Finished` — 3, HRR — 3, сигнал понижения
+(клиент и сервер) — 3, записи — 2, `KeyUpdate` — 2. Все 22 красные на целевых
+прогонах: `Crypto_devTLS13`, `Crypto_devTLS`/`Crypto_devTLSServer` против openssl
+и `tools/crypto_tls13_fake.py`.
+
 ## ПУБЛИЧНЫЕ ХОСТЫ (ЭТАП 3б, П. 6)
 
 `tools/test-crypto-hosts.sh` (ручной, нужна сеть) соединяется нашим клиентом с восемью
 публичными HTTPS-хостами, грузит системный набор CA и печатает версию, набор, группу и
-подпись. Прогон 26.11.2026: 8/8 по TLS 1.2 (google, cloudflare, github, letsencrypt,
-wikipedia, microsoft, apple, amazon; наборы ECDHE-ECDSA/RSA с AES-128/256-GCM и
-ChaCha20-Poly1305, группы x25519 и secp256r1, подписи ECDSA P-256 и RSA-PSS SHA-256).
-Прогон нашёл шесть дефектов, все исправлены:
+подпись. Прогон 27.11.2026: 8/8 по TLS 1.3 (google, cloudflare, github, letsencrypt,
+wikipedia, microsoft, apple, amazon). Наборы TLS_AES_256_GCM_SHA384 и
+TLS_AES_128_GCM_SHA256, группы x25519 и secp256r1; microsoft.com запросил secp256r1
+через `HelloRetryRequest` (первая доля клиента — x25519). Подписи —
+ecdsa_secp256r1_sha256 и rsa_pss_rsae_sha256. Прогон 26.11.2026 по TLS 1.2 нашёл шесть
+дефектов X.509/PKCS#1, все исправлены:
 
 - не поддерживались OID `sha384WithRSAEncryption` и `sha512WithRSAEncryption` в
   `AlgorithmIdentifier` сертификата;
@@ -306,6 +367,18 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 Механизмы SHA-384/512, HKDF, P-256/P-384, ChaCha20-Poly1305, RSA-PSS,
 Ed25519 и новые подписи X.509 проверены 67 порчами: 63 красных,
 4 перечислены как эквивалентные на выбранных векторах с причиной.
+
+TLS 1.3 проверен 22 порчами (таблица выше): все 22 красные на целевых
+прогонах — `Crypto_devTLS13` для расписания, `Crypto_devTLS`/
+`Crypto_devTLSServer` против openssl для рукопожатия и HRR,
+`crypto_tls13_fake.py` для `KeyUpdate`, чужого контекста
+`CertificateVerify`, испорченного `Finished` и ключей. Первый проход
+нашёл три выжившие: цель `hash-name-256` шла с набором SHA-384 (добавлен
+явный `-ciphersuites TLS_AES_128_GCM_SHA256`), порча `downgrade-always`
+меняла недостижимую ветку (перенесена на условие вызова), а
+`keyupdate-order` не проверялся, потому что фейк не читал ответный
+`KeyUpdate` (фейк усилен: ответ обязан прийти под старыми ключами).
+После этого красные все 22.
 
 ### Приёмка пунктов 1–5: структура EMSA-PSS
 
@@ -461,7 +534,9 @@ EM собирается с одним дефектом и подписывает
 
 ## ЧТО ОСТАЛОСЬ
 
-- TLS 1.3 не реализован; это следующий шаг (сначала клиент, затем сервер).
+- TLS 1.3: нет 0-RTT, PSK, post-handshake authentication и ранних данных;
+  `NewSessionTicket` игнорируется, возобновления нет. Сервер 1.3 подписывает
+  RSA-PSS и ECDSA, Ed25519 только проверяется (исходящей подписи нет).
 - `CryptoAosBigNumbers.NewRand` не сообщает об отказе `/dev/urandom`: у `NewPrime`
   и `NewRandRange` нет пути ошибки. На Linux источник есть всегда; чтобы убрать
   остаток, нужно менять сигнатуры `CryptoPrimes`/`CryptoRSA` и проверять `NIL`

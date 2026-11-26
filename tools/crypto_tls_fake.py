@@ -97,6 +97,9 @@ def serve_handshake(conn, mode, cert_path, key_path):
     _, client_random, _ = L.parse_client_hello(client_hs[4:])
 
     server_random = os.urandom(32)
+    if mode == "downgrade":
+        # Сигнал понижения RFC 8446, 4.1.3: сервер умеет 1.3, но ответил 1.2.
+        server_random = os.urandom(24) + b"DOWNGRD\x01"
     version = b"\x03\x02" if mode == "oldversion" else L.VERSION
     is_chacha = mode == "badtagchacha"
     suite = L.SUITE_CHACHA if is_chacha else L.SUITE
@@ -259,7 +262,7 @@ def serve(mode, port, cert_path, key_path=None):
     conn, _ = srv.accept()
     conn.settimeout(15)
     try:
-        if mode in ("goodfinished", "badfinished", "badccs", "badtag", "shortrec", "oldversion", "longfinished", "longccs", "zeropub", "badcurve", "badpoint", "badpss", "badecdsa", "badpss", "badtagchacha"):
+        if mode in ("goodfinished", "badfinished", "badccs", "badtag", "shortrec", "oldversion", "longfinished", "longccs", "zeropub", "badcurve", "badpoint", "badpss", "badecdsa", "badpss", "badtagchacha", "downgrade"):
             serve_handshake(conn, mode, cert_path, key_path)
             return 0
         # ClientHello
