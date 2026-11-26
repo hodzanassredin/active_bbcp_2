@@ -59,10 +59,13 @@ MODULE Raft_devBench;
 	END Drain;
 
 	PROCEDURE Start (i: INTEGER; seed: LONGINT);
-		VAR t, v, si, st, last, res: INTEGER; snap: Core.Bytes; log: Core.Entries;
+		VAR t, v, cm, si, st, last, res: INTEGER; snap: Core.Bytes; log: Core.Entries;
+			voters, learners: SET; hasConf: BOOLEAN;
 	BEGIN
-		disk[i].Load(t, v, si, st, snap, log, last, res);
-		nodes[i] := Core.New(i, n, seed, 10, t, v, si, st, snap, log, last)
+		disk[i].Load(t, v, cm, si, st, snap, log, last, res, voters, learners, hasConf);
+		nodes[i] := Core.New(i, n, seed, 10, t, v, si, st, snap, log, last);
+		IF hasConf THEN Core.SetConfig(nodes[i], voters, learners) END;
+		Core.SetCommit(nodes[i], cm)
 	END Start;
 
 	PROCEDURE Leader (): INTEGER;
