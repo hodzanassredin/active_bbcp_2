@@ -260,9 +260,15 @@ catches up and becomes a voter after the leader sees its `match` reach `commit`.
 `kill -9` of the leader, renew, leave), the driver's configuration commands, four state-machine mutations and three mutations of the driver's configuration path.
 `Raft_devGrain` runs two grains whose members come from the service: a key moves on leave and on node
 loss, and twelve seeds cover a partition of the service minority, a lost owner and a leaving owner; each
-operation is applied once. The process scenario `tools/test-cluster.sh --only membership` starts five
+operation is applied once. A participant whose lease expired is not alive for the others and does not
+keep its keys: the deposit goes to a live owner (`TestExpiredLease`), and the bridge mutation
+`mutAllAlive` — every entry of the list is taken as alive — makes the deposit wait for the dead owner
+(`TestMutAllAlive`); the service mutation `mutNoExpire`, which ignores the lease, leaves the dead
+owner alive (`TestMutNoExpire`). The process scenario `tools/test-cluster.sh --only membership` starts five
 service processes, brings two of them into the voters, starts a fourth participant, removes and kills a member, kills the
-service leader and checks that deposits are applied once.
+service leader and checks that deposits are applied once; when the key of the driver's own node remains
+the driver's after the leave, the driver takes a key owned by another participant and rebuilds the
+address for it, so the killed owner is the owner of the address that the later deposits use.
 
 ## Testing
 
@@ -339,6 +345,26 @@ long one is `Raft_devPersist.Long` (2000 seeds of 3000 steps and the mutation se
 caught: `RaftJournal.mutNoWait` on seed 1, `ActorPersist.mutNoStash` on seed 1,
 `RaftJournal.mutNoExpected` on seed 8.
 
+`Raft_devGrainJournal` joins the two: virtual actors on `RaftJournal` under `ActorSim` with the
+membership service. Three journal nodes and three service nodes share one `ActorNetMem`; three
+participants take the list from the service and write through their own `RaftJournal.Client`. Each
+key has a writer (operations in order; an unconfirmed operation is repeated with the same number) and
+a reader (the answer is compared with the last confirmed write). The reference is the same journal
+machine applied to the decided Raft entries in index order. Invariants at every step and at the end:
+each operation is recorded once; the confirmed writes of a key form one chain (`prev` is the previous
+number); no answer is older than the last confirmed write — an activation asks the journal for the
+last number (`SubmitLast`) and catches up before writing or answering; the balance of a key is the
+sum of its events. The faults are frame loss, duplicates and delay, crashes of journal, service and
+participants, a minority partition of the journal or the service, the owner cut off from the service,
+a participant joining and leaving; the seed run is followed by a repair and the operations finish.
+The normal run is 100 seeds (about 24 s), the long one is `Raft_devGrainJournal.Long` (2000 seeds).
+Mutations caught: `RaftJournal.mutNoWait` (an answer before the majority), `RaftJournal.mutNoExpected`
+(a write without the number check), `ActorPersist.mutKeepOnConflict` (a conflicting write confirmed
+and applied), `RaftNode.mutLocalQuery` (a read from a follower without `ReadIndex`),
+`ActorPersist.mutNoFresh` (no freshness check before a letter) and `ActorPersist.mutNoCatchUp`
+(the stream is seen ahead, but the activation does not read it). The first one is caught in the seed
+run, the others in the scripted `SplitBody`, `StaleBody` and `BehindBody` scenarios.
+
 `Raft_devJournal` tests `RaftJournal` on the `ActorRun` pool in real time: a persistent counter writes and
 recovers from the Raft journal, the leader's death loses nothing confirmed, and a leader cut off from the
 majority does not confirm a write (Append returns through the new leader once the entry is on a
@@ -379,9 +405,10 @@ measured.
   `kill -9` of the leader, restart with the same storage, addition and removal of servers, `kill -9`
   of a member and of the leader). A process run does not partition the network; partitions are checked
   in the model.
-- The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`; `ActorGrain` is tested on
-  it only in the process scenario of `tools/test-cluster.sh`, without partitions. The journal state
-  machine's snapshot is all accepted commands in a row; there is no separate truncation for it.
+- The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`. `ActorGrain` runs on it
+  under `ActorSim` with partitions and crashes (`Raft_devGrainJournal`) and in the process scenario of
+  `tools/test-cluster.sh`. The journal state machine's snapshot is all accepted commands in a row;
+  there is no separate truncation for it.
 - The driver accepts membership commands and peer capabilities. `Config.n` is the initial number of
   voters; peers up to `RaftCore.maxNodes` can be given. The list of application members with addresses
   and open keys is a state machine of a separate Raft cluster, not Raft's own configuration. The key is
@@ -416,7 +443,10 @@ fields `id`, `n`, `term`, `vote`, `role`, `leader`, `last`, `commit`, `applied`,
 `RaftGrainMembership`: `NewConfig`, `Start`, `Tick`, `Leave`, `Status`, `Errors`, `time`, mutations
 `mutIgnoreList`, `mutAllAlive`, `mutNoJoin`, `mutNoRenew`.
 `RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`tickMs`, `timeoutMs`, `giveUpMs`,
-`timeoutTicks`, `giveUpTicks`, `Close`), `Tick(c)`, mutations `mutNoWait`, `mutNoExpected`.
+`timeoutTicks`, `giveUpTicks`, `SubmitLast`, `Close`), `Tick(c)`, mutations `mutNoWait`,
+`mutNoExpected`, and `RaftNode.mutLocalQuery` answers a query from a follower without `ReadIndex`.
+`RaftNode.Config.tracer` is the per-node observer of applied entries (`RaftNode.tracer` stays the
+common one).
 `RaftSm.StateMachine.Query` is the read for `RaftNode.Query`.
 
 `RaftNode.Status(cfg; OUT role, term, leader, last, lastTerm, commit, applied: INTEGER; OUT broken: BOOLEAN)`

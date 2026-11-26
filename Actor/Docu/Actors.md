@@ -527,6 +527,15 @@ bypassing `Props.capacity`: a full mailbox does not lose it. Stashed letters cou
 mailbox limit, so while the actor waits for an answer it holds at most `capacity` letters, and the
 extra ones become dead at once (`Actor_devBounded`).
 
+**Freshness before a letter.** An activation of a virtual actor (`fresh`, section 11) answers only
+from a state that is not older than the confirmed journal. Before handling a letter it asks the
+journal for the last number of its stream (`SubmitLast`); if the stream is ahead, it reads the
+missing events (`Replay`) while the letter waits in the stash. With `RaftJournal` that question goes
+through `ReadIndex`, so an activation cut off from the journal majority stops with `storeTrap`
+instead of answering a stale state. The price is one journal request per letter. The rule holds for
+every answer, including the answer to a repeated command, so a client never sees less than the last
+confirmed write of the key.
+
 Event versions. `Stores.Writer.WriteStore` writes the frame: the type name, then the fields from
 `Externalize`. The type reads its version number with `ReadVersion(min, max, v)` and parses the
 fields by `v`. A new field is a new version: `max` grows, old frames are read with the old layout,
@@ -768,17 +777,26 @@ the driver gives it, on a live node a `Services` action.
 lost; the client repeats it with the same operation number.
 
 **One activation without consensus.** If the network splits, each node may consider itself the owner
-and bring up its own activation of a key. Only one of them can write: an event is written with a
-number check (`Append` with the expected `seq`), the second activation gets `conflict` and stops
-(`ActorPersist.conflictTrap`), and the next letter brings it up with the other's event already in
-(`TestSplitBrainOneWriter`). Before writing, the second activation may read stale state. A replicated
-log is the `Raft` subsystem (`Raft/Docu/Raft.md`, decision record 0025); an `ActorPersist` journal on top
-of it is `RaftJournal` (example `ObxRaft1`); `ActorGrain` was not tested on it, and the limit stays.
+and bring up its own activation of a key. Before writing, an activation of a virtual actor compares
+its state with the last event of the stream (`SubmitLast`) and catches up (`Replay`), so two copies
+write one after the other instead of past each other. A write that still arrives with an old number
+gets `conflict`: it is not applied and the activation stops (`ActorPersist.conflictTrap`), and the
+next letter brings it up with the other's event already in (`TestSplitBrainOneWriter`). A replicated
+log is the `Raft` subsystem (`Raft/Docu/Raft.md`, decision record 0025); an `ActorPersist` journal on
+top of it is `RaftJournal` (example `ObxRaft1`). `Raft_devGrainJournal` runs virtual actors on
+`RaftJournal` under `ActorSim`: a journal cluster of three nodes, a membership service of three
+nodes, network splits, crashes of nodes of both clusters and changes of the membership list. It
+checks on every step and at the end that every operation is executed once, that the confirmed writes
+of a key form one chain (`prev` is the previous number), that no answer is older than the last
+confirmed write and that the sum is conserved. The read barrier is decision record 0035.
 
 `TestSeeds` runs 100 seeds: three nodes, five keys, twenty operations; the network loses and
 duplicates frames, nodes crash and come back, and the client repeats unacknowledged operations.
 Every operation is executed exactly once, and a rerun of a seed matches step by step; 2000 seeds are
-`Actor_devGrain.Long`.
+`Actor_devGrain.Long`. The same properties on `RaftJournal` are `Raft_devGrainJournal.TestSeeds`
+(100 seeds, three keys, four deposits and four reads per key, network splits, crashes of the journal,
+the service and the participants, a participant joining and leaving); the long run is
+`Raft_devGrainJournal.Long` (2000 seeds).
 
 Example: `ObxActor8`, an account on two nodes: access by number, a node crash, continuation on the
 other node.
@@ -1223,12 +1241,14 @@ DEFINITION ActorJournal;
 				IN body: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
 			(j: Journal) SubmitSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
 				IN data: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) SubmitLast (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE;
 			(j: Journal) Replay (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE
 		END;
 
 		Request = POINTER TO ABSTRACT RECORD (Sink)
 			(r: Request) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, EXTENSIBLE;
 			(r: Request) Snapshot (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
+			(r: Request) Last (seq: LONGINT), NEW, EMPTY;
 			(r: Request) Done (res: INTEGER), NEW, ABSTRACT
 		END;
 
@@ -1246,12 +1266,13 @@ A journal is a set of streams; a stream is events numbered 1, 2, 3 … without g
 `conflict`, the expected number does not match; `absent`, there is no snapshot; `failed`, an
 environment error; `corrupt`, the data cannot be read.
 
-`Submit`, `SubmitSnapshot` and `Replay` are the same `Append`, `SaveSnapshot` and reading of the
-snapshot with its events, but the result goes to the request `r` by `Done(res)` — exactly once, inside
-the call or later, from another context; `Replay` gives the snapshot to `r.Snapshot` and the events to
-`r.Event` before `Done`. By default they call the synchronous methods and answer at once, so a
-synchronous journal does not redefine them; a journal that answers later (`RaftJournal.Client`) does.
-Pre: `r # NIL` — trap 23 (`Replay`: 20).
+`Submit`, `SubmitSnapshot`, `SubmitLast` and `Replay` are the same `Append`, `SaveSnapshot`, `Last`
+and reading of the snapshot with its events, but the result goes to the request `r` by `Done(res)` —
+exactly once, inside the call or later, from another context; `Replay` gives the snapshot to
+`r.Snapshot` and the events to `r.Event` before `Done`, `SubmitLast` gives the number to `r.Last`. By
+default they call the synchronous methods and answer at once, so a synchronous journal does not
+redefine them; a journal that answers later (`RaftJournal.Client`) does. Pre: `r # NIL` — trap 23
+(`Replay`: 20).
 
 `Meta` is the event metadata: the number `seq`, the write time `time` (UTC, `YYYYMMDDhhmmss`), the
 cause `cause`, the author `author`. The journal keeps them apart from the body and returns them
@@ -1342,7 +1363,7 @@ DEFINITION ActorPersist;
 
 	CONST
 		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
-		mutNoStash = 0;
+		mutNoStash = 0; mutNoFresh = 1; mutKeepOnConflict = 2; mutNoCatchUp = 3;
 
 	TYPE
 		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
@@ -1353,6 +1374,7 @@ DEFINITION ActorPersist;
 
 		Actor = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
 			seq-: LONGINT;
+			fresh: BOOLEAN;
 			snapEvery: INTEGER;
 			journal: ActorJournal.Journal;
 			stream: ActorCore.Name;
@@ -1383,7 +1405,9 @@ END ActorPersist.
 The stream of an actor is `stream` or, when it is empty, the mailbox name (`c.name`); virtual actors
 set `stream` so that the stream does not depend on the node (section 11). `journal = NIL` means `ActorJournal.dir`. `seq` is the
 number of the last applied event. `snapEvery > 0` takes a snapshot after each event whose number is
-a multiple of `snapEvery`; 0 only on `SaveSnapshot`.
+a multiple of `snapEvery`; 0 only on `SaveSnapshot`. `fresh = TRUE` makes the actor compare `seq`
+with the last number of its stream before every user message (`SubmitLast`) and read the missing
+events; the reply thus cannot be older than the last confirmed write. Virtual actors set it.
 
 **PROCEDURE (a: Actor) Apply (e: Event)**
 Post: the state of `a` is changed by event `e`. No messages, no writes, no traps.
@@ -1398,7 +1422,9 @@ message whose handler wrote `e`. Reply to the command here; `Persist` may be cal
 **PROCEDURE (a: Actor) Busy (): BOOLEAN**
 Post: recovery or a write without the journal's answer is in progress — user messages are stashed.
 
-`mutations` (`mutNoStash`: a message arriving during a write is handled at once) is for tests only.
+`mutations` is for tests only: `mutNoStash` handles a message arriving during a write at once,
+`mutNoFresh` skips the freshness check, `mutNoCatchUp` sees the stream ahead but does not read the
+missing events, `mutKeepOnConflict` applies and confirms an event whose number did not match.
 
 **PROCEDURE (a: Actor) Snapshot (): Stores.Store**
 Post: the object whose frame is the snapshot of the state. By default the actor itself (its

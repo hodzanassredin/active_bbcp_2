@@ -53,6 +53,7 @@ MODULE RaftNode;
 		mutEarlyReply* = 1;	(** ответить клиенту сразу, до фиксации *)
 		mutConfIgnore* = 2;	(** письма confAdd/confRemove не меняют состав *)
 		mutPeerStale* = 3;	(** письмо confPeer не дописывает пропуск *)
+		mutLocalQuery* = 4;	(** Query отвечает любой узел по своей копии, без ReadIndex *)
 		(** вид письма Conf *)
 		confPeer* = 0;	(** дописать пропуск узла id *)
 		confAdd* = 1;	(** ввести узел id в состав (учеником, затем избирателем) *)
@@ -63,6 +64,8 @@ MODULE RaftNode;
 
 	TYPE
 		Bytes* = Core.Bytes;
+		(** Наблюдатель для тестов: применённые записи. *)
+		Tracer* = POINTER TO ABSTRACT RECORD END;
 		Config* = POINTER TO ConfigDesc;
 		Caps* = ARRAY Core.maxNodes OF ARRAY capLen OF CHAR;	(** пропуски узлов-акторов по номерам *)
 
@@ -136,12 +139,10 @@ MODULE RaftNode;
 			seed*: LONGINT;
 			sessionExpiry*: INTEGER;	(** сроков без работы до вытеснения сеанса; 0 — не вытеснять *)
 			compactEvery*: INTEGER;	(** снимок после стольких применённых записей; 0 — без снимков *)
+			tracer*: Tracer;	(** наблюдатель этого узла; NIL — общий RaftNode.tracer *)
 			actor-: Node;	(** последнее воплощение актора узла *)
 			starts: INTEGER
 		END;
-
-		(** Наблюдатель для тестов: применённые записи. *)
-		Tracer* = POINTER TO ABSTRACT RECORD END;
 
 	VAR
 		mutations*: SET;	(** включённые мутации; пусто в рабочем пути *)
@@ -366,7 +367,9 @@ MODULE RaftNode;
 			FOR k := r.applyLo TO r.applyHi DO
 				Core.EntryAt(nd, k, e);
 				a.sm.Apply(k, e.term, e.data, out, dup);
-				IF tracer # NIL THEN tracer.Applied(a.cfg.id, k, e) END;
+				IF a.cfg.tracer # NIL THEN a.cfg.tracer.Applied(a.cfg.id, k, e)
+				ELSIF tracer # NIL THEN tracer.Applied(a.cfg.id, k, e)
+				END;
 				a.Applied(c, k, e.data, out)
 			END;
 			FOR j := 0 TO r.nreads - 1 DO
@@ -422,9 +425,12 @@ MODULE RaftNode;
 	END OnPropose;
 
 	PROCEDURE (a: Node) OnQuery (c: ActorCore.Context; m: Query), NEW;
-		VAR w: Waiter;
+		VAR w: Waiter; empty: ARRAY 1 OF BYTE; data: Bytes;
 	BEGIN
-		IF a.nd.role # Core.leader THEN Answer(c, c.Sender(), m.tag, notLeader, a.nd.leader, 0, NIL)
+		IF (a.nd.role # Core.leader) & (mutLocalQuery IN mutations) THEN	(* порча: чтение без ReadIndex *)
+			IF m.body = NIL THEN data := a.sm.sm.Query(empty, 0) ELSE data := a.sm.sm.Query(m.body, LEN(m.body^)) END;
+			Answer(c, c.Sender(), m.tag, ok, a.cfg.id, a.nd.applied, data)
+		ELSIF a.nd.role # Core.leader THEN Answer(c, c.Sender(), m.tag, notLeader, a.nd.leader, 0, NIL)
 		ELSE
 			INC(a.ctx);
 			IF Core.ReadIndex(a.nd, a.ctx) THEN

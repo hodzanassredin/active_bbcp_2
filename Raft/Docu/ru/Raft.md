@@ -256,9 +256,15 @@ Raft, проверка ожидаемого номера (`expected`) выпол
 `kill -9` лидера, продление, выход), команды состава водителя, четыре порчи автомата и три порчи пути команд водителя. `Raft_devGrain` гоняет две
 гранулы, чей состав берётся из службы: ключ переезжает при выходе и при падении узла, а двенадцать
 зёрен покрывают разрыв меньшинства службы, потерю владельца и выход владельца; каждая операция
-применяется один раз. Сценарий процессов `tools/test-cluster.sh --only membership` поднимает пять
-процессов службы, вводит два из них в избиратели, запускает четвёртого участника, выводит и убивает
-участника, убивает лидера службы и проверяет, что вклады применены по одному разу.
+применяется один раз. Участник с истёкшей арендой не живой для остальных и не держит ключи: вклад
+уходит живому владельцу (`TestExpiredLease`), а порча моста `mutAllAlive` — каждая запись списка
+считается живой — заставляет вклад ждать мёртвого владельца (`TestMutAllAlive`); порча службы
+`mutNoExpire`, не смотрящая на аренду, оставляет мёртвого владельца живым (`TestMutNoExpire`). Сценарий процессов
+`tools/test-cluster.sh --only membership` поднимает пять процессов службы, вводит два из них в
+избиратели, запускает четвёртого участника, выводит и убивает участника, убивает лидера службы и
+проверяет, что вклады применены по одному разу; если после выхода ключ остаётся у самого водителя,
+водитель берёт ключ, которым владеет другой участник, и строит адрес заново, поэтому убитый владелец —
+владелец адреса, по которому идут следующие вклады.
 
 ## Проверка
 
@@ -333,6 +339,24 @@ commit; сеансы не вытесняются, вытесняется сеа�
 (2000 зёрен по 3000 ходов и поиск мутаций). Мутации ловятся: `RaftJournal.mutNoWait` — зерно 1,
 `ActorPersist.mutNoStash` — зерно 1, `RaftJournal.mutNoExpected` — зерно 8.
 
+`Raft_devGrainJournal` соединяет оба: виртуальные акторы на `RaftJournal` под `ActorSim` со службой
+состава. Три узла журнала и три узла службы делят одну `ActorNetMem`; три участника берут список из
+службы и пишут через свой `RaftJournal.Client`. У каждого ключа есть пишущий клиент (операции по
+порядку, неподтверждённая повторяется с тем же номером) и читающий (ответ сверяется с последней
+подтверждённой записью). Эталон — тот же автомат журнала, применённый к решённым записям Raft по
+порядку индексов. Инварианты каждого шага и итога: каждая операция записана один раз; подтверждённые
+записи ключа — одна цепь (`prev` равен предыдущему номеру); ни один ответ не старше последней
+подтверждённой записи — воплощение перед записью и ответом спрашивает у журнала последний номер
+(`SubmitLast`) и догоняет поток; баланс ключа — сумма его событий. Сбои: потеря, дубль и задержка
+кадров, падения узлов журнала, службы и участников, разрыв меньшинства журнала или службы, отрезание
+владельца от службы, вступление и выход участника; после сбоев идёт лечение, и операции завершаются.
+Обычный прогон — 100 зёрен (около 24 с), долгий — `Raft_devGrainJournal.Long` (2000 зёрен). Мутации
+ловятся: `RaftJournal.mutNoWait` (ответ до большинства), `RaftJournal.mutNoExpected` (запись без
+сверки номера), `ActorPersist.mutKeepOnConflict` (конфликтующая запись подтверждена и применена),
+`RaftNode.mutLocalQuery` (чтение с ведомого без `ReadIndex`), `ActorPersist.mutNoFresh` (нет сверки
+свежести перед письмом) и `ActorPersist.mutNoCatchUp` (отставание видно, но догона нет). Первая
+ловится прогоном по зёрнам, остальные — сценариями `SplitBody`, `StaleBody` и `BehindBody`.
+
 `Raft_devJournal` проверяет `RaftJournal` на пуле `ActorRun` в реальном времени: стойкий счётчик пишет и
 восстанавливается из журнала Raft, гибель лидера не теряет подтверждённого, лидер, отрезанный от
 большинства, записи не подтверждает (Append возвращается через нового лидера, когда запись у
@@ -369,8 +393,9 @@ echo 'Raft_devBench.Run' | tools/run64.sh
 - Актор `RaftNode` работает на `ActorNetTcp` между процессами в `tools/test-cluster.sh` (выборы,
   `kill -9` лидера, перезапуск с тем же хранилищем, вступление и выход узлов, `kill -9` участника и
   лидера). Прогон в процессах не делит сеть; разрывы проверяются в модели.
-- Журнал `RaftJournal` под `ActorSim` проверен только на `ActorNetMem`; `ActorGrain` на нём проверен
-  только в сценарии процессов `tools/test-cluster.sh`, без разделения сети. Снимок автомата журнала —
+- Журнал `RaftJournal` под `ActorSim` проверен только на `ActorNetMem`. `ActorGrain` работает на нём
+  под `ActorSim` с разрывами и падениями (`Raft_devGrainJournal`) и в сценарии процессов
+  `tools/test-cluster.sh`. Снимок автомата журнала —
   все принятые команды подряд, усечения журнала Raft для него не настраивается отдельно.
 - Водитель принимает команды состава и пропуски узлов. `Config.n` — начальное число избирателей;
   пропуски можно задать до `RaftCore.maxNodes`. Список участников приложения с адресами и открытыми
@@ -397,7 +422,7 @@ echo 'Raft_devBench.Run' | tools/run64.sh
 `SetExpiry`, `Count`, `Has`), `New`, `Encode`, `Decode`.
 `RaftStorage`: `Storage` (`Save`, `Compact`, `Load`), `NewMem`. `RaftKvStorage`: `New(db)`.
 `RaftNode`: `NewConfig`, `Start`, `Config` (`ref`, `peers`, `tickMs`, `electionTicks`,
-`sessionExpiry`, `compactEvery`, `seed`, `actor`), `Status`, `SetPeer`, `AddServer`, `RemoveServer`,
+`sessionExpiry`, `compactEvery`, `seed`, `tracer`, `actor`), `Status`, `SetPeer`, `AddServer`, `RemoveServer`,
 `ConfStatus`, письма `Tick`, `Conf`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`), `Caps`.
 `RaftMembership`: `NewMachine`, `Machine` (`Apply`, `Snapshot`, `Restore`, `Query`), `JoinCmd`,
 `LeaveCmd`, `RenewCmd`, `ListQuery`, `DecodeList`, `Member`, `Members`, `New(net, caps, n, id)` →
@@ -406,7 +431,10 @@ echo 'Raft_devBench.Run' | tools/run64.sh
 `RaftGrainMembership`: `NewConfig`, `Start`, `Tick`, `Leave`, `Status`, `Errors`, `time`, мутации
 `mutIgnoreList`, `mutAllAlive`, `mutNoJoin`, `mutNoRenew`.
 `RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`tickMs`, `timeoutMs`, `giveUpMs`,
-`timeoutTicks`, `giveUpTicks`, `Close`), `Tick(c)`, мутации `mutNoWait`, `mutNoExpected`.
+`timeoutTicks`, `giveUpTicks`, `SubmitLast`, `Close`), `Tick(c)`, мутации `mutNoWait`,
+`mutNoExpected`; `RaftNode.mutLocalQuery` отвечает на чтение с ведомого без `ReadIndex`.
+`RaftNode.Config.tracer` — наблюдатель применённых записей этого узла (`RaftNode.tracer` остаётся
+общим).
 `RaftSm.StateMachine.Query` — чтение для `RaftNode.Query`.
 
 `RaftNode.Status(cfg; OUT role, term, leader, last, lastTerm, commit, applied: INTEGER; OUT broken: BOOLEAN)`

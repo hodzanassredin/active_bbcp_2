@@ -32,7 +32,15 @@ MODULE ActorPersist;
 
 	Ответ журнала приходит письмом в ящик актора. Ящик с пределом
 	(Props.capacity > 0) может его не принять — тогда актор ждёт вечно;
-	журналу с ответом позже нужен ящик без предела. *)
+	журналу с ответом позже нужен ящик без предела.
+
+	Свежесть. Актор с fresh = TRUE перед каждым пользовательским письмом
+	спрашивает у журнала последний номер потока (SubmitLast) и, если
+	поток ушёл вперёд, догоняет его чтением (Replay). Письмо ждёт ответа
+	в отложенных. Так ответ, в том числе повтор команды, не может быть
+	старше подтверждённой записи: у журнала поверх Raft Last идёт через
+	ReadIndex, и отрезанная от большинства копия не отвечает вовсе
+	(storeTrap). Цена — один запрос к журналу на письмо. *)
 
 	IMPORT Stores, ActorCore, ActorJournal, ActorCodec;
 
@@ -42,8 +50,11 @@ MODULE ActorPersist;
 		decodeTrap* = 72;	(** кадр не читается: тип не найден, версия вне допустимых *)
 		(** переключатели мутаций — только для тестов *)
 		mutNoStash* = 0;	(** письмо, пришедшее во время записи, обрабатывается, не дожидаясь ответа журнала *)
+		mutNoFresh* = 1;	(** fresh: письмо обрабатывается без проверки свежести состояния *)
+		mutKeepOnConflict* = 2;	(** конфликт журнала не останавливает актора: событие применяется и подтверждается *)
+		mutNoCatchUp* = 3;	(** Last видит отставший поток, но догона нет: ответ по старому состоянию *)
 
-		kEvent = 0; kSnap = 1; kReplay = 2;	(* вид запроса *)
+		kEvent = 0; kSnap = 1; kReplay = 2; kLast = 3; kRefresh = 4;	(* вид запроса *)
 
 	TYPE
 		(** Событие. Поля пишет Externalize наследника; meta — из журнала. *)
@@ -58,6 +69,8 @@ MODULE ActorPersist;
 		(** Персистентный актор. journal = NIL — ActorJournal.dir. *)
 		Actor* = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
 			seq-: LONGINT;	(** номер последнего применённого события *)
+			fresh*: BOOLEAN;	(** перед каждым письмом сверять seq с последним номером потока (Last) и догонять: ответ не может быть старше подтверждённой записи *)
+			checked-: BOOLEAN;	(** отложенное письмо уже прошло проверку свежести *)
 			snapEvery*: INTEGER;	(** снимок каждые snapEvery событий; 0 — только по SaveSnapshot *)
 			journal*: ActorJournal.Journal;
 			stream*: ActorCore.Name;	(** поток журнала; "" — имя ящика c.name *)
@@ -75,6 +88,7 @@ MODULE ActorPersist;
 			a: Actor;
 			self, sender: ActorCore.Ref;	(* кому и от чьего имени придёт ответ *)
 			kind: INTEGER;
+			lastSeq: LONGINT;	(* ответ SubmitLast *)
 			e: Event; m: ActorJournal.Meta;
 			data: ActorJournal.Bytes; len: INTEGER;
 			calling, done, bad, hasSnap: BOOLEAN;	(* calling — идёт вызов журнала *)
@@ -194,12 +208,17 @@ MODULE ActorPersist;
 		IF ~r.calling THEN NEW(w); w.r := r; r.self.Post(w, r.sender) END
 	END Done;
 
+	PROCEDURE (r: Req) Last (seq: LONGINT);
+	BEGIN
+		r.lastSeq := seq
+	END Last;
+
 	PROCEDURE (a: Actor) NewReq (c: ActorCore.Context; kind: INTEGER): Req, NEW;
 		VAR r: Req;
 	BEGIN
 		IF a.spare # NIL THEN r := a.spare; a.spare := NIL ELSE NEW(r) END;
 		r.a := a; r.self := c; r.sender := c.Sender(); r.kind := kind;
-		r.e := NIL; r.data := NIL; r.len := 0;
+		r.lastSeq := 0; r.e := NIL; r.data := NIL; r.len := 0;
 		r.calling := FALSE; r.done := FALSE; r.bad := FALSE; r.hasSnap := FALSE; r.res := ActorJournal.ok;
 		r.snap := NIL; r.first := NIL; r.last := NIL; r.next := NIL;
 		RETURN r
@@ -232,6 +251,49 @@ MODULE ActorPersist;
 		IF r.done THEN a.Recovered(c, r) END
 	END Recover;
 
+	(* --- свежесть --------------------------------------------------------------- *)
+
+	PROCEDURE^ (a: Actor) Refreshed (c: ActorCore.Context; r: Req), NEW;
+
+	PROCEDURE (a: Actor) Checked (c: ActorCore.Context; r: Req), NEW;
+	(* Ответ Last: если поток ушёл вперёд, догнать его чтением через журнал. *)
+		VAR r2: Req; st: ActorCore.Name;
+	BEGIN
+		a.req := NIL;
+		IF r.res # ActorJournal.ok THEN HALT(storeTrap) END;
+		IF (r.lastSeq > a.seq) & ~(mutNoCatchUp IN mutations) THEN
+			r2 := a.NewReq(c, kRefresh); a.req := r2;
+			a.S(c, st); r2.calling := TRUE; a.J().Replay(st, r2); r2.calling := FALSE;
+			IF r2.done THEN a.Refreshed(c, r2) END
+		ELSE a.checked := TRUE
+		END
+	END Checked;
+
+	PROCEDURE (a: Actor) Refreshed (c: ActorCore.Context; r: Req), NEW;
+	(* Ответ Replay для догона: применить недостающие события, письмо — дальше. *)
+		VAR x: Rec;
+	BEGIN
+		a.req := NIL;
+		IF ~r.bad & r.hasSnap & (r.snapSeq > a.seq) THEN r.Restore(r.snapSeq, r.snap^, r.snapLen) END;
+		x := r.first;
+		WHILE (x # NIL) & ~r.bad DO
+			IF x.m.seq > a.seq THEN r.Replayed(x.m, x.b^, x.len) END;
+			x := x.next
+		END;
+		IF r.res # ActorJournal.ok THEN HALT(storeTrap) END;
+		IF r.bad THEN HALT(decodeTrap) END;
+		a.checked := TRUE
+	END Refreshed;
+
+	PROCEDURE (a: Actor) Check (c: ActorCore.Context), NEW;
+	(* Начать проверку свежести; отложенное письмо вернётся после ответа. *)
+		VAR r: Req; st: ActorCore.Name;
+	BEGIN
+		r := a.NewReq(c, kLast); a.req := r;
+		a.S(c, st); r.calling := TRUE; a.J().SubmitLast(st, r); r.calling := FALSE;
+		IF r.done THEN a.Checked(c, r) END
+	END Check;
+
 	(* --- запись ---------------------------------------------------------------- *)
 
 	PROCEDURE^ (a: Actor) SaveSnapshot* (c: ActorCore.Context), NEW;
@@ -245,7 +307,8 @@ MODULE ActorPersist;
 			IF r.res # ActorJournal.ok THEN HALT(storeTrap) END
 		ELSE
 			DEC(a.nev);
-			IF r.res = ActorJournal.conflict THEN HALT(conflictTrap)
+			IF r.res = ActorJournal.conflict THEN
+				IF mutKeepOnConflict IN mutations THEN r.res := ActorJournal.ok ELSE HALT(conflictTrap) END
 			ELSIF r.res # ActorJournal.ok THEN HALT(storeTrap)
 			END;
 			e := r.e; e.meta := r.m; a.Apply(e); a.seq := r.m.seq;
@@ -321,13 +384,19 @@ MODULE ActorPersist;
 		ELSIF m IS Written THEN
 			r := m(Written).r;
 			IF (r = a.req) & r.done THEN	(* иначе — ответ прежнему воплощению *)
-				IF r.kind = kReplay THEN a.Recovered(c, r) ELSE a.Complete(c, r) END;
+				IF r.kind = kReplay THEN a.Recovered(c, r)
+				ELSIF r.kind = kLast THEN a.Checked(c, r)
+				ELSIF r.kind = kRefresh THEN a.Refreshed(c, r)
+				ELSE a.Complete(c, r)
+				END;
 				a.Next(c)
 			END
 		ELSIF (m IS ActorCore.Stopping) OR (m IS ActorCore.Stopped) OR (m IS ActorCore.Restarting) THEN
 			a.Handle(c, m); RETURN
 		ELSIF a.recovering OR a.Busy() & ~(mutNoStash IN mutations) THEN c.Stash; RETURN
-		ELSE a.Handle(c, m)
+		ELSIF a.fresh & ~a.checked & ~(mutNoFresh IN mutations) THEN	(* свежесть: Last, затем при необходимости догон *)
+			c.Stash; a.Check(c)
+		ELSE a.checked := FALSE; a.Handle(c, m)
 		END;
 		IF ~a.Busy() THEN c.Unstash END
 	END Receive;

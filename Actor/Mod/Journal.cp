@@ -22,6 +22,11 @@ MODULE ActorJournal;
 	Request.Done и Request.Event журнал зовёт по одному разу на событие,
 	Done — последним и ровно один раз.
 
+	SubmitLast отдаёт номер последнего события потока тем же путём, что и
+	запросы: журнал поверх Raft читает его через ReadIndex. Актор сверяет
+	этот номер со своим seq перед обработкой письма, поэтому ответ не
+	бывает старше подтверждённой записи.
+
 	Раскладка для упорядоченного хранилища ключ -> значение (адаптер к Kv):
 	событие — ключ "e" + поток + 0X + seq (8 байт, big-endian), значение —
 	метаданные и тело; снимок — ключ "s" + поток, значение — seq и кадр.
@@ -123,6 +128,9 @@ MODULE ActorJournal;
 	PROCEDURE (r: Request) Snapshot* (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
 	(** Для Replay: снимок после события seq, кадр data[0 .. len-1]; зовётся до событий. *)
 
+	PROCEDURE (r: Request) Last* (seq: LONGINT), NEW, EMPTY;
+	(** Для SubmitLast: номер последнего события потока (0 — событий нет). *)
+
 	PROCEDURE (r: Request) Done* (res: INTEGER), NEW, ABSTRACT;
 	(** Итог запроса: коды Append, SaveSnapshot или Read. Зовётся ровно один раз,
 		внутри вызова журнала или позже. *)
@@ -146,6 +154,16 @@ MODULE ActorJournal;
 		ASSERT(r # NIL, 23);
 		j.SaveSnapshot(stream, seq, data, len, res); r.Done(res)
 	END SubmitSnapshot;
+
+	PROCEDURE (j: Journal) SubmitLast* (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE;
+	(** Last с ответом в r.Last и r.Done. Пред: r # NIL — 23.
+		Пост: по умолчанию — Last и сразу r.Last(seq), r.Done(ok); журнал с
+		ответом позже переопределяет: чтение идёт через ReadIndex. *)
+		VAR seq: LONGINT;
+	BEGIN
+		ASSERT(r # NIL, 23);
+		seq := j.Last(stream); r.Last(seq); r.Done(ok)
+	END SubmitLast;
 
 	PROCEDURE (j: Journal) Replay* (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE;
 	(** Восстановление: последний снимок потока в r.Snapshot (если есть), затем

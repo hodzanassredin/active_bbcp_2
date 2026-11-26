@@ -363,13 +363,15 @@ MODULE Actor_devGrain;
 	END SplitBody;
 
 	PROCEDURE TestSplitBrainOneWriter*;
-	(* Разделение: оба узла подняли ключ; записать смогло одно воплощение,
-		второе остановлено конфликтом журнала; повтор проходит поверх первого. *)
+	(* Разделение: оба узла подняли ключ. Перед письмом воплощение сверяет
+		seq с последним номером потока (Last) и догоняет первое событие, так
+		что два воплощения не пишут мимо друг друга: события идут по
+		порядку, сумма общая. *)
 		VAR s: Sum;
 	BEGIN
 		UnitAssert.True(Drive(SplitBody, 5000), "run");
 		UnitAssert.EqualInt(1, cl[0].activations, "A activated");
-		UnitAssert.EqualInt(2, cl[1].activations, "B activated twice: conflict stopped the first");
+		UnitAssert.EqualInt(1, cl[1].activations, "B caught up before writing: no second activation");
 		Journal(key, s);
 		UnitAssert.EqualInt(2, s.n, "two events, none lost or doubled");
 		UnitAssert.EqualInt(110, s.total, "sum");

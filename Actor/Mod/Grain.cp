@@ -14,8 +14,11 @@ MODULE ActorGrain;
 
 	Член, чей хозяин пропал (Terminated с byNodeLoss), считается мёртвым,
 	его ключи размещаются среди живых; возврат — Rejoin. Согласования
-	нет: при разделении сети возможны два воплощения, писать может одно —
-	второе получает conflict журнала (ActorPersist.conflictTrap). *)
+	нет: при разделении сети возможны два воплощения. Воплощение —
+	persist-актор с fresh: перед каждым письмом оно сверяет seq с концом
+	потока (Last) и догоняет его, поэтому две копии пишут по очереди, а
+	не мимо друг друга; запись со старым номером получает conflict
+	(ActorPersist.conflictTrap). *)
 
 	IMPORT CasHash, ActorCore, ActorJournal, ActorPersist, ActorNet, Stores;
 
@@ -147,6 +150,7 @@ MODULE ActorGrain;
 		a.kind := newKind.name$; a.key := newKey$;
 		a.stream := newKind.name + "." + newKey;
 		a.journal := newCl.journal;
+		a.fresh := TRUE;	(* ответ не старше подтверждённой записи: Last через журнал *)
 		RETURN a
 	END NewGrain;
 
