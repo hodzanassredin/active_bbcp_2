@@ -474,6 +474,7 @@ tools/iso.sh sh -c "echo 'Async_devStacks.LoadSmall' | tools/run64.sh"
 tools/iso.sh tools/test-cluster.sh --runs 20
 tools/iso.sh tools/test-cluster.sh --runs 1 --bench-ops 2000
 tools/iso.sh tools/test-cluster.sh --runs 1 --kill-at 0 --ops 200 --bench-ops 50
+tools/iso.sh tools/test-cluster.sh --runs 3 --only membership
 ```
 
 Сценарий `tools/test-cluster.sh` запускает узлы `ActorNetTcp` отдельными процессами, раздаёт
@@ -514,3 +515,13 @@ tools/iso.sh tools/test-cluster.sh --runs 1 --kill-at 0 --ops 200 --bench-ops 50
 процессах с `RaftJournal` укладываются в секунды прогона; сценарий проверяет остатки счетов
 (`A=700 B=1300 sum=2000`), повтор шага 1 без второго списания (`dup=700`) и остаток ключа после
 переезда (`175`).
+
+Сценарий состава (`--only membership`) поднимает пять процессов службы и участников G0..G3:
+вводит S3 и S4 в избиратели, запускает G3, выводит G1, убивает владельца ключа и лидера службы и
+снимает S4. В каждом из десяти прогонов итог один — `oks=5 bad=0 balance=185`: пять вкладов
+применены по одному разу. Время от запуска процессов до итога — 1891–1905 мс в семи прогонах,
+2322 мс в одном и 3895–3928 мс в двух; в медленных прогонах лишний срок занимают выборы лидера
+службы. Числа воспроизводит `tools/iso.sh tools/test-cluster.sh --runs 10`.
+
+В том же финальном прогоне выборы после `kill -9` лидера: 3 узла — 338–794 мс, 5 узлов — 10–443 мс;
+60 команд записаны за 675–1102 мс, по TCP — 760–890 команд в секунду в `bench` на 400 командах.

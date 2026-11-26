@@ -6,13 +6,17 @@
 #   tools/test-cluster.sh --quick         # один короткий прогон
 #   tools/test-cluster.sh --veth          # две «машины»: два netns с veth
 #   tools/test-cluster.sh --keep          # не удалять каталог прогона
-#   tools/test-cluster.sh --only raft     # один сценарий: ask, raft, saga, grain, bench
+#   tools/test-cluster.sh --only raft     # один сценарий: ask, raft, saga, grain, membership, bench
 #
 # Прогон: ask — Ask и Watch между процессами, kill -9 → byNodeLoss;
 # raft3/raft5 — выборы, запись, kill -9 лидера, перевыборы, перезапуск
 # узла с тем же хранилищем, согласие журналов; saga — перевод между
 # счетами A и B с убийством координатора C посреди шага и перезапуском;
 # grain — виртуальные акторы на трёх процессах, kill -9 владельца ключа.
+# membership — служба состава из пяти процессов S0..S4: три избирателя,
+# вступление S3 и S4, выход S4; участники G0..G2 (четвёртый G3 вступает
+# позже) берут состав из службы и пишут через RaftJournal; kill -9
+# владельца ключа и лидера службы, аренда истекшего участника.
 # bench — запись в секунду по TCP на хранилище в памяти.
 #
 # Все процессы живут в своём сетевом пространстве (unshare -rmn),
@@ -381,6 +385,72 @@ if [ "${INNER:-0}" = 1 ]; then
 		return 0
 	}
 
+
+	# --- membership ---------------------------------------------------------------
+
+	run_membership() {
+		local dir=$1 i role r p g3 killed killedsvc start t
+		mkdir -p "$dir"
+		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
+		PIDS=()
+		for ((i = 0; i < 5; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
+		for ((i = 0; i < 3; i++)); do alloc_role "R$i" "$((i % 2 + 1))"; done
+		for ((i = 0; i < 4; i++)); do alloc_role "G$i" "$((i % 2 + 1))"; done
+		: > "$dir/nodes"
+		for ((i = 0; i < 5; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < 3; i++)); do echo "R$i $(addr_of "R$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < 4; i++)); do echo "G$i $(addr_of "G$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < 5; i++)); do
+			launch_role "$dir" "S$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
+			PIDS[S$i]=$LASTPID
+		done
+		for ((i = 0; i < 3; i++)); do
+			launch_role "$dir" "G$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
+			PIDS[G$i]=$LASTPID
+		done
+		for ((i = 0; i < 5; i++)); do
+			waitfile "$dir/S$i.ready" 8000 || { bad "$dir" "membership: S$i не готов"; return 1; }
+		done
+		for ((i = 0; i < 3; i++)); do
+			waitfile "$dir/G$i.ready" 12000 || { bad "$dir" "membership: G$i не готов"; return 1; }
+		done
+		g3=0; killed=0; killedsvc=0; start=$(date +%s%3N)
+		while [ ! -f "$dir/G0.result" ]; do
+			if [ "$g3" = 0 ] && [ -f "$dir/startG3" ]; then
+				launch_role "$dir" G3 --SCENARIO=membership --IDX=3 --TICK="$TICK"
+				PIDS[G3]=$LASTPID; g3=1
+			fi
+			if [ "$killed" = 0 ] && [ -f "$dir/kill-owner" ]; then
+				role=$(cat "$dir/kill-owner" 2>/dev/null)
+				if [ -n "$role" ] && [ -n "${PIDS[$role]:-}" ]; then
+					killpid "${PIDS[$role]}"; unset "PIDS[$role]"
+				fi
+				touch "$dir/killed"; killed=1
+			fi
+			if [ "$killedsvc" = 0 ] && [ -f "$dir/kill-svc" ]; then
+				role=$(cat "$dir/kill-svc" 2>/dev/null)
+				if [ -n "$role" ] && [ -n "${PIDS[$role]:-}" ]; then
+					killpid "${PIDS[$role]}"; unset "PIDS[$role]"
+				fi
+				touch "$dir/killed-svc"; killedsvc=1
+			fi
+			if [ $(( $(date +%s%3N) - start )) -gt 120000 ]; then
+				bad "$dir" "membership: нет итога за 120 с"; return 1
+			fi
+			sleep 0.05
+		done
+		local res; res=$(cat "$dir/G0.result")
+		MEAS="$MEAS membership-ms=$(( $(date +%s%3N) - start ))"
+		echo "membership: $res ($(( $(date +%s%3N) - start )) мс)"
+		case "$res" in
+			*"oks=5"*"bad=0"*"balance=185"*"good=1"*) ;;
+			*) bad "$dir" "membership: итог $res"; return 1;;
+		esac
+		check_no_traps "$dir" || { bad "$dir" "membership: трап"; return 1; }
+		stop_all "$dir"
+		return 0
+	}
+
 	# --- измерение -----------------------------------------------------------------
 
 	run_bench() {
@@ -455,6 +525,7 @@ if [ "${INNER:-0}" = 1 ]; then
 		fi
 		if want saga; then run_saga "$d/saga" || break; fi
 		if want grain; then run_grain "$d/grain" || break; fi
+		if want membership; then run_membership "$d/membership" || break; fi
 		if want bench; then run_bench "$d/bench" || break; fi
 		if [ "$KEEP" = 0 ]; then rm -rf "$d"; fi
 		say "прогон $run: ок"
@@ -496,7 +567,7 @@ fi
 clean() { [ "$KEEP" = 1 ] && echo "cluster: каталог прогона $work" >&2 || rm -rf "$work"; }
 trap clean EXIT INT TERM
 
-mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash CasStore ActorNet ActorNetTcp AsyncIO AsyncSelect AsyncChan LinNative LinThreads RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb RaftNode RaftJournal ActorGrain ActorFileJournal Actor_devCluster"
+mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash CasStore ActorNet ActorNetTcp AsyncIO AsyncSelect AsyncChan LinNative LinThreads RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb RaftNode RaftJournal ActorGrain ActorFileJournal RaftMembership RaftGrainMembership Actor_devCluster"
 pass=0
 while [ "$pass" -lt 3 ]; do
 	pass=$((pass + 1))
