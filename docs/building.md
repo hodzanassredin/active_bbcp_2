@@ -175,7 +175,7 @@ tools/test-win64.sh --rebuild          # пересобрать каркас @Wi
 console. Под wine идут `Unit_devMain` (7/7), `System_devWinTasks` (5/5), `Dev_devOpenArr` (8/8)
 и `Dev_devPtrInit` (7/7). Нет wine — `SKIP`.
 
-### 6.5. Негативные проверки компилятора
+### 6.4. Негативные проверки компилятора
 
 ```sh
 tools/check-reject.sh
@@ -185,7 +185,7 @@ tools/check-reject.sh
 `DevLibrarian`, компилирует их и ждёт `error:`. Проверяются обычные правила языка на `Tasks.Ctx`:
 переменная `Ctx` вне `Tasks`, копия пропуска и вызов `Exclusive` снаружи.
 
-### 6.6. Замер сборщика
+### 6.5. Замер сборщика
 
 ```sh
 tools/bench-gc.sh System_devGcBench.DoSmall   # 1 и 10 млн
