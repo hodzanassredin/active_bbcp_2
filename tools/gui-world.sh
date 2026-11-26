@@ -16,6 +16,11 @@ set -e
 . "$(dirname "$0")/env.sh"
 [ -x "$INTERP" ] || { echo "gui-world: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
 
+if [ -d "$BB/Docu" ]; then
+	mkdir -p "$INSTALL/Docu"
+	cp -a "$BB/Docu/." "$INSTALL/Docu/"
+fi
+
 for sub in "$BB"/*/; do
 	sub=$(basename "$sub")
 	[ -d "$INSTALL/$sub/Code" ] || continue
