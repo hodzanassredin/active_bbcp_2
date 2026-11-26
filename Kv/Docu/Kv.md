@@ -216,7 +216,7 @@ free list, free. The tests call it after every commit; a user — after a suspic
 
 ## 8. Cost
 
-Measurements — `docs/measurements.md`, section 13 "Kv store". On amd64 under a machine load of about 20,
+Measurements of 24.11.2026 — `docs/measurements.md`, section 13 "Kv store". On amd64 under a machine load of about 20,
 one writing transaction inserts about 25 thousand keys per second in order and about 9 thousand at
 random; a random `Get` — about 40 thousand per second: every node of the path is decoded from page
 bytes. A commit with `fsync` costs about 2 ms (540 per second on NVMe), without `fsync` about 50 µs.
