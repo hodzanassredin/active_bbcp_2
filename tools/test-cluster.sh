@@ -428,7 +428,10 @@ if [ "${INNER:-0}" = 1 ]; then
 
 	finish_veth() {
 		local h
-		for h in "${!HOLDERS[@]}"; do kill -9 "${HOLDERS[$h]}" 2>/dev/null; done
+		for h in "${!HOLDERS[@]}"; do
+			kill -9 "${HOLDERS[$h]}" 2>/dev/null
+			wait "${HOLDERS[$h]}" 2>/dev/null
+		done
 	}
 
 	# --- прогон ------------------------------------------------------------------
@@ -483,7 +486,13 @@ if [ "$VETH" = 1 ]; then
 		|| skip "veth в пространстве не создаётся: $probe"
 fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/bbcluster.XXXXXX") || exit 1
+if [ "$KEEP" = 1 ]; then
+	work="$BB/.work/cluster-keep"
+	rm -rf "$work"
+	mkdir -p "$work" || exit 1
+else
+	work=$(mktemp -d "${TMPDIR:-/tmp}/bbcluster.XXXXXX") || exit 1
+fi
 clean() { [ "$KEEP" = 1 ] && echo "cluster: каталог прогона $work" >&2 || rm -rf "$work"; }
 trap clean EXIT INT TERM
 
