@@ -17,21 +17,21 @@ MODULE Buffer;
 		Buffer* = POINTER TO RECORD (Tasks.Object)
 			n: INTEGER; data: ARRAY 8 OF INTEGER
 		END;
-		PutOp* = RECORD (Tasks.Op) x: INTEGER END;
-		GetOp* = RECORD (Tasks.Op) x: INTEGER END;
+		PutOp* = RECORD (Tasks.Op) x*: INTEGER END;
+		GetOp* = RECORD (Tasks.Op) x*: INTEGER END;
 
 	PROCEDURE (b: Buffer) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: PutOp DO
-			WHILE b.n = LEN(b.data) DO IF ~b.Await(ctx, {0}) THEN RETURN END END;
+			IF ~b.Await(ctx, {0}) THEN RETURN END;
 			b.data[b.n] := op.x; INC(b.n)
 		| op: GetOp DO
-			WHILE b.n = 0 DO IF ~b.Await(ctx, {1}) THEN RETURN END END;
+			IF ~b.Await(ctx, {1}) THEN RETURN END;
 			DEC(b.n); op.x := b.data[b.n]
 		END
 	END Exclusive;
 
-	PROCEDURE (b: Buffer) Ready (): SET;
+	PROCEDURE (b: Buffer) Ready* (): SET;
 		VAR s: SET;
 	BEGIN
 		s := {};
@@ -57,7 +57,9 @@ Pascal исполняет одна нить ОС, поэтому задача о
 Монитор-объект `Tasks.Object` — обычная запись-наследник с методом `Exclusive-`; его зовёт
 `Do`, передавая пропуск `Tasks.Ctx` и запрос `Tasks.Op`. Повторный вход и ожидание условия
 (`Await`, `AwaitCond`) — в самом объекте; при трапе занятые мониторы отпускаются. Задание
-(`Tasks.Job`) исполняет тело за один запуск, задачу (`Tasks.Task`) можно запускать повторно.
+(`Tasks.Job`) получает пропуск и пишет тело `Body-`; задача (`Tasks.Task`) пишет свой `Run`. Оба
+вида можно запускать повторно после завершения; прикладной код начинает с `Job`, а `Task` нужен
+планировщику, пулу исполнителей и библиотеке над задачами.
 
 Ядро регистрирует стеки задач и сканирует их при сборке мусора; модуль, код которого есть в
 каком-либо кадре, не выгружается. Периодическая сборка пропускается, если с прошлой не было

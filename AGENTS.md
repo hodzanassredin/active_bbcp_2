@@ -240,7 +240,8 @@ subsystems: they are not in `CompileSubs`. Tests are built on demand by `tools/u
   `PAGE_NOACCESS` in `WinKernel`).
 - `Tasks.Object` is a monitor object: `Do` passes `Tasks.Ctx` and a `Tasks.Op` request to the
   method `Exclusive-`; `Await`/`AwaitCond` wait for flags or a condition object. A `Tasks.Job`
-  runs its body once, a `Tasks.Task` can be started again.
+  supplies the pass and calls `Body-`; a `Tasks.Task` writes its own `Run`. Both can be started
+  again after they finish.
 - A finished task returns its stack to the `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool`
   frees stacks above `poolMax`, at most `trimStep` per scheduler step. `Kernel.AllocStack`
   returns FALSE for a size above `maxStackScan`.

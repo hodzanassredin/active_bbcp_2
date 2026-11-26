@@ -23,8 +23,10 @@
 ## 1. Создание задачи
 
 Программа создаёт задачу как обычную запись, расширение `Tasks.Task` с методом `Run`, и передаёт её в
-`Tasks.Start` или `Tasks.StartIn`. До этого вызова задача — объект в куче в состоянии `New`; стека у
-неё нет.
+`Tasks.Start` или `Tasks.StartIn`. Прикладной код расширяет `Tasks.Job`: его `Run` создаёт пропуск и
+зовёт `Body-`, а при трапе отпускает взятые мониторы. `Task` остаётся нижним уровнем для
+планировщика, пула исполнителей и библиотеки над задачами. До вызова `Start` задача — объект в куче
+в состоянии `New`; стека у неё нет.
 
 `StartIn` сначала проверяет аргумент (`CheckTask`: задача не `NIL` — трап 20, ещё не запущена —
 трап 21) и зовёт `InitStack`. Размер стека задаёт `SetStackSize`, по умолчанию 256 КБ (неэкспортная
@@ -213,7 +215,7 @@ gcGoal = выжившее + MAX(выжившее * gcPercent DIV 100, gcMinGrowt
 устроен `GOGC` в Go. Если кластер выделить не удалось, `NewBlock` всё же собирает и ищет блок ещё
 раз. До первой сборки цель равна нулю, и первая нехватка блока собирает. Ценой служит память: куча
 между сборками бывает вдвое больше живых данных и не меньше чем на 4 МБ больше
-(`docs/measurements.md`, раздел 2.2). Правило одинаково в `System/Mod/Kernel.cp` и
+(`docs/measurements.md`, раздел 1). Правило одинаково в `System/Mod/Kernel.cp` и
 `System/Mod64/Kernel.cp`; экспорт ядра оно не меняет.
 
 `Kernel.NewBlock` увеличивает счётчик `AllocCount`. Главный цикл (`Loop`) запоминает его после каждой
@@ -317,12 +319,14 @@ interface-модулей загружает `WinKernel.WkResolve`. Под wine �
 `Time()`.
 
 `Tasks` экспортирует тип `Task` с абстрактным `Run`, тип `Job` с `Body-` и готовым `Run`, тип
-`Object` с `Do`/`Await`/`AwaitCond`, пропуск `Ctx`, запрос `Op`, условие `Cond`, тип `Group`,
-константы состояний и операции `Start`, `StartIn`, `Yield`, `Sleep`, `Join`, `Park`, `ParkExternal`,
-`Unpark`, `Cancel`, `NewGroup`, `GroupFailed`, `GroupCount`, `OwnGroup`, `Spawn`, `JoinAll`,
-`SetDeadline`, `NextDeadline`, `Step`, `Current`, `InTask`, `Held`, `Depth`, `Queued`, `State`,
-`GetName`, `SetName`, `Failed`, `SetStackSize`, `Count`, `BeginAtomic`, `EndAtomic`, `Deadlocked`,
-`Switches`, `ResetStats`, `ListSize`, `List`.
+`Object` с `Do`/`Await`/`AwaitCond`, пропуск `Ctx` с `Stopped`/`TaskOf`/`GroupOf`/`HeldCount`,
+запрос `Op`, условие `Cond`, тип `Group`, поставщика стеков `StackDir`, константы состояний и
+операции `Start`, `StartIn`, `Yield`, `Sleep`, `Join`, `Park`, `ParkExternal`, `ParkCtx`, `Unpark`,
+`Cancel`, `NewGroup`, `GroupFailed`, `GroupCount`, `OwnGroup`, `Spawn`, `JoinAll`, `SetDeadline`,
+`NextDeadline`, `Step`, `Current`, `InTask`, `Held`, `Depth`, `Queued`, `State`, `GetName`,
+`SetName`, `Failed`, `SetStackSize`, `Count`, `BeginAtomic`, `EndAtomic`, `Deadlocked`, `Switches`,
+`ResetStats`, `ListSize`, `List`, `NewGuardDir`, `NewSlabDir`, `SetStackDir`, `StackDirOf`,
+`StackDirOfTask`, `UseGuardStacks`, `UseSlabStacks`, `PoolCount`.
 
 ## 12. Границы
 

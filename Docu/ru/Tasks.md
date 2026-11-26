@@ -19,7 +19,8 @@
 её стеке, и программисту не нужно их сохранять. Сто клиентов — это сто задач, и каждая записана
 как прямой текст из трёх строк.
 
-Задачу описывают расширением записи `Tasks.Task` и методом `Run`; `Tasks.Start` её запускает.
+Задание описывают расширением записи `Tasks.Job` и методом `Body-`; `Tasks.Start` его запускает.
+Задание получает пропуск `Tasks.Ctx` — через него оно входит в монитор-объект и ждёт условия.
 Все задачи исполняет одна нить операционной системы, и в каждый момент исполняется не больше
 одной задачи. Задачу никто не прерывает: она отдаёт процессор сама и только в известных местах.
 Эти места называются *точками переключения*:
@@ -38,18 +39,18 @@
 MODULE TasksSample0;
 	IMPORT Tasks, Console, Strings;
 
-	TYPE Counter = POINTER TO RECORD (Tasks.Task) END;
+	TYPE Counter = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR count: INTEGER;
 
-	PROCEDURE (c: Counter) Run;
+	PROCEDURE (c: Counter) Body- (VAR ctx: Tasks.Ctx);
 		VAR i, x: INTEGER;
 	BEGIN
 		FOR i := 1 TO 1000 DO
 			x := count; count := x + 1;	(* чтение и запись без точки переключения между ними *)
 			IF i MOD 10 = 0 THEN Tasks.Yield END
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR a, b: Counter; s: ARRAY 16 OF CHAR;
@@ -66,6 +67,11 @@ END TasksSample0.
 
 Команда `TasksSample0.Do` печатает `count = 2000` при любом числе прогонов. Задачи чередуются
 через каждые десять прибавлений, но ни одно прибавление не разорвано.
+
+`Tasks.Task` — нижний уровень той же библиотеки. У задачи программа пишет `Run` сама и пропуска не
+получает. Так пишут код, который сам управляет задачами: планировщик, пул исполнителей, библиотека
+над задачами. Прикладному коду `Run` не нужен: `Job` создаёт пропуск, отпускает взятые мониторы
+при трапе и даёт звать `Do` и `Await`. Поэтому в примерах главы используется `Job`.
 
 Свойство держится, пока между чтением и записью нет точки переключения. Если поставить
 `Tasks.Yield` между `x := count` и `count := x + 1`, вторая задача успеет прочитать старое
@@ -106,15 +112,11 @@ MODULE TasksSample2;
 	PROCEDURE (q: Queue) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: SubmitOp DO
-			WHILE q.count = cap DO
-				IF ~q.Await(ctx, {0}) THEN RETURN END
-			END;
+			IF ~q.Await(ctx, {0}) THEN RETURN END;
 			q.ring[q.tail] := op.r;
 			q.tail := (q.tail + 1) MOD cap; INC(q.count)
 		| op: TakeOp DO
-			WHILE q.count = 0 DO
-				IF ~q.Await(ctx, {1}) THEN RETURN END
-			END;
+			IF ~q.Await(ctx, {1}) THEN RETURN END;
 			op.r := q.ring[q.head];
 			q.head := (q.head + 1) MOD cap; DEC(q.count)
 		END
@@ -166,9 +168,10 @@ END TasksSample2.
 
 Исполняемая задача покидает это состояние тремя путями. Она может уступить и сразу встать в
 очередь (`Yield`) — тогда она снова `Ready`. Она может ждать: `Sleep` переводит её в `Sleeping`,
-`Join` — в `Waiting`, `Park` и ожидание монитора — в `Parked`. Наконец, тело `Run` может
-закончиться: обычным возвратом, трапом или отменой. Ждущую задачу будит событие, которого она
-ждёт, `Unpark` или `Cancel`; разбуженная задача снова встаёт в очередь готовых.
+`Join` — в `Waiting`, `Park` и ожидание монитора — в `Parked`. Наконец, тело задания (`Body`)
+или задачи (`Run`) может закончиться: обычным возвратом, трапом или отменой. Ждущую задачу будит
+событие, которого она ждёт, `Unpark` или `Cancel`; разбуженная задача снова встаёт в очередь
+готовых.
 
 Состояний восемь, их значения экспортирует модуль, а `State(t)` возвращает текущее:
 
@@ -183,7 +186,7 @@ END TasksSample2.
 | `Sleeping` | `Ready` | срок истёк; `Unpark`; `Cancel` |
 | `Waiting` | `Ready` | цель завершилась; `Unpark`; `Cancel` |
 | `Parked` | `Ready` | `Unpark`; `Cancel`; задаче передан монитор |
-| `Running` | `Finished` (6) | тело `Run` вернулось или трапнуло |
+| `Running` | `Finished` (6) | тело `Body` или `Run` вернулось или трапнуло |
 | `Running` | `Cancelled` (7) | задача отменена |
 
 `Finished` и `Cancelled` — конечные состояния. Задача, тело которой завершилось трапом, тоже
@@ -222,32 +225,32 @@ MODULE TasksSample1;
 	IMPORT Tasks, Console;
 
 	TYPE
-		Sleeper = POINTER TO RECORD (Tasks.Task) END;
-		Waker = POINTER TO RECORD (Tasks.Task) who: Tasks.Task END;
-		Main = POINTER TO RECORD (Tasks.Task) END;
+		Sleeper = POINTER TO RECORD (Tasks.Job) END;
+		Waker = POINTER TO RECORD (Tasks.Job) who: Tasks.Task END;
+		Main = POINTER TO RECORD (Tasks.Job) END;
 
-	PROCEDURE (s: Sleeper) Run;
+	PROCEDURE (s: Sleeper) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Console.WriteStr("sleeper: park"); Console.WriteLn;
 		Tasks.Park;
 		Console.WriteStr("sleeper: woken"); Console.WriteLn
-	END Run;
+	END Body;
 
-	PROCEDURE (w: Waker) Run;
+	PROCEDURE (w: Waker) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(20);
 		Console.WriteStr("waker: unpark"); Console.WriteLn;
 		Tasks.Unpark(w.who)
-	END Run;
+	END Body;
 
-	PROCEDURE (m: Main) Run;
+	PROCEDURE (m: Main) Body- (VAR ctx: Tasks.Ctx);
 		VAR s: Sleeper; w: Waker;
 	BEGIN
 		NEW(s); Tasks.Start(s);
 		NEW(w); w.who := s; Tasks.Start(w);
 		Tasks.Join(s); Tasks.Join(w);
 		Console.WriteStr("main: both finished"); Console.WriteLn
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR m: Main;
@@ -283,7 +286,7 @@ main: both finished
 ## 4. Отмена и группы
 
 Задача запустила трёх помощников, и один из них упал. Двое других продолжают работать на
-результат, который уже никому не нужен. Задача-родитель закончила `Run`, а помощники ещё живы и
+результат, который уже никому не нужен. Задача-родитель закончила тело, а помощники ещё живы и
 держат ресурсы, о которых родитель думает, что освободил. Обе беды лечит одно правило: дети не
 переживают родителя, а провал одного ребёнка отменяет остальных. Такое правило называют
 структурной конкуренцией.
@@ -300,14 +303,14 @@ main: both finished
 задачи одна группа), а `StartIn(t, g)` запускает `t` участником группы `g`. Владелец группы — та
 задача, которая её создала. С группой связаны четыре правила:
 
-1. Владелец, вернувшийся из `Run`, не завершается, пока в группе есть живые участники: он
+1. Владелец, вернувшийся из тела, не завершается, пока в группе есть живые участники: он
    переходит в `Parked` и ждёт последнего.
 2. Трап участника помечает группу проваленной (`GroupFailed`) и отменяет остальных участников.
 3. Трап или отмена владельца отменяет всех участников его группы. Владелец их конца не ждёт;
    каждый ребёнок завершается в своей ближайшей точке переключения.
 4. Отмена владельца, пока он ждёт группу, отменяет участников, и владелец становится `Cancelled`.
 
-Пример показывает второе правило. Родитель запускает трёх детей и выходит из `Run`; второй
+Пример показывает второе правило. Родитель запускает трёх детей и выходит из тела; второй
 ребёнок через 10 мс трапует, двое других спят в бесконечном цикле:
 
 ```
@@ -315,23 +318,23 @@ MODULE TasksSample3;
 	IMPORT Tasks, Console, Strings;
 
 	TYPE
-		Child = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
-		Parent = POINTER TO RECORD (Tasks.Task) g: Tasks.Group END;
+		Child = POINTER TO RECORD (Tasks.Job) n: INTEGER END;
+		Parent = POINTER TO RECORD (Tasks.Job) g: Tasks.Group END;
 
 	VAR kids: ARRAY 3 OF Child;
 
-	PROCEDURE (c: Child) Run;
+	PROCEDURE (c: Child) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		IF c.n = 1 THEN Tasks.Sleep(10); HALT(30) END;
 		LOOP Tasks.Sleep(1000) END
-	END Run;
+	END Body;
 
-	PROCEDURE (p: Parent) Run;
+	PROCEDURE (p: Parent) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER;
 	BEGIN
 		p.g := Tasks.NewGroup();
 		FOR i := 0 TO 2 DO NEW(kids[i]); kids[i].n := i; Tasks.StartIn(kids[i], p.g) END
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR p: Parent; i: INTEGER; s: ARRAY 8 OF CHAR;
@@ -365,7 +368,7 @@ child state 7
 трап 127 в `Sleep` и становятся `Cancelled` (7); строки `Tasks: cancelled` печатает их отмена.
 Родитель всё это время ждал группу по правилу 1 и завершился последним.
 
-Трап в задаче не роняет программу. Каждое тело `Run` исполняется под `Kernel.Try`: трап
+Трап в задаче не роняет программу. Каждое тело исполняется под `Kernel.Try`: трап
 завершает только эту задачу, остальные живут дальше. Поэтому о провале узнают по `Failed(t)` и
 `GroupFailed(g)`, а не по остановке BlackBox.
 
@@ -408,12 +411,12 @@ child state 7
 MODULE TasksSample4;
 	IMPORT Tasks;
 
-	TYPE Lonely = POINTER TO RECORD (Tasks.Task) END;
+	TYPE Lonely = POINTER TO RECORD (Tasks.Job) END;
 
-	PROCEDURE (l: Lonely) Run;
+	PROCEDURE (l: Lonely) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Park	(* разбудить некому *)
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR l: Lonely;
@@ -433,8 +436,9 @@ Tasks: deadlock: no ready tasks and no wake-up deadlines
 Tasks: cancelled
 ```
 
-Журнал — диагностика, а не авария. Программа может выйти из тупика: `Unpark` или `Cancel` снова делают задачу готовой, и признак снимается. В примере команда
-отменяет одинокую задачу, и та завершается трапом 127.
+Журнал — диагностика, а не авария. Программа может выйти из тупика: `Unpark` или `Cancel` снова
+делают задачу готовой, и признак снимается. В примере команда отменяет одинокую задачу, и та
+завершается трапом 127.
 
 Планировщик обнаруживает только полный тупик. Если хоть одна задача спит со сроком или крутится
 в цикле с `Yield`, часть задач может стоять навсегда, а журнала не будет. Задача, которая вообще
@@ -460,15 +464,16 @@ Tasks: cancelled
 
 Первое создание задачи дорого: системный вызов на стек и, чаще всего, сборка мусора, которая
 сканирует все живые стеки. Замер `System_devTasks.TestSlowLoadTenThousand` (Linux x86-64, одна
-нить, load average около 7) даёт для 10 тыс. задач со стеком 64 КБ 52 мс на свежих стеках и 4,3 мс
-на стеках из пула. Поэтому стек завершённой задачи не возвращается платформе, а уходит в пул, и
-следующая задача того же размера берёт его без системного вызова. Пул держит до 1024 свободных
-стеков; излишек планировщик возвращает ядру понемногу, не больше 16 стеков за шаг, чтобы массовое
-завершение задач не стоило массы системных вызовов разом.
+нить, load average около 7, 25.11.2026) даёт для 10 тыс. задач со стеком 64 КБ 52 мс на свежих
+стеках и 4,3 мс на стеках из пула. Поэтому стек завершённой задачи не возвращается платформе, а
+уходит в пул, и следующая задача того же размера берёт его без системного вызова. Пул держит до
+1024 свободных стеков; излишек планировщик возвращает ядру понемногу, не больше 16 стеков за шаг,
+чтобы массовое завершение задач не стоило массы системных вызовов разом.
 
-`System_devBench` даёт цену одной уступки `Yield` — 29–30 нс, повторного запуска задачи — 196–207 нс
-против 507–523 нс при `NEW` каждый раз. Сборка мусора при стоящих задачах: 9–11 мс при 10 тыс.,
-72–77 мс при 50 тыс., 202–223 мс при 100 тыс. (`System_devGcStacks`).
+Числа `System_devBench` и `System_devGcStacks` — из того же замера: `System_devBench` даёт цену
+одной уступки `Yield` — 29–30 нс, повторного запуска задачи — 196–207 нс против 507–523 нс при
+`NEW` каждый раз; сборка мусора при стоящих задачах занимает 9–11 мс при 10 тыс., 72–77 мс при
+50 тыс., 202–223 мс при 100 тыс. (`System_devGcStacks`).
 
 ```sh
 printf 'UnitRunner.Run System_devTasks slow noquit\n' | tools/run64.sh
@@ -481,55 +486,91 @@ tools/iso.sh sh -c "echo 'System_devBench.Yield' | tools/run64.sh"
 ```
 DEFINITION Tasks;
 
+	IMPORT SYSTEM;
+
 	CONST
 		New = 0; Ready = 1; Running = 2; Sleeping = 3;
 		Waiting = 4; Parked = 5; Finished = 6; Cancelled = 7;
 
 	TYPE
-		Task = POINTER TO ABSTRACT RECORD
-			(t: Task) Run, NEW, ABSTRACT
-		END;
-
+		Task = POINTER TO ABSTRACT RECORD END;
 		Group = POINTER TO RECORD END;
+		Op = ABSTRACT RECORD END;
+		Ctx = LIMITED RECORD END;
+		Job = POINTER TO ABSTRACT RECORD (Task) END;
+		Object = POINTER TO ABSTRACT RECORD END;
+		Cond = POINTER TO ABSTRACT RECORD END;
+		StackDir = POINTER TO ABSTRACT RECORD END;
+
+	PROCEDURE (t: Task) Run (), NEW, ABSTRACT;
+	PROCEDURE (t: Job) Body- (VAR ctx: Ctx), NEW, ABSTRACT;
+	PROCEDURE (t: Job) Run (), NEW;
+	PROCEDURE (o: Object) Exclusive- (VAR ctx: Ctx; VAR op: Op), NEW, ABSTRACT;
+	PROCEDURE (o: Object) Do (VAR ctx: Ctx; VAR op: Op), NEW;
+	PROCEDURE (o: Object) Await (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
+	PROCEDURE (o: Object) AwaitCond (VAR ctx: Ctx; c: Cond): BOOLEAN, NEW;
+	PROCEDURE (o: Object) Ready (): SET, NEW, EXTENSIBLE;
+	PROCEDURE (o: Object) HoldsWhileWaiting (): BOOLEAN, NEW, EXTENSIBLE;
+	PROCEDURE (o: Object) TransferOnRelease (): BOOLEAN, NEW, EXTENSIBLE;
+	PROCEDURE (c: Cond) Ready (o: Object): BOOLEAN, NEW, ABSTRACT;
+	PROCEDURE (VAR c: Ctx) Stopped (): BOOLEAN, NEW;
+	PROCEDURE (VAR c: Ctx) TaskOf (): Task, NEW;
+	PROCEDURE (VAR c: Ctx) GroupOf (): Group, NEW;
+	PROCEDURE (VAR c: Ctx) HeldCount (): INTEGER, NEW;
+	PROCEDURE (d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: SYSTEM.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+	PROCEDURE (d: StackDir) FreeStack- (lo, hi: SYSTEM.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (d: StackDir) Drain-, NEW, EMPTY;
 
 	PROCEDURE BeginAtomic;
 	PROCEDURE Cancel (t: Task);
 	PROCEDURE Count (): INTEGER;
 	PROCEDURE Current (): Task;
 	PROCEDURE Deadlocked (): BOOLEAN;
+	PROCEDURE Depth (o: Object): INTEGER;
 	PROCEDURE EndAtomic;
 	PROCEDURE Failed (t: Task): BOOLEAN;
 	PROCEDURE GetName (t: Task; OUT s: ARRAY OF CHAR);
 	PROCEDURE GroupCount (g: Group): INTEGER;
 	PROCEDURE GroupFailed (g: Group): BOOLEAN;
+	PROCEDURE Held (o: Object): BOOLEAN;
 	PROCEDURE InTask (): BOOLEAN;
 	PROCEDURE Join (t: Task);
+	PROCEDURE JoinAll (VAR ctx: Ctx);
 	PROCEDURE List;
 	PROCEDURE ListSize (): INTEGER;
 	PROCEDURE NewGroup (): Group;
+	PROCEDURE NewGuardDir (): StackDir;
+	PROCEDURE NewSlabDir (): StackDir;
 	PROCEDURE NextDeadline (): LONGINT;
 	PROCEDURE OwnGroup (t: Task): Group;
 	PROCEDURE Park;
+	PROCEDURE ParkCtx (VAR ctx: Ctx; external: BOOLEAN): BOOLEAN;
 	PROCEDURE ParkExternal;
+	PROCEDURE PoolCount (): INTEGER;
+	PROCEDURE Queued (o: Object): INTEGER;
 	PROCEDURE ResetStats;
+	PROCEDURE SetDeadline (VAR ctx: Ctx; ms: LONGINT);
 	PROCEDURE SetName (t: Task; IN s: ARRAY OF CHAR);
+	PROCEDURE SetStackDir (d: StackDir);
 	PROCEDURE SetStackSize (t: Task; size: INTEGER);
 	PROCEDURE Sleep (ms: LONGINT);
+	PROCEDURE Spawn (VAR ctx: Ctx; t: Task);
+	PROCEDURE StackDirOf (): StackDir;
+	PROCEDURE StackDirOfTask (t: Task): StackDir;
 	PROCEDURE Start (t: Task);
 	PROCEDURE StartIn (t: Task; g: Group);
 	PROCEDURE State (t: Task): INTEGER;
 	PROCEDURE Step;
 	PROCEDURE Switches (): LONGINT;
 	PROCEDURE Unpark (t: Task);
+	PROCEDURE UseGuardStacks;
+	PROCEDURE UseSlabStacks;
 	PROCEDURE Yield;
 
 END Tasks.
 ```
 
-Кроме классических задач, модуль экспортирует монитор-объект и пропуск: `Ctx` (`LIMITED RECORD`),
-`Job` с абстрактным `Body-` и готовым `Run`, `Object` с `Do`, `Await`, `AwaitCond`, `Ready`,
-`HoldsWhileWaiting` и `TransferOnRelease`, `Op`, `Cond`, операции `Spawn`, `JoinAll`, `ParkCtx`,
-`SetDeadline`, диагностику `Held`, `Depth`, `Queued`. Их сигнатуры, правила и примеры —
+Монитор-объект, пропуск и задание описаны выше; правила и примеры монитора-объекта —
 `docs/monitor-object.md`.
 
 Перед каждым трапом модуль пишет в консоль строку `Tasks: <текст>`. Операции, которые
@@ -553,7 +594,8 @@ END Tasks.
 
 **TYPE Task**
 ABSTRACT
-Задача. Программа расширяет запись и реализует `Run`.
+Задача нижнего уровня. Программу, которая не управляет задачами сама, пишут через `Job`
+(раздел 1); `Run` нужен планировщику, пулу исполнителей и библиотеке над задачами.
 
 **PROCEDURE (t: Task) Run**
 NEW, ABSTRACT
@@ -561,6 +603,123 @@ NEW, ABSTRACT
 
 **TYPE Group**
 Группа задач (раздел 4). Состояние читают `GroupCount` и `GroupFailed`.
+
+**TYPE Job**
+ABSTRACT
+Задание: задача с пропуском. Наследник пишет `Body-`; `Run` реализован библиотекой. Прикладной код
+начинает с `Job`, а не с `Task` (раздел 1).
+
+**PROCEDURE (t: Job) Body- (VAR ctx: Ctx)**
+NEW, ABSTRACT
+Тело задания. Исполняется на стеке задачи под `Kernel.Try`; `ctx` — пропуск этого запуска.
+
+**PROCEDURE (t: Job) Run**
+NEW
+Создаёт `Ctx` на стеке задачи, зовёт `Body`, ждёт детей, запущенных через `Spawn`, отпускает
+оставшиеся мониторы и завершает пропуск. Повторный `Start` того же задания начинает новый запуск.
+
+**TYPE Ctx**
+LIMITED
+Пропуск задания. Создаётся `Job.Run` на стеке задачи и уходит наружу только `VAR`-параметром
+`Body`. Через него идут `Do`, `Await`, `AwaitCond`, `Spawn`, `JoinAll`, `SetDeadline` и `ParkCtx`.
+
+**PROCEDURE (VAR c: Ctx) Stopped (): BOOLEAN**
+`TRUE`, если задание отменено или его срок истёк.
+
+**PROCEDURE (VAR c: Ctx) TaskOf (): Task**
+Задача этого пропуска.
+
+**PROCEDURE (VAR c: Ctx) GroupOf (): Group**
+Группа детей задания; `NIL`, если их не запускали.
+
+**PROCEDURE (VAR c: Ctx) HeldCount (): INTEGER**
+Число мониторов, взятых заданием.
+
+**TYPE Object**
+ABSTRACT
+Монитор-объект: наследник добавляет поля и пишет `Exclusive-`. Подробнее — `docs/monitor-object.md`.
+
+**TYPE Op**
+ABSTRACT
+Запрос к монитору: запись-наследник на стеке вызывающего, передаётся в `Do` и `Exclusive-`.
+
+**TYPE Cond**
+ABSTRACT
+Условие-объект для `AwaitCond`: наследник решает `Ready(o)` по состоянию монитора `o`.
+
+**PROCEDURE (o: Object) Do (VAR ctx: Ctx; VAR op: Op)**
+Входит в монитор — свободный, свой повторно или после ожидания — и зовёт `Exclusive-` с пропуском
+и запросом.
+
+**PROCEDURE (o: Object) Await (VAR ctx: Ctx; need: SET): BOOLEAN**
+Отпускает монитор и ждёт, пока `Ready()` не покроет `need`; `FALSE` — пропуск остановлен.
+
+**PROCEDURE (o: Object) AwaitCond (VAR ctx: Ctx; c: Cond): BOOLEAN**
+То же, но условие решает `c.Ready(o)`.
+
+**PROCEDURE (o: Object) Ready (): SET**
+Множество истинных флагов объекта; наследник переопределяет.
+
+**PROCEDURE (o: Object) HoldsWhileWaiting (): BOOLEAN**
+`TRUE` — ждущая задача держит монитор (правило `Await`).
+
+**PROCEDURE (o: Object) TransferOnRelease (): BOOLEAN**
+`TRUE` — при выходе монитор передаётся первому ждущему, а не ставится в очередь входа.
+
+**PROCEDURE (c: Cond) Ready (o: Object): BOOLEAN**
+NEW, ABSTRACT
+Истинно, если условие выполнено для состояния монитора `o`.
+
+**PROCEDURE Spawn (VAR ctx: Ctx; t: Task)**
+Запускает `t` в группе детей пропуска; `JoinAll(ctx)` ждёт их конца.
+
+**PROCEDURE JoinAll (VAR ctx: Ctx)**
+Ждёт завершения детей пропуска, затем снимает владельца группы.
+
+**PROCEDURE ParkCtx (VAR ctx: Ctx; external: BOOLEAN): BOOLEAN**
+Ждёт как `Park`, сохраняя пропуск; `external` — ожидание события извне задач. `FALSE` — пропуск
+остановлен.
+
+**PROCEDURE SetDeadline (VAR ctx: Ctx; ms: LONGINT)**
+Срок ожидания в `Await` и `ParkCtx` от текущего момента; `ms <= 0` — срок уже истёк.
+
+**PROCEDURE Held (o: Object): BOOLEAN**
+`TRUE`, если монитор кем-то занят.
+
+**PROCEDURE Depth (o: Object): INTEGER**
+Глубина повторных входов владельца.
+
+**PROCEDURE Queued (o: Object): INTEGER**
+Число задач в очередях входа, флагов и условий.
+
+**TYPE StackDir**
+ABSTRACT
+Поставщик стеков. Методы `NewStack-` и `FreeStack-` выделяют и освобождают память; `Drain-`
+опустошает пул. По умолчанию стоит плита.
+
+**PROCEDURE NewGuardDir (): StackDir**
+Поставщик со сторожевыми страницами: отдельный `mmap` на стек.
+
+**PROCEDURE NewSlabDir (): StackDir**
+Поставщик-плита: 64 стека одним отображением, сторожевая страница под каждым.
+
+**PROCEDURE SetStackDir (d: StackDir)**
+Ставит поставщика для новых задач; живые задачи возвращают стеки своим поставщикам.
+
+**PROCEDURE StackDirOf (): StackDir**
+Поставщик для новых задач.
+
+**PROCEDURE StackDirOfTask (t: Task): StackDir**
+Поставщик, выдавший стек задачи `t`; `NIL` при `t = NIL`.
+
+**PROCEDURE UseGuardStacks**
+Выбирает поставщика со сторожевыми страницами.
+
+**PROCEDURE UseSlabStacks**
+Выбирает плиту.
+
+**PROCEDURE PoolCount (): INTEGER**
+Число свободных стеков в пуле поставщика.
 
 **PROCEDURE StartIn (t: Task; g: Group)**
 Выделяет задаче стек и ставит её в конец очереди готовых; при `g # NIL` записывает её в группу `g`.
