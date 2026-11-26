@@ -9,6 +9,20 @@
 сверка — `Crypto_dev/Vectors/check.py`. Модульные тесты — в `tools/tests.txt`,
 межпроцессные — в `tools/test-crypto-tls.sh`.
 
+## СТАТУС И КОММИТЫ
+
+| Находка | Статус | Коммит | Покрытие |
+|---|---|---|---|
+| 1. Подпись `ServerKeyExchange` | исправлено | `dd52f048` | `test-crypto-tls.sh` (`fake-badsig`, `client-serverhello`), `Crypto_devPKCS1` |
+| 2. X.509: подпись, цепочка, сроки, имя | исправлено | `c89a551b` | `Crypto_devX509`, `test-crypto-tls.sh` (`untrusted`, `expired`, `wrong-host`, `server-foreign-client`) |
+| 3. Границы `sigLen` до копирования | исправлено | `dd52f048`, `262ba455` | `fake-oversize`, `Crypto_devPKCS1` |
+| 4. Разбор сети без `ASSERT` | исправлено | `262ba455`, `dd52f048` | `TestAsn1`, `TestMalformed`, `fake-noske`, `v2hello`, `v2record`, `hstype` |
+| 5. Энтропия ГСЧ | исправлено, с остатком | `262ba455` | `TestEntropy`; остаток — в «Что осталось» |
+| 6. Наборы шифров по умолчанию | исправлено | `dd52f048` | `TestDefaults` |
+| 7. Постоянное время | частично, с пометкой | `262ba455` | `TestConstantTime`, `EqualBytesCT` |
+| Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
+| 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
+
 ## КРИТИЧНЫЕ
 
 ### 1. TLS: подпись ServerKeyExchange — ИСПРАВЛЕНО
