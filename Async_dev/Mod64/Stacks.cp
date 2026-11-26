@@ -69,9 +69,7 @@ MODULE Async_devStacks;
 	PROCEDURE (b: Box) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: WaitOp DO
-			WHILE b.n = 0 DO
-				IF ~b.Await(ctx, {0}) THEN RETURN END
-			END;
+			IF ~b.Await(ctx, {0}) THEN RETURN END;
 			DEC(b.n)
 		| op: PutOp DO
 			INC(b.n)
@@ -82,7 +80,7 @@ MODULE Async_devStacks;
 
 	PROCEDURE (p: Probe) Body- (VAR ctx: Tasks.Ctx);
 		VAR s: Kernel.Stack; a, top, sp: S.ADDRESS; i, w: INTEGER; x: AsyncSelect.Msg;
-			ops: ARRAY 2 OF AsyncSelect.Op;
+			ops: ARRAY 2 OF AsyncSelect.Op; wait: WaitOp;
 	BEGIN
 		s := Kernel.StackOf(S.ADR(a));
 		S.GETREG(SP, sp);
@@ -116,7 +114,7 @@ MODULE Async_devStacks;
 			| yield: Tasks.Sleep(0)
 			| chan: p.a.Recv(x); p.b.Send(m)
 			| select: p.a.Send(m)
-			| await: Tasks.Sleep(0); p.box.Do(ctx, put)
+			| await: Tasks.Sleep(0); p.box.Do(ctx, p.put)
 			| buffer: p.buf.Send(m)
 			END
 		END
