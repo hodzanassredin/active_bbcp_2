@@ -8,6 +8,11 @@
   garbage  — ServerHello с невозможной длиной, затем закрытие;
   noske    — вместо ServerKeyExchange сразу ServerHelloDone: клиент ждёт
              ServerKeyExchange при ECDHE и обязан отказаться без трапа.
+  badcurve — SKE с группой, которой клиент не предлагал;
+  badpoint — SKE с точкой secp256r1 вне кривой;
+  badpss   — SKE с подписью RSA-PSS, испорчен последний байт;
+  badecdsa — SKE с подписью ECDSA P-256, испорчен последний байт;
+  badtagchacha — ChaCha20-Poly1305, затем запись с испорченным тегом.
 
 Клиент обязан отказаться и не упасть (без TRAP). Запускается из
 tools/test-crypto-tls.sh; порт и путь к PEM сертификата — аргументы.
@@ -19,6 +24,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import crypto_tls_lib as L
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, utils
 
 
 def recv_exact(sock, n):
@@ -70,7 +78,12 @@ def serve_handshake(conn, mode, cert_path, key_path):
     oldversion   — ServerHello с версией TLS 1.1;
     longfinished — Finished из 13 байт вместо 12;
     longccs      — ChangeCipherSpec из 2 байт с верным первым байтом;
-    zeropub      — SKE с нулевым открытым ключом X25519 (общий секрет 0).
+    zeropub      — SKE с нулевым открытым ключом X25519 (общий секрет 0);
+    badcurve     — SKE с группой, которой клиент не предлагал;
+    badpoint     — SKE с точкой secp256r1 вне кривой;
+    badpss       — SKE с подписью RSA-PSS, испорчен последний байт;
+    badecdsa     — SKE с подписью ECDSA P-256, испорчен последний байт;
+    badtagchacha — ChaCha20-Poly1305, затем запись с испорченным тегом.
     """
     rec = read_record(conn)
     if rec is None:
@@ -85,7 +98,9 @@ def serve_handshake(conn, mode, cert_path, key_path):
 
     server_random = os.urandom(32)
     version = b"\x03\x02" if mode == "oldversion" else L.VERSION
-    sh = version + server_random + b"\x00" + L.SUITE + b"\x00" + b"\x00\x00"
+    is_chacha = mode == "badtagchacha"
+    suite = L.SUITE_CHACHA if is_chacha else L.SUITE
+    sh = version + server_random + b"\x00" + suite + b"\x00" + b"\x00\x00"
     msg = L.handshake(2, sh)
     transcript += msg
     conn.sendall(L.plain_record(22, msg))
@@ -96,13 +111,41 @@ def serve_handshake(conn, mode, cert_path, key_path):
     conn.sendall(L.plain_record(22, msg))
 
     priv, pub = L.new_x25519()
+    curve = b"\x00\x1d"
+    pub_len = 32
+    scheme = b"\x04\x01"
     if mode == "zeropub":
         pub = b"\x00" * 32
-    params = b"\x03\x00\x1d\x20" + pub
-    key = L.load_rsa_key(key_path)
+    elif mode == "badcurve":
+        # Группа, которой клиент не предлагал.
+        curve = b"\x99\x99"
+        pub = os.urandom(32)
+    elif mode == "badpoint":
+        # secp256r1, но точка заведомо не лежит на кривой.
+        curve = b"\x00\x17"
+        pub = b"\x04" + b"\x01" * 64
+        pub_len = 65
+    params = b"\x03" + curve + bytes([pub_len]) + pub
     signed = client_random + server_random + params
-    sig = L.sign_transcript(key, L.sha256(signed))
-    ske = params + b"\x04\x01" + len(sig).to_bytes(2, "big") + sig
+    if mode == "badecdsa":
+        # ECDSA-подпись SKE с испорченным последним байтом.
+        ec_key = L.load_ec_key(key_path)
+        sig = ec_key.sign(L.sha256(signed),
+                          ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+        sig = sig[:-1] + bytes([sig[-1] ^ 1])
+        scheme = b"\x04\x03"
+    elif mode == "badpss":
+        # RSA-PSS с испорченным последним байтом.
+        sig = key.sign(L.sha256(signed),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                   salt_length=32),
+                       utils.Prehashed(hashes.SHA256()))
+        sig = sig[:-1] + bytes([sig[-1] ^ 1])
+        scheme = b"\x08\x04"
+    else:
+        key = L.load_rsa_key(key_path)
+        sig = L.sign_transcript(key, L.sha256(signed))
+    ske = params + scheme + len(sig).to_bytes(2, "big") + sig
     msg = L.handshake(12, ske)
     transcript += msg
     conn.sendall(L.plain_record(22, msg))
@@ -129,7 +172,12 @@ def serve_handshake(conn, mode, cert_path, key_path):
     else:
         shared = priv.exchange(L.x25519.X25519PublicKey.from_public_bytes(client_pub))
     master = L.prf(shared, b"master secret", client_random + server_random, 48)
-    keys = L.derive_keys(master, client_random, server_random)
+    if is_chacha:
+        keys = L.derive_keys_chacha(master, client_random, server_random)
+    else:
+        keys = L.derive_keys(master, client_random, server_random)
+    rec_open = L.chacha_open if is_chacha else L.aead_open
+    rec_seal = L.chacha_record if is_chacha else L.aead_record
 
     # CCS клиента — открытый, Finished — первый шифрованный, seq=0.
     seen_ccs = False
@@ -141,7 +189,7 @@ def serve_handshake(conn, mode, cert_path, key_path):
         if typ == 20:
             seen_ccs = True
         elif typ == 22 and seen_ccs:
-            plain = L.aead_open(body, keys["client_key"], keys["client_iv"], 0, typ)
+            plain = rec_open(body, keys["client_key"], keys["client_iv"], 0, typ)
             if plain is None:
                 return
             transcript += plain
@@ -157,10 +205,10 @@ def serve_handshake(conn, mode, cert_path, key_path):
     ccs_value = 2 if mode == "badccs" else 1
     ccs_body = b"\x01\x00" if mode == "longccs" else bytes([ccs_value])
     conn.sendall(L.plain_record(20, ccs_body))
-    conn.sendall(L.aead_record(22, L.handshake(20, verify),
-                               keys["server_key"], keys["server_iv"], 0))
+    conn.sendall(rec_seal(22, L.handshake(20, verify),
+                          keys["server_key"], keys["server_iv"], 0))
 
-    if mode not in ("goodfinished", "badtag", "shortrec", "zeropub"):
+    if mode not in ("goodfinished", "badtag", "badtagchacha", "shortrec", "zeropub"):
         # Клиент обязан ответить алертом и закрыться; читаем до закрытия.
         conn.settimeout(2)
         try:
@@ -179,7 +227,7 @@ def serve_handshake(conn, mode, cert_path, key_path):
             return
         typ, _, _, body = rec
         if typ == 23:
-            plain = L.aead_open(body, keys["client_key"], keys["client_iv"], seq, typ)
+            plain = rec_open(body, keys["client_key"], keys["client_iv"], seq, typ)
             if plain is None:
                 return
             if mode == "shortrec":
@@ -189,9 +237,9 @@ def serve_handshake(conn, mode, cert_path, key_path):
             reply = plain[::-1]
             if plain.endswith(b"\n"):
                 reply = plain[:-1][::-1] + b"\n"
-            rec = L.aead_record(23, reply,
-                                keys["server_key"], keys["server_iv"], 1)
-            if mode == "badtag":
+            rec = rec_seal(23, reply,
+                           keys["server_key"], keys["server_iv"], 1)
+            if mode in ("badtag", "badtagchacha"):
                 rec = rec[:-1] + bytes([rec[-1] ^ 1])
             conn.sendall(rec)
             return
@@ -211,7 +259,7 @@ def serve(mode, port, cert_path, key_path=None):
     conn, _ = srv.accept()
     conn.settimeout(15)
     try:
-        if mode in ("goodfinished", "badfinished", "badccs", "badtag", "shortrec", "oldversion", "longfinished", "longccs", "zeropub"):
+        if mode in ("goodfinished", "badfinished", "badccs", "badtag", "shortrec", "oldversion", "longfinished", "longccs", "zeropub", "badcurve", "badpoint", "badpss", "badecdsa", "badpss", "badtagchacha"):
             serve_handshake(conn, mode, cert_path, key_path)
             return 0
         # ClientHello

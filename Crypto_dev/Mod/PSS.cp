@@ -202,6 +202,28 @@ MODULE Crypto_devPSS;
 			FALSE, "PSS rejects salt length 33")
 	END TestNegativeEncoding;
 
+	PROCEDURE TestSign2048*;
+	(* Ключ 2048 бит: emLen = 256, dbLen = 223 > 2*MaxHash+8. Проверка
+	   ловит переполнение буферов Encode (в TLS SKE ключ сервера 2048). *)
+		VAR p, q, e: B.BigNumber; pub, priv: CryptoRSA.Key;
+			digest: ARRAY 64 OF SHORTCHAR; sig: ARRAY 512 OF SHORTCHAR;
+			sigLen, hLen, i: INTEGER;
+	BEGIN
+		p := CryptoPrimes.NewPrime(1024, FALSE);
+		q := CryptoPrimes.NewPrime(1024, FALSE);
+		B.AssignInt(e, 65537);
+		CryptoRSA.MakeKeys(p, q, e, "PSS 2048 test", pub, priv);
+		FOR i := 0 TO 47 DO digest[i] := SHORT(CHR(i)) END;
+		hLen := HashBytes("CryptoSHA384", "pss 2048", 8, digest);
+		CryptoPSS.SignHash("CryptoSHA384", digest, hLen, priv, sig, 0, sigLen);
+		UnitAssert.EqualInt(256, sigLen, "PSS 2048 signature length");
+		UnitAssert.True(CryptoPSS.VerifyHash("CryptoSHA384", digest, hLen,
+			pub, sig, 0, sigLen), "PSS 2048 signature verifies");
+		sig[0] := SHORT(CHR(ORD(sig[0]) + 1));
+		UnitAssert.True(~CryptoPSS.VerifyHash("CryptoSHA384", digest, hLen,
+			pub, sig, 0, sigLen), "PSS 2048 rejects changed signature")
+	END TestSign2048;
+
 	PROCEDURE TestSign*;
 		VAR p, q, e: B.BigNumber; pub, priv: CryptoRSA.Key;
 			digest: ARRAY 64 OF SHORTCHAR; sig: ARRAY 256 OF SHORTCHAR;

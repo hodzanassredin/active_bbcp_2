@@ -120,13 +120,24 @@ srv.Accept(client, res);                       (* completes the handshake *)
 ```
 
 `CryptoTLS.ReadFile` reads a PEM file by an absolute path; `X509.ReadPemChain` and
-`X509.ReadPemPrivateKey` parse PEM without a file system.
+`X509.ReadPemPrivateKey` parse PEM without a file system. `X509.ReadPemEcPrivateKey` reads an
+ECDSA private key from SEC1 (`EC PRIVATE KEY`) or PKCS#8 (`PRIVATE KEY`) and returns the curve
+and the scalar; `Context.LoadEcPrivateKeyFile` and `LoadClientEcPrivateKeyFile` use it for
+ECDHE-ECDSA suites.
 
 ## Security
 
-- The default cipher suite list contains only `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. CBC,
-  3DES, RC4, NULL and RSA key transport remain in the code and can be enabled explicitly with
-  `Policy.SetCipherSuites`; they are not offered by default.
+- The TLS 1.2 client and server use ECDHE on X25519, secp256r1 or secp384r1 and AEAD records.
+  The default policy offers ECDHE-ECDSA and ECDHE-RSA with AES-128-GCM-SHA256,
+  AES-256-GCM-SHA384 and ChaCha20-Poly1305-SHA256 (six suites). CBC, 3DES, RC4, NULL and RSA
+  key transport remain in the code and can be enabled explicitly with `Policy.SetCipherSuites`;
+  they are not offered by default.
+- The client sends `signature_algorithms` with ECDSA P-256/P-384, RSA-PSS with SHA-256/384,
+  RSA PKCS#1 v1.5 SHA-256 and Ed25519 (verification only), `supported_groups` with the three
+  curves, `ec_point_formats` (uncompressed) and an empty `renegotiation_info`. The server picks a
+  suite compatible with its certificate, a signature scheme offered by the client and, for an
+  ECDSA certificate, the ECDHE group matching the certificate curve (OpenSSL enforces the same
+  rule in TLS 1.2).
 - X.509 supports RSA PKCS#1 v1.5, RSA-PSS, ECDSA with P-256/P-384 and Ed25519 signatures, and
   RSA, EC (P-256/P-384) and Ed25519 public keys in SPKI. A chain may mix these algorithms; each
   link is checked with the key type of its issuer.
@@ -137,8 +148,11 @@ srv.Accept(client, res);                       (* completes the handshake *)
   `MaxChainDepth` are rejected. The server name is matched against SAN `dNSName`/`iPAddress`;
   CN is used only when SAN is absent. An IP address never matches a DNS name and vice versa; a
   wildcard matches exactly one label and is not allowed over a top-level domain (`*.com`).
-- `ServerKeyExchange` is signed with RSA PKCS#1 v1.5/SHA-256; the client recomputes the signature
-  over `client_random || server_random || ECDHParams`. A server certificate without a trusted root,
+- `ServerKeyExchange` is signed by the negotiated scheme (RSA PKCS#1 v1.5, RSA-PSS or ECDSA;
+  Ed25519 can be verified but not signed); the client recomputes the signature
+  over `client_random || server_random || ECDHParams`. ECDSA signatures are DER
+  `ECDSA-Sig-Value`; a hash shorter or longer than the curve order is converted to an integer
+  as ECDSA requires. A server certificate without a trusted root,
   an expired certificate, a wrong name or a forged signature aborts the handshake with an alert.
 - A server that requires a client certificate sends `CertificateRequest` and verifies the client
   chain and `CertificateVerify` before accepting the client's `Finished`.
@@ -196,15 +210,14 @@ srv.Accept(client, res);                       (* completes the handshake *)
 
 ## Limitations
 
-- TLS 1.3 is not implemented. The TLS 1.2 client and server support only
-  `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` by default (the legacy CBC suite only when enabled
-  explicitly); ECDHE-ECDSA, AES-256-GCM, ChaCha20-Poly1305, P-256/P-384 groups and the new
-  signature algorithms are not yet wired into TLS.
-- The TLS handshake still uses X25519 and RSA certificates; the new ECDSA/RSA-PSS/Ed25519
-  X.509 support is not yet wired into TLS. Compressed SEC1 points, P-521 and the other named
-  curves are not implemented.
-- Ed25519 signing is not implemented. RSA-PSS uses a fixed salt length equal to the hash length;
-  other salt lengths are not accepted. PKCS#1 v1.5 signatures remain the default for X.509.
+- TLS 1.3 is not implemented.
+- The TLS 1.2 handshake supports uncompressed points on X25519, secp256r1 and secp384r1; P-521,
+  compressed points and the other named curves are not implemented. The extended master secret,
+  session tickets, secure renegotiation and 0-RTT/PSK are not implemented; an empty
+  `renegotiation_info` is sent and any renegotiation is refused.
+- Ed25519 signing is not implemented (verification is). RSA-PSS uses a fixed salt length equal to
+  the hash length; other salt lengths are not accepted. The built-in server signs with RSA-PSS or
+  ECDSA according to its certificate and does not serve an Ed25519 certificate.
 - CRL, OCSP and certificate transparency are not checked. The trust decision is the configured
   root set.
 - The big-number arithmetic (RSA private operations) and X25519 are not constant-time at the
@@ -240,19 +253,22 @@ with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/che
 them with an independent Python implementation.
 
 The TLS handshake needs a peer process, so it has a separate scenario:
-`tools/test-crypto-tls.sh` creates a CA, an intermediate CA, a `CA:FALSE` issuer, server,
-client, expired, wrong-host and expired-root certificates in a temporary directory, runs the
-client against `openssl s_server -rev` and the server against `openssl s_client`, checks mutual
-authentication in both directions, and requires refusal (without a process trap) for an untrusted
-CA, an expired certificate or intermediate root, a wrong name, a `CA:FALSE` issuer, a forged
-`ServerKeyExchange` signature, a bad `Finished`, a wrong `ChangeCipherSpec`, a corrupted GCM tag,
-an oversized signature length, a bad certificate length, an impossible extension length, a
-missing `ServerKeyExchange`, a zero X25519 public key, an SSLv2 `ClientHello` and an unknown
-handshake type. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py` and `crypto_tls_client.py` are
-the Python peers used for the cases that need a correct handshake transcript: bad `Finished`,
-bad `ChangeCipherSpec`, corrupted record tag, zero X25519 point and a bad or good
-`CertificateVerify`. `Crypto_devTLS` and `Crypto_devTLSServer` are not in `tools/tests.txt`,
-because without a peer they cannot run.
+`tools/test-crypto-tls.sh` creates a CA, an intermediate CA, a `CA:FALSE` issuer, RSA, ECDSA
+P-256 and ECDSA P-384 server certificates, client, expired, wrong-host and expired-root
+certificates in a temporary directory, runs the client against `openssl s_server -rev` and the
+server against `openssl s_client`, checks the matrix of ECDHE-RSA/ECDHE-ECDSA × AES-128/256-GCM
+and ChaCha20-Poly1305 × x25519/secp256r1/secp384r1 in both directions, checks mutual
+authentication with RSA and ECDSA server certificates, and requires refusal (without a process
+trap) for an untrusted CA, an expired certificate or intermediate root, a wrong name, a
+`CA:FALSE` issuer, a forged `ServerKeyExchange` signature (RSA PKCS#1, RSA-PSS and ECDSA), a bad
+`Finished`, a wrong `ChangeCipherSpec`, a corrupted AES-GCM or ChaCha20-Poly1305 tag, a group the
+client did not offer, a secp256r1 point outside the curve, an oversized signature length, a bad
+certificate length, an impossible extension length, a missing `ServerKeyExchange`, a zero X25519
+public key, an SSLv2 `ClientHello` and an unknown handshake type. `tools/crypto_tls_lib.py`,
+`crypto_tls_fake.py` and `crypto_tls_client.py` are the Python peers used for the cases that need
+a correct handshake transcript: bad `Finished`, bad `ChangeCipherSpec`, corrupted record tag,
+zero X25519 point and a bad or good `CertificateVerify`. `Crypto_devTLS` and
+`Crypto_devTLSServer` are not in `tools/tests.txt`, because without a peer they cannot run.
 
 
 ## Licence and known limitations

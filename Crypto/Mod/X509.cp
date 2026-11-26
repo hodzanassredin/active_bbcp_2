@@ -1497,6 +1497,106 @@ MODULE CryptoX509;
 		RETURN (p # NIL) & (q # NIL) & (e # NIL)
 	END ReadPemPrivateKey;
 
+	PROCEDURE ReadPemEcPrivateKey* (IN pem : ARRAY OF SHORTCHAR; VAR curve : EC.Curve;
+			VAR d : EC.BigInt; VAR res : AO.SIGNED32): BOOLEAN;
+		CONST
+			EcHeader = "-----BEGIN EC PRIVATE KEY-----";
+			Pkcs8Header = "-----BEGIN PRIVATE KEY-----";
+		VAR
+			start, stop, derLen, len0, n, i : AO.SIZE;
+			der : ARRAY MaxPem OF SHORTCHAR;
+			buf : ARRAY 128 OF SHORTCHAR;
+			r, r2 : Streams.StringReader;
+			root, seq, version, priv, params, alg, inner : ASN1.Triplet;
+			sec1 : BOOLEAN;
+	BEGIN
+		res := ErrMalformed;
+		curve := NIL;
+		IF FindPem(pem, 0, EcHeader, start, stop) THEN
+			sec1 := TRUE
+		ELSIF FindPem(pem, 0, Pkcs8Header, start, stop) THEN
+			sec1 := FALSE
+		ELSE
+			res := ErrUnsupported;
+			RETURN FALSE
+		END;
+		IF ~PemToDer(pem, start, stop, der, derLen) THEN
+			RETURN FALSE
+		END;
+		NEW(r);
+		r.InitStringReader(derLen);
+		r.SetRaw(der, 0, derLen);
+		root := ASN1.Decode(r, 0, len0);
+		IF (root = NIL) OR ~root.ok OR (root.child = NIL) THEN
+			RETURN FALSE
+		END;
+		seq := root;
+		IF ~sec1 THEN
+			(* PKCS#8: PrivateKeyInfo { version, AlgorithmIdentifier,
+			   privateKey OCTET STRING }. *)
+			alg := root.child.next;
+			IF (alg = NIL) OR (alg.child = NIL) THEN
+				RETURN FALSE
+			END;
+			params := alg.child.next;
+			IF OidIs(params, OidPrime256v1, 8) THEN
+				curve := EC.P256()
+			ELSIF OidIs(params, OidSecp384r1, 5) THEN
+				curve := EC.P384()
+			ELSE
+				res := ErrUnsupported;
+				RETURN FALSE
+			END;
+			priv := alg.next;
+			IF (priv = NIL) OR (priv.tag # ASN1.String) OR (priv.svalue = NIL) THEN
+				RETURN FALSE
+			END;
+			NEW(r2);
+			r2.InitStringReader(LEN(priv.svalue^));
+			r2.SetRaw(priv.svalue^, 0, LEN(priv.svalue^));
+			inner := ASN1.Decode(r2, 0, len0);
+			IF (inner = NIL) OR ~inner.ok OR (inner.child = NIL) THEN
+				RETURN FALSE
+			END;
+			seq := inner
+		ELSE
+			(* SEC1: ECPrivateKey { version, privateKey OCTET STRING,
+			   [0] parameters OID, ... }. *)
+			params := root.child.next.next;
+			IF (params = NIL) OR (params.class # ASN1.ASN1Context)
+				OR (params.child = NIL) THEN
+				res := ErrUnsupported;
+				RETURN FALSE
+			END;
+			IF OidIs(params.child, OidPrime256v1, 8) THEN
+				curve := EC.P256()
+			ELSIF OidIs(params.child, OidSecp384r1, 5) THEN
+				curve := EC.P384()
+			ELSE
+				res := ErrUnsupported;
+				RETURN FALSE
+			END
+		END;
+		version := seq.child;
+		priv := version.next;
+		IF (priv = NIL) OR (priv.tag # ASN1.String) OR (priv.svalue = NIL) THEN
+			RETURN FALSE
+		END;
+		n := 4 * curve.n;
+		IF (LEN(priv.svalue^) = 0) OR (LEN(priv.svalue^) > n) THEN
+			RETURN FALSE
+		END;
+		FOR i := 0 TO n - 1 DO buf[i] := 0X END;
+		FOR i := 0 TO LEN(priv.svalue^) - 1 DO
+			buf[n - LEN(priv.svalue^) + i] := priv.svalue^[i]
+		END;
+		IF ~EC.OrderFromBytes(curve, buf, 0, n, d) OR ~EC.OrderInRange(curve, d) THEN
+			RETURN FALSE
+		END;
+		res := Ok;
+		RETURN TRUE
+	END ReadPemEcPrivateKey;
+
 	PROCEDURE Check (b : BOOLEAN);
 	BEGIN
 		ASSERT(b)

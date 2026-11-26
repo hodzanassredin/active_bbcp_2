@@ -54,7 +54,9 @@ MODULE Crypto_devTLSServer;
 
 		ctx := CryptoTLS.NewContext();
 		UnitAssert.True(ctx.LoadCertificateFile(cert), "server certificate loaded");
-		UnitAssert.True(ctx.LoadPrivateKeyFile(key), "server key loaded");
+		IF ~ctx.LoadPrivateKeyFile(key) THEN
+			UnitAssert.True(ctx.LoadEcPrivateKeyFile(key), "server key loaded")
+		END;
 		IF ca[0] # 0X THEN
 			UnitAssert.True(ctx.AddTrustedFile(ca), "trusted CA loaded")
 		END;

@@ -85,7 +85,8 @@ MODULE CryptoPSS;
 			VAR emOut : AO.SIZE): BOOLEAN;
 		VAR
 			hLen, dbLen, psLen, i : AO.SIZE;
-			salt, h, db, dbMask, mprime : ARRAY 2 * MaxHash + 8 OF SHORTCHAR;
+			salt, h, mprime : ARRAY 2 * MaxHash + 8 OF SHORTCHAR;
+			db, dbMask : ARRAY MaxModulusBytes OF SHORTCHAR;
 	BEGIN
 		hLen := HashSeg(hashName, em, 0, em, 0, em, 0, h);
 		IF hLen = 0 THEN RETURN FALSE END;
