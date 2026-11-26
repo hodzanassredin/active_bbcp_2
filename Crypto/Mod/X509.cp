@@ -12,6 +12,7 @@ MODULE CryptoX509;
 	IMPORT Streams := CryptoAosStreams, Dates := CryptoAosDates, AosBigNumbers := CryptoAosBigNumbers,
 		CryptoRSA, ASN1 := CryptoASN1, (*CONV FROM KernelLog*)
 		StdLog, AO := CryptoAosCompat, Hashes := CryptoHashes, PKCS1 := CryptoPKCS1,
+		EC := CryptoEC, ECDSA := CryptoECDSA, Ed25519 := CryptoEd25519, PSS := CryptoPSS,
 		U := CryptoUtils, Base64 := CryptoBase64;
 
 	CONST
@@ -19,6 +20,15 @@ MODULE CryptoX509;
 		AllowNotTrusted* = 0;
 		AllowOutdated* = 1;
 		Bypass* = 31;
+
+		(* Вид открытого ключа и подписи сертификата. *)
+		KeyRsa* = 1;
+		KeyEc* = 2;
+		KeyEd25519* = 3;
+		SigRsaPkcs1* = 0;
+		SigEcdsa* = 1;
+		SigRsaPss* = 2;
+		SigEd25519* = 3;
 
 		(* Коды ошибок проверки. *)
 		Ok* = 0;
@@ -32,14 +42,27 @@ MODULE CryptoX509;
 		ErrNoCA* = 8;
 
 		MaxChainDepth = 8;
-		MaxSans = 16;
+		MaxSans = 64;
 		MaxPem = 16384;
 
 		(* OID в DER-содержимом (без заголовка). *)
 		OidSha256WithRsa = "2A864886F70D01010B";
+		OidSha384WithRsa = "2A864886F70D01010C";
+		OidSha512WithRsa = "2A864886F70D01010D";
 		OidSha1WithRsa = "2A864886F70D010105";
 		OidMd5WithRsa = "2A864886F70D010104";
 		OidRsaEncryption = "2A864886F70D010101";
+		OidRsaPss = "2A864886F70D01010A";
+		OidMgf1 = "2A864886F70D010108";
+		OidEcdsaSha256 = "2A8648CE3D040302";
+		OidEcdsaSha384 = "2A8648CE3D040303";
+		OidEcPublicKey = "2A8648CE3D0201";
+		OidPrime256v1 = "2A8648CE3D030107";
+		OidSecp384r1 = "2B81040022";
+		OidEd25519 = "2B6570";
+		OidSha256Alg = "608648016503040201";
+		OidSha384Alg = "608648016503040202";
+		OidSha512Alg = "608648016503040203";
 		OidSubjectAltName = "551D11";
 		OidBasicConstraints = "551D13";
 		OidKeyUsage = "551D0F";
@@ -63,6 +86,12 @@ MODULE CryptoX509;
 			END;
 			identifier- : POINTER TO ARRAY OF SHORTCHAR;
 			publicKey- : CryptoRSA.Key;
+			keyType* : AO.SIGNED32;
+			ecCurve* : EC.Curve;
+			ecX*, ecY* : EC.BigInt;
+			edKey* : ARRAY 32 OF SHORTCHAR;
+			sigType* : AO.SIGNED32;
+			pssSaltLen* : AO.SIGNED32;
 			issuer-, subject- : Entity;
 			parent-, next* : Certificate;
 			(* Проверка подписи. *)
@@ -125,26 +154,99 @@ MODULE CryptoX509;
 		RETURN U.EqualBytesCT(want, t.svalue^, 0, 0, hexLen)
 	END OidIs;
 
-	PROCEDURE AlgHashName (alg : ASN1.Triplet; VAR name : ARRAY OF SHORTCHAR): BOOLEAN;
-		VAR oid : ASN1.Triplet;
+	PROCEDURE HashAlgName (oid : ASN1.Triplet; VAR name : ARRAY OF SHORTCHAR): BOOLEAN;
 	BEGIN
-		name[0] := 0X;
+		IF OidIs(oid, OidSha256Alg, 9) THEN
+			CopyStr("CryptoSHA256", name); RETURN TRUE
+		ELSIF OidIs(oid, OidSha384Alg, 9) THEN
+			CopyStr("CryptoSHA384", name); RETURN TRUE
+		ELSIF OidIs(oid, OidSha512Alg, 9) THEN
+			CopyStr("CryptoSHA512", name); RETURN TRUE
+		END;
+		RETURN FALSE
+	END HashAlgName;
+
+	(* AlgorithmIdentifier подписи: PKCS#1 v1.5, ECDSA, RSA-PSS или Ed25519.
+	   Для PSS разбираются параметры и принимается только соль длины хеша
+	   и MGF1 по тому же хешу. *)
+	PROCEDURE ParseSigAlg (alg : ASN1.Triplet; VAR sigType : AO.SIGNED32;
+			VAR hashName : ARRAY OF SHORTCHAR; VAR saltLen : AO.SIGNED32): BOOLEAN;
+		VAR oid, params, c, h, mgfHashAlg : ASN1.Triplet;
+			mgfName : ARRAY 16 OF SHORTCHAR;
+			tag, hSize : AO.SIGNED32;
+	BEGIN
+		hashName[0] := 0X;
+		saltLen := -1;
+		sigType := SigRsaPkcs1;
 		IF (alg = NIL) OR (alg.class # ASN1.ASN1Universal) OR (alg.tag # ASN1.Sequence) THEN
 			RETURN FALSE
 		END;
 		oid := alg.child;
 		IF OidIs(oid, OidSha256WithRsa, 9) THEN
-			CopyStr("CryptoSHA256", name);
-			RETURN TRUE
+			CopyStr("CryptoSHA256", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidSha384WithRsa, 9) THEN
+			CopyStr("CryptoSHA384", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidSha512WithRsa, 9) THEN
+			CopyStr("CryptoSHA512", hashName); RETURN TRUE
 		ELSIF OidIs(oid, OidSha1WithRsa, 9) THEN
-			CopyStr("CryptoSHA1", name);
-			RETURN TRUE
+			CopyStr("CryptoSHA1", hashName); RETURN TRUE
 		ELSIF OidIs(oid, OidMd5WithRsa, 9) THEN
-			CopyStr("CryptoMD5", name);
+			CopyStr("CryptoMD5", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidEcdsaSha256, 8) THEN
+			sigType := SigEcdsa; CopyStr("CryptoSHA256", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidEcdsaSha384, 8) THEN
+			sigType := SigEcdsa; CopyStr("CryptoSHA384", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidEd25519, 3) THEN
+			sigType := SigEd25519; RETURN TRUE
+		ELSIF OidIs(oid, OidRsaPss, 9) THEN
+			sigType := SigRsaPss;
+			params := oid.next;
+			IF (params = NIL) OR (params.class # ASN1.ASN1Universal)
+				OR (params.tag # ASN1.Sequence) THEN
+				RETURN FALSE
+			END;
+			c := params.child;
+			mgfName[0] := 0X;
+			WHILE c # NIL DO
+				tag := c.tag MOD 32;
+				IF (c.class = ASN1.ASN1Context) & (c.child # NIL) THEN
+					IF tag = 0 THEN
+						h := c.child;
+						IF ~HashAlgName(h.child, hashName) THEN RETURN FALSE END
+					ELSIF tag = 1 THEN
+						h := c.child;   (* AlgorithmIdentifier MGF1 *)
+						IF (h.child = NIL) OR ~OidIs(h.child, OidMgf1, 9) THEN
+							RETURN FALSE
+						END;
+						mgfHashAlg := h.child.next;
+						IF mgfHashAlg = NIL THEN RETURN FALSE END;
+						IF ~HashAlgName(mgfHashAlg.child, mgfName) THEN
+							RETURN FALSE
+						END
+					ELSIF tag = 2 THEN
+						IF c.child.tag # ASN1.Integer THEN RETURN FALSE END;
+						saltLen := c.child.ivalue
+					END
+				END;
+				c := c.next
+			END;
+			IF hashName[0] = 0X THEN RETURN FALSE END;
+			IF mgfName[0] # 0X THEN
+				IF mgfName # hashName THEN RETURN FALSE END
+			ELSE
+				RETURN FALSE
+			END;
+			IF saltLen < 0 THEN RETURN FALSE END;
+			IF hashName = "CryptoSHA256" THEN hSize := 32
+			ELSIF hashName = "CryptoSHA384" THEN hSize := 48
+			ELSIF hashName = "CryptoSHA512" THEN hSize := 64
+			ELSE RETURN FALSE
+			END;
+			IF saltLen # hSize THEN RETURN FALSE END;
 			RETURN TRUE
 		END;
 		RETURN FALSE
-	END AlgHashName;
+	END ParseSigAlg;
 
 	PROCEDURE SameBytes (IN a, b : ARRAY OF SHORTCHAR; aLen, bLen : AO.SIGNED32): BOOLEAN;
 	BEGIN
@@ -165,12 +267,53 @@ MODULE CryptoX509;
 		RETURN SameBytes(a.raw^, b.raw^, a.rawLen, b.rawLen)
 	END SameCert;
 
+	PROCEDURE SameKey (a, b : Certificate): BOOLEAN;
+		VAR ba, bb : ARRAY 128 OF SHORTCHAR; i : AO.SIZE;
+	BEGIN
+		IF (a = NIL) OR (b = NIL) OR (a.keyType # b.keyType) THEN
+			RETURN FALSE
+		END;
+		IF a.keyType = KeyRsa THEN
+			RETURN (a.publicKey # NIL) & (b.publicKey # NIL)
+				& (AosBigNumbers.Cmp(a.publicKey.modulus, b.publicKey.modulus) = 0)
+				& (AosBigNumbers.Cmp(a.publicKey.exponent, b.publicKey.exponent) = 0)
+		ELSIF a.keyType = KeyEc THEN
+			IF (a.ecCurve = NIL) OR (b.ecCurve = NIL) OR (a.ecCurve.n # b.ecCurve.n) THEN
+				RETURN FALSE
+			END;
+			FOR i := 0 TO LEN(ba) - 1 DO ba[i] := 0X; bb[i] := 0X END;
+			EC.GetBytes(a.ecCurve, a.ecX, ba, 0);
+			EC.GetBytes(b.ecCurve, b.ecX, bb, 0);
+			IF ~U.EqualBytesCT(ba, bb, 0, 0, 4 * a.ecCurve.n) THEN RETURN FALSE END;
+			FOR i := 0 TO LEN(ba) - 1 DO ba[i] := 0X; bb[i] := 0X END;
+			EC.GetBytes(a.ecCurve, a.ecY, ba, 0);
+			EC.GetBytes(b.ecCurve, b.ecY, bb, 0);
+			RETURN U.EqualBytesCT(ba, bb, 0, 0, 4 * a.ecCurve.n)
+		ELSIF a.keyType = KeyEd25519 THEN
+			RETURN U.EqualBytesCT(a.edKey, b.edKey, 0, 0, 32)
+		END;
+		RETURN FALSE
+	END SameKey;
+
+	(* Доверенный корень и предъявленный сертификат могут быть разными
+	   кодировками одного ключа (cross-signed root): сравниваем субъект
+	   и открытый ключ, как это делает построение пути по RFC 5280. *)
+	PROCEDURE SameAnchor (a, b : Certificate): BOOLEAN;
+	BEGIN
+		IF (a = NIL) OR (b = NIL) OR (a.subjectRaw = NIL) OR (b.subjectRaw = NIL)
+			OR (a.subjectLen # b.subjectLen) THEN
+			RETURN FALSE
+		END;
+		RETURN U.EqualBytesCT(a.subjectRaw^, b.subjectRaw^, 0, 0, a.subjectLen)
+			& SameKey(a, b)
+	END SameAnchor;
+
 	PROCEDURE InList (cert, list : Certificate): BOOLEAN;
 		VAR c : Certificate;
 	BEGIN
 		c := list;
 		WHILE c # NIL DO
-			IF SameCert(cert, c) THEN
+			IF SameCert(cert, c) OR SameAnchor(cert, c) THEN
 				RETURN TRUE
 			END;
 			c := c.next
@@ -198,13 +341,61 @@ MODULE CryptoX509;
 		RETURN Ok
 	END CheckDate;
 
-	(* Подпись сертификата открытым ключом издателя. *)
-	PROCEDURE CheckSignature* (c : Certificate; issuerKey : CryptoRSA.Key): BOOLEAN;
-		VAR h : Hashes.Hash; digest : ARRAY 64 OF SHORTCHAR;
+	(* Число из DER-INTEGER в BigInt кривой: ведущий 0x00 допустим,
+	   отрицательное значение (старший бит без 0x00) отвергается. *)
+	PROCEDURE IntToBig (c : EC.Curve; IN src : ARRAY OF SHORTCHAR; len : AO.SIGNED32;
+			VAR b : EC.BigInt): BOOLEAN;
+		VAR buf : ARRAY 128 OF SHORTCHAR;
+			i, n, ofs : AO.SIGNED32;
 	BEGIN
-		IF (c = NIL) OR (issuerKey = NIL) OR (c.tbs = NIL) OR (c.signature = NIL)
+		n := 4 * c.n;
+		IF len <= 0 THEN RETURN FALSE END;
+		ofs := 0;
+		WHILE (ofs < len - 1) & (src[ofs] = 0X) DO INC(ofs) END;
+		(* Без ведущего нуля старший бит означает отрицательное число. *)
+		IF (ofs = 0) & (ORD(src[0]) >= 128) THEN RETURN FALSE END;
+		IF len - ofs > n THEN RETURN FALSE END;
+		FOR i := 0 TO n - 1 DO buf[i] := 0X END;
+		FOR i := ofs TO len - 1 DO buf[n - len + i] := src[i] END;
+		RETURN EC.OrderFromBytes(c, buf, 0, n, b)
+	END IntToBig;
+
+	(* Подпись ECDSA в X.509 — DER SEQUENCE { r INTEGER, s INTEGER }. *)
+	PROCEDURE EcdsaRS (c : EC.Curve; IN sig : ARRAY OF SHORTCHAR; sigLen : AO.SIGNED32;
+			VAR r, s : EC.BigInt): BOOLEAN;
+		VAR reader : Streams.StringReader; root, ri, si : ASN1.Triplet; len0 : AO.SIZE;
+	BEGIN
+		NEW(reader);
+		reader.InitStringReader(sigLen);
+		reader.SetRaw(sig, 0, sigLen);
+		root := ASN1.Decode(reader, 0, len0);
+		IF (root = NIL) OR ~root.ok OR (root.tag # ASN1.Sequence)
+			OR (root.child = NIL) OR (root.child.next = NIL)
+			OR (root.child.next.next # NIL) THEN
+			RETURN FALSE
+		END;
+		ri := root.child;
+		si := ri.next;
+		IF (ri.tag # ASN1.Integer) OR (si.tag # ASN1.Integer)
+			OR (ri.svalue = NIL) OR (si.svalue = NIL) THEN
+			RETURN FALSE
+		END;
+		RETURN IntToBig(c, ri.svalue^, LEN(ri.svalue^), r)
+			& IntToBig(c, si.svalue^, LEN(si.svalue^), s)
+	END EcdsaRS;
+
+	(* Подпись сертификата открытым ключом издателя. *)
+	PROCEDURE CheckSignature* (c, issuer : Certificate): BOOLEAN;
+		VAR h : Hashes.Hash; digest : ARRAY 64 OF SHORTCHAR;
+			r, s : EC.BigInt; hLen : AO.SIGNED32;
+	BEGIN
+		IF (c = NIL) OR (issuer = NIL) OR (c.tbs = NIL) OR (c.signature = NIL)
 			OR (c.tbsLen <= 0) OR (c.sigLen <= 0) THEN
 			RETURN FALSE
+		END;
+		IF c.sigType = SigEd25519 THEN
+			RETURN (issuer.keyType = KeyEd25519) & (c.sigLen = 64)
+				& Ed25519.Verify(issuer.edKey, c.tbs^, c.tbsLen, c.signature^)
 		END;
 		h := Hashes.NewHash(c.hashName);
 		IF h = NIL THEN
@@ -213,7 +404,28 @@ MODULE CryptoX509;
 		h.Initialize;
 		h.Update(c.tbs^, 0, c.tbsLen);
 		h.GetHash(digest, 0);
-		RETURN PKCS1.VerifyHash(c.hashName, digest, h.size, issuerKey, c.signature^, 0, c.sigLen)
+		hLen := h.size;
+		IF c.sigType = SigRsaPkcs1 THEN
+			RETURN (issuer.keyType = KeyRsa) & (issuer.publicKey # NIL)
+				& PKCS1.VerifyHash(c.hashName, digest, hLen, issuer.publicKey,
+					c.signature^, 0, c.sigLen)
+		ELSIF c.sigType = SigRsaPss THEN
+			RETURN (issuer.keyType = KeyRsa) & (issuer.publicKey # NIL)
+				& (c.pssSaltLen = hLen)
+				& PSS.VerifyHash(c.hashName, digest, hLen, issuer.publicKey,
+					c.signature^, 0, c.sigLen)
+		ELSIF c.sigType = SigEcdsa THEN
+			IF (issuer.keyType # KeyEc) OR (issuer.ecCurve = NIL)
+				OR (hLen # 4 * issuer.ecCurve.n) THEN
+				RETURN FALSE
+			END;
+			IF ~EcdsaRS(issuer.ecCurve, c.signature^, c.sigLen, r, s) THEN
+				RETURN FALSE
+			END;
+			RETURN ECDSA.Verify(issuer.ecCurve, issuer.ecX, issuer.ecY,
+				digest, hLen, r, s)
+		END;
+		RETURN FALSE
 	END CheckSignature;
 
 	PROCEDURE Verify* (chain : Certificate; flags : SET): BOOLEAN;
@@ -695,7 +907,8 @@ MODULE CryptoX509;
 			r : Streams.StringReader;
 			root, tbs, sigAlg, sigVal, d, alg, spki, ext : ASN1.Triplet;
 			innerHash : ARRAY 16 OF SHORTCHAR;
-			len0 : AO.SIZE;
+			innerType, innerSalt, innerLen : AO.SIGNED32;
+			len0, i : AO.SIZE;
 			ok : BOOLEAN;
 	BEGIN
 		res := Ok;
@@ -715,6 +928,10 @@ MODULE CryptoX509;
 		END;
 		NEW(c);
 		c.sanCount := 0;
+		c.keyType := 0;
+		c.sigType := SigRsaPkcs1;
+		c.pssSaltLen := -1;
+		c.publicKey := NIL;
 		c.isCA := FALSE;
 		c.hasPathLen := FALSE;
 		c.pathLen := 0;
@@ -737,7 +954,7 @@ MODULE CryptoX509;
 		END;
 		c.tbs := tbs.raw;
 		c.tbsLen := tbs.rawLen;
-		IF ~AlgHashName(sigAlg, c.hashName) THEN
+		IF ~ParseSigAlg(sigAlg, c.sigType, c.hashName, c.pssSaltLen) THEN
 			res := ErrUnsupported;
 			RETURN NIL
 		END;
@@ -767,7 +984,12 @@ MODULE CryptoX509;
 			RETURN NIL
 		END;
 		(* Внутренний AlgorithmIdentifier должен совпасть с внешним. *)
-		IF ~AlgHashName(d, innerHash) OR (innerHash # c.hashName) THEN
+		innerLen := -1;
+		IF ~ParseSigAlg(d, innerType, innerHash, innerLen) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		IF (innerType # c.sigType) OR (innerHash # c.hashName) OR (innerLen # c.pssSaltLen) THEN
 			res := ErrMalformed;
 			RETURN NIL
 		END;
@@ -804,13 +1026,45 @@ MODULE CryptoX509;
 		END;
 		spki := d;
 		alg := spki.child;
-		IF ~OidIs(alg.child, OidRsaEncryption, 9) THEN
-			res := ErrUnsupported;
+		IF (alg = NIL) OR (alg.child = NIL) OR (spki.child.next = NIL)
+			OR (spki.child.next.svalue = NIL) THEN
+			res := ErrMalformed;
 			RETURN NIL
 		END;
-		FormatRsaPublicKey(spki, c.publicKey);
-		IF (c.publicKey = NIL) OR (c.publicKey.modulus = NIL) OR (c.publicKey.exponent = NIL) THEN
-			res := ErrMalformed;
+		IF OidIs(alg.child, OidRsaEncryption, 9) THEN
+			c.keyType := KeyRsa;
+			FormatRsaPublicKey(spki, c.publicKey);
+			IF (c.publicKey = NIL) OR (c.publicKey.modulus = NIL)
+				OR (c.publicKey.exponent = NIL) THEN
+				res := ErrMalformed;
+				RETURN NIL
+			END
+		ELSIF OidIs(alg.child, OidEcPublicKey, 7) THEN
+			c.keyType := KeyEc;
+			IF OidIs(alg.child.next, OidPrime256v1, 8) THEN
+				c.ecCurve := EC.P256()
+			ELSIF OidIs(alg.child.next, OidSecp384r1, 5) THEN
+				c.ecCurve := EC.P384()
+			ELSE
+				res := ErrUnsupported;
+				RETURN NIL
+			END;
+			IF ~EC.PointFromBytes(c.ecCurve, spki.child.next.svalue^,
+					LEN(spki.child.next.svalue^), c.ecX, c.ecY) THEN
+				res := ErrMalformed;
+				RETURN NIL
+			END
+		ELSIF OidIs(alg.child, OidEd25519, 3) THEN
+			c.keyType := KeyEd25519;
+			IF (alg.child.next # NIL) OR (LEN(spki.child.next.svalue^) # 32) THEN
+				res := ErrMalformed;
+				RETURN NIL
+			END;
+			FOR i := 0 TO 31 DO
+				c.edKey[i] := spki.child.next.svalue^[i]
+			END
+		ELSE
+			res := ErrUnsupported;
 			RETURN NIL
 		END;
 		(* Дополнительные поля: extensions [3]. *)
@@ -916,21 +1170,21 @@ MODULE CryptoX509;
 		tail := NIL;
 		from := 0;
 		WHILE FindPem(pem, from, CertHeader, start, stop) DO
-			IF ~PemToDer(pem, start, stop, der, derLen) THEN
-				res := ErrMalformed;
-				RETURN head
-			END;
-			c := ReadCert(der, 0, derLen, res);
-			IF c = NIL THEN
-				RETURN head
-			END;
-			IF head = NIL THEN
-				head := c
-			ELSE
-				tail.next := c
-			END;
-			tail := c;
-			from := stop
+			(* Набор доверенных корней может содержать сертификат,
+			   который мы не разбираем (неизвестный алгоритм). Один
+			   такой сертификат не должен отбрасывать остальные. *)
+			from := stop;
+			IF PemToDer(pem, start, stop, der, derLen) THEN
+				c := ReadCert(der, 0, derLen, res);
+				IF c # NIL THEN
+					IF head = NIL THEN
+						head := c
+					ELSE
+						tail.next := c
+					END;
+					tail := c
+				END
+			END
 		END;
 		IF head = NIL THEN
 			res := ErrMalformed
@@ -1181,7 +1435,7 @@ MODULE CryptoX509;
 				err := ErrUntrusted;
 				RETURN FALSE
 			END;
-			IF ~CheckSignature(current, issuer.publicKey) THEN
+			IF ~CheckSignature(current, issuer) THEN
 				err := ErrBadSignature;
 				RETURN FALSE
 			END;
@@ -1289,6 +1543,106 @@ MODULE CryptoX509;
 		res := Ok;
 		RETURN (p # NIL) & (q # NIL) & (e # NIL)
 	END ReadPemPrivateKey;
+
+	PROCEDURE ReadPemEcPrivateKey* (IN pem : ARRAY OF SHORTCHAR; VAR curve : EC.Curve;
+			VAR d : EC.BigInt; VAR res : AO.SIGNED32): BOOLEAN;
+		CONST
+			EcHeader = "-----BEGIN EC PRIVATE KEY-----";
+			Pkcs8Header = "-----BEGIN PRIVATE KEY-----";
+		VAR
+			start, stop, derLen, len0, n, i : AO.SIZE;
+			der : ARRAY MaxPem OF SHORTCHAR;
+			buf : ARRAY 128 OF SHORTCHAR;
+			r, r2 : Streams.StringReader;
+			root, seq, version, priv, params, alg, inner : ASN1.Triplet;
+			sec1 : BOOLEAN;
+	BEGIN
+		res := ErrMalformed;
+		curve := NIL;
+		IF FindPem(pem, 0, EcHeader, start, stop) THEN
+			sec1 := TRUE
+		ELSIF FindPem(pem, 0, Pkcs8Header, start, stop) THEN
+			sec1 := FALSE
+		ELSE
+			res := ErrUnsupported;
+			RETURN FALSE
+		END;
+		IF ~PemToDer(pem, start, stop, der, derLen) THEN
+			RETURN FALSE
+		END;
+		NEW(r);
+		r.InitStringReader(derLen);
+		r.SetRaw(der, 0, derLen);
+		root := ASN1.Decode(r, 0, len0);
+		IF (root = NIL) OR ~root.ok OR (root.child = NIL) THEN
+			RETURN FALSE
+		END;
+		seq := root;
+		IF ~sec1 THEN
+			(* PKCS#8: PrivateKeyInfo { version, AlgorithmIdentifier,
+			   privateKey OCTET STRING }. *)
+			alg := root.child.next;
+			IF (alg = NIL) OR (alg.child = NIL) THEN
+				RETURN FALSE
+			END;
+			params := alg.child.next;
+			IF OidIs(params, OidPrime256v1, 8) THEN
+				curve := EC.P256()
+			ELSIF OidIs(params, OidSecp384r1, 5) THEN
+				curve := EC.P384()
+			ELSE
+				res := ErrUnsupported;
+				RETURN FALSE
+			END;
+			priv := alg.next;
+			IF (priv = NIL) OR (priv.tag # ASN1.String) OR (priv.svalue = NIL) THEN
+				RETURN FALSE
+			END;
+			NEW(r2);
+			r2.InitStringReader(LEN(priv.svalue^));
+			r2.SetRaw(priv.svalue^, 0, LEN(priv.svalue^));
+			inner := ASN1.Decode(r2, 0, len0);
+			IF (inner = NIL) OR ~inner.ok OR (inner.child = NIL) THEN
+				RETURN FALSE
+			END;
+			seq := inner
+		ELSE
+			(* SEC1: ECPrivateKey { version, privateKey OCTET STRING,
+			   [0] parameters OID, ... }. *)
+			params := root.child.next.next;
+			IF (params = NIL) OR (params.class # ASN1.ASN1Context)
+				OR (params.child = NIL) THEN
+				res := ErrUnsupported;
+				RETURN FALSE
+			END;
+			IF OidIs(params.child, OidPrime256v1, 8) THEN
+				curve := EC.P256()
+			ELSIF OidIs(params.child, OidSecp384r1, 5) THEN
+				curve := EC.P384()
+			ELSE
+				res := ErrUnsupported;
+				RETURN FALSE
+			END
+		END;
+		version := seq.child;
+		priv := version.next;
+		IF (priv = NIL) OR (priv.tag # ASN1.String) OR (priv.svalue = NIL) THEN
+			RETURN FALSE
+		END;
+		n := 4 * curve.n;
+		IF (LEN(priv.svalue^) = 0) OR (LEN(priv.svalue^) > n) THEN
+			RETURN FALSE
+		END;
+		FOR i := 0 TO n - 1 DO buf[i] := 0X END;
+		FOR i := 0 TO LEN(priv.svalue^) - 1 DO
+			buf[n - LEN(priv.svalue^) + i] := priv.svalue^[i]
+		END;
+		IF ~EC.OrderFromBytes(curve, buf, 0, n, d) OR ~EC.OrderInRange(curve, d) THEN
+			RETURN FALSE
+		END;
+		res := Ok;
+		RETURN TRUE
+	END ReadPemEcPrivateKey;
 
 	PROCEDURE Check (b : BOOLEAN);
 	BEGIN

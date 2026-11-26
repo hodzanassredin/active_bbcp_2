@@ -20,7 +20,9 @@ MODULE CryptoSHA3;
 	BEGIN
 		NEW(SELF.sponge);SELF.sponge.Init();
 		SELF.capacity := 2 * 256;
-		SELF.Initialize
+		SELF.Initialize;
+		(* Скорость губки: 1600 бит состояния минус ёмкость. *)
+		SELF.blockSize := 200 - SELF.capacity DIV 8
 	END Init;
 
 	PROCEDURE (SELF: Hash) Initialize* ;

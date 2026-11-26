@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Минимальный TLS 1.2 peer для отрицательных проверок Crypto.
 
-Только ECDHE-RSA-AES128-GCM-SHA256 (0xC02F): тот же набор, что по
-умолчанию у CryptoTLS. Нужен, чтобы поддельный сервер мог довести
-рукопожатие до Finished, а поддельный клиент — до CertificateVerify.
-Библиотека не претендует на полноту: разбирается ровно то, что шлют
-CryptoTLS и openssl в тестах.
+Поддерживает ECDHE-RSA-AES128-GCM-SHA256 (0xC02F) и
+ECDHE-RSA-CHACHA20-POLY1305-SHA256 (0xCCA8): те же наборы, что нужны
+поддельному серверу и клиенту в тестах. Библиотека не претендует на
+полноту: разбирается ровно то, что шлют CryptoTLS и openssl в тестах.
 
 Используется tools/crypto_tls_fake.py и tools/crypto_tls_client.py.
 """
@@ -14,10 +13,11 @@ import hmac
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, utils, x25519
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 VERSION = b"\x03\x03"
 SUITE = b"\xc0\x2f"
+SUITE_CHACHA = b"\xcc\xa8"
 
 HANDSHAKE, ALERT, CCS, APPLICATION = 22, 21, 20, 23
 
@@ -108,6 +108,10 @@ def load_rsa_key(path):
     raise ValueError("no private key in %s" % path)
 
 
+def load_ec_key(path):
+    return serialization.load_pem_private_key(open(path, "rb").read(), password=None)
+
+
 def load_cert_der(path):
     data = open(path, "rb").read()
     start = data.index(b"-----BEGIN CERTIFICATE-----")
@@ -133,6 +137,44 @@ def derive_keys(master, client_random, server_random):
         "client_iv": block[32:36],
         "server_iv": block[36:40],
     }
+
+
+def derive_keys_chacha(master, client_random, server_random):
+    # RFC 7905: 32-байтные ключи и 12-байтные соли, явной части нет.
+    block = prf(master, b"key expansion", server_random + client_random, 88)
+    return {
+        "client_key": block[0:32],
+        "server_key": block[32:64],
+        "client_iv": block[64:76],
+        "server_iv": block[76:88],
+    }
+
+
+def _chacha_nonce(iv, seq):
+    nonce = bytearray(iv)
+    seqb = seq.to_bytes(8, "big")
+    for i in range(8):
+        nonce[4 + i] ^= seqb[i]
+    return bytes(nonce)
+
+
+def chacha_record(typ, body, key, iv, seq):
+    seqb = seq.to_bytes(8, "big")
+    aad = seqb + bytes([typ]) + VERSION + len(body).to_bytes(2, "big")
+    ct = ChaCha20Poly1305(key).encrypt(_chacha_nonce(iv, seq), body, aad)
+    return plain_record(typ, ct)
+
+
+def chacha_open(body, key, iv, seq, typ):
+    if len(body) < 16:
+        return None
+    plain_len = len(body) - 16
+    seqb = seq.to_bytes(8, "big")
+    aad = seqb + bytes([typ]) + VERSION + plain_len.to_bytes(2, "big")
+    try:
+        return ChaCha20Poly1305(key).decrypt(_chacha_nonce(iv, seq), body, aad)
+    except Exception:
+        return None
 
 
 def new_x25519():

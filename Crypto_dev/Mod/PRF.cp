@@ -51,9 +51,14 @@ MODULE Crypto_devPRF;
 		VAR suites : ARRAY 20 OF AO.SIGNED32; n : AO.SIZE;
 	BEGIN
 		TLS.DefaultSuites(suites, n);
-		UnitAssert.EqualInt(1, n, "one default suite");
-		IF n > 0 THEN
-			UnitAssert.EqualInt(0C02FH, suites[0], "default is ECDHE-RSA-AES128-GCM-SHA256")
+		UnitAssert.EqualInt(6, n, "six default suites");
+		IF n >= 6 THEN
+			UnitAssert.EqualInt(0C02CH, suites[0], "default 1: ECDHE-ECDSA-AES256-GCM-SHA384");
+			UnitAssert.EqualInt(0C030H, suites[1], "default 2: ECDHE-RSA-AES256-GCM-SHA384");
+			UnitAssert.EqualInt(0CCA9H, suites[2], "default 3: ECDHE-ECDSA-CHACHA20-POLY1305-SHA256");
+			UnitAssert.EqualInt(0CCA8H, suites[3], "default 4: ECDHE-RSA-CHACHA20-POLY1305-SHA256");
+			UnitAssert.EqualInt(0C02BH, suites[4], "default 5: ECDHE-ECDSA-AES128-GCM-SHA256");
+			UnitAssert.EqualInt(0C02FH, suites[5], "default 6: ECDHE-RSA-AES128-GCM-SHA256")
 		END
 	END TestDefaults;
 

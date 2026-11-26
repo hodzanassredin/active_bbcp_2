@@ -3,7 +3,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	05.2014 -- Timothée Martiel -- Implemented TLS client connection.
 *)
 
-	IMPORT SYSTEM, IP := CryptoAosIP, TCP := CryptoAosTCP, Streams := CryptoAosStreams, Files := CryptoAosFileStreams, StdLog, Kernel, BIT:= CryptoAosBIT, Dates:= CryptoAosDates, Strings := CryptoAosStrings, Ciphers := CryptoCiphers, HMAC := CryptoHMAC, Rng := CryptoFortunaRng, CryptoHashes, CryptoMD5, CryptoSHA1, CryptoRSA, AosBigNumbers := CryptoAosBigNumbers, PKCS1 := CryptoPKCS1, X509 := CryptoX509, AO := CryptoAosCompat, Pipes := CryptoAosPipes, Services, X25519 := CryptoX25519, Gcm := CryptoGcm, U := CryptoUtils, SysFiles := Files;
+	IMPORT SYSTEM, IP := CryptoAosIP, TCP := CryptoAosTCP, Streams := CryptoAosStreams, Files := CryptoAosFileStreams, StdLog, Kernel, BIT:= CryptoAosBIT, Dates:= CryptoAosDates, Strings := CryptoAosStrings, Ciphers := CryptoCiphers, HMAC := CryptoHMAC, Rng := CryptoFortunaRng, CryptoHashes, CryptoMD5, CryptoSHA1, CryptoRSA, AosBigNumbers := CryptoAosBigNumbers, PKCS1 := CryptoPKCS1, X509 := CryptoX509, AO := CryptoAosCompat, Pipes := CryptoAosPipes, Services, X25519 := CryptoX25519, Gcm := CryptoGcm, U := CryptoUtils, SysFiles := Files,
+		EC := CryptoEC, ECDSA := CryptoECDSA, PSS := CryptoPSS, Ed25519 := CryptoEd25519, ChaCha20 := CryptoChaCha20;
 
 	CONST
 	(* debugging *)
@@ -63,6 +64,29 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 				TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256  = 0C027H;(*49191*)
 				TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256  = 0C02FH;
+		(* Современные наборы TLS 1.2 (RFC 5289, 7905). *)
+		TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256* = 0C02BH;
+		TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384* = 0C02CH;
+		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384* = 0C030H;
+		TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256* = 0CCA8H;
+		TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256* = 0CCA9H;
+
+		(* Группы ECDHE (named groups, RFC 8422, 8446). *)
+		GroupSecp256r1* = 23;
+		GroupSecp384r1* = 24;
+		GroupX25519* = 29;
+		MaxGroupPublic = 97;
+		MaxSharedSecret = 48;
+
+		(* SignatureScheme (RFC 8446, 4.2.3); в TLS 1.2 те же пары
+		   (hash, signature) для PKCS#1/ECDSA. *)
+		SigRsaPkcs1Sha256* = 0401H;
+		SigRsaPkcs1Sha384* = 0501H;
+		SigEcdsaP256Sha256* = 0403H;
+		SigEcdsaP384Sha384* = 0503H;
+		SigRsaPssRsaeSha256* = 0804H;
+		SigRsaPssRsaeSha384* = 0805H;
+		SigEd25519* = 0807H;
 				
 				(* not supported
 				TlsDhDssWithAes256CbcSha* = 0036H; 
@@ -131,11 +155,44 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		SessionHashtableSize = 1023;
 		SessionCleanUpInterval = 60;
 		DefaultSessionLifetime = 3600;
-		DefaultSuitesNbr = 1;
+		DefaultSuitesNbr = 6;
 		MaxSignatureLength = 512;
 		MaxCertificateChain = 8;
 
 	TYPE
+		(* Эфемерная группа ECDHE: открытый ключ в формате TLS и
+		   общий секрет. Реализации: X25519 (шаг 1), P-256/P-384
+		   (шаг 2). *)
+		Group = POINTER TO ABSTRACT RECORD
+			id : AO.SIGNED32;
+			publicLen, secretLen : AO.SIZE;
+			publicKey : ARRAY MaxGroupPublic OF SHORTCHAR
+		END;
+		X25519Group = POINTER TO RECORD(Group)
+			keys : X25519.X25519KeyPair
+		END;
+		EcGroup = POINTER TO RECORD(Group)
+			curve : EC.Curve;
+			priv : EC.BigInt
+		END;
+
+		(* AEAD записи TLS 1.2: Seal/Open, длины nonce и тега.
+		   GCM — 4 байта соли и 8 байт явного nonce в записи;
+		   ChaCha20-Poly1305 (RFC 7905) — 12 байт соли, nonce из
+		   номера записи, явной части нет. *)
+		RecordAEAD = POINTER TO ABSTRACT RECORD
+			tagLen, explicitLen, saltLen : AO.SIZE
+		END;
+		GcmRecordAEAD = POINTER TO RECORD(RecordAEAD)
+			mode : Gcm.GcmMode;
+			cipher : Ciphers.Cipher;
+			salt : ARRAY 4 OF SHORTCHAR
+		END;
+		ChaChaRecordAEAD = POINTER TO RECORD(RecordAEAD)
+			key : ARRAY 32 OF SHORTCHAR;
+			nonce : ARRAY 12 OF SHORTCHAR
+		END;
+
 		SecurityParameters = POINTER TO EXTENSIBLE RECORD
 			cipherSuite, cipherKeySize : AO.SIGNED32;
 			clientRandom, serverRandom : ARRAY 32 OF SHORTCHAR;
@@ -143,7 +200,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		END;
 		ConnectionState = POINTER TO EXTENSIBLE RECORD
 			cipher : Ciphers.Cipher;
-			aeadCipher : Gcm.GcmMode;
+			aead : RecordAEAD;
 			mac : HMAC.HMac;
 			recordSeq : DoubleLong;
 			cipherKey : ARRAY 32 OF SHORTCHAR;
@@ -182,6 +239,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			policy : Policy;
 			rsaCertificate : ARRAY 10000 OF SHORTCHAR;
 			rsaPrivateKey, rsaPublicKey : CryptoRSA.Key;
+			ecCurve : EC.Curve;
+			ecPrivate : EC.BigInt;
 			lengthOfRsaCertificate : AO.SIZE;
 			sessionCache : ARRAY SessionHashtableSize OF Session;
 			active : BOOLEAN;
@@ -192,6 +251,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			certChain : X509.Certificate;
 			clientCertChain : X509.Certificate;
 			clientPrivateKey : CryptoRSA.Key;
+			clientEcCurve : EC.Curve;
+			clientEcPrivate : EC.BigInt;
 			requireClientCert : BOOLEAN;
 			verifyFlags : SET;
 			owned : BOOLEAN
@@ -217,8 +278,16 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			client, trapped : BOOLEAN;
 			asyncWriter : AsyncWriter;
 			serverName : ARRAY 256 OF SHORTCHAR;
-			x25519 : X25519.X25519KeyPair;
-			x25519Shared : ARRAY 32 OF SHORTCHAR;
+			group : Group;
+			sharedSecret : ARRAY MaxSharedSecret OF SHORTCHAR;
+			sharedLen : AO.SIZE;
+			(* Выбор второй стороны из ClientHello. *)
+			clientSigSchemes : SET;
+			haveSigSchemes : BOOLEAN;
+			clientGroups : SET;
+			haveGroups : BOOLEAN;
+			serverScheme : AO.SIGNED32;
+			negotiatedSigScheme : AO.SIGNED32;
 			(* Результаты проверки сертификатов. *)
 			serverCert, clientCert : X509.Certificate;
 			peerVerified, certificateRequested, ownsContext, clientCertVerified : BOOLEAN;
@@ -227,7 +296,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			   (GetHash дописывает паддинг). *)
 			transcript : POINTER TO ARRAY OF SHORTCHAR;
 			transcriptLen, transcriptCap : AO.SIZE;
-			finishedDigest : ARRAY 32 OF SHORTCHAR
+			finishedDigest : ARRAY 64 OF SHORTCHAR
 		END;
 		
 		ConnectionReceiver = POINTER TO RECORD(Streams.Receiver) conn: Connection END;
@@ -239,6 +308,622 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	VAR
 		defaultCipherPolicy: Policy;
 		LastCertError*: AO.SIGNED32;
+
+	(* ------------------- группа ECDHE ------------------- *)
+
+	PROCEDURE (g: Group) Generate* , NEW, ABSTRACT;
+
+	PROCEDURE (g: Group) Shared* (IN peer : ARRAY OF SHORTCHAR; peerLen : AO.SIZE;
+			VAR secret : ARRAY OF SHORTCHAR; VAR secretLen : AO.SIZE): BOOLEAN, NEW, ABSTRACT;
+
+	PROCEDURE (g: X25519Group) Generate ;
+		VAR i : AO.SIZE;
+	BEGIN
+		X25519.GenerateKeyPair(g.keys);
+		FOR i := 0 TO 31 DO
+			g.publicKey[i] := g.keys.PublicKey[i]
+		END;
+		g.publicLen := 32;
+		g.secretLen := 32
+	END Generate;
+
+	PROCEDURE (g: X25519Group) Shared (IN peer : ARRAY OF SHORTCHAR; peerLen : AO.SIZE;
+			VAR secret : ARRAY OF SHORTCHAR; VAR secretLen : AO.SIZE): BOOLEAN;
+		VAR ok : BOOLEAN; i : AO.SIZE; tmp, pk, sk : ARRAY 32 OF SHORTCHAR;
+	BEGIN
+		secretLen := 0;
+		IF peerLen # 32 THEN
+			RETURN FALSE
+		END;
+		FOR i := 0 TO 31 DO
+			pk[i] := peer[i];
+			sk[i] := g.keys.PrivateKey[i]
+		END;
+		ok := X25519.AgreementChecked(sk, pk, tmp);
+		IF ~ok THEN
+			RETURN FALSE
+		END;
+		FOR i := 0 TO 31 DO
+			secret[i] := tmp[i]
+		END;
+		secretLen := 32;
+		RETURN TRUE
+	END Shared;
+
+	PROCEDURE (g: EcGroup) Generate ;
+		VAR raw : ARRAY 64 OF SHORTCHAR; x, y : EC.BigInt;
+			n, tries : AO.SIZE; ok : BOOLEAN;
+	BEGIN
+		n := 4 * g.curve.n;
+		tries := 0;
+		ok := FALSE;
+		WHILE ~ok & (tries < 64) DO
+			INC(tries);
+			IF ~U.RandomBytesOk(raw, 0, n) THEN
+				tries := 64
+			ELSIF EC.OrderFromBytes(g.curve, raw, 0, n, g.priv)
+				& EC.OrderInRange(g.curve, g.priv) THEN
+				EC.ScalarMulBase(g.curve, g.priv, x, y, ok)
+			END
+		END;
+		IF ~ok THEN
+			g.publicLen := 0;
+			RETURN
+		END;
+		EC.PointToBytes(g.curve, x, y, g.publicKey);
+		g.publicLen := 1 + 8 * g.curve.n;
+		g.secretLen := n
+	END Generate;
+
+	PROCEDURE (g: EcGroup) Shared (IN peer : ARRAY OF SHORTCHAR; peerLen : AO.SIZE;
+			VAR secret : ARRAY OF SHORTCHAR; VAR secretLen : AO.SIZE): BOOLEAN;
+		VAR x, y, sx : EC.BigInt; n : AO.SIZE;
+	BEGIN
+		secretLen := 0;
+		IF (g.curve = NIL) OR (peerLen # 1 + 8 * g.curve.n) THEN
+			RETURN FALSE
+		END;
+		IF ~EC.PointFromBytes(g.curve, peer, peerLen, x, y) THEN
+			RETURN FALSE
+		END;
+		IF ~EC.ECDH(g.curve, g.priv, x, y, sx) THEN
+			RETURN FALSE
+		END;
+		n := 4 * g.curve.n;
+		EC.GetBytes(g.curve, sx, secret, 0);
+		secretLen := n;
+		RETURN TRUE
+	END Shared;
+
+	PROCEDURE NewGroup* (id : AO.SIGNED32): Group;
+		VAR g : X25519Group; e : EcGroup;
+	BEGIN
+		IF id = GroupX25519 THEN
+			NEW(g);
+			g.id := GroupX25519;
+			g.publicLen := 32;
+			g.secretLen := 32;
+			RETURN g
+		ELSIF (id = GroupSecp256r1) OR (id = GroupSecp384r1) THEN
+			NEW(e);
+			e.id := id;
+			IF id = GroupSecp256r1 THEN
+				e.curve := EC.P256()
+			ELSE
+				e.curve := EC.P384()
+			END;
+			e.publicLen := 1 + 8 * e.curve.n;
+			e.secretLen := 4 * e.curve.n;
+			RETURN e
+		END;
+		RETURN NIL
+	END NewGroup;
+
+	(* ------------------- AEAD записи ------------------- *)
+
+	PROCEDURE (a: RecordAEAD) Init* (cipher : Ciphers.Cipher; IN key : ARRAY OF SHORTCHAR;
+			keyLen : AO.SIZE; IN iv : ARRAY OF SHORTCHAR), NEW, ABSTRACT;
+
+	PROCEDURE (a: RecordAEAD) Seal* (IN plain : ARRAY OF SHORTCHAR; plainOfs, plainLen : AO.SIZE;
+			IN aad : ARRAY OF SHORTCHAR; aadLen : AO.SIZE; IN seq : ARRAY OF SHORTCHAR;
+			VAR out : ARRAY OF SHORTCHAR; outOfs : AO.SIZE;
+			VAR explicit : ARRAY OF SHORTCHAR; VAR tag : ARRAY OF SHORTCHAR), NEW, ABSTRACT;
+
+	PROCEDURE (a: RecordAEAD) Open* (IN cipherText : ARRAY OF SHORTCHAR; cipherOfs, cipherLen : AO.SIZE;
+			IN aad : ARRAY OF SHORTCHAR; aadLen : AO.SIZE; IN seq : ARRAY OF SHORTCHAR;
+			IN explicit : ARRAY OF SHORTCHAR; IN tag : ARRAY OF SHORTCHAR;
+			VAR plain : ARRAY OF SHORTCHAR; plainOfs : AO.SIZE): BOOLEAN, NEW, ABSTRACT;
+
+	PROCEDURE (a: GcmRecordAEAD) Init (cipher : Ciphers.Cipher; IN key : ARRAY OF SHORTCHAR;
+			keyLen : AO.SIZE; IN iv : ARRAY OF SHORTCHAR);
+		VAR i : AO.SIZE;
+	BEGIN
+		a.cipher := cipher;
+		FOR i := 0 TO 3 DO
+			a.salt[i] := iv[i]
+		END
+	END Init;
+
+	PROCEDURE (a: GcmRecordAEAD) Seal (IN plain : ARRAY OF SHORTCHAR; plainOfs, plainLen : AO.SIZE;
+			IN aad : ARRAY OF SHORTCHAR; aadLen : AO.SIZE; IN seq : ARRAY OF SHORTCHAR;
+			VAR out : ARRAY OF SHORTCHAR; outOfs : AO.SIZE;
+			VAR explicit : ARRAY OF SHORTCHAR; VAR tag : ARRAY OF SHORTCHAR);
+		VAR nonce : ARRAY 12 OF SHORTCHAR; i : AO.SIZE;
+	BEGIN
+		FOR i := 0 TO 3 DO
+			nonce[i] := a.salt[i]
+		END;
+		FOR i := 0 TO 7 DO
+			nonce[4 + i] := seq[i];
+			explicit[i] := seq[i]
+		END;
+		a.mode.Init(a.cipher, nonce, 12);
+		a.mode.Encrypt(plain, aad, plainOfs, plainLen, aadLen, 8 * a.tagLen, out, tag, outOfs)
+	END Seal;
+
+	PROCEDURE (a: GcmRecordAEAD) Open (IN cipherText : ARRAY OF SHORTCHAR; cipherOfs, cipherLen : AO.SIZE;
+			IN aad : ARRAY OF SHORTCHAR; aadLen : AO.SIZE; IN seq : ARRAY OF SHORTCHAR;
+			IN explicit : ARRAY OF SHORTCHAR; IN tag : ARRAY OF SHORTCHAR;
+			VAR plain : ARRAY OF SHORTCHAR; plainOfs : AO.SIZE): BOOLEAN;
+		VAR nonce : ARRAY 12 OF SHORTCHAR; i, res : AO.SIZE;
+	BEGIN
+		FOR i := 0 TO 3 DO
+			nonce[i] := a.salt[i]
+		END;
+		FOR i := 0 TO 7 DO
+			nonce[4 + i] := explicit[i]
+		END;
+		a.mode.Init(a.cipher, nonce, 12);
+		a.mode.Decrypt(cipherText, aad, tag, cipherOfs, cipherLen, aadLen,
+			8 * a.tagLen, plain, plainOfs, res);
+		RETURN res = 0
+	END Open;
+
+	PROCEDURE (a: ChaChaRecordAEAD) Init (cipher : Ciphers.Cipher; IN key : ARRAY OF SHORTCHAR;
+			keyLen : AO.SIZE; IN iv : ARRAY OF SHORTCHAR);
+		VAR i : AO.SIZE;
+	BEGIN
+		FOR i := 0 TO 31 DO
+			a.key[i] := key[i]
+		END;
+		FOR i := 0 TO 11 DO
+			a.nonce[i] := iv[i]
+		END
+	END Init;
+
+	(* RFC 7905: nonce = write_iv XOR seq_num(64), дополненный слева
+	   четырьмя нулями; явной части nonce в записи нет. *)
+	PROCEDURE (a: ChaChaRecordAEAD) Seal (IN plain : ARRAY OF SHORTCHAR; plainOfs, plainLen : AO.SIZE;
+			IN aad : ARRAY OF SHORTCHAR; aadLen : AO.SIZE; IN seq : ARRAY OF SHORTCHAR;
+			VAR out : ARRAY OF SHORTCHAR; outOfs : AO.SIZE;
+			VAR explicit : ARRAY OF SHORTCHAR; VAR tag : ARRAY OF SHORTCHAR);
+		VAR n : ARRAY 12 OF SHORTCHAR; i : AO.SIZE;
+	BEGIN
+		FOR i := 0 TO 11 DO
+			n[i] := a.nonce[i]
+		END;
+		FOR i := 0 TO 7 DO
+			n[4 + i] := SHORT(CHR(ORD(BITS(ORD(n[4 + i])) / BITS(ORD(seq[i])))))
+		END;
+		ChaCha20.Encrypt(a.key, n, aad, aadLen, plain, plainLen, out, tag)
+	END Seal;
+
+	PROCEDURE (a: ChaChaRecordAEAD) Open (IN cipherText : ARRAY OF SHORTCHAR; cipherOfs, cipherLen : AO.SIZE;
+			IN aad : ARRAY OF SHORTCHAR; aadLen : AO.SIZE; IN seq : ARRAY OF SHORTCHAR;
+			IN explicit : ARRAY OF SHORTCHAR; IN tag : ARRAY OF SHORTCHAR;
+			VAR plain : ARRAY OF SHORTCHAR; plainOfs : AO.SIZE): BOOLEAN;
+		VAR n : ARRAY 12 OF SHORTCHAR; i : AO.SIZE; tmp : POINTER TO ARRAY OF SHORTCHAR;
+	BEGIN
+		FOR i := 0 TO 11 DO
+			n[i] := a.nonce[i]
+		END;
+		FOR i := 0 TO 7 DO
+			n[4 + i] := SHORT(CHR(ORD(BITS(ORD(n[4 + i])) / BITS(ORD(seq[i])))))
+		END;
+		(* ChaCha20.Decrypt не принимает смещение; копируем фрагмент. *)
+		NEW(tmp, cipherLen);
+		FOR i := 0 TO cipherLen - 1 DO
+			tmp^[i] := cipherText[cipherOfs + i]
+		END;
+		IF ~ChaCha20.Decrypt(a.key, n, aad, aadLen, tmp^, cipherLen, tag, plain) THEN
+			RETURN FALSE
+		END;
+		(* Результат уже записан в plain с нулевого смещения; переносим. *)
+		IF plainOfs > 0 THEN
+			FOR i := cipherLen - 1 TO 0 BY (-1) DO
+				plain[plainOfs + i] := plain[i]
+			END
+		END;
+		RETURN TRUE
+	END Open;
+
+	PROCEDURE NewGcmRecordAEAD (): RecordAEAD;
+		VAR a : GcmRecordAEAD;
+	BEGIN
+		NEW(a);
+		NEW(a.mode);
+		a.tagLen := 16;
+		a.explicitLen := 8;
+		a.saltLen := 4;
+		RETURN a
+	END NewGcmRecordAEAD;
+
+	PROCEDURE NewChaChaRecordAEAD (): RecordAEAD;
+		VAR a : ChaChaRecordAEAD;
+	BEGIN
+		NEW(a);
+		a.tagLen := 16;
+		a.explicitLen := 0;
+		a.saltLen := 12;
+		RETURN a
+	END NewChaChaRecordAEAD;
+
+	PROCEDURE^ IsGcmSuite (cipherSuite : AO.SIGNED32): BOOLEAN;
+	PROCEDURE^ IsChaChaSuite (cipherSuite : AO.SIGNED32): BOOLEAN;
+
+	PROCEDURE NewRecordAEAD (cipherSuite : AO.SIGNED32): RecordAEAD;
+	BEGIN
+		IF IsGcmSuite(cipherSuite) THEN
+			RETURN NewGcmRecordAEAD()
+		ELSIF IsChaChaSuite(cipherSuite) THEN
+			RETURN NewChaChaRecordAEAD()
+		END;
+		RETURN NIL
+	END NewRecordAEAD;
+
+	(* ------------------- подпись рукопожатия ------------------- *)
+
+	PROCEDURE IsGcmSuite (cipherSuite : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		RETURN (cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+			OR (cipherSuite = TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+			OR (cipherSuite = TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384)
+			OR (cipherSuite = TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)
+	END IsGcmSuite;
+
+	PROCEDURE IsChaChaSuite (cipherSuite : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		RETURN (cipherSuite = TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256)
+			OR (cipherSuite = TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256)
+	END IsChaChaSuite;
+
+	(* Сертификат сервера обязан быть того же вида, что и набор. *)
+	PROCEDURE IsEcdsaSuite (cipherSuite : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		RETURN (cipherSuite = TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+			OR (cipherSuite = TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384)
+			OR (cipherSuite = TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256)
+	END IsEcdsaSuite;
+
+	PROCEDURE IsEcdheSuite (cipherSuite : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		RETURN (cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256)
+			OR IsGcmSuite(cipherSuite) OR IsChaChaSuite(cipherSuite)
+	END IsEcdheSuite;
+
+	PROCEDURE SchemeBit (scheme : AO.SIGNED32): AO.SIGNED32;
+	BEGIN
+		CASE scheme OF
+			SigRsaPkcs1Sha256 : RETURN 0
+		|       SigRsaPkcs1Sha384 : RETURN 1
+		|       SigEcdsaP256Sha256 : RETURN 2
+		|       SigEcdsaP384Sha384 : RETURN 3
+		|       SigRsaPssRsaeSha256 : RETURN 4
+		|       SigRsaPssRsaeSha384 : RETURN 5
+		|       SigEd25519 : RETURN 6
+		ELSE
+			RETURN (-1)
+		END
+	END SchemeBit;
+
+	PROCEDURE GroupBit (id : AO.SIGNED32): AO.SIGNED32;
+	BEGIN
+		CASE id OF
+			GroupX25519 : RETURN 0
+		|       GroupSecp256r1 : RETURN 1
+		|       GroupSecp384r1 : RETURN 2
+		ELSE
+			RETURN (-1)
+		END
+	END GroupBit;
+
+	PROCEDURE ClientSchemeSupported (scheme : AO.SIGNED32): BOOLEAN;
+		VAR b : AO.SIGNED32;
+	BEGIN
+		b := SchemeBit(scheme);
+		RETURN b >= 0
+	END ClientSchemeSupported;
+
+	PROCEDURE ServerHasEc (ctx : Context): BOOLEAN;
+	BEGIN
+		RETURN (ctx # NIL) & (ctx.certChain # NIL) & (ctx.certChain.keyType = X509.KeyEc)
+			& (ctx.ecCurve # NIL)
+	END ServerHasEc;
+
+	PROCEDURE ServerHasRsa (ctx : Context): BOOLEAN;
+	BEGIN
+		RETURN (ctx # NIL) & (ctx.rsaPrivateKey # NIL)
+	END ServerHasRsa;
+
+	(* Набор должен подходить к ключу сертификата. *)
+	PROCEDURE SuiteCompatible (ctx : Context; cipherSuite : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		IF IsEcdsaSuite(cipherSuite) THEN
+			RETURN ServerHasEc(ctx)
+		END;
+		RETURN ServerHasRsa(ctx)
+	END SuiteCompatible;
+
+	PROCEDURE ServerScheme (SELF : Connection): AO.SIGNED32;
+		VAR offered : SET;
+	BEGIN
+		offered := SELF.clientSigSchemes;
+		IF ServerHasEc(SELF.context) THEN
+			IF SELF.context.ecCurve.n = 8 THEN
+				IF ~SELF.haveSigSchemes OR (2 IN offered) THEN RETURN SigEcdsaP256Sha256 END
+			ELSIF SELF.context.ecCurve.n = 12 THEN
+				IF ~SELF.haveSigSchemes OR (3 IN offered) THEN RETURN SigEcdsaP384Sha384 END
+			END;
+			RETURN 0
+		END;
+		IF ServerHasRsa(SELF.context) THEN
+			IF ~SELF.haveSigSchemes THEN RETURN SigRsaPkcs1Sha256 END;
+			IF 4 IN offered THEN RETURN SigRsaPssRsaeSha256 END;
+			IF 5 IN offered THEN RETURN SigRsaPssRsaeSha384 END;
+			IF 0 IN offered THEN RETURN SigRsaPkcs1Sha256 END;
+			IF 1 IN offered THEN RETURN SigRsaPkcs1Sha384 END
+		END;
+		RETURN 0
+	END ServerScheme;
+
+	PROCEDURE ServerGroup (SELF : Connection): AO.SIGNED32;
+	BEGIN
+		(* OpenSSL (и не только) требует в TLS 1.2, чтобы кривая
+		   ECDSA-подписи совпадала с группой ECDHE. *)
+		IF ServerHasEc(SELF.context) THEN
+			IF SELF.context.ecCurve.n = 8 THEN
+				IF ~SELF.haveGroups OR (1 IN SELF.clientGroups) THEN
+					RETURN GroupSecp256r1
+				END
+			ELSIF SELF.context.ecCurve.n = 12 THEN
+				IF ~SELF.haveGroups OR (2 IN SELF.clientGroups) THEN
+					RETURN GroupSecp384r1
+				END
+			END;
+			RETURN 0
+		END;
+		IF ~SELF.haveGroups THEN RETURN GroupX25519 END;
+		IF 0 IN SELF.clientGroups THEN RETURN GroupX25519 END;
+		IF 1 IN SELF.clientGroups THEN RETURN GroupSecp256r1 END;
+		IF 2 IN SELF.clientGroups THEN RETURN GroupSecp384r1 END;
+		RETURN 0
+	END ServerGroup;
+
+	PROCEDURE TLSNewHash (scheme : AO.SIGNED32): CryptoHashes.Hash;
+	BEGIN
+		CASE scheme OF
+			SigRsaPkcs1Sha256, SigEcdsaP256Sha256, SigRsaPssRsaeSha256 :
+				RETURN CryptoHashes.NewHash("CryptoSHA256")
+		|       SigRsaPkcs1Sha384, SigEcdsaP384Sha384, SigRsaPssRsaeSha384 :
+				RETURN CryptoHashes.NewHash("CryptoSHA384")
+		ELSE
+			RETURN NIL
+		END
+	END TLSNewHash;
+
+	PROCEDURE DerToBig (c : EC.Curve; IN buf : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE;
+			VAR v : EC.BigInt): BOOLEAN;
+		VAR tmp : ARRAY 64 OF SHORTCHAR; n, start, i : AO.SIZE;
+	BEGIN
+		n := 4 * c.n;
+		IF len <= 0 THEN RETURN FALSE END;
+		start := 0;
+		WHILE (start < len - 1) & (buf[ofs + start] = 0X) DO INC(start) END;
+		(* Отрицательное число (старший бит без ведущего нуля). *)
+		IF (start = 0) & (ORD(buf[ofs]) >= 128) THEN RETURN FALSE END;
+		IF len - start > n THEN RETURN FALSE END;
+		FOR i := 0 TO n - 1 DO tmp[i] := 0X END;
+		FOR i := start TO len - 1 DO
+			tmp[n - (len - start) + (i - start)] := buf[ofs + i]
+		END;
+		RETURN EC.OrderFromBytes(c, tmp, 0, n, v)
+	END DerToBig;
+
+	(* Хеш как целое для ECDSA: если хеш короче порядка, он дополняется
+	   нулями слева; если длиннее — берутся старшие 4n байт. *)
+	PROCEDURE EcdsaHash (c : EC.Curve; IN digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			VAR buf : ARRAY OF SHORTCHAR; VAR len : AO.SIZE): BOOLEAN;
+		VAR n, i : AO.SIZE;
+	BEGIN
+		len := 0;
+		IF (c = NIL) OR (digestLen <= 0) THEN RETURN FALSE END;
+		n := 4 * c.n;
+		FOR i := 0 TO n - 1 DO buf[i] := 0X END;
+		IF digestLen >= n THEN
+			FOR i := 0 TO n - 1 DO buf[i] := digest[i] END
+		ELSE
+			FOR i := 0 TO digestLen - 1 DO
+				buf[n - digestLen + i] := digest[i]
+			END
+		END;
+		len := n;
+		RETURN TRUE
+	END EcdsaHash;
+
+	(* ECDSA-Sig-Value ::= SEQUENCE { r INTEGER, s INTEGER }. *)
+	PROCEDURE EcdsaVerifyDer (c : EC.Curve; IN qx, qy : EC.BigInt;
+			IN digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			IN sig : ARRAY OF SHORTCHAR; sigOfs, sigLen : AO.SIZE): BOOLEAN;
+		VAR r, s : EC.BigInt; pos, seqLen, rLen, sLen, hLen : AO.SIZE;
+			hbuf : ARRAY 64 OF SHORTCHAR;
+	BEGIN
+		IF (c = NIL) OR (sigLen < 8) OR (sig[sigOfs] # 30X) THEN RETURN FALSE END;
+		IF ~EcdsaHash(c, digest, digestLen, hbuf, hLen) THEN RETURN FALSE END;
+		seqLen := ORD(sig[sigOfs + 1]);
+		IF seqLen + 2 # sigLen THEN RETURN FALSE END;
+		pos := sigOfs + 2;
+		IF sig[pos] # 02X THEN RETURN FALSE END;
+		rLen := ORD(sig[pos + 1]);
+		IF pos + 2 + rLen + 2 > sigOfs + sigLen THEN RETURN FALSE END;
+		IF ~DerToBig(c, sig, pos + 2, rLen, r) THEN RETURN FALSE END;
+		INC(pos, 2 + rLen);
+		IF sig[pos] # 02X THEN RETURN FALSE END;
+		sLen := ORD(sig[pos + 1]);
+		IF pos + 2 + sLen # sigOfs + sigLen THEN RETURN FALSE END;
+		IF ~DerToBig(c, sig, pos + 2, sLen, s) THEN RETURN FALSE END;
+		RETURN ECDSA.Verify(c, qx, qy, hbuf, hLen, r, s)
+	END EcdsaVerifyDer;
+
+	PROCEDURE PutDerInt (c : EC.Curve; IN v : EC.BigInt; VAR out : ARRAY OF SHORTCHAR;
+			ofs : AO.SIZE): AO.SIZE;
+		VAR raw : ARRAY 64 OF SHORTCHAR; n, start, len, i : AO.SIZE;
+	BEGIN
+		n := 4 * c.n;
+		EC.OrderBytes(c, v, raw, 0);
+		start := 0;
+		WHILE (start < n - 1) & (raw[start] = 0X) DO INC(start) END;
+		len := n - start;
+		out[ofs] := 02X;
+		IF ORD(raw[start]) >= 128 THEN
+			out[ofs + 1] := (*WARN CONV CAST*)SHORT(CHR(len + 1));
+			out[ofs + 2] := 0X;
+			FOR i := 0 TO len - 1 DO out[ofs + 3 + i] := raw[start + i] END;
+			RETURN 3 + len
+		END;
+		out[ofs + 1] := (*WARN CONV CAST*)SHORT(CHR(len));
+		FOR i := 0 TO len - 1 DO out[ofs + 2 + i] := raw[start + i] END;
+		RETURN 2 + len
+	END PutDerInt;
+
+	PROCEDURE EcdsaSignDer (c : EC.Curve; IN priv : EC.BigInt;
+			IN digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			VAR sig : ARRAY OF SHORTCHAR; sigOfs : AO.SIZE; VAR sigLen : AO.SIZE): BOOLEAN;
+		VAR r, s : EC.BigInt; body : ARRAY 160 OF SHORTCHAR; n, m, pos, hLen : AO.SIZE;
+			hbuf : ARRAY 64 OF SHORTCHAR;
+	BEGIN
+		sigLen := 0;
+		IF (c = NIL) OR ~EcdsaHash(c, digest, digestLen, hbuf, hLen) THEN RETURN FALSE END;
+		IF ~ECDSA.Sign(c, priv, hbuf, hLen, r, s) THEN RETURN FALSE END;
+		pos := 2;
+		INC(pos, PutDerInt(c, r, body, pos));
+		INC(pos, PutDerInt(c, s, body, pos));
+		n := pos - 2;
+		body[0] := 30X;
+		body[1] := (*WARN CONV CAST*)SHORT(CHR(n));
+		IF n > 127 THEN RETURN FALSE END;
+		IF sigOfs + 2 + n > LEN(sig) THEN RETURN FALSE END;
+		FOR m := 0 TO 2 + n - 1 DO sig[sigOfs + m] := body[m] END;
+		sigLen := 2 + n;
+		RETURN TRUE
+	END EcdsaSignDer;
+
+	PROCEDURE TLSSignDigest (scheme : AO.SIGNED32; rsaKey : CryptoRSA.Key;
+			ecCurve : EC.Curve; IN ecPriv : EC.BigInt;
+			IN digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			VAR sig : ARRAY OF SHORTCHAR; sigOfs : AO.SIZE; VAR sigLen : AO.SIZE): BOOLEAN;
+	BEGIN
+		sigLen := 0;
+		CASE scheme OF
+			SigRsaPkcs1Sha256 :
+				IF rsaKey = NIL THEN RETURN FALSE END;
+				PKCS1.SignHash("CryptoSHA256", digest, digestLen, rsaKey, sig, sigOfs, sigLen)
+		|       SigRsaPkcs1Sha384 :
+				IF rsaKey = NIL THEN RETURN FALSE END;
+				PKCS1.SignHash("CryptoSHA384", digest, digestLen, rsaKey, sig, sigOfs, sigLen)
+		|       SigRsaPssRsaeSha256 :
+				IF (rsaKey = NIL) OR (digestLen # 32) THEN RETURN FALSE END;
+				PSS.SignHash("CryptoSHA256", digest, digestLen, rsaKey, sig, sigOfs, sigLen)
+		|       SigRsaPssRsaeSha384 :
+				IF (rsaKey = NIL) OR (digestLen # 48) THEN RETURN FALSE END;
+				PSS.SignHash("CryptoSHA384", digest, digestLen, rsaKey, sig, sigOfs, sigLen)
+		|       SigEcdsaP256Sha256 :
+				IF (ecCurve = NIL) OR (digestLen # 32) THEN RETURN FALSE END;
+				RETURN EcdsaSignDer(ecCurve, ecPriv, digest, digestLen, sig, sigOfs, sigLen)
+		|       SigEcdsaP384Sha384 :
+				IF (ecCurve = NIL) OR (digestLen # 48) THEN RETURN FALSE END;
+				RETURN EcdsaSignDer(ecCurve, ecPriv, digest, digestLen, sig, sigOfs, sigLen)
+		ELSE
+			RETURN FALSE
+		END;
+		RETURN sigLen > 0
+	END TLSSignDigest;
+
+	PROCEDURE TLSVerifyDigest (scheme : AO.SIGNED32; cert : X509.Certificate;
+			IN digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			IN sig : ARRAY OF SHORTCHAR; sigOfs, sigLen : AO.SIZE): BOOLEAN;
+	BEGIN
+		IF (cert = NIL) OR (sigLen <= 0) THEN RETURN FALSE END;
+		CASE scheme OF
+			SigRsaPkcs1Sha256 :
+				RETURN (cert.keyType = X509.KeyRsa) & (cert.publicKey # NIL)
+					& PKCS1.VerifyHash("CryptoSHA256", digest, digestLen,
+						cert.publicKey, sig, sigOfs, sigLen)
+		|       SigRsaPkcs1Sha384 :
+				RETURN (cert.keyType = X509.KeyRsa) & (cert.publicKey # NIL)
+					& PKCS1.VerifyHash("CryptoSHA384", digest, digestLen,
+						cert.publicKey, sig, sigOfs, sigLen)
+		|       SigRsaPssRsaeSha256 :
+				RETURN (cert.keyType = X509.KeyRsa) & (cert.publicKey # NIL)
+					& (digestLen = 32)
+					& PSS.VerifyHash("CryptoSHA256", digest, digestLen,
+						cert.publicKey, sig, sigOfs, sigLen)
+		|       SigRsaPssRsaeSha384 :
+				RETURN (cert.keyType = X509.KeyRsa) & (cert.publicKey # NIL)
+					& (digestLen = 48)
+					& PSS.VerifyHash("CryptoSHA384", digest, digestLen,
+						cert.publicKey, sig, sigOfs, sigLen)
+		|       SigEcdsaP256Sha256 :
+				RETURN (cert.keyType = X509.KeyEc) & (cert.ecCurve # NIL)
+					& (digestLen = 32)
+					& EcdsaVerifyDer(cert.ecCurve, cert.ecX, cert.ecY, digest, digestLen,
+						sig, sigOfs, sigLen)
+		|       SigEcdsaP384Sha384 :
+				RETURN (cert.keyType = X509.KeyEc) & (cert.ecCurve # NIL)
+					& (digestLen = 48)
+					& EcdsaVerifyDer(cert.ecCurve, cert.ecX, cert.ecY, digest, digestLen,
+						sig, sigOfs, sigLen)
+		END;
+		RETURN FALSE
+	END TLSVerifyDigest;
+
+	PROCEDURE TLSSign (scheme : AO.SIGNED32; rsaKey : CryptoRSA.Key;
+			ecCurve : EC.Curve; IN ecPriv : EC.BigInt;
+			IN data : ARRAY OF SHORTCHAR; dataLen : AO.SIZE;
+			VAR sig : ARRAY OF SHORTCHAR; sigOfs : AO.SIZE; VAR sigLen : AO.SIZE): BOOLEAN;
+		VAR h : CryptoHashes.Hash; digest : ARRAY 64 OF SHORTCHAR;
+	BEGIN
+		sigLen := 0;
+		(* Ed25519 подписывать не умеем; проверка — в TLSVerify. *)
+		h := TLSNewHash(scheme);
+		IF h = NIL THEN
+			RETURN FALSE
+		END;
+		h.Initialize;
+		h.Update(data, 0, dataLen);
+		h.GetHash(digest, 0);
+		RETURN TLSSignDigest(scheme, rsaKey, ecCurve, ecPriv, digest, h.size, sig, sigOfs, sigLen)
+	END TLSSign;
+
+	PROCEDURE TLSVerify (scheme : AO.SIGNED32; cert : X509.Certificate;
+			IN data : ARRAY OF SHORTCHAR; dataLen : AO.SIZE;
+			IN sig : ARRAY OF SHORTCHAR; sigOfs, sigLen : AO.SIZE): BOOLEAN;
+		VAR h : CryptoHashes.Hash; digest : ARRAY 64 OF SHORTCHAR;
+	BEGIN
+		IF (cert = NIL) OR (sigLen <= 0) THEN RETURN FALSE END;
+		IF scheme = SigEd25519 THEN
+			RETURN (cert.keyType = X509.KeyEd25519) & (sigLen = 64)
+				& Ed25519.Verify(cert.edKey, data, dataLen, sig)
+		END;
+		h := TLSNewHash(scheme);
+		IF h = NIL THEN
+			RETURN FALSE
+		END;
+		h.Initialize;
+		h.Update(data, 0, dataLen);
+		h.GetHash(digest, 0);
+		RETURN TLSVerifyDigest(scheme, cert, digest, h.size, sig, sigOfs, sigLen)
+	END TLSVerify;
+
 
 	PROCEDURE (*WARN CONV NOT SUPPORTED: &*)
 (SELF: DoubleLong) Init , NEW;
@@ -590,12 +1275,15 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	END AddTrustedPem;
 
 	PROCEDURE (SELF: Context) AddTrustedFile* (IN path : ARRAY OF CHAR): BOOLEAN, NEW;
-		VAR pem : ARRAY 16384 OF SHORTCHAR; len : INTEGER;
+		VAR pem : POINTER TO ARRAY OF SHORTCHAR; len : INTEGER; ok : BOOLEAN;
 	BEGIN
-		IF ~ReadFile(path, pem, len) THEN
+		(* Системный набор CA бывает больше 16 КиБ; читаем динамически. *)
+		NEW(pem, 1024 * 1024);
+		IF ~ReadFile(path, pem^, len) THEN
 			RETURN FALSE
 		END;
-		RETURN SELF.AddTrustedPem(pem)
+		ok := SELF.AddTrustedPem(pem^);
+		RETURN ok
 	END AddTrustedFile;
 
 	PROCEDURE (SELF: Context) LoadCertificatePem* (IN pem : ARRAY OF SHORTCHAR): BOOLEAN, NEW;
@@ -645,6 +1333,23 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		RETURN SELF.LoadPrivateKeyPem(pem)
 	END LoadPrivateKeyFile;
 
+	(* Ключ ECDSA (SEC1 или PKCS#8) для наборов ECDHE-ECDSA. *)
+	PROCEDURE (SELF: Context) LoadEcPrivateKeyPem* (IN pem : ARRAY OF SHORTCHAR): BOOLEAN, NEW;
+		VAR res : AO.SIGNED32;
+	BEGIN
+		SELF.ecCurve := NIL;
+		RETURN X509.ReadPemEcPrivateKey(pem, SELF.ecCurve, SELF.ecPrivate, res)
+	END LoadEcPrivateKeyPem;
+
+	PROCEDURE (SELF: Context) LoadEcPrivateKeyFile* (IN path : ARRAY OF CHAR): BOOLEAN, NEW;
+		VAR pem : ARRAY 16384 OF SHORTCHAR; len : INTEGER;
+	BEGIN
+		IF ~ReadFile(path, pem, len) THEN
+			RETURN FALSE
+		END;
+		RETURN SELF.LoadEcPrivateKeyPem(pem)
+	END LoadEcPrivateKeyFile;
+
 	PROCEDURE (SELF: Context) LoadClientCertificatePem* (IN pem : ARRAY OF SHORTCHAR): BOOLEAN, NEW;
 		VAR c : X509.Certificate; res : AO.SIGNED32;
 	BEGIN
@@ -678,6 +1383,22 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		END;
 		RETURN SELF.LoadClientPrivateKeyPem(pem)
 	END LoadClientPrivateKeyFile;
+
+	PROCEDURE (SELF: Context) LoadClientEcPrivateKeyPem* (IN pem : ARRAY OF SHORTCHAR): BOOLEAN, NEW;
+		VAR res : AO.SIGNED32;
+	BEGIN
+		SELF.clientEcCurve := NIL;
+		RETURN X509.ReadPemEcPrivateKey(pem, SELF.clientEcCurve, SELF.clientEcPrivate, res)
+	END LoadClientEcPrivateKeyPem;
+
+	PROCEDURE (SELF: Context) LoadClientEcPrivateKeyFile* (IN path : ARRAY OF CHAR): BOOLEAN, NEW;
+		VAR pem : ARRAY 16384 OF SHORTCHAR; len : INTEGER;
+	BEGIN
+		IF ~ReadFile(path, pem, len) THEN
+			RETURN FALSE
+		END;
+		RETURN SELF.LoadClientEcPrivateKeyPem(pem)
+	END LoadClientEcPrivateKeyFile;
 
 	PROCEDURE (SELF: Context) RequireClientCertificate* (require : BOOLEAN), NEW;
 	BEGIN
@@ -918,7 +1639,12 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		NEW(SELF.pendingReadState);SELF.pendingReadState.Init();
 		NEW(SELF.currentReadState);SELF.currentReadState.Init();
 		NEW(SELF.pendingSecurityParameters);
-				X25519.GenerateKeyPair(SELF.x25519);
+		SELF.group := NewGroup(GroupX25519);
+		IF SELF.group = NIL THEN
+			ASSERT(FALSE)
+		END;
+		SELF.group.Generate;
+		SELF.sharedLen := 0;
 		SELF.ownsContext := FALSE;
 		SELF.transcript := NIL;
 		SELF.transcriptLen := 0;
@@ -956,7 +1682,15 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	PROCEDURE (SELF: Connection) TranscriptDigestAt (len : AO.SIZE; VAR digest : ARRAY OF SHORTCHAR), NEW;
 		VAR h : CryptoHashes.Hash;
 	BEGIN
-		h := CryptoHashes.NewHash("CryptoSHA256");
+		(* TLS 1.2: хеш транскрипта — хеш PRF (SHA-256 или SHA-384). *)
+		IF SELF.version[1] >= 3X THEN
+			h := CryptoHashes.NewHash(SELF.pendingSecurityParameters.PRFAlgorithm)
+		ELSE
+			h := CryptoHashes.NewHash("CryptoSHA256")
+		END;
+		IF h = NIL THEN
+			h := CryptoHashes.NewHash("CryptoSHA256")
+		END;
 		h.Initialize;
 		IF (SELF.transcript # NIL) & (len > 0) THEN
 			IF len > SELF.transcriptLen THEN len := SELF.transcriptLen END;
@@ -965,10 +1699,49 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		h.GetHash(digest, 0)
 	END TranscriptDigestAt;
 
+	PROCEDURE (SELF: Connection) PrfDigestLen (): AO.SIZE, NEW;
+	BEGIN
+		IF (SELF.version[1] >= 3X)
+			& (SELF.pendingSecurityParameters.PRFAlgorithm = "CryptoSHA384") THEN
+			RETURN 48
+		END;
+		RETURN 32
+	END PrfDigestLen;
+
 	PROCEDURE (SELF: Connection) TranscriptDigest (VAR digest : ARRAY OF SHORTCHAR), NEW;
 	BEGIN
 		SELF.TranscriptDigestAt(SELF.transcriptLen, digest)
 	END TranscriptDigest;
+
+	(* Хеш транскрипта хешем схемы подписи (CertificateVerify TLS 1.2). *)
+	PROCEDURE (SELF: Connection) TranscriptHash (scheme : AO.SIGNED32;
+			VAR digest : ARRAY OF SHORTCHAR; VAR digestLen : AO.SIZE): BOOLEAN, NEW;
+		VAR h : CryptoHashes.Hash;
+	BEGIN
+		digestLen := 0;
+		h := TLSNewHash(scheme);
+		IF h = NIL THEN RETURN FALSE END;
+		h.Initialize;
+		IF (SELF.transcript # NIL) & (SELF.transcriptLen > 0) THEN
+			h.Update(SELF.transcript^, 0, SELF.transcriptLen)
+		END;
+		h.GetHash(digest, 0);
+		digestLen := h.size;
+		RETURN TRUE
+	END TranscriptHash;
+
+	PROCEDURE (SELF: Connection) ClientSignScheme (): AO.SIGNED32, NEW;
+	BEGIN
+		IF (SELF.context # NIL) & (SELF.context.clientEcCurve # NIL) THEN
+			IF SELF.context.clientEcCurve.n = 8 THEN RETURN SigEcdsaP256Sha256 END;
+			IF SELF.context.clientEcCurve.n = 12 THEN RETURN SigEcdsaP384Sha384 END;
+			RETURN 0
+		END;
+		IF (SELF.context # NIL) & (SELF.context.clientPrivateKey # NIL) THEN
+			RETURN SigRsaPkcs1Sha256
+		END;
+		RETURN 0
+	END ClientSignScheme;
 
 	PROCEDURE (SELF: Connection) AwaitStateNotEqual* (s : AO.SIGNED32) : BOOLEAN, NEW;
 
@@ -1057,6 +1830,32 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			RETURN s.conn.IsConnected();
 		END IsConnected;
 
+	PROCEDURE (SELF: Connection) NegotiatedVersion* (): AO.SIGNED32, NEW;
+	BEGIN
+		RETURN 256 * ORD(SELF.version[0]) + ORD(SELF.version[1])
+	END NegotiatedVersion;
+
+	PROCEDURE (SELF: Connection) NegotiatedSuite* (): AO.SIGNED32, NEW;
+	BEGIN
+		IF SELF.pendingSecurityParameters # NIL THEN
+			RETURN SELF.pendingSecurityParameters.cipherSuite
+		END;
+		RETURN 0
+	END NegotiatedSuite;
+
+	PROCEDURE (SELF: Connection) NegotiatedGroup* (): AO.SIGNED32, NEW;
+	BEGIN
+		IF SELF.group # NIL THEN
+			RETURN SELF.group.id
+		END;
+		RETURN 0
+	END NegotiatedGroup;
+
+	PROCEDURE (SELF: Connection) NegotiatedScheme* (): AO.SIGNED32, NEW;
+	BEGIN
+		RETURN SELF.negotiatedSigScheme
+	END NegotiatedScheme;
+
 
 	PROCEDURE (SELF: Connection) SetConnection* (c : TCP.Connection), NEW;
 
@@ -1092,6 +1891,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 						additionalData: ARRAY 13 OF SHORTCHAR;
 						tag: ARRAY 16 OF SHORTCHAR;
 			iv: ARRAY 16 OF SHORTCHAR;
+			seq, explicit: ARRAY 8 OF SHORTCHAR;
 			i, length, padLen, blocksize: AO.SIZE;
 			sendIV: BOOLEAN;
 
@@ -1107,7 +1907,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 					StdLog.String("Payload len:");StdLog.Int(len);StdLog.Ln;
 					StdLog.String("Payload:");AO.LogBuffer(data, ofs, len);StdLog.Ln;U.PrintHex(data, ofs, len); StdLog.Ln;
 				END;*)
-		IF (SELF.currentWriteState.mac # NIL) & (SELF.currentWriteState.aeadCipher = NIL) THEN
+		IF (SELF.currentWriteState.mac # NIL) & (SELF.currentWriteState.aead = NIL) THEN
 			SELF.currentWriteState.recordSeq.GetBytes(macInput, 0);
 			macInput[8] := (*WARN CONV CAST*)SHORT(CHR(contentType));
 			macInput[9] := SELF.version[0];
@@ -1120,7 +1920,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.currentWriteState.mac.GetMac(data, ofs + len);
 			INC(length, SELF.currentWriteState.mac.size)
 		END;
-		IF (SELF.currentWriteState.cipher # NIL) & (SELF.currentWriteState.aeadCipher = NIL) THEN
+		IF (SELF.currentWriteState.cipher # NIL) & (SELF.currentWriteState.aead = NIL) THEN
 			blocksize := SELF.currentWriteState.cipher.blockSize;
 			IF blocksize > 1 THEN
 				sendIV := ORD(SELF.version[1]) >= 2;
@@ -1141,7 +1941,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			ASSERT(length MOD blocksize = 0);
 			SELF.currentWriteState.cipher.Encrypt(data, ofs, length)
 		END;
-				IF SELF.currentWriteState.aeadCipher # NIL THEN
+				IF SELF.currentWriteState.aead # NIL THEN
 					(*additional_data = seq_num + TLSCompressed.type +
 			TLSCompressed.version + TLSCompressed.length;*)
 					SELF.currentWriteState.recordSeq.GetBytes(additionalData, 0);
@@ -1150,26 +1950,20 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		    additionalData[10] := SELF.version[1];
 		    additionalData[11] := SHORT(CHR(len DIV 256));
 		    additionalData[12] := SHORT(CHR(len));
-					(*StdLog.String("additionalData:");StdLog.Ln;U.PrintHex(additionalData, 0, LEN(additionalData)); StdLog.Ln; *)
-					(* nonce = implicit salt (4) || explicit (8). Явная часть —
-					   номер записи: он уникален для ключа, в отличие от
-					   случайных 8 байт. *)
-					iv[0] := SELF.currentWriteState.iv[0];
-					iv[1] := SELF.currentWriteState.iv[1];
-					iv[2] := SELF.currentWriteState.iv[2];
-					iv[3] := SELF.currentWriteState.iv[3];
-					SELF.currentWriteState.recordSeq.GetBytes(iv, 4);
-					sendIV := TRUE;
-
-					SELF.currentWriteState.aeadCipher.Init(SELF.currentWriteState.cipher, iv, 12);
-					(*writing encrypted data, the same length as plaintext*)
-					SELF.currentWriteState.aeadCipher.Encrypt(data, additionalData, ofs, length, LEN(additionalData), LEN(tag) * 8, data, tag, ofs);
+					SELF.currentWriteState.recordSeq.GetBytes(seq, 0);
+					(* nonce строит AEAD: GCM — salt(4) || seq(8) с явной
+					   частью seq в записи; ChaCha — соль(12), номер
+					   записи в nonce, явной части нет. *)
+					SELF.currentWriteState.aead.Seal(data, ofs, length,
+						additionalData, LEN(additionalData), seq,
+						data, ofs, explicit, tag);
+					sendIV := TRUE
 				END;
 
 		IF sendIV THEN
-						IF SELF.currentWriteState.aeadCipher # NIL THEN
-							INC(length, 8);(*explicit nonce(IV) size*)
-							INC(length, LEN(tag));(*tag size*)
+						IF SELF.currentWriteState.aead # NIL THEN
+							INC(length, SELF.currentWriteState.aead.explicitLen);
+							INC(length, SELF.currentWriteState.aead.tagLen)
 						ELSE
 				INC(length, blocksize)
 						END;
@@ -1180,19 +1974,19 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		SELF.out.Char(SHORT(CHR(length DIV 256)));
 		SELF.out.Char(SHORT(CHR(length)));
 		IF sendIV THEN
-			
-						IF SELF.currentWriteState.aeadCipher # NIL THEN
-							SELF.out.Bytes(iv, 4, 8);
-		       	 DEC(length, 8);
-							DEC(length, LEN(tag));(*tag size*)
+
+						IF SELF.currentWriteState.aead # NIL THEN
+							SELF.out.Bytes(explicit, 0, SELF.currentWriteState.aead.explicitLen);
+		       	 DEC(length, SELF.currentWriteState.aead.explicitLen);
+							DEC(length, SELF.currentWriteState.aead.tagLen)
 						ELSE
 				SELF.out.Bytes(iv, 0, blocksize);
 				DEC(length, blocksize)
 						END;
 		END;
 		SELF.out.Bytes(data, ofs, length);
-				IF SELF.currentWriteState.aeadCipher # NIL THEN
-					SELF.out.Bytes(tag, 0, LEN(tag));
+				IF SELF.currentWriteState.aead # NIL THEN
+					SELF.out.Bytes(tag, 0, SELF.currentWriteState.aead.tagLen);
 				END;
 		SELF.out.Update;
 	END SendRecord;
@@ -1319,17 +2113,18 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	BEGIN
 				
-		macSecretSize := SELF.pendingWriteState.mac.size;
-				IF SELF.pendingWriteState.aeadCipher # NIL THEN
+		macSecretSize := 0;
+		IF SELF.pendingWriteState.mac # NIL THEN
+			macSecretSize := SELF.pendingWriteState.mac.size
+		END;
+				IF SELF.pendingWriteState.aead # NIL THEN
 					macSecretSize := 0;
 				END;
 		cipherKeySize := SELF.pendingSecurityParameters.cipherKeySize;
-		IF SELF.pendingWriteState.cipher # NIL THEN
-						IF SELF.pendingWriteState.aeadCipher = NIL THEN
-				cipherBlockSize := SELF.pendingWriteState.cipher.blockSize
-						ELSE
-							cipherBlockSize := 4;(* fixed iv size *)
-						END
+		IF SELF.pendingWriteState.aead # NIL THEN
+			cipherBlockSize := SELF.pendingWriteState.aead.saltLen
+		ELSIF SELF.pendingWriteState.cipher # NIL THEN
+			cipherBlockSize := SELF.pendingWriteState.cipher.blockSize
 		ELSE
 			cipherBlockSize := 0
 		END;
@@ -1389,11 +2184,14 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		IF state.cipher # NIL THEN
 						(*StdLog.String('Cipher key: ');U.PrintHex(state.cipherKey, 0, sp.cipherKeySize); StdLog.Ln;*)
 			state.cipher.InitKey(state.cipherKey, 8 * sp.cipherKeySize);
-			IF (state.cipher.blockSize > 0) & (state.aeadCipher = NIL) THEN
+			IF (state.cipher.blockSize > 0) & (state.aead = NIL) THEN
 				state.cipher.SetIV(state.iv, Ciphers.CBC)
 			END
 		END;
-				
+		IF state.aead # NIL THEN
+			state.aead.Init(state.cipher, state.cipherKey, sp.cipherKeySize, state.iv)
+		END
+
 	END InitializeConnectionState;
 
 	PROCEDURE (SELF: Connection) PrepareConnectionState (state : ConnectionState; cipherSuite : AO.SIGNED32; VAR res : INTEGER), NEW;
@@ -1401,41 +2199,47 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	BEGIN
 		ASSERT(cipherSuite # 0);
 		res := Ok;
+		IF IsGcmSuite(cipherSuite) THEN
+			(* HMAC не используется, но GenerateKeys читает его длину. *)
+			NEW(state.mac); state.mac.Init("CryptoSHA256");
+			state.cipher := Ciphers.NewCipher("CryptoAES");
+			state.aead := NewRecordAEAD(cipherSuite)
+		ELSIF IsChaChaSuite(cipherSuite) THEN
+			NEW(state.mac); state.mac.Init("CryptoSHA256");
+			state.cipher := NIL;
+			state.aead := NewRecordAEAD(cipherSuite)
+		ELSE
 		CASE cipherSuite OF
-			TlsRsaWithNullMd5 :	     
+			TlsRsaWithNullMd5 :
 							NEW(state.mac); state.mac.Init( "CryptoMD5");
 					state.cipher := NIL
-		|       TlsRsaWithNullSha :	     
+		|       TlsRsaWithNullSha :
 							NEW(state.mac); state.mac.Init( "CryptoSHA1");
 					state.cipher := NIL
-		|       TlsRsaWithRc4128Md5 :	  
+		|       TlsRsaWithRc4128Md5 :
 							NEW(state.mac); state.mac.Init( "CryptoMD5");
 					state.cipher := Ciphers.NewCipher("CryptoARC4")
-		|       TlsRsaWithRc4128Sha :	   
+		|       TlsRsaWithRc4128Sha :
 							NEW(state.mac); state.mac.Init( "CryptoSHA1");
 					state.cipher := Ciphers.NewCipher("CryptoARC4")
-		|       TlsRsaWithIdeaCbcSha :	  
+		|       TlsRsaWithIdeaCbcSha :
 							NEW(state.mac); state.mac.Init("CryptoSHA1");
 					state.cipher := Ciphers.NewCipher("CryptoIDEA")
-		|       TlsRsaWithDesCbcSha :	   
+		|       TlsRsaWithDesCbcSha :
 							NEW(state.mac); state.mac.Init( "CryptoSHA1");
 					state.cipher := Ciphers.NewCipher("CryptoDES")
-		|       TlsRsaWith3DesEdeCbcSha :	       
+		|       TlsRsaWith3DesEdeCbcSha :
 							NEW(state.mac); state.mac.Init(  "CryptoSHA1");
 					state.cipher := Ciphers.NewCipher("CryptoDES3")
-		|       TlsRsaWithAes128CbcSha,TlsRsaWithAes256CbcSha :		 
+		|       TlsRsaWithAes128CbcSha,TlsRsaWithAes256CbcSha :
 							NEW(state.mac); state.mac.Init( "CryptoSHA1");
 					state.cipher := Ciphers.NewCipher("CryptoAES")
-		 		|       TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 :		 
+		 		|       TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 :
 							NEW(state.mac); state.mac.Init( "CryptoSHA256");
 					state.cipher := Ciphers.NewCipher("CryptoAES")
-		 		|       TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 :		 
-							NEW(state.mac); state.mac.Init( "CryptoSHA256");
-							state.cipher := Ciphers.NewCipher("CryptoAES");
-					NEW(state.aeadCipher);
-							
 		ELSE
 			res := (-1)
+		END
 		END
 	END PrepareConnectionState;
 
@@ -1456,13 +2260,21 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		|       TlsRsaWithAes128CbcSha :      sp.cipherKeySize := 16
 		|       TlsRsaWithAes256CbcSha :      sp.cipherKeySize := 32
 				|       TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 :  sp.cipherKeySize := 16
-				|       TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 : sp.cipherKeySize := 16
+				|       TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+						TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 : sp.cipherKeySize := 16
+				|       TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+						TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+						TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+						TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 : sp.cipherKeySize := 32
 		ELSE
 			res := (-1)
 		END;
 
 		IF SELF.version[1] < 3X THEN
 			sp.PRFAlgorithm := "SHA1 XOR MD5"
+		ELSIF (cipherSuite = TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384)
+			OR (cipherSuite = TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) THEN
+			sp.PRFAlgorithm := "CryptoSHA384"
 		ELSE
 			sp.PRFAlgorithm := "CryptoSHA256"
 		END
@@ -1609,81 +2421,107 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	PROCEDURE (SELF: Connection) SendServerKeyExchange (VAR data : ARRAY OF SHORTCHAR; ofs : AO.SIZE): BOOLEAN, NEW;
 		VAR
-			params : ARRAY 36 OF SHORTCHAR;
-			signedData : ARRAY 100 OF SHORTCHAR;
-			digest : ARRAY 32 OF SHORTCHAR;
-			h : CryptoHashes.Hash;
-			i, sigLen : AO.SIZE;
+			params : ARRAY 4 + MaxGroupPublic OF SHORTCHAR;
+			signedData : ARRAY 64 + 4 + MaxGroupPublic OF SHORTCHAR;
+			scheme : AO.SIGNED32;
+			i, sigLen, signedLen : AO.SIZE;
 	BEGIN
-		IF SELF.context.rsaPrivateKey = NIL THEN
-			SELF.SendError(InternalError);
-			RETURN FALSE
-		END;
 		params[0] := 3X;	(* named_curve *)
 		params[1] := 0X;
-		params[2] := 1DX;	(* x25519 *)
-		params[3] := 20X;	(* длина ключа 32 *)
-		FOR i := 0 TO 31 DO
-			params[4 + i] := SELF.x25519.PublicKey[i]
+		params[2] := (*WARN CONV CAST*)SHORT(CHR(SELF.group.id));
+		params[3] := (*WARN CONV CAST*)SHORT(CHR(SELF.group.publicLen));
+		FOR i := 0 TO SELF.group.publicLen - 1 DO
+			params[4 + i] := SELF.group.publicKey[i]
 		END;
 		FOR i := 0 TO 31 DO
 			signedData[i] := SELF.pendingSecurityParameters.clientRandom[i];
 			signedData[i + 32] := SELF.pendingSecurityParameters.serverRandom[i]
 		END;
-		FOR i := 0 TO 35 DO
+		signedLen := 64 + 4 + SELF.group.publicLen;
+		FOR i := 0 TO 4 + SELF.group.publicLen - 1 DO
 			signedData[64 + i] := params[i]
 		END;
-		h := CryptoHashes.NewHash("CryptoSHA256");
-		h.Initialize;
-		h.Update(signedData, 0, 100);
-		h.GetHash(digest, 0);
+		scheme := SELF.serverScheme;
+		IF scheme = 0 THEN
+			SELF.SendError(HandshakeFailure);
+			RETURN FALSE
+		END;
 		sigLen := 0;
-		PKCS1.SignHash("CryptoSHA256", digest, 32, SELF.context.rsaPrivateKey, data, ofs + 40, sigLen);
-		IF sigLen = 0 THEN
+		IF ~TLSSign(scheme, SELF.context.rsaPrivateKey, SELF.context.ecCurve,
+				SELF.context.ecPrivate, signedData, signedLen,
+				data, ofs + 4 + SELF.group.publicLen + 4, sigLen) THEN
 			SELF.SendError(InternalError);
 			RETURN FALSE
 		END;
-		FOR i := 0 TO 35 DO
+		FOR i := 0 TO 4 + SELF.group.publicLen - 1 DO
 			data[ofs + i] := params[i]
 		END;
-		data[ofs + 36] := 4X;	(* SHA256 *)
-		data[ofs + 37] := 1X;	(* RSA *)
-		data[ofs + 38] := (*WARN CONV CAST*)SHORT(CHR(sigLen DIV 256));
-		data[ofs + 39] := (*WARN CONV CAST*)SHORT(CHR(sigLen MOD 256));
-		SELF.SendHandshake(data, ServerKeyExchange, ofs - 4, 40 + sigLen);
+		data[ofs + 4 + SELF.group.publicLen] := (*WARN CONV CAST*)SHORT(CHR(scheme DIV 256));
+		data[ofs + 5 + SELF.group.publicLen] := (*WARN CONV CAST*)SHORT(CHR(scheme MOD 256));
+		data[ofs + 6 + SELF.group.publicLen] := (*WARN CONV CAST*)SHORT(CHR(sigLen DIV 256));
+		data[ofs + 7 + SELF.group.publicLen] := (*WARN CONV CAST*)SHORT(CHR(sigLen MOD 256));
+		SELF.SendHandshake(data, ServerKeyExchange, ofs - 4, 8 + SELF.group.publicLen + sigLen);
 		RETURN TRUE
 	END SendServerKeyExchange;
 
 	PROCEDURE (SELF: Connection) SendCertificateRequest (VAR data : ARRAY OF SHORTCHAR; ofs : AO.SIZE), NEW;
+		VAR schemes : ARRAY 5 OF AO.SIGNED32; i, pos : AO.SIZE;
 	BEGIN
 		IF Trace THEN
 			SELF.PrintDirection(TRUE);
 			StdLog.String("CertificateRequest");
 			StdLog.Ln
 		END;
-		data[ofs] := 1X;	data[ofs + 1] := 1X;	(* rsa_sign *)
-		data[ofs + 2] := 0X;	data[ofs + 3] := 2X;	(* длина списка алгоритмов *)
-		data[ofs + 4] := 4X;	data[ofs + 5] := 1X;	(* SHA256/RSA *)
-		data[ofs + 6] := 0X;	data[ofs + 7] := 0X;	(* нет имён CA *)
-		SELF.SendHandshake(data, CertificateRequest, ofs - 4, 8)
+		(* certificate_types: rsa_sign(1), ecdsa_sign(64). *)
+		data[ofs] := 2X;
+		data[ofs + 1] := 1X;
+		data[ofs + 2] := 40X;
+		pos := ofs + 3;
+		(* supported_signature_algorithms: 5 схем по 2 байта. *)
+		schemes[0] := SigRsaPkcs1Sha256;
+		schemes[1] := SigRsaPssRsaeSha256;
+		schemes[2] := SigEcdsaP256Sha256;
+		schemes[3] := SigEcdsaP384Sha384;
+		schemes[4] := SigEd25519;
+		data[pos] := 0X; data[pos + 1] := 0AX;
+		INC(pos, 2);
+		FOR i := 0 TO 4 DO
+			data[pos] := (*WARN CONV CAST*)SHORT(CHR(schemes[i] DIV 256));
+			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(schemes[i] MOD 256));
+			INC(pos, 2)
+		END;
+		(* Нет имён CA. *)
+		data[pos] := 0X; data[pos + 1] := 0X;
+		INC(pos, 2);
+		SELF.SendHandshake(data, CertificateRequest, ofs - 4, pos - ofs)
 	END SendCertificateRequest;
 
 	PROCEDURE (SELF: Connection) SendCertificateVerify (VAR data : ARRAY OF SHORTCHAR; ofs : AO.SIZE): BOOLEAN, NEW;
-		VAR digest : ARRAY 32 OF SHORTCHAR; sigLen : AO.SIZE;
+		VAR digest : ARRAY 64 OF SHORTCHAR; scheme : AO.SIGNED32;
+			sigLen, digestLen : AO.SIZE;
 	BEGIN
-		IF (SELF.context.clientCertChain = NIL) OR (SELF.context.clientPrivateKey = NIL) THEN
+		IF (SELF.context.clientCertChain = NIL)
+			OR ((SELF.context.clientPrivateKey = NIL) & (SELF.context.clientEcCurve = NIL)) THEN
 			SELF.SendError(InternalError);
 			RETURN FALSE
 		END;
-		SELF.TranscriptDigest(digest);
-		sigLen := 0;
-		PKCS1.SignHash("CryptoSHA256", digest, 32, SELF.context.clientPrivateKey, data, ofs + 4, sigLen);
-		IF sigLen = 0 THEN
+		scheme := SELF.ClientSignScheme();
+		IF scheme = 0 THEN
 			SELF.SendError(InternalError);
 			RETURN FALSE
 		END;
-		data[ofs] := 4X;
-		data[ofs + 1] := 1X;
+		IF ~SELF.TranscriptHash(scheme, digest, digestLen) THEN
+			SELF.SendError(InternalError);
+			RETURN FALSE
+		END;
+		IF ~TLSSignDigest(scheme, SELF.context.clientPrivateKey, SELF.context.clientEcCurve,
+				SELF.context.clientEcPrivate, digest, digestLen,
+				data, ofs + 4, sigLen) THEN
+			SELF.SendError(InternalError);
+			RETURN FALSE
+		END;
+		data[ofs] := (*WARN CONV CAST*)SHORT(CHR(scheme DIV 256));
+		data[ofs + 1] := (*WARN CONV CAST*)SHORT(CHR(scheme MOD 256));
 		data[ofs + 2] := (*WARN CONV CAST*)SHORT(CHR(sigLen DIV 256));
 		data[ofs + 3] := (*WARN CONV CAST*)SHORT(CHR(sigLen MOD 256));
 		SELF.SendHandshake(data, CertificateVerify, ofs - 4, 4 + sigLen);
@@ -1751,16 +2589,14 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	END ReceiveClientCertificate;
 
 	PROCEDURE (SELF: Connection) ReceiveCertificateVerify (IN data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): BOOLEAN, NEW;
-		VAR digest : ARRAY 32 OF SHORTCHAR; sigLen : AO.SIZE; ok : BOOLEAN;
+		VAR digest : ARRAY 64 OF SHORTCHAR; dummy : ARRAY 1 OF SHORTCHAR;
+			scheme, sigLen, digestLen : AO.SIZE; ok : BOOLEAN;
 	BEGIN
 		IF (len < 4) OR (ofs + len > LEN(data)) THEN
 			SELF.SendError(DecodeError);
 			RETURN FALSE
 		END;
-		IF (ORD(data[ofs]) # 4) OR (ORD(data[ofs + 1]) # 1) THEN
-			SELF.SendError(HandshakeFailure);
-			RETURN FALSE
-		END;
+		scheme := 256 * ORD(data[ofs]) + ORD(data[ofs + 1]);
 		sigLen := 256 * ORD(data[ofs + 2]) + ORD(data[ofs + 3]);
 		IF (sigLen = 0) OR (sigLen > MaxSignatureLength) OR (4 + sigLen > len) THEN
 			SELF.SendError(DecodeError);
@@ -1771,9 +2607,19 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.SendError(BadCertificate);
 			RETURN FALSE
 		END;
-		SELF.TranscriptDigest(digest);
-		ok := PKCS1.VerifyHash("CryptoSHA256", digest, 32, SELF.clientCert.publicKey,
-			data, ofs + 4, sigLen);
+		IF scheme = SigEd25519 THEN
+			IF SELF.transcript # NIL THEN
+				ok := TLSVerify(scheme, SELF.clientCert, SELF.transcript^,
+					SELF.transcriptLen, data, ofs + 4, sigLen)
+			ELSE
+				ok := TLSVerify(scheme, SELF.clientCert, dummy, 0,
+					data, ofs + 4, sigLen)
+			END
+		ELSE
+			ok := SELF.TranscriptHash(scheme, digest, digestLen)
+				& TLSVerifyDigest(scheme, SELF.clientCert, digest, digestLen,
+					data, ofs + 4, sigLen)
+		END;
 		IF ~ok THEN
 			SELF.SendError(DecryptError);
 			RETURN FALSE
@@ -1785,7 +2631,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	PROCEDURE (SELF: Connection) ReceiveClientHello (VAR data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): AO.SIGNED32, NEW;
 		VAR
 			nofSuites, i, idLen, cipherSuite, major, minor, suiteBytes, chosen: AO.SIGNED32;
-			idPos, pos, endPos: AO.SIZE;
+			idPos, pos, endPos, compPos, extPos, extEnd, epos, extType, elen, listLen, ipos: AO.SIZE;
+			gid, scheme, b: AO.SIGNED32;
 			res: INTEGER;
 			found: BOOLEAN;
 
@@ -1845,23 +2692,95 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			END
 		END;
 		SELF.session := SELF.context.GetNewServerSession();
+		(* Разбор расширений: supported_groups (10), signature_algorithms
+		   (13), ec_point_formats (11), server_name (0), renegotiation_info
+		   (0xff01). Остальные пропускаются. *)
+		SELF.haveSigSchemes := FALSE;
+		SELF.clientSigSchemes := {};
+		SELF.haveGroups := FALSE;
+		SELF.clientGroups := {};
+		compPos := pos + suiteBytes;
+		IF compPos + 1 > endPos THEN
+			SELF.SendError(DecodeError);
+			RETURN (-1)
+		END;
+		extPos := compPos + 1 + ORD(data[compPos]);
+		IF extPos > endPos THEN
+			SELF.SendError(DecodeError);
+			RETURN (-1)
+		END;
+		IF extPos + 2 <= endPos THEN
+			extEnd := extPos + 2 + 256 * ORD(data[extPos]) + ORD(data[extPos + 1]);
+			IF extEnd > endPos THEN
+				SELF.SendError(DecodeError);
+				RETURN (-1)
+			END;
+			epos := extPos + 2;
+			WHILE epos + 4 <= extEnd DO
+				extType := 256 * ORD(data[epos]) + ORD(data[epos + 1]);
+				elen := 256 * ORD(data[epos + 2]) + ORD(data[epos + 3]);
+				IF epos + 4 + elen > extEnd THEN
+					SELF.SendError(DecodeError);
+					RETURN (-1)
+				END;
+				IF (extType = 13) & (elen >= 2) THEN
+					(* signature_algorithms: список по 2 байта. *)
+					listLen := 256 * ORD(data[epos + 4]) + ORD(data[epos + 5]);
+					IF listLen + 2 <= elen THEN
+						SELF.haveSigSchemes := TRUE;
+						ipos := epos + 6;
+						WHILE ipos + 2 <= epos + 6 + listLen DO
+							scheme := 256 * ORD(data[ipos]) + ORD(data[ipos + 1]);
+							b := SchemeBit(scheme);
+							IF b >= 0 THEN INCL(SELF.clientSigSchemes, SHORT(b)) END;
+							INC(ipos, 2)
+						END
+					END
+				ELSIF (extType = 10) & (elen >= 2) THEN
+					(* supported_groups: список по 2 байта. *)
+					listLen := 256 * ORD(data[epos + 4]) + ORD(data[epos + 5]);
+					IF listLen + 2 <= elen THEN
+						SELF.haveGroups := TRUE;
+						ipos := epos + 6;
+						WHILE ipos + 2 <= epos + 6 + listLen DO
+							gid := 256 * ORD(data[ipos]) + ORD(data[ipos + 1]);
+							b := GroupBit(gid);
+							IF b >= 0 THEN INCL(SELF.clientGroups, SHORT(b)) END;
+							INC(ipos, 2)
+						END
+					END
+				END;
+				INC(epos, 4 + elen)
+			END
+		END;
 		found := FALSE;
 		chosen := 0;
 		FOR i := 0 TO nofSuites - 1 DO
 			cipherSuite := 256 * ORD(data[pos + 2 * i]) + ORD(data[pos + 2 * i + 1]);
-			IF ~found & SELF.context.policy.IsSupported(cipherSuite) THEN
+			IF ~found & SELF.context.policy.IsSupported(cipherSuite)
+				& SuiteCompatible(SELF.context, cipherSuite) THEN
 				chosen := cipherSuite;
 				found := TRUE
 			END
 		END;
 		IF ~found THEN
-			IF Trace THEN
-				StdLog.String("Server: No common cipher suite found"); StdLog.Ln
-			END;
 			SELF.SendError(HandshakeFailure);
 			RETURN (-1)
 		END;
 		cipherSuite := chosen;
+		SELF.serverScheme := ServerScheme(SELF);
+		SELF.negotiatedSigScheme := SELF.serverScheme;
+		gid := ServerGroup(SELF);
+		IF (SELF.serverScheme = 0) OR (gid = 0) THEN
+			SELF.SendError(HandshakeFailure);
+			RETURN (-1)
+		END;
+		SELF.group := NewGroup(gid);
+		IF SELF.group = NIL THEN
+			SELF.SendError(HandshakeFailure);
+			RETURN (-1)
+		END;
+		SELF.group.Generate;
 		IF Trace THEN
 			StdLog.String("cipherSuite:");AO.LogHex(cipherSuite, -4);StdLog.Ln
 		END;
@@ -1976,7 +2895,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	PROCEDURE (SELF: Connection) ReceiveClientKeyExchange (IN data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): BOOLEAN, NEW;
 		VAR
-			remotePubKey: ARRAY 32 OF SHORTCHAR;
+			remotePubKey: ARRAY MaxGroupPublic OF SHORTCHAR;
 			tmp: ARRAY 512 OF SHORTCHAR;
 			rnd: ARRAY 48 OF SHORTCHAR;
 			i, plen: AO.SIZE;
@@ -1993,22 +2912,22 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.SendError(DecodeError);
 			RETURN FALSE
 		END;
-		IF (SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256) OR
-			(SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) THEN
-			IF (len # 33) OR (ORD(data[ofs]) # 32) THEN
+		IF IsEcdheSuite(SELF.pendingSecurityParameters.cipherSuite) THEN
+			IF (len # 1 + SELF.group.publicLen) OR (ORD(data[ofs]) # SELF.group.publicLen) THEN
 				SELF.SendError(DecodeError);
 				RETURN FALSE
 			END;
-			FOR i := 0 TO 31 DO
+			FOR i := 0 TO SELF.group.publicLen - 1 DO
 				remotePubKey[i] := data[ofs + 1 + i]
 			END;
-			ok := X25519.AgreementChecked(SELF.x25519.PrivateKey, remotePubKey, SELF.x25519Shared);
+			ok := SELF.group.Shared(remotePubKey, SELF.group.publicLen,
+				SELF.sharedSecret, SELF.sharedLen);
 			IF ~ok THEN
 				SELF.SendError(IllegalParameter);
 				RETURN FALSE
 			END;
-			SELF.session.preMasterSecretLen := 32;
-			SELF.session.SetPreMasterSecret(SELF.x25519Shared, 0, 32)
+			SELF.session.preMasterSecretLen := SELF.sharedLen;
+			SELF.session.SetPreMasterSecret(SELF.sharedSecret, 0, SELF.sharedLen)
 		ELSE
 			(* RSA key transport: только при явно заданном наборе. *)
 			IF (SELF.context.rsaPrivateKey = NIL) OR (len < 3) THEN
@@ -2038,7 +2957,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	PROCEDURE (SELF: Connection) ReceiveFinished (IN data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): BOOLEAN, NEW;
 		VAR
-			seed: ARRAY 36 OF SHORTCHAR;
+			seed: ARRAY 64 OF SHORTCHAR;
 			verifyData: ARRAY 12 OF SHORTCHAR;
 			prf: PRF;
 			i, seedSize: AO.SIZE;
@@ -2059,10 +2978,10 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.hsSHAverify.GetHash(seed, 16);
 			seedSize := 36
 		ELSE
-			FOR i := 0 TO 31 DO
+			seedSize := SELF.PrfDigestLen();
+			FOR i := 0 TO seedSize - 1 DO
 				seed[i] := SELF.finishedDigest[i]
-			END;
-			seedSize := 32
+			END
 		END;
 		NEW(prf); prf.Init(SELF.pendingSecurityParameters.PRFAlgorithm);
 		IF SELF.client THEN
@@ -2092,7 +3011,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	PROCEDURE (SELF: Connection) SendFinished (VAR data : ARRAY OF SHORTCHAR; ofs : AO.SIZE), NEW;
 		VAR
-			seed: ARRAY 36 OF SHORTCHAR;
+			seed: ARRAY 64 OF SHORTCHAR;
 			verifyData: ARRAY 12 OF SHORTCHAR;
 			i, seedSize: AO.SIZE;
 			prf: PRF;
@@ -2110,8 +3029,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.hsSHAsend.GetHash(seed, 16);
 			seedSize := 36
 		ELSE
-			SELF.TranscriptDigest(seed);
-			seedSize := 32
+			seedSize := SELF.PrfDigestLen();
+			SELF.TranscriptDigest(seed)
 		END;
 		NEW(prf); prf.Init(SELF.pendingSecurityParameters.PRFAlgorithm);
 		IF SELF.client THEN
@@ -2202,9 +3121,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	PROCEDURE (SELF: Connection) SendClientHello (VAR data : ARRAY OF SHORTCHAR; ofs : AO.SIGNED32), NEW;
 		VAR
-			pos, i, sniLen, ecLen, keyShareLen, ecPointFormatsLen, signatureAlgorithmsLen: AO.SIZE;
-						
-						
+			pos, i, sniLen, extLenPos, extStart, extLen: AO.SIZE;
+			n, id: AO.SIGNED32;
 	BEGIN
 		IF Trace THEN
 			SELF.PrintDirection(TRUE);
@@ -2232,162 +3150,89 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			data[pos] := 0X;
 			INC(pos)
 		END;
-		data[pos] := (*WARN CONV CAST*)SHORT(CHR((2 * SELF.context.policy.nofCipherSuites) DIV 256));
-		data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR((2 * SELF.context.policy.nofCipherSuites) MOD 256));
+		n := 2 * SELF.context.policy.nofCipherSuites;
+		data[pos] := (*WARN CONV CAST*)SHORT(CHR(n DIV 256));
+		data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(n MOD 256));
 		INC(pos, 2);
 		FOR i := 0 TO SELF.context.policy.nofCipherSuites - 1 DO
 			data[pos] := (*WARN CONV CAST*)SHORT(CHR(SELF.context.policy.cipherSuites[i] DIV 256));
 			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(SELF.context.policy.cipherSuites[i] MOD 256));
 			INC(pos, 2)
 		END;
+		(* Только null-сжатие. *)
 		data[pos] := 1X;
 		INC(pos);
 		data[pos] := 0X;
 		INC(pos);
-				
-				ecLen := 8;
-				keyShareLen := 42;
-				sniLen := LEN(SELF.serverName$) + 9;
-				ecPointFormatsLen := 6;
-				signatureAlgorithmsLen := 8;
-				(*extensions length*)
-				data[pos] := SHORT(CHR((sniLen+ ecLen + keyShareLen + ecPointFormatsLen + signatureAlgorithmsLen) DIV 256));
-		data[pos + 1] := SHORT(CHR((sniLen+ ecLen + keyShareLen + ecPointFormatsLen + signatureAlgorithmsLen) MOD 256));
-		INC(pos,2);
-
-				(*writing extension SNI. Need for correct certificate on virtual hosts*)
-				(*SNI type*)
-				data[pos] := 0X;
-				data[pos+1] := 0X;	(*00  = Type: server_name*)
-		INC(pos,2);
-				
-				(*SNI length*)
-				sniLen := sniLen - 4;
-				data[pos] := SHORT(CHR(sniLen DIV 256));
-		data[pos + 1] := SHORT(CHR(sniLen MOD 256));
+		extLenPos := pos;
 		INC(pos, 2);
-
-				(*server name list length*)
-				sniLen := sniLen - 2;
-				data[pos] := SHORT(CHR(sniLen DIV 256));
-		data[pos + 1] := SHORT(CHR(sniLen MOD 256));
-		INC(pos, 2);
-
-				(*server name type*)
-				data[pos] := 0X;
-		INC(pos, 1);
-				
-				(*server name length*)
-				sniLen := sniLen - 3;
-				data[pos] := SHORT(CHR(sniLen DIV 256));
-		data[pos + 1] := SHORT(CHR(sniLen MOD 256));
-		INC(pos, 2);
-				(*server name*)
-				FOR i := 0 TO sniLen - 1 DO
-			data[pos + i] := SELF.serverName[i]
+		extStart := pos;
+		(* SNI: нужно для выбора виртуального хоста. *)
+		sniLen := 0;
+		WHILE (sniLen < 255) & (SELF.serverName[sniLen] # 0X) DO INC(sniLen) END;
+		IF sniLen > 0 THEN
+			data[pos] := 0X; data[pos + 1] := 0X; INC(pos, 2);
+			n := 5 + sniLen;
+			data[pos] := (*WARN CONV CAST*)SHORT(CHR(n DIV 256));
+			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(n MOD 256));
+			INC(pos, 2);
+			n := 3 + sniLen;
+			data[pos] := (*WARN CONV CAST*)SHORT(CHR(n DIV 256));
+			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(n MOD 256));
+			INC(pos, 2);
+			data[pos] := 0X; INC(pos);
+			data[pos] := (*WARN CONV CAST*)SHORT(CHR(sniLen DIV 256));
+			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(sniLen MOD 256));
+			INC(pos, 2);
+			FOR i := 0 TO sniLen - 1 DO
+				data[pos + i] := SELF.serverName[i]
+			END;
+			INC(pos, sniLen)
 		END;
-				INC(pos, sniLen);
-				
-				(*EC type ext*)
-				data[pos] := 0X;
-				data[pos+1] := 0AX;	
-		INC(pos,2);
-
-				(*EC length*)
-				data[pos] := 0X;
-		data[pos + 1] := 4X;
-		INC(pos, 2);
-
-				(*EC list length*)
-				data[pos] := 0X;
-		data[pos + 1] := 2X;
-		INC(pos, 2);
-
-				(*EC x25519*)
-				data[pos] := 0X;
-				data[pos + 1] := 1DX;
-		INC(pos, 2);
-
-				(*EC_point_formats ext*)
-				data[pos] := 0X;
-				data[pos+1] := 0BX;	
-		INC(pos,2);
-
-				(*length*)
-				data[pos] := 0X;
-		data[pos + 1] := 2X;
-		INC(pos, 2);
-
-				(*EC_point_formats len*)
-				data[pos] := 1X;
-		INC(pos, 1);
-
-				(*uncompressed*)
-				data[pos] := 0X;
-		INC(pos, 1);
-
-				(*key_share ext*)
-				data[pos] := 0X;
-				data[pos+1] := 33X;	(*00  = Type: key_share*)
-		INC(pos,2);
-
-				DEC(keyShareLen,4);
-				(*key_share length*)
-				data[pos] := SHORT(CHR(keyShareLen DIV 256));
-		data[pos + 1] := SHORT(CHR(keyShareLen MOD 256));
-		INC(pos, 2);
-
-				DEC(keyShareLen,2);
-				
-				(*client key_share length*)
-				data[pos] := SHORT(CHR(keyShareLen DIV 256));
-		data[pos + 1] := SHORT(CHR(keyShareLen MOD 256));
-		INC(pos, 2);
-
-				(*EC x25519*)
-				data[pos] := 0X;
-				data[pos + 1] := 1DX;
-		INC(pos, 2);
-
-
-				(*Key exchange len*)
-				data[pos] := 0X;
-				data[pos + 1] := 20X;
-		INC(pos, 2);
-
-				FOR i:=0 TO 31 DO
-					data[pos] := SELF.x25519.PublicKey[i];
-					INC(pos);
-				END;
-				
-				
-				
-				(*signature_algorithms ext*)
-				data[pos] := 0X;
-				data[pos+1] := 0DX;	(* Type: signature_algorithms*)
-		INC(pos,2);
-
-				DEC(signatureAlgorithmsLen,4);
-				(*signature_algorithms length*)
-				data[pos] := SHORT(CHR(signatureAlgorithmsLen DIV 256));
-		data[pos + 1] := SHORT(CHR(signatureAlgorithmsLen MOD 256));
-		INC(pos, 2);
-
-				DEC(signatureAlgorithmsLen,2);
-				
-				(*hash signature_algorithms length*)
-				data[pos] := SHORT(CHR(signatureAlgorithmsLen DIV 256));
-		data[pos + 1] := SHORT(CHR(signatureAlgorithmsLen MOD 256));
-		INC(pos, 2);
-
-				(*HASH alg*)
-				data[pos] := 04X; (*SHA256*)
-		INC(pos, 1);
-
-				(*signature alg*)
-				data[pos] := 01X; (*RSA*)
-		INC(pos, 1);
-
+		(* supported_groups: x25519, secp256r1, secp384r1. *)
+		data[pos] := 0X; data[pos + 1] := 0AX; INC(pos, 2);
+		data[pos] := 0X; data[pos + 1] := 8X; INC(pos, 2);
+		data[pos] := 0X; data[pos + 1] := 6X; INC(pos, 2);
+		FOR i := 0 TO 2 DO
+			CASE i OF
+				0 : id := GroupX25519
+			| 1 : id := GroupSecp256r1
+			ELSE id := GroupSecp384r1
+			END;
+			data[pos] := (*WARN CONV CAST*)SHORT(CHR(id DIV 256));
+			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(id MOD 256));
+			INC(pos, 2)
+		END;
+		(* ec_point_formats: только uncompressed. *)
+		data[pos] := 0X; data[pos + 1] := 0BX; INC(pos, 2);
+		data[pos] := 0X; data[pos + 1] := 2X; INC(pos, 2);
+		data[pos] := 1X; INC(pos);
+		data[pos] := 0X; INC(pos);
+		(* signature_algorithms: ECDSA P-256/P-384, RSA-PSS 256/384,
+		   RSA PKCS#1 SHA-256, Ed25519 (только проверка). *)
+		data[pos] := 0X; data[pos + 1] := 0DX; INC(pos, 2);
+		data[pos] := 0X; data[pos + 1] := 0EX; INC(pos, 2);
+		data[pos] := 0X; data[pos + 1] := 0CX; INC(pos, 2);
+		FOR i := 0 TO 5 DO
+			CASE i OF
+				0 : n := SigEcdsaP256Sha256
+			| 1 : n := SigEcdsaP384Sha384
+			| 2 : n := SigRsaPssRsaeSha256
+			| 3 : n := SigRsaPssRsaeSha384
+			| 4 : n := SigRsaPkcs1Sha256
+			ELSE n := SigEd25519
+			END;
+			data[pos] := (*WARN CONV CAST*)SHORT(CHR(n DIV 256));
+			data[pos + 1] := (*WARN CONV CAST*)SHORT(CHR(n MOD 256));
+			INC(pos, 2)
+		END;
+		(* renegotiation_info (RFC 5746), пустая связка. *)
+		data[pos] := 0FFX; data[pos + 1] := 01X; INC(pos, 2);
+		data[pos] := 0X; data[pos + 1] := 1X; INC(pos, 2);
+		data[pos] := 0X; INC(pos);
+		extLen := pos - extStart;
+		data[extLenPos] := (*WARN CONV CAST*)SHORT(CHR(extLen DIV 256));
+		data[extLenPos + 1] := (*WARN CONV CAST*)SHORT(CHR(extLen MOD 256));
 		SELF.SendHandshake(data, ClientHello, ofs - 4, pos - ofs)
 	END SendClientHello;
 
@@ -2459,8 +3304,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			RETURN (-1)
 		END;
 		SELF.peerVerified := TRUE;
-		IF (SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256) OR
-			(SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) THEN
+		IF IsEcdheSuite(SELF.pendingSecurityParameters.cipherSuite) THEN
 			RETURN AwaitServerKeyExchange
 		END;
 		RETURN AwaitServerHelloDone
@@ -2468,11 +3312,9 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 
 	PROCEDURE (SELF: Connection) ReceiveServerKeyExchange (IN data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): AO.SIGNED32, NEW;
 			VAR
-				remotePubKey : ARRAY 32 OF SHORTCHAR;
-				signedData : ARRAY 100 OF SHORTCHAR;
-				digest : ARRAY 32 OF SHORTCHAR;
-				h : CryptoHashes.Hash;
-				pos, sigLen, signedLen : AO.SIZE;
+				remotePubKey : ARRAY MaxGroupPublic OF SHORTCHAR;
+				signedData : ARRAY 64 + 4 + MaxGroupPublic OF SHORTCHAR;
+				curveId, scheme, pubLen, pos, sigLen, signedLen, paramsLen : AO.SIZE;
 				ok : BOOLEAN;
 	BEGIN
 		IF Trace THEN
@@ -2480,28 +3322,44 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			StdLog.String("ReceiveServerKeyExchange");
 			StdLog.Ln
 		END;
-		(* curve_type(1) + named_curve(2) + pubkey_len(1) + pubkey(32) =
-		   36 байт параметров, затем hash/sig(2), sig_len(2), подпись.
+		(* ServerECDHParams: curve_type(1) + named_curve(2) + pubkey_len(1)
+		   + pubkey, затем SignatureScheme(2), sig_len(2), подпись.
 		   Все длины проверяются до копирования. *)
-		IF (len < 36 + 4) OR (ofs + len > LEN(data)) THEN
+		IF (len < 4 + 1 + 4) OR (ofs + len > LEN(data)) THEN
 			SELF.SendError(DecodeError);
 			RETURN (-1)
 		END;
-		IF (ORD(data[ofs]) # 3) OR (ORD(data[ofs + 1]) # 0) OR (ORD(data[ofs + 2]) # 1DH)
-			OR (ORD(data[ofs + 3]) # 32) THEN
+		IF ORD(data[ofs]) # 3 THEN
 			SELF.SendError(HandshakeFailure);
 			RETURN (-1)
 		END;
-		FOR pos := 0 TO 31 DO
-			remotePubKey[pos] := data[pos + 4 + ofs]
+		curveId := 256 * ORD(data[ofs + 1]) + ORD(data[ofs + 2]);
+		pubLen := ORD(data[ofs + 3]);
+		(* Группу сервер выбирает из supported_groups; ключ
+		   генерируем под неё. *)
+		IF (curveId = GroupX25519) OR (curveId = GroupSecp256r1)
+			OR (curveId = GroupSecp384r1) THEN
+			IF (SELF.group = NIL) OR (SELF.group.id # curveId) THEN
+				SELF.group := NewGroup(curveId);
+				IF SELF.group # NIL THEN SELF.group.Generate END
+			END
+		ELSE
+			SELF.group := NIL
 		END;
-		IF (ORD(data[36 + ofs]) # 4) OR (ORD(data[36 + ofs + 1]) # 1) THEN
-			SELF.SendError(HandshakeFailure);
+		IF (SELF.group = NIL) OR (pubLen # SELF.group.publicLen)
+			OR (4 + pubLen + 4 > len) THEN
+			SELF.SendError(IllegalParameter);
 			RETURN (-1)
 		END;
-		sigLen := 256 * ORD(data[36 + ofs + 2]) + ORD(data[36 + ofs + 3]);
-		IF (sigLen = 0) OR (sigLen > MaxSignatureLength) OR (36 + 4 + sigLen > len) THEN
+		paramsLen := 4 + pubLen;
+		scheme := 256 * ORD(data[ofs + paramsLen]) + ORD(data[ofs + paramsLen + 1]);
+		sigLen := 256 * ORD(data[ofs + paramsLen + 2]) + ORD(data[ofs + paramsLen + 3]);
+		IF (sigLen = 0) OR (sigLen > MaxSignatureLength) OR (paramsLen + 4 + sigLen > len) THEN
 			SELF.SendError(DecodeError);
+			RETURN (-1)
+		END;
+		IF ~ClientSchemeSupported(scheme) THEN
+			SELF.SendError(HandshakeFailure);
 			RETURN (-1)
 		END;
 		(* Подпись покрывает client_random || server_random || params. *)
@@ -2509,28 +3367,27 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			signedData[pos] := SELF.pendingSecurityParameters.clientRandom[pos];
 			signedData[pos + 32] := SELF.pendingSecurityParameters.serverRandom[pos]
 		END;
-		FOR pos := 0 TO 35 DO
-			signedData[pos + 64] := data[ofs + pos]
+		signedLen := 64 + paramsLen;
+		FOR pos := 0 TO paramsLen - 1 DO
+			signedData[64 + pos] := data[ofs + pos]
 		END;
-		signedLen := 100;
-		h := CryptoHashes.NewHash("CryptoSHA256");
-		h.Initialize;
-		h.Update(signedData, 0, signedLen);
-		h.GetHash(digest, 0);
 		IF SELF.serverCert = NIL THEN
 			SELF.SendError(BadCertificate);
 			RETURN (-1)
 		END;
-		ok := PKCS1.VerifyHash("CryptoSHA256", digest, 32, SELF.serverCert.publicKey,
-			data, 36 + ofs + 4, sigLen);
-		IF ~ok THEN
+		IF ~TLSVerify(scheme, SELF.serverCert, signedData, signedLen,
+				data, ofs + paramsLen + 4, sigLen) THEN
 			IF Trace THEN
 				StdLog.String("ServerKeyExchange signature is invalid"); StdLog.Ln
 			END;
 			SELF.SendError(DecryptError);
 			RETURN (-1)
 		END;
-		ok := X25519.AgreementChecked(SELF.x25519.PrivateKey, remotePubKey, SELF.x25519Shared);
+		SELF.negotiatedSigScheme := scheme;
+		FOR pos := 0 TO pubLen - 1 DO
+			remotePubKey[pos] := data[ofs + 4 + pos]
+		END;
+		ok := SELF.group.Shared(remotePubKey, pubLen, SELF.sharedSecret, SELF.sharedLen);
 		IF ~ok THEN
 			SELF.SendError(IllegalParameter);
 			RETURN (-1)
@@ -2616,15 +3473,16 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		IF SELF.certificateRequested & (SELF.context.clientCertChain # NIL) THEN
 			SELF.SendCertificate(data, ofs)
 		END;
-		IF (SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256) OR
-			(SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) THEN
-			SELF.session.preMasterSecretLen := 32;
-			data[ofs] := (*WARN CONV CAST*)SHORT(CHR(32));
-			FOR i := 0 TO 31 DO
-				SELF.session.preMasterSecret[i] := SELF.x25519Shared[i];
-				data[ofs + 1 + i] := SELF.x25519.PublicKey[i]
+		IF IsEcdheSuite(SELF.pendingSecurityParameters.cipherSuite) THEN
+			SELF.session.preMasterSecretLen := SELF.sharedLen;
+			data[ofs] := (*WARN CONV CAST*)SHORT(CHR(SELF.group.publicLen));
+			FOR i := 0 TO SELF.sharedLen - 1 DO
+				SELF.session.preMasterSecret[i] := SELF.sharedSecret[i]
 			END;
-			bodyLen := 33
+			FOR i := 0 TO SELF.group.publicLen - 1 DO
+				data[ofs + 1 + i] := SELF.group.publicKey[i]
+			END;
+			bodyLen := 1 + SELF.group.publicLen
 		ELSE
 			SELF.context.GetRsaPublicKey;
 			IF SELF.context.rsaPublicKey = NIL THEN
@@ -2693,8 +3551,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 						END
 				|       GenerateServerHello :			   SELF.SendServerHello(SELF.outbuf, 4);
 				SELF.SendCertificate(SELF.outbuf, 4);
-					IF (SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256) OR
-						(SELF.pendingSecurityParameters.cipherSuite = TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) THEN
+					IF IsEcdheSuite(SELF.pendingSecurityParameters.cipherSuite) THEN
 						IF ~SELF.SendServerKeyExchange(SELF.outbuf, 4) THEN
 							RETURN
 						END
@@ -2922,8 +3779,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			badRecordMac: BOOLEAN;
 			additionalData: ARRAY 13 OF SHORTCHAR;
 			tag: ARRAY 16 OF SHORTCHAR;
-			iv : ARRAY 12 OF SHORTCHAR;
-			aeadRes : INTEGER;
+			seq, explicit: ARRAY 8 OF SHORTCHAR;
 	BEGIN
 		badRecordMac := FALSE;
 		len := 0;
@@ -2974,7 +3830,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			RETURN
 		END;
 		SELF.currentReadState.recordSeq.Inc();
-		IF (SELF.currentReadState.cipher # NIL) & (SELF.currentReadState.aeadCipher = NIL) THEN
+		IF (SELF.currentReadState.cipher # NIL) & (SELF.currentReadState.aead = NIL) THEN
 			bs := SELF.currentReadState.cipher.blockSize;
 			IF (bs > 1) & ((len < bs) OR (len MOD bs # 0)) THEN
 				SELF.SendError(BadRecordMac);
@@ -3007,38 +3863,34 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 				END
 			END
 		END;
-		IF SELF.currentReadState.aeadCipher # NIL THEN
-			IF len < LEN(tag) + 8 THEN
+		IF SELF.currentReadState.aead # NIL THEN
+			IF len < SELF.currentReadState.aead.tagLen + SELF.currentReadState.aead.explicitLen THEN
 				SELF.SendError(BadRecordMac);
 				RETURN
 			END;
-			DEC(len, LEN(tag));
-			FOR i := 0 TO LEN(tag) - 1 DO
+			DEC(len, SELF.currentReadState.aead.tagLen);
+			FOR i := 0 TO SELF.currentReadState.aead.tagLen - 1 DO
 				tag[i] := SELF.inbuf[ofs + len + i]
 			END;
-			iv[0] := SELF.currentReadState.iv[0];
-			iv[1] := SELF.currentReadState.iv[1];
-			iv[2] := SELF.currentReadState.iv[2];
-			iv[3] := SELF.currentReadState.iv[3];
-			FOR i := 0 TO 7 DO
-				iv[4 + i] := SELF.inbuf[ofs + i]
+			FOR i := 0 TO SELF.currentReadState.aead.explicitLen - 1 DO
+				explicit[i] := SELF.inbuf[ofs + i]
 			END;
-			DEC(len, 8);
-			SELF.currentReadState.aeadCipher.Init(SELF.currentReadState.cipher, iv, 12);
-			INC(ofs, 8);
+			DEC(len, SELF.currentReadState.aead.explicitLen);
+			INC(ofs, SELF.currentReadState.aead.explicitLen);
+			SELF.currentReadState.recordSeq.GetBytes(seq, 0);
 			SELF.currentReadState.recordSeq.GetBytes(additionalData, 0);
 			additionalData[8] := SHORT(CHR(type));
 			additionalData[9] := SHORT(CHR(major));
 			additionalData[10] := SHORT(CHR(minor));
 			additionalData[11] := SHORT(CHR(len DIV 256));
 			additionalData[12] := SHORT(CHR(len));
-			SELF.currentReadState.aeadCipher.Decrypt(SELF.inbuf, additionalData, tag, ofs, len,
-				LEN(additionalData), LEN(tag) * 8, SELF.inbuf, ofs, aeadRes);
-			IF aeadRes # 0 THEN
+			IF ~SELF.currentReadState.aead.Open(SELF.inbuf, ofs, len,
+					additionalData, LEN(additionalData), seq, explicit, tag,
+					SELF.inbuf, ofs) THEN
 				badRecordMac := TRUE
 			END
 		END;
-		IF (SELF.currentReadState.mac # NIL) & (SELF.currentReadState.aeadCipher = NIL) THEN
+		IF (SELF.currentReadState.mac # NIL) & (SELF.currentReadState.aead = NIL) THEN
 			macSize := SELF.currentReadState.mac.size;
 			IF (len < macSize) OR badRecordMac THEN
 				badRecordMac := TRUE;
@@ -3151,10 +4003,15 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		VAR
 			defaultSuites: ARRAY DefaultSuitesNbr OF AO.SIGNED32;
 	BEGIN
-		(* Только ECDHE + AES-GCM. CBC, 3DES, RC4, NULL и RSA key
+		(* TLS 1.2: только ECDHE и AEAD. CBC, 3DES, RC4, NULL и RSA key
 		   transport остаются в коде, но включаются лишь явным
 		   SetCipherSuites. *)
-		defaultSuites[0] := TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+		defaultSuites[0] := TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+		defaultSuites[1] := TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384;
+		defaultSuites[2] := TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256;
+		defaultSuites[3] := TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256;
+		defaultSuites[4] := TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+		defaultSuites[5] := TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
 		NEW(defaultCipherPolicy);defaultCipherPolicy.Init();
 		defaultCipherPolicy.SetCipherSuites(defaultSuites, DefaultSuitesNbr);
 		defaultCipherPolicy.SetVersion(1, 2)
@@ -3269,6 +4126,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			END;
 			SELF.session.Invalidate;
 		END Do;
+
 
 BEGIN
 	InitDefaults

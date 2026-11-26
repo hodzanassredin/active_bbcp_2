@@ -11,11 +11,13 @@ StdLog, AO := CryptoAosCompat;
 	CONST
 		Trace = FALSE;
 		MaxModulusBytes = 1024;
-		(* DER-кодировка DigestInfo из RFC 8017, раздел 9.2, для трёх
+		(* DER-кодировка DigestInfo из RFC 8017, раздел 9.2, для пяти
 		   хешей, которые есть в подсистеме. *)
 		DigestInfoMD5 = "3020300C06082A864886F70D020505000410";
 		DigestInfoSHA1 = "3021300906052B0E03021A05000414";
 		DigestInfoSHA256 = "3031300D060960864801650304020105000420";
+		DigestInfoSHA384 = "3041300D060960864801650304020205000430";
+		DigestInfoSHA512 = "3051300D060960864801650304020305000440";
 
 	PROCEDURE Encrypt* (IN src : ARRAY OF SHORTCHAR; srcOfs, srcLen : AO.SIZE; key : CryptoRSA.Key; blockType : AO.SIGNED32; VAR dest : ARRAY OF SHORTCHAR; destOfs : AO.SIZE; VAR destLen : AO.SIZE);
 		VAR
@@ -173,6 +175,12 @@ StdLog, AO := CryptoAosCompat;
 		ELSIF hashName = "CryptoSHA256" THEN
 			prefixLen := 19;
 			CryptoUtils.Hex2Bin(DigestInfoSHA256, 0, prefix, 0, prefixLen)
+		ELSIF hashName = "CryptoSHA384" THEN
+			prefixLen := 19;
+			CryptoUtils.Hex2Bin(DigestInfoSHA384, 0, prefix, 0, prefixLen)
+		ELSIF hashName = "CryptoSHA512" THEN
+			prefixLen := 19;
+			CryptoUtils.Hex2Bin(DigestInfoSHA512, 0, prefix, 0, prefixLen)
 		ELSE
 			RETURN FALSE
 		END;

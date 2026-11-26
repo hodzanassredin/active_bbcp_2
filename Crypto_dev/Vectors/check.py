@@ -60,6 +60,27 @@ for name, key, data, want in rows("hmac.txt"):
     if got != want.upper():
         fail(f"hmac {name}: {got} != {want}")
 
+# hkdf (RFC 5869)
+def hkdf(alg, ikm, salt, info, length):
+    prk = hmac.new(salt, ikm, alg).digest()
+    t, out, i = b"", b"", 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes([i]), alg).digest()
+        out += t
+        i += 1
+    return prk, out[:length]
+
+
+for alg, ikm, salt, info, length, prk_want, okm_want in rows("hkdf.txt"):
+    data = unhex(ikm)
+    s = b"" if salt == '""' else unhex(salt)
+    inf = b"" if info == '""' else unhex(info)
+    prk, okm = hkdf(alg, data, s, inf, int(length))
+    if prk.hex().upper() != prk_want.upper():
+        fail(f"hkdf {alg} prk: {prk.hex()} != {prk_want}")
+    if okm.hex().upper() != okm_want.upper():
+        fail(f"hkdf {alg} okm: {okm.hex()} != {okm_want}")
+
 # PRF (RFC 5246, P_SHA256)
 kv = {}
 for line in open(f"{BASE}/prf.txt", encoding="utf-8"):
@@ -122,6 +143,47 @@ if have_crypto:
         got = AESGCM(key_b).encrypt(iv_b, pt, aad_b or None)
         if got != ct + tag_b:
             fail(f"gcm {key[:8]}: {got.hex().upper()} != {(ct + tag_b).hex().upper()}")
+
+    # ChaCha20 / Poly1305 / AEAD (RFC 8439)
+    from cryptography.hazmat.primitives.ciphers import Cipher as CChacha
+    from cryptography.hazmat.primitives.ciphers.algorithms import ChaCha20
+    from cryptography.hazmat.primitives.poly1305 import Poly1305
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    for row in rows("chacha.txt"):
+        kind = row[0]
+        key_b = unhex(row[1])
+        if kind == "block":
+            nonce_b = unhex(row[2])
+            n16 = int(row[3]).to_bytes(4, "little") + nonce_b
+            want = unhex(row[4])
+            enc = CChacha(ChaCha20(key_b, n16), mode=None).encryptor()
+            got = enc.update(b"\0" * len(want))
+            if got != want:
+                fail(f"chacha block: {got.hex()} != {want.hex()}")
+        elif kind == "stream":
+            nonce_b = unhex(row[2])
+            n16 = int(row[3]).to_bytes(4, "little") + nonce_b
+            plain = unhex(row[4])
+            want = unhex(row[5])
+            enc = CChacha(ChaCha20(key_b, n16), mode=None).encryptor()
+            got = enc.update(plain)
+            if got != want:
+                fail(f"chacha stream: {got.hex()} != {want.hex()}")
+        elif kind == "poly":
+            msg = unhex(row[2])
+            want = unhex(row[3])
+            got = Poly1305.generate_tag(key_b, msg)
+            if got != want:
+                fail(f"poly1305: {got.hex()} != {want.hex()}")
+        else:  # aead | key | nonce | aad | plain | cipher | tag
+            nonce_b = unhex(row[2])
+            aad = unhex(row[3])
+            plain = unhex(row[4])
+            want = unhex(row[5]) + unhex(row[6])
+            got = ChaCha20Poly1305(key_b).encrypt(nonce_b, plain, aad or None)
+            if got != want:
+                fail(f"chacha aead: {got.hex().upper()} != {want.hex().upper()}")
     vals = {}
     for line in open(f"{BASE}/x25519.txt", encoding="utf-8"):
         line = line.strip()
@@ -137,6 +199,84 @@ if have_crypto:
         X25519PrivateKey.from_private_bytes(vals["bob_private"]).public_key())
     if shared != vals["shared"]:
         fail(f"x25519 shared: {shared.hex()} != {vals['shared'].hex()}")
+
+    # Wycheproof ECDSA P-256: выбранные случаи.
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.exceptions import InvalidSignature
+
+    def der_int(x):
+        b = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
+        if b[0] & 0x80:
+            b = b"\x00" + b
+        return b"\x02" + bytes([len(b)]) + b
+
+    def der_sig(r, s):
+        body = der_int(r) + der_int(s)
+        return b"\x30" + bytes([len(body)]) + body
+
+    curves = {"secp256r1": ec.SECP256R1()}
+    for name, hashname, qx, qy, msg, r, s, expect, comment in rows("ecdsa-wycheproof.txt"):
+        try:
+            pub = ec.EllipticCurvePublicNumbers(int(qx, 16), int(qy, 16),
+                                                curves[name]).public_key()
+            pub.verify(der_sig(int(r, 16), int(s, 16)), unhex(msg),
+                       ec.ECDSA(hashes.SHA256()))
+            ok = True
+        except (InvalidSignature, ValueError):
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"ecdsa-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
+
+    for name, priv, x, y, shared, expect, comment in rows("ecdh-wycheproof.txt"):
+        try:
+            pub = ec.EllipticCurvePublicNumbers(int(x, 16), int(y, 16),
+                                                curves[name]).public_key()
+            got = ec.derive_private_key(int(priv, 16), curves[name]).exchange(ec.ECDH(), pub)
+            ok = (expect == "valid" and got.hex().upper() == shared.upper())
+        except Exception:
+            ok = (expect == "invalid")
+        if not ok:
+            fail(f"ecdh-wycheproof {comment}: не совпало с ожиданием")
+
+    # RSA-PSS (Wycheproof)
+    from cryptography.hazmat.primitives.asymmetric import rsa as crsa, padding
+    for n, e, sha, msg, sig, expect, comment in rows("pss-wycheproof.txt"):
+        try:
+            pub = crsa.RSAPublicNumbers(int(e, 16), int(n, 16)).public_key()
+            pub.verify(unhex(sig), b"" if msg == '""' else unhex(msg),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                   salt_length=32), hashes.SHA256())
+            ok = True
+        except Exception:
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"pss-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
+
+    # RSA-PSS: отрицательные векторы структуры EM (свой ключ, EM подписан).
+    for n, e, sha, msg, sig, expect, comment in rows("pss-negative.txt"):
+        try:
+            pub = crsa.RSAPublicNumbers(int(e, 16), int(n, 16)).public_key()
+            pub.verify(unhex(sig), unhex(msg),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                   salt_length=32), hashes.SHA256())
+            ok = True
+        except Exception:
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"pss-negative {comment}: получено {'valid' if ok else 'invalid'}")
+
+    # Ed25519 (Wycheproof)
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    for pk, msg, sig, expect, comment in rows("ed25519-wycheproof.txt"):
+        try:
+            Ed25519PublicKey.from_public_bytes(unhex(pk)).verify(
+                unhex(sig), b"" if msg == '""' else unhex(msg))
+            ok = True
+        except Exception:
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"ed25519-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
 
 if failures:
     print(f"check-vectors: {failures} провалов")

@@ -8,6 +8,7 @@ MODULE CryptoHMAC;(** AUTHOR "G.F."; PURPOSE "RFC 2104 HMAC"; *)
 			name* : ARRAY 64 OF SHORTCHAR;
 			ih, oh : Hashes.Hash;
 			L : AO.SIZE;
+			blockSize : AO.SIZE;
 			n : AO.SIZE
 		END;
 
@@ -19,6 +20,7 @@ MODULE CryptoHMAC;(** AUTHOR "G.F."; PURPOSE "RFC 2104 HMAC"; *)
 		SELF.ih := Hashes.NewHash(hashmod);
 		SELF.oh := Hashes.NewHash(hashmod);
 		SELF.L := SELF.ih.size;
+		SELF.blockSize := SELF.ih.blockSize;
 		SELF.size := SELF.L;
 		SELF.n := 0;
 		SELF.name := "hmac-";
@@ -40,17 +42,18 @@ MODULE CryptoHMAC;(** AUTHOR "G.F."; PURPOSE "RFC 2104 HMAC"; *)
 
 	PROCEDURE (SELF: HMac) Initialize* (IN key : ARRAY OF SHORTCHAR; len : AO.SIZE), NEW;
 		VAR
-			usedkey, buf: ARRAY 64 OF SHORTCHAR;
+			usedkey, buf: ARRAY 256 OF SHORTCHAR;
 			i: AO.SIZE;
 
 
 	BEGIN
-		IF len > 64 THEN
+		ASSERT(SELF.blockSize <= 256);
+		IF len > SELF.blockSize THEN
 			SELF.ih.Initialize;
 			SELF.ih.Update(key, 0, len);
 			SELF.ih.GetHash(usedkey, 0);
 			i := SELF.L;
-			WHILE i < 64 DO
+			WHILE i < SELF.blockSize DO
 				usedkey[i] := 0X;
 				INC(i)
 			END
@@ -60,21 +63,21 @@ MODULE CryptoHMAC;(** AUTHOR "G.F."; PURPOSE "RFC 2104 HMAC"; *)
 				usedkey[i] := key[i];
 				INC(i)
 			END;
-			WHILE i < 64 DO
+			WHILE i < SELF.blockSize DO
 				usedkey[i] := 0X;
 				INC(i)
 			END
 		END;
 		SELF.oh.Initialize;
-		FOR i := 0 TO 63 DO
+		FOR i := 0 TO SELF.blockSize - 1 DO
 			buf[i] := BIT.CXOR(5CX, usedkey[i])
 		END;
-		SELF.oh.Update(buf, 0, 64);
+		SELF.oh.Update(buf, 0, SELF.blockSize);
 		SELF.ih.Initialize;
-		FOR i := 0 TO 63 DO
+		FOR i := 0 TO SELF.blockSize - 1 DO
 			buf[i] := BIT.CXOR(36X, usedkey[i])
 		END;
-		SELF.ih.Update(buf, 0, 64)
+		SELF.ih.Update(buf, 0, SELF.blockSize)
 	END Initialize;
 
 	PROCEDURE (SELF: HMac) Update* (IN data : ARRAY OF SHORTCHAR; pos, len : AO.SIZE), NEW;

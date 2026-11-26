@@ -90,10 +90,13 @@ MODULE Crypto_devTLS;
 					INC(got, read)
 				UNTIL (got >= repLen) OR (Services.Ticks() > deadline);
 				IF badApp[0] = '1' THEN
-					(* Запись с испорченным тегом GCM не должна дойти
-					   до приложения. *)
+					(* Запись с испорченным тегом AEAD не должна дойти
+					   до приложения, а соединение обязано закрыться:
+					   недостаточно получить нули/мусор вместо ответа. *)
 					UnitAssert.True((got < repLen) OR ~EqualBytes(buf, want, repLen),
-						"corrupted record rejected")
+						"corrupted record rejected");
+					UnitAssert.True(con.State() # TCP.Established,
+						"connection closed after corrupted record")
 				ELSE
 					UnitAssert.EqualInt(repLen, got, "TLS receives the reply");
 					UnitAssert.True(EqualBytes(buf, want, repLen), "TLS reply is reversed request")

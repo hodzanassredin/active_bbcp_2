@@ -4,21 +4,24 @@
 #
 #   tools/test-crypto-tls.sh
 #
-# Создаёт во временном каталоге корневой CA, серверный и клиентский
-# сертификаты, просроченный сертификат и сертификат с чужим именем.
+# Создаёт во временном каталоге корневой CA, серверные сертификаты RSA,
+# ECDSA P-256 и P-384, просроченный сертификат и сертификат с чужим именем.
 # Положительные случаи:
 #   * наш клиент -> openssl s_server -rev (проверка цепочки, имени, подписи
 #     ServerKeyExchange), ответ "olleh";
 #   * openssl s_client -> наш сервер (проверка сертификата сервера), "olleh";
-#   * взаимная проверка: openssl с клиентским сертификатом -> наш сервер
-#     с обязательным клиентским сертификатом;
-#   * наш клиент с клиентским сертификатом -> openssl s_server -Verify.
+#   * матрица: ECDHE-RSA/ECDHE-ECDSA × AES-128/256-GCM и ChaCha20-Poly1305
+#     × x25519/secp256r1/secp384r1 (для ECDSA-сертификата — его кривая),
+#     в обе стороны;
+#   * взаимная проверка с RSA и ECDSA сертификатом сервера.
 # Отрицательные случаи (клиент обязан отказаться, процесс не падает):
 #   * сертификат не из доверенного корня;
 #   * просроченный сертификат;
 #   * сертификат с чужим именем;
-#   * подделанная подпись ServerKeyExchange;
+#   * подделанная подпись ServerKeyExchange (RSA PKCS#1, RSA-PSS, ECDSA);
 #   * вместо ServerKeyExchange сразу ServerHelloDone (нарушение порядка);
+#   * группа, которой клиент не предлагал; точка secp256r1 вне кривой;
+#   * испорченный тег AES-GCM и ChaCha20-Poly1305;
 #   * sigLen = 65535 (границы до копирования);
 #   * длина сертификата больше списка;
 #   * невозможная длина расширений ServerHello.
@@ -88,6 +91,57 @@ req -newkey rsa:2048 -nodes -keyout "$TMP/srv.key" -out "$TMP/srv.csr" -subj "/C
 printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' >"$TMP/srv.ext"
 sign -in "$TMP/srv.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
 	-out "$TMP/srv.pem" -days 1 -extfile "$TMP/srv.ext"
+
+# Сертификаты, подписанные CA с SHA-384/SHA-512 (DigestInfo PKCS#1).
+req -newkey rsa:2048 -nodes -keyout "$TMP/srv384.key" -out "$TMP/srv384.csr" -subj "/CN=localhost"
+sign -in "$TMP/srv384.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/srv384.pem" -days 1 -sha384 -extfile "$TMP/srv.ext"
+req -newkey rsa:2048 -nodes -keyout "$TMP/srv512.key" -out "$TMP/srv512.csr" -subj "/CN=localhost"
+sign -in "$TMP/srv512.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/srv512.pem" -days 1 -sha512 -extfile "$TMP/srv.ext"
+
+# Серверные сертификаты ECDSA P-256 и P-384.
+ec_cert() {
+	name=$1; curve=$2
+	"$OPENSSL" ecparam -name "$curve" -genkey -noout -out "$TMP/$name.key" >>"$TMP/cert.log" 2>&1 \
+		|| { cat "$TMP/cert.log" >&2; fail "openssl ecparam $curve"; }
+	"$OPENSSL" req -new -key "$TMP/$name.key" -out "$TMP/$name.csr" -subj "/CN=localhost" \
+		>>"$TMP/cert.log" 2>&1 || { cat "$TMP/cert.log" >&2; fail "openssl req $curve"; }
+	sign -in "$TMP/$name.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+		-out "$TMP/$name.pem" -days 1 -extfile "$TMP/srv.ext"
+}
+ec_cert ec256 prime256v1
+ec_cert ec384 secp384r1
+
+# Сертификат с длинным списком SAN: совпадающее имя стоит дальше 16-го.
+req -newkey rsa:2048 -nodes -keyout "$TMP/many.key" -out "$TMP/many.csr" -subj "/CN=localhost"
+{
+	printf 'subjectAltName='
+	i=0
+	while [ $i -lt 20 ]; do
+		printf 'DNS:host%s.example,' "$i"
+		i=$((i + 1))
+	done
+	printf 'DNS:localhost,IP:127.0.0.1\n'
+	printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
+} >"$TMP/many.ext"
+sign -in "$TMP/many.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/many.pem" -days 1 -extfile "$TMP/many.ext"
+
+# Набор корней: сначала нечитаемый сертификат, затем настоящий CA.
+{
+	printf -- '-----BEGIN CERTIFICATE-----\n'
+	head -c 300 /dev/urandom | base64
+	printf -- '\n-----END CERTIFICATE-----\n'
+	cat "$TMP/ca.pem"
+} >"$TMP/badca.pem"
+
+# Большой набор корней (> 16 КиБ): буфер AddTrustedFile должен быть динамическим.
+i=0
+while [ $i -lt 100 ]; do
+	cat "$TMP/ca.pem" >>"$TMP/bigca.pem"
+	i=$((i + 1))
+done
 
 # Просроченный (notAfter = notBefore = сейчас).
 req -newkey rsa:2048 -nodes -keyout "$TMP/exp.key" -out "$TMP/exp.csr" -subj "/CN=127.0.0.1"
@@ -174,11 +228,14 @@ client_case() {
 client_vs_openssl() {
 	desc=$1; cert=$2; key=$3; ca=$4; ccert=$5; ckey=$6; expectFail=$7; verify=$8
 	server_extra=${9:-}
+	cipher=${10:-$CIPHER}; group=${11:-}
 	port=$(free_port)
 	extra=""
+	gopt=""
 	[ "$verify" = "1" ] && extra="-Verify 1 -CAfile $TMP/ca.pem"
+	[ -n "$group" ] && gopt="-groups $group"
 	(sleep 60 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -cert "$cert" -key "$key" \
-		-tls1_2 -cipher "$CIPHER" -rev $extra $server_extra >"$TMP/server-$desc.log" 2>&1) &
+		-tls1_2 -cipher "$cipher" $gopt -rev $extra $server_extra >"$TMP/server-$desc.log" 2>&1) &
 	spid=$!
 	i=0; ready=0
 	while [ $i -lt 100 ]; do
@@ -197,9 +254,11 @@ s.close()" 2>/dev/null; then ready=1; break; fi
 # Наш сервер против openssl s_client.
 server_vs_openssl() {
 	desc=$1; ca=$2; require=$3; expectReject=$4; ccert=$5; ckey=$6; want=$7
+	cipher=${8:-$CIPHER}; group=${9:-}
+	srv_cert=${10:-$TMP/srv.pem}; srv_key=${11:-$TMP/srv.key}
 	port=$(free_port)
 	log="$TMP/tlsserver-$desc.log"
-	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
+	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$srv_cert --CRYPTO_TLS_KEY=$srv_key"
 	args="$args --CRYPTO_TLS_REQUIRE_CLIENT=$require --CRYPTO_TLS_EXPECT_REJECT=$expectReject"
 	[ -n "$ca" ] && args="$args --CRYPTO_TLS_CA=$ca"
 	(
@@ -210,9 +269,13 @@ server_vs_openssl() {
 	spid=$!
 	sleep 1
 	client_extra=""
+	gopt=""
+	copt=""
 	[ -n "$ccert" ] && client_extra="-cert $ccert -key $ckey"
+	[ -n "$group" ] && [ "$group" != "-" ] && gopt="-groups $group"
+	[ "$cipher" != "-" ] && copt="-cipher $cipher"
 	printf 'hello\n' | timeout 25 "$OPENSSL" s_client -connect "127.0.0.1:$port" \
-		-tls1_2 -cipher "$CIPHER" -CAfile "$TMP/ca.pem" -verify_return_error \
+		-tls1_2 $copt $gopt -CAfile "$TMP/ca.pem" -verify_return_error \
 		$client_extra -quiet >"$TMP/sclient-$desc.out" 2>"$TMP/sclient-$desc.err"
 	wait "$spid" 2>/dev/null; spid=""
 	no_trap "$log" "сервере ($desc)"
@@ -229,8 +292,9 @@ server_vs_openssl() {
 
 # Поддельный сервер для отрицательных проверок клиента.
 fake_case() {	mode=$1; expect=${2:-1}; badapp=${3:-0}
+	fcert=${4:-$TMP/srv.pem}; fkey=${5:-$TMP/srv.key}
 	port=$(free_port)
-	python3 -I "$BB/tools/crypto_tls_fake.py" "$mode" "$port" "$TMP/srv.pem" "$TMP/srv.key" \
+	python3 -I "$BB/tools/crypto_tls_fake.py" "$mode" "$port" "$fcert" "$fkey" \
 		>"$TMP/fake-$mode.log" 2>&1 &
 	fpid=$!
 	i=0
@@ -241,7 +305,7 @@ fake_case() {	mode=$1; expect=${2:-1}; badapp=${3:-0}
 	client_case "fake-$mode" "$port" "$TMP/ca.pem" "" "" "$expect" "$badapp"
 	wait "$fpid" 2>/dev/null; fpid=""
 	case "$mode" in
-		goodfinished|badfinished|badccs|badtag|shortrec|oldversion|longfinished|longccs) ;;	# CKE здесь обязателен
+		goodfinished|badfinished|badccs|badtag|badtagchacha|shortrec|oldversion|longfinished|longccs) ;;	# CKE здесь обязателен
 		*)
 			if grep -q saw_cke "$TMP/fake-$mode.log"; then
 				fail "клиент дошёл до ClientKeyExchange при плохом SKE ($mode)"
@@ -313,6 +377,50 @@ python_client_case goodcertverify goodcertverify 0
 client_vs_openssl "client-mutual" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/ca.pem" \
 	"$TMP/cl.pem" "$TMP/cl.key" 0 1
 
+echo "test-crypto-tls: матрица наборов, групп и типов ключей"
+SUITES_RSA="ECDHE-RSA-AES128-GCM-SHA256 ECDHE-RSA-AES256-GCM-SHA384 ECDHE-RSA-CHACHA20-POLY1305"
+SUITES_EC="ECDHE-ECDSA-AES128-GCM-SHA256 ECDHE-ECDSA-AES256-GCM-SHA384 ECDHE-ECDSA-CHACHA20-POLY1305"
+for s in $SUITES_RSA; do
+	for g in x25519 secp256r1 secp384r1; do
+		client_vs_openssl "rsa-$s-$g" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/ca.pem" \
+			"" "" 0 0 "" "$s" "$g"
+		server_vs_openssl "rsa-$s-$g" "$TMP/ca.pem" 0 0 "" "" "olleh" "$s" "$g"
+	done
+done
+for s in $SUITES_EC; do
+	client_vs_openssl "ec256-$s" "$TMP/ec256.pem" "$TMP/ec256.key" "$TMP/ca.pem" \
+		"" "" 0 0 "" "$s" secp256r1
+	server_vs_openssl "ec256-$s" "$TMP/ca.pem" 0 0 "" "" "olleh" "$s" secp256r1 \
+		"$TMP/ec256.pem" "$TMP/ec256.key"
+	client_vs_openssl "ec384-$s" "$TMP/ec384.pem" "$TMP/ec384.key" "$TMP/ca.pem" \
+		"" "" 0 0 "" "$s" secp384r1
+	server_vs_openssl "ec384-$s" "$TMP/ca.pem" 0 0 "" "" "olleh" "$s" secp384r1 \
+		"$TMP/ec384.pem" "$TMP/ec384.key"
+done
+# Взаимная проверка с ECDSA-сертификатом сервера.
+client_vs_openssl "client-mutual-ecdsa" "$TMP/ec256.pem" "$TMP/ec256.key" "$TMP/ca.pem" \
+	"$TMP/cl.pem" "$TMP/cl.key" 0 1 "" "ECDHE-ECDSA-AES128-GCM-SHA256" secp256r1
+server_vs_openssl "server-mutual-ecdsa" "$TMP/ca.pem" 1 0 "$TMP/cl.pem" "$TMP/cl.key" "olleh" \
+	"ECDHE-ECDSA-AES128-GCM-SHA256" secp256r1 "$TMP/ec256.pem" "$TMP/ec256.key"
+# Клиент openssl предлагает и ECDSA-, и RSA-наборы; сервер с RSA-ключом
+# обязан выбрать совместимый (проверка SuiteCompatible).
+server_vs_openssl "server-auto-suite" "$TMP/ca.pem" 0 0 "" "" "olleh" "-" "-"
+# Цепочка, подписанная CA хешем SHA-384/SHA-512.
+client_vs_openssl "client-rsa-sha384" "$TMP/srv384.pem" "$TMP/srv384.key" "$TMP/ca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+server_vs_openssl "server-rsa-sha384" "$TMP/ca.pem" 0 0 "" "" "olleh" \
+	"ECDHE-RSA-AES128-GCM-SHA256" x25519 "$TMP/srv384.pem" "$TMP/srv384.key"
+client_vs_openssl "client-rsa-sha512" "$TMP/srv512.pem" "$TMP/srv512.key" "$TMP/ca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+server_vs_openssl "server-rsa-sha512" "$TMP/ca.pem" 0 0 "" "" "olleh" \
+	"ECDHE-RSA-AES128-GCM-SHA256" x25519 "$TMP/srv512.pem" "$TMP/srv512.key"
+client_vs_openssl "client-many-san" "$TMP/many.pem" "$TMP/many.key" "$TMP/ca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+client_vs_openssl "client-badca-skip" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/badca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+client_vs_openssl "client-bigca" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/bigca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+
 echo "test-crypto-tls: отрицательные случаи"
 client_vs_openssl "untrusted" "$TMP/srv.pem" "$TMP/srv.key" "" "" "" 1 0
 client_vs_openssl "expired" "$TMP/exp.pem" "$TMP/exp.key" "$TMP/ca.pem" "" "" 1 0
@@ -324,11 +432,16 @@ fake_case goodfinished 0
 fake_case badfinished
 fake_case badccs
 fake_case badtag 0 1
+fake_case badtagchacha 0 1
 fake_case shortrec 0 1
 fake_case oldversion
 fake_case longfinished
 fake_case longccs
 fake_case zeropub
+fake_case badcurve
+fake_case badpoint
+fake_case badpss
+fake_case badecdsa 1 0 "$TMP/ec256.pem" "$TMP/ec256.key"
 fake_case noske
 fake_case oversize
 fake_case badcert

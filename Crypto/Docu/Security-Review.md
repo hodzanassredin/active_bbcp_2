@@ -18,10 +18,18 @@
 | 3. Границы `sigLen` до копирования | исправлено | `dd52f048`, `262ba455` | `fake-oversize`, `Crypto_devPKCS1` |
 | 4. Разбор сети без `ASSERT` | исправлено | `262ba455`, `dd52f048` | `TestAsn1`, `TestMalformed`, `fake-noske`, `v2hello`, `v2record`, `hstype` |
 | 5. Энтропия ГСЧ | исправлено, с остатком | `262ba455` | `TestEntropy`; остаток — в «Что осталось» |
-| 6. Наборы шифров по умолчанию | исправлено | `dd52f048` | `TestDefaults` |
+| 6. Наборы шифров по умолчанию | исправлено, современный набор | `dd52f048`, `crypto-fix` | `TestDefaults`, матрица `test-crypto-tls.sh` |
 | 7. Постоянное время | частично, с пометкой | `262ba455` | `TestConstantTime`, `EqualBytesCT` |
 | 8. TLS: результат `Finished` и состояние | исправлено | `crypto-fix` | `fake-badfinished`, `fake-badccs`, `fake-badtag`, `badcertverify`, `goodcertverify` |
 | 9. X.509: ограничения пути и расширения | исправлено | `f4ae77de`, `8b9d6d8c` | `Crypto_devX509` (`TestNoCA`, `TestPathLen`, `TestKeyUsage`, `TestCriticalExtension`, `TestCycle`, `TestAlgMismatch`) |
+| SHA-384/512, HMAC-SHA-384/512, HKDF | сделано | `crypto-fix` | `Crypto_devSHA512`, `Crypto_devHMAC`, `Crypto_devHKDF`, `Vectors/check.py` |
+| P-256/P-384: ECDH и ECDSA (RFC 6979) | сделано | `crypto-fix` | `Crypto_devEC`, `Crypto_devECDSA`, NIST CAVP, RFC 6979, Wycheproof, `Vectors/check.py` |
+| AES-256-GCM, ChaCha20-Poly1305 | сделано | `crypto-fix` | `Crypto_devGcm` (`TestAES256`), `Crypto_devChaCha20`, RFC 8439, `Vectors/check.py` |
+| RSA-PSS | сделано | `crypto-fix` | `Crypto_devPSS`, Wycheproof, `Vectors/check.py` |
+| Ed25519 (проверка) | сделано | `crypto-fix` | `Crypto_devEd25519`, RFC 8032, Wycheproof, `Vectors/check.py` |
+| X.509: ECDSA, RSA-PSS, Ed25519, смешанные цепочки | сделано | `crypto-fix` | `Crypto_devX509Modern`, `Crypto_devX509` |
+| TLS 1.2: ECDHE-ECDSA/RSA, AES-128/256-GCM, ChaCha20-Poly1305, x25519/secp256r1/secp384r1, PSS/ECDSA | сделано | `crypto-fix` | `tools/test-crypto-tls.sh` (матрица 30 пар в обе стороны), `Crypto_devTLS`, `Crypto_devTLSServer` |
+| Публичные HTTPS-хосты | сделано, 8/8 | `crypto-fix` | `tools/test-crypto-hosts.sh` (ручной), исправления sha384/512 RSA, SameAnchor, SAN, PEM-набора — см. раздел ниже |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -201,6 +209,89 @@ RSA key transport остаются в коде для совместимости
 - `CryptoPKCS1.Decrypt` проверяет дополнение с границами (не было `padd` при `NEW`,
   циклы могли уйти за буфер).
 
+## TLS 1.2: СОВРЕМЕННЫЕ НАБОРЫ (ЭТАП 3б, П. 2)
+
+Клиент и сервер TLS 1.2 переведены на ECDHE с x25519/secp256r1/secp384r1 и AEAD:
+ECDHE-ECDSA и ECDHE-RSA с AES-128-GCM-SHA256, AES-256-GCM-SHA384 и
+ChaCha20-Poly1305-SHA256. PRF и хеш транскрипта выбираются по набору (SHA-256
+или SHA-384); запись AES-GCM использует nonce 4+8, ChaCha20-Poly1305 — соль
+12 байт и номер записи (RFC 7905). Подпись `ServerKeyExchange` и
+`CertificateVerify` проверяется и создаётся по согласованной схеме:
+RSA PKCS#1 v1.5 SHA-256/384, RSA-PSS rsae SHA-256/384, ECDSA P-256/P-384;
+Ed25519 только проверяется. Для ECDSA хеш приводится к целому по правилам
+ECDSA (усечение/дополнение до порядка кривой), поэтому P-384-сертификат
+работает и с `ecdsa_secp256r1_sha256`, как это делает OpenSSL в TLS 1.2.
+
+Сервер разбирает `supported_groups` и `signature_algorithms` клиента, выбирает
+набор, совместимый с сертификатом, схему из предложенных и для
+ECDSA-сертификата — группу, равную кривой сертификата (это же правило
+проверяет OpenSSL). Ключ ECDSA читается из PEM SEC1 «EC PRIVATE KEY» и PKCS#8
+(`X509.ReadPemEcPrivateKey`). Найдено и исправлено переполнение буферов
+`CryptoPSS.Encode` на ключе 2048 бит: `db`/`dbMask` были размером
+`2*MaxHash+8` (136 байт), а для 2048-битного модуля `dbLen = 223`; подпись
+`ServerKeyExchange` RSA-PSS падала трапом. Добавлен `TestSign2048`.
+
+Порчи (каждая — отдельный прогон; «поймана» — соответствующий сценарий
+`test-crypto-tls.sh` или `Crypto_devPSS` красный):
+
+| Место | Порча | Результат |
+|---|---|---|
+| `ServerGroup`: выбор группы ECDSA по кривой | всегда `GroupX25519` | поймана: сервер P-256 + клиент secp256r1 (`wrong curve`) |
+| `NewGroup`: `secp384r1` | `EC.P256()` | поймана: клиент P-384 не принимает SKE |
+| `EcGroup.Shared`: `secretLen := n` | `n - 1` | поймана: клиент P-256, неверный pre-master |
+| ChaCha `Seal`: XOR номера записи | убран | поймана: клиент ChaCha/x25519 |
+| ChaCha `saltLen` | 12 → 4 | поймана: сервер ChaCha/x25519 |
+| ChaCha `Open`: результат `Decrypt` | игнорируется | поймана: `fake-badtagchacha` (усиленная проверка «соединение закрыто») |
+| `PrepareSecurityParameters`: PRF SHA-384 | SHA-256 | поймана: клиент AES-256-GCM-SHA384 |
+| `PrfDigestLen` | 48 → 32 | поймана: клиент AES-256-GCM-SHA384 |
+| `TranscriptDigestAt` | всегда SHA-256 | поймана: клиент AES-256-GCM-SHA384 |
+| `TLSVerifyDigest`: RSA-PSS | `RETURN TRUE` | поймана: `fake-badpss` |
+| `TLSVerifyDigest`: ECDSA P-256 | `RETURN TRUE` | поймана: `fake-badecdsa` |
+| `SuiteCompatible` | `RETURN TRUE` | поймана: `server-auto-suite` (клиент openssl предлагает оба типа) |
+| `ReceiveClientHello`: граница `supported_groups` | `epos+6` → `epos+4` | поймана: ECDSA-сервер не видит группу |
+| `TLSNewHash`: `ecdsa_secp384r1_sha384` | нет SHA-384 | поймана: сервер P-384 не подписывает SKE |
+| `PrepareSecurityParameters`: ключ AES-256/ChaCha | 32 → 16 | поймана: клиент AES-256-GCM-SHA384 |
+| `X509.ReadPemEcPrivateKey`: OID P-384 (SEC1) | `EC.P256()` | поймана: сервер P-384 |
+| `X509.ReadPemEcPrivateKey`: SEC1-заголовок | не принимается | поймана: сервер ECDSA (openssl пишет SEC1) |
+| `X509.ReadPemEcPrivateKey`: длина скаляра | `4n` → `4n-1` | поймана: сервер ECDSA, ключ не загружается |
+| `X509.ReadPemEcPrivateKey`: выравнивание скаляра | слева → справа | эквивалентна: openssl пишет скаляр ровно `4n` байт, ветка дополнения на этих векторах не срабатывает |
+| `CryptoPSS.Encode`: буферы `db`/`dbMask` | `MaxModulusBytes` → `2*MaxHash+8` | поймана: `TestSign2048` трапом |
+
+## ПУБЛИЧНЫЕ ХОСТЫ (ЭТАП 3б, П. 6)
+
+`tools/test-crypto-hosts.sh` (ручной, нужна сеть) соединяется нашим клиентом с восемью
+публичными HTTPS-хостами, грузит системный набор CA и печатает версию, набор, группу и
+подпись. Прогон 26.11.2026: 8/8 по TLS 1.2 (google, cloudflare, github, letsencrypt,
+wikipedia, microsoft, apple, amazon; наборы ECDHE-ECDSA/RSA с AES-128/256-GCM и
+ChaCha20-Poly1305, группы x25519 и secp256r1, подписи ECDSA P-256 и RSA-PSS SHA-256).
+Прогон нашёл шесть дефектов, все исправлены:
+
+- не поддерживались OID `sha384WithRSAEncryption` и `sha512WithRSAEncryption` в
+  `AlgorithmIdentifier` сертификата;
+- `PKCS1.BuildEM` знал DigestInfo только для MD5/SHA-1/SHA-256, поэтому подпись цепочки
+  SHA-384/SHA-512 не проверялась;
+- доверенный корень сопоставлялся только по точному DER; cross-signed корень (тот же субъект
+  и ключ, другой издатель) не принимался — добавлено сопоставление по субъекту и открытому
+  ключу (`SameAnchor`);
+- `MaxSans = 16` обрезал длинные списки SAN;
+- `X509.ReadPemChain` прекращал разбор на первом нечитаемом сертификате, отбрасывая остальные
+  корни набора;
+- `Context.AddTrustedFile` читал файл в буфер 16 КиБ, а системный набор — 180 КиБ.
+
+Порчи (проверка — соответствующий сценарий `tools/test-crypto-tls.sh` или ручной прогон
+хостов):
+
+| Место | Порча | Результат |
+|---|---|---|
+| `PKCS1`: DigestInfo SHA-384 | первый байт `30` → `31` | поймана: клиент против CA-подписи SHA-384 |
+| `PKCS1`: DigestInfo SHA-512 | первый байт `30` → `31` | поймана: клиент против CA-подписи SHA-512 |
+| X509 `ParseSigAlg`: `sha384WithRSA` | ветка отключена | поймана: клиент, сертификат SHA-384 |
+| X509 `ParseSigAlg`: `sha512WithRSA` | ветка отключена | поймана: клиент, сертификат SHA-512 |
+| X509 `MaxSans` | 64 → 16 | поймана: `client-many-san` (совпадение дальше 16-го) |
+| X509 `ReadPemChain` | возврат на первом нечитаемом | поймана: `client-badca-skip` |
+| `AddTrustedFile`: буфер | динамический → 16 КиБ | поймана: `client-bigca` (113 КиБ) |
+| X509 `SameAnchor` | `RETURN FALSE` (только точный DER) | поймана ручным прогоном: google/cloudflare `certError=4` |
+
 ## ПРОВЕРКА ПОРЧЕЙ
 
 Порчи вносились по одной в рабочую копию, модуль пересобирался
@@ -211,6 +302,41 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 приёмки стоят первыми в таблице X.509. Всего 78 новых порч: X.509 — 35
 (30 красных, включая таймаут цикла, и 5 эквивалентных), TLS — 43
 (25 красных и 18 эквивалентных).
+
+Механизмы SHA-384/512, HKDF, P-256/P-384, ChaCha20-Poly1305, RSA-PSS,
+Ed25519 и новые подписи X.509 проверены 67 порчами: 63 красных,
+4 перечислены как эквивалентные на выбранных векторах с причиной.
+
+### Приёмка пунктов 1–5: структура EMSA-PSS
+
+Порча `Crypto/Mod/PSS.cp`, убирающая проверку разделителя `db[psLen] # 1X`,
+раньше выживала: в `Crypto_devPSS` не было вектора с испорченным
+разделителем. Добавлены отрицательные векторы
+`Crypto_dev/Vectors/pss-negative.txt` (генератор `make-pss-negative.py`):
+EM собирается с одним дефектом и подписывается настоящим ключом
+(`s = EM^d mod n`), поэтому проверяющая сторона после `s^e mod n`
+получает ровно этот EM. Вектор с ненулевым старшим битом maskedDB
+обнаружил настоящий пропуск: шаг 4 из RFC 8017, 9.1.2 (старшие
+`8*emLen - emBits` бита maskedDB нулевые) не проверялся, а маска `db[0]`
+ниже скрывала эти биты. Проверка добавлена в `CryptoPSS.VerifyHash`;
+контрольный вектор подтверждает, что годная подпись проходит.
+
+| Место | Порча | Результат |
+|---|---|---|
+| `VerifyHash`: `IF db[psLen] # 1X` | `IF FALSE` (порча приёмки) | поймана `TestNegativeEncoding` (разделитель 0x00 и 0x02) |
+| `VerifyHash`: `IF ORD(em[emLen-1]) # 0BCH` | проверка удалена | поймана `TestNegativeEncoding` (концевой 0xBB) |
+| `VerifyHash`: проверка старших бит maskedDB | `IF FALSE` | поймана `TestNegativeEncoding` (старший бит maskedDB) |
+| `VerifyHash`: `IF db[i] # 0X` | `IF FALSE` | поймана `TestNegativeEncoding` (ненулевой PS) |
+| `VerifyHash`: `saltLen := hLen` | `hLen - 1` | поймана `TestNegativeEncoding` (соль 31) и годные векторы |
+| `MGF1`: `INC(c)` | `INC(c, 0)` | поймана контрольным и годными векторами |
+| `VerifyHash`: `EqualBytesCT(h, hp)` | `ok := TRUE` | поймана `TestWycheproof` (изменённый m_hash) |
+| `VerifyHash`: `db[i] := em[i] XOR dbMask[i]` | `db[i] := em[i]` | поймана годными векторами |
+| `Encode`: `em[emLen-1] := 0BCH` | `0BBH` | поймана `TestSign` (своя подпись не проверяется) |
+| `VerifyHash`: обнуление старших бит `db[0]` | строка удалена | поймана годными векторами (маска делает PS ненулевым) |
+
+До этой приёмки порча `pss-zerobits` считалась эквивалентной; после
+добавления проверки старших бит и векторов она краснеет, как и остальные
+девять.
 
 ### X.509
 
@@ -313,6 +439,19 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 | GCM-тег | `gcm-tag-ignored`, `gcm-tag-always-fail`, `gcm-tag-one-byte` | `Crypto_devGcm.TestTampered`, `TestVector2` |
 | TLS SKE и сертификаты | `tls-ske-skip`, `tls-ske-wrong-data`, `tls-client-cert-skip`, `tls-server-cert-skip` | `tools/test-crypto-tls.sh` (`fake-badsig`, `client-serverhello`, `untrusted`, `server-foreign-client`) |
 | Состояния и границы TLS | `tls-noske-assert`, `tls-v2-unchecked` | `tools/test-crypto-tls.sh` (`fake-noske`, `v2hello` — `TRAP`) |
+| SHA-384/512 | `sha512-rotr`, `sha512-iv`, `sha512-len`, `sha512-schedule`, `sha384-size` | `Crypto_devSHA512` (все пять красные) |
+| HMAC-SHA-384/512 | `hmac-block`, `hmac-ipad`, `hmac-trunc` | `Crypto_devHMAC` (все три красные) |
+| HKDF | `hkdf-counter`, `hkdf-prk`, `hkdf-salt` | `Crypto_devHKDF` (все три красные) |
+| P-256/P-384: поле и точка | `ec-mont-sub`, `ec-formula`, `ec-digit`, `ec-oncurve`, `ec-window`, `ec-inrange`, `ec-mont-zero`, `ec384-a`, `ec384-nbits` | `Crypto_devEC` (все красные; `ec384-nbits` покраснел после того, как векторы P-384 стали полной длины — с короткими скалярами старшие 128 бит не проверялись) |
+| ECDH | `ecdh-novalidate`, `ecdh-noprivcheck`, `ecdh-wrongpoint`, `ecdh-zero` | три красные; `ecdh-zero` эквивалентна: на проверенной точке простого порядка общий секрет ноль только у бесконечности, а её отвергает `Validate` |
+| ECDSA RFC 6979 | `ecdsa-sep`, `ecdsa-swap`, `ecdsa-sformula`, `ecdsa-u1`, `ecdsa-compare`, `ecdsa-range` | пять красные; `ecdsa-range` на выбранных векторах эквивалентна (r=0 и s=n отвергаются арифметикой, r=p не совпадает), но проверка диапазона оставлена по RFC 6979/ECDSA |
+| AES-256-GCM | `aes256` | `Crypto_devGcm.TestAES256` (красная) |
+| ChaCha20 | `chacha-qr`, `chacha-sigma`, `chacha-counter`, `chacha-inc` | `Crypto_devChaCha20` (все четыре красные) |
+| Poly1305 | `poly-clamp`, `poly-fullbit`, `poly-mul`, `poly-addmask`, `poly-final5` | четыре красные; `poly-final5` (+5 → +4 в окончательном приведении) на выбранных векторах не меняет тег и остаётся эквивалентной без случая на границе приведения |
+| ChaCha20-Poly1305 AEAD | `aead-tag`, `aead-pad`, `aead-lens` | все три красные |
+| RSA-PSS | `pss-separator`, `pss-trailer`, `pss-topbits`, `pss-ps`, `pss-saltlen`, `pss-mgf`, `pss-hcompare`, `pss-dbmask`, `pss-sign`, `pss-zerobits` | все десять красные (приёмка п. 0); `pss-topbits` — новая проверка старших бит maskedDB по RFC 8017, 9.1.2; `pss-zerobits` после неё уже не эквивалентна |
+| Ed25519 | `ed-lessL`, `ed-sign`, `ed-nibble`, `ed-pointeq`, `ed-addD`, `ed-hashR` | `ed-pointeq` по одной оси не краснеет (X уже различается); при возврате `TRUE` из всего сравнения — красная. Остальные пять красные |
+| X.509: алгоритмы подписи и ключи | `x509-ecdsa-skip`, `x509-pss-skip`, `x509-ed-skip`, `x509-pss-type`, `x509-ec-curve`, `x509-ed-oid`, `x509-ecdsa-hash`, `x509-int-zero` | все восемь красные (`Crypto_devX509Modern`) |
 
 Порча `uls-signed-compare` (возврат сравнения через XOR старшего бита) тест не
 краснит: на этом компиляторе эта форма эквивалентна явным ветвям, поэтому замена
@@ -322,7 +461,7 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 
 ## ЧТО ОСТАЛОСЬ
 
-- TLS 1.3 не реализован (в этапе 3 он был «если укладывается»).
+- TLS 1.3 не реализован; это следующий шаг (сначала клиент, затем сервер).
 - `CryptoAosBigNumbers.NewRand` не сообщает об отказе `/dev/urandom`: у `NewPrime`
   и `NewRandRange` нет пути ошибки. На Linux источник есть всегда; чтобы убрать
   остаток, нужно менять сигнатуры `CryptoPrimes`/`CryptoRSA` и проверять `NIL`
@@ -353,11 +492,14 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 - Фрагментация handshake-сообщений по нескольким записям не поддержана: `ReceiveHandshake`
   отвергает сообщение, не влезшее в запись. У `Accept` нет таймаута рукопожатия:
   молчащий клиент занимает сервер.
-- Только RSA-сертификаты и X25519; ECDSA, AES-256-GCM и другие группы не добавлены.
+- TLS 1.2 использует x25519/secp256r1/secp384r1 (только несжатые точки) и подписи
+  RSA PKCS#1, RSA-PSS, ECDSA и проверку Ed25519. Подпись Ed25519 не реализована; сервер
+  с Ed25519-сертификатом не обслуживается. P-521, сжатые точки и остальные named groups нет.
 - Возобновление сессий и пересогласование — в объёме исходного кода A2, без тикетов
-  TLS 1.3 и без отдельного аудита. Сервер принимает новый `ClientHello` в состоянии
-  `Established`, но не разбирает расширения `ClientHello` и не сверяет
-  `renegotiated_connection` (RFC 5746); безопасное пересогласование не реализовано.
+  TLS 1.3 и без отдельного аудита. Сервер разбирает расширения `ClientHello`
+  (`supported_groups`, `signature_algorithms`) при выборе параметров, но не сверяет
+  `renegotiated_connection` (RFC 5746) и отвергает пересогласование; безопасное
+  пересогласование не реализовано. Extended master secret и session tickets не поддержаны.
   Для модели кластера пересогласование не используется.
 - Постоянное время bignum/RSA — см. п. 7.
 

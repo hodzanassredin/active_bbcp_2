@@ -21,6 +21,7 @@ MODULE CryptoMD5;(** AUTHOR "G.F."; PURPOSE "MD5"; *)
 
 	BEGIN
 		SELF.SetNameAndSize("md5", 16);
+		SELF.blockSize := 64;
 		SELF.initialized := FALSE
 	END Init;
 

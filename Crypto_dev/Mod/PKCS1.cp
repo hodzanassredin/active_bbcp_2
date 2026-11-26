@@ -48,6 +48,23 @@ MODULE Crypto_devPKCS1;
 		ok := PKCS1.VerifyHash("CryptoSHA256", digest, 32, pub, sig, 0, sigLen + 1);
 		UnitAssert.True(~ok, "oversized signature rejected");
 
+		(* DigestInfo SHA-384 и SHA-512 (сертификаты публичных CA). *)
+		FOR i := 0 TO 47 DO digest[i] := SHORT(CHR(i)) END;
+		sigLen := 0;
+		PKCS1.SignHash("CryptoSHA384", digest, 48, priv, sig, 0, sigLen);
+		UnitAssert.True(PKCS1.VerifyHash("CryptoSHA384", digest, 48, pub, sig, 0, sigLen),
+			"SHA-384 signature verifies");
+		digest[0] := BIT.CXOR(digest[0], 1X);
+		UnitAssert.True(~PKCS1.VerifyHash("CryptoSHA384", digest, 48, pub, sig, 0, sigLen),
+			"SHA-384 wrong digest rejected");
+		digest[0] := BIT.CXOR(digest[0], 1X);
+
+		FOR i := 0 TO 63 DO digest[i] := SHORT(CHR(i)) END;
+		sigLen := 0;
+		PKCS1.SignHash("CryptoSHA512", digest, 64, priv, sig, 0, sigLen);
+		UnitAssert.True(PKCS1.VerifyHash("CryptoSHA512", digest, 64, pub, sig, 0, sigLen),
+			"SHA-512 signature verifies");
+
 		(* Шифрование типа 2 и расшифровка. *)
 		FOR i := 0 TO 47 DO msg[i] := SHORT(CHR(i + 1)) END;
 		msgLen := 0;
