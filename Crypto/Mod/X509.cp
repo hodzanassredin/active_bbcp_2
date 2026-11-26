@@ -1,21 +1,55 @@
 MODULE CryptoX509;
 (**
-	X.509 Certificates and certificate management.
-	See RFC5280 standard.
-	Written by Timothée Martiel, 2014, with some fragments by P. Hunziker.
+	X.509 certificates and certificate management.
+	See RFC 5280.
+
+	Written by Timothée Martiel, 2014, with fragments by P. Hunziker.
+	2026: разбор без доверия к длинам, проверка подписи, цепочки,
+	сроков и имени (SAN/CN), чтение PEM. Все проверки возвращают
+	FALSE/код ошибки, а не ASSERT: сертификат приходит из сети.
 *)
 
-	IMPORT Streams := CryptoAosStreams, Dates := CryptoAosDates, AosBigNumbers := CryptoAosBigNumbers, CryptoRSA, ASN1 := CryptoASN1, (*CONV FROM KernelLog*)
-StdLog, AO := CryptoAosCompat;
+	IMPORT Streams := CryptoAosStreams, Dates := CryptoAosDates, AosBigNumbers := CryptoAosBigNumbers,
+		CryptoRSA, ASN1 := CryptoASN1, (*CONV FROM KernelLog*)
+		StdLog, AO := CryptoAosCompat, Hashes := CryptoHashes, PKCS1 := CryptoPKCS1,
+		U := CryptoUtils, Base64 := CryptoBase64;
 
 	CONST
-		Trace = TRUE;
+		Trace = FALSE;
 		AllowNotTrusted* = 0;
 		AllowOutdated* = 1;
 		Bypass* = 31;
 
+		(* Коды ошибок проверки. *)
+		Ok* = 0;
+		ErrMalformed* = 1;
+		ErrExpired* = 2;
+		ErrNotYetValid* = 3;
+		ErrUntrusted* = 4;
+		ErrBadSignature* = 5;
+		ErrHostname* = 6;
+		ErrUnsupported* = 7;
+		ErrNoCA* = 8;
+
+		MaxChainDepth = 8;
+		MaxSans = 16;
+		MaxPem = 16384;
+
+		(* OID в DER-содержимом (без заголовка). *)
+		OidSha256WithRsa = "2A864886F70D01010B";
+		OidSha1WithRsa = "2A864886F70D010105";
+		OidMd5WithRsa = "2A864886F70D010104";
+		OidRsaEncryption = "2A864886F70D010101";
+		OidSubjectAltName = "551D11";
+		OidBasicConstraints = "551D13";
+		OidCommonName = "550403";
+		OidCountry = "550406";
+		OidOrganisation = "55040A";
+		OidOrganisationUnit = "55040B";
+		OidState = "550408";
+
 	TYPE
-				StdLogSender = POINTER TO RECORD(Streams.Sender) END;
+		StdLogSender = POINTER TO RECORD(Streams.Sender) END;
 		Entity* = EXTENSIBLE RECORD
 			country-, organisation-, organisationUnit-, distName-, state-, commonName- : POINTER TO ARRAY OF SHORTCHAR;
 			serial- : AO.SIGNED32
@@ -29,101 +63,194 @@ StdLog, AO := CryptoAosCompat;
 			identifier- : POINTER TO ARRAY OF SHORTCHAR;
 			publicKey- : CryptoRSA.Key;
 			issuer-, subject- : Entity;
-			parent-, next : Certificate
+			parent-, next* : Certificate;
+			(* Проверка подписи. *)
+			hashName* : ARRAY 16 OF SHORTCHAR;
+			signature* : POINTER TO ARRAY OF SHORTCHAR;
+			sigLen* : AO.SIGNED32;
+			tbs* : POINTER TO ARRAY OF SHORTCHAR;	(* подписанная часть DER *)
+			tbsLen* : AO.SIGNED32;
+			raw* : POINTER TO ARRAY OF SHORTCHAR;	(* весь сертификат DER *)
+			rawLen* : AO.SIGNED32;
+			issuerRaw* : POINTER TO ARRAY OF SHORTCHAR;
+			issuerLen* : AO.SIGNED32;
+			subjectRaw* : POINTER TO ARRAY OF SHORTCHAR;
+			subjectLen* : AO.SIGNED32;
+			isCA* : BOOLEAN;
+			sanCount* : AO.SIGNED32;
+			sanValue* : ARRAY MaxSans OF POINTER TO ARRAY OF SHORTCHAR;
+			sanLen* : ARRAY MaxSans OF AO.SIGNED32;
+			sanIsIP* : ARRAY MaxSans OF BOOLEAN
 		END;
-
 
 	VAR
 		roots: Certificate;
 
-		PROCEDURE (SELF: StdLogSender) Send* (IN buf : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE; propagate : BOOLEAN; VAR res : INTEGER);
-			VAR arr : POINTER TO ARRAY OF CHAR; i : INTEGER;
-		BEGIN 
-			NEW(arr, len);
-			FOR i:= 0 TO len - 1 DO
-				arr[i] := buf[ofs+i]
-			END;
-			StdLog.String(arr);
-			res := Streams.Ok;
-		END Send;
-
-	PROCEDURE Verify* (chain : Certificate; flags : SET): BOOLEAN;
-		VAR
-			valid: BOOLEAN;
-
-
-		PROCEDURE CheckDate (c : Certificate): BOOLEAN;
-			VAR
-				now: Dates.DateTime;
-
-
-		BEGIN
-			IF AllowOutdated IN flags THEN
-				RETURN TRUE
-			END;
-			now := Dates.Now();
-			RETURN (Dates.CompareDateTime(c.validity.notBefore, now) <= 0) & (Dates.CompareDateTime(now, c.validity.notAfter) <= 0)
-		END CheckDate;
-
-		PROCEDURE CheckSignature (c : Certificate): BOOLEAN;
-				BEGIN
-					RETURN TRUE;
-		END CheckSignature;
-
+	PROCEDURE (SELF: StdLogSender) Send* (IN buf : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE; propagate : BOOLEAN; VAR res : INTEGER);
+		VAR arr : POINTER TO ARRAY OF CHAR; i : INTEGER;
 	BEGIN
-		IF Bypass IN flags THEN
+		NEW(arr, len);
+		FOR i:= 0 TO len - 1 DO
+			arr[i] := buf[ofs+i]
+		END;
+		StdLog.String(arr);
+		res := Streams.Ok;
+	END Send;
+
+	PROCEDURE CopyStr* (IN src : ARRAY OF SHORTCHAR; VAR dst : ARRAY OF SHORTCHAR);
+		VAR i : AO.SIZE;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(src)) & (i < LEN(dst) - 1) & (src[i] # 0X) DO
+			dst[i] := src[i];
+			INC(i)
+		END;
+		dst[i] := 0X
+	END CopyStr;
+
+	PROCEDURE OidIs (t : ASN1.Triplet; IN hex : ARRAY OF SHORTCHAR; hexLen : AO.SIZE): BOOLEAN;
+		VAR want : ARRAY 32 OF SHORTCHAR;
+	BEGIN
+		IF (t = NIL) OR (t.class # ASN1.ASN1Universal) OR (t.tag # ASN1.Oid)
+			OR (t.svalue = NIL) OR (LEN(t.svalue^) # hexLen) OR (hexLen > LEN(want)) THEN
+			RETURN FALSE
+		END;
+		U.Hex2Bin(hex, 0, want, 0, hexLen);
+		RETURN U.EqualBytesCT(want, t.svalue^, 0, 0, hexLen)
+	END OidIs;
+
+	PROCEDURE AlgHashName (alg : ASN1.Triplet; VAR name : ARRAY OF SHORTCHAR): BOOLEAN;
+		VAR oid : ASN1.Triplet;
+	BEGIN
+		name[0] := 0X;
+		IF (alg = NIL) OR (alg.class # ASN1.ASN1Universal) OR (alg.tag # ASN1.Sequence) THEN
+			RETURN FALSE
+		END;
+		oid := alg.child;
+		IF OidIs(oid, OidSha256WithRsa, 9) THEN
+			CopyStr("CryptoSHA256", name);
+			RETURN TRUE
+		ELSIF OidIs(oid, OidSha1WithRsa, 9) THEN
+			CopyStr("CryptoSHA1", name);
+			RETURN TRUE
+		ELSIF OidIs(oid, OidMd5WithRsa, 9) THEN
+			CopyStr("CryptoMD5", name);
 			RETURN TRUE
 		END;
-		valid := CheckDate(chain) & CheckSignature(chain);
-		RETURN valid
+		RETURN FALSE
+	END AlgHashName;
+
+	PROCEDURE SameBytes (IN a, b : ARRAY OF SHORTCHAR; aLen, bLen : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		IF aLen # bLen THEN
+			RETURN FALSE
+		END;
+		IF (aLen <= 0) OR (LEN(a) < aLen) OR (LEN(b) < bLen) THEN
+			RETURN FALSE
+		END;
+		RETURN U.EqualBytesCT(a, b, 0, 0, aLen)
+	END SameBytes;
+
+	PROCEDURE SameCert (a, b : Certificate): BOOLEAN;
+	BEGIN
+		IF (a = NIL) OR (b = NIL) OR (a.raw = NIL) OR (b.raw = NIL) THEN
+			RETURN FALSE
+		END;
+		RETURN SameBytes(a.raw^, b.raw^, a.rawLen, b.rawLen)
+	END SameCert;
+
+	PROCEDURE InList (cert, list : Certificate): BOOLEAN;
+		VAR c : Certificate;
+	BEGIN
+		c := list;
+		WHILE c # NIL DO
+			IF SameCert(cert, c) THEN
+				RETURN TRUE
+			END;
+			c := c.next
+		END;
+		RETURN FALSE
+	END InList;
+
+	PROCEDURE CheckDate (c : Certificate; flags : SET): AO.SIGNED32;
+		VAR now : Dates.DateTime; cmpBefore, cmpAfter : AO.SIGNED32;
+	BEGIN
+		IF AllowOutdated IN flags THEN
+			RETURN Ok
+		END;
+		IF c = NIL THEN
+			RETURN ErrMalformed
+		END;
+		now := Dates.Now();
+		cmpBefore := Dates.CompareDateTime(c.validity.notBefore, now);
+		cmpAfter := Dates.CompareDateTime(now, c.validity.notAfter);
+		IF cmpBefore > 0 THEN
+			RETURN ErrNotYetValid
+		ELSIF cmpAfter > 0 THEN
+			RETURN ErrExpired
+		END;
+		RETURN Ok
+	END CheckDate;
+
+	(* Подпись сертификата открытым ключом издателя. *)
+	PROCEDURE CheckSignature* (c : Certificate; issuerKey : CryptoRSA.Key): BOOLEAN;
+		VAR h : Hashes.Hash; digest : ARRAY 64 OF SHORTCHAR;
+	BEGIN
+		IF (c = NIL) OR (issuerKey = NIL) OR (c.tbs = NIL) OR (c.signature = NIL)
+			OR (c.tbsLen <= 0) OR (c.sigLen <= 0) THEN
+			RETURN FALSE
+		END;
+		h := Hashes.NewHash(c.hashName);
+		IF h = NIL THEN
+			RETURN FALSE
+		END;
+		h.Initialize;
+		h.Update(c.tbs^, 0, c.tbsLen);
+		h.GetHash(digest, 0);
+		RETURN PKCS1.VerifyHash(c.hashName, digest, h.size, issuerKey, c.signature^, 0, c.sigLen)
+	END CheckSignature;
+
+	PROCEDURE Verify* (chain : Certificate; flags : SET): BOOLEAN;
+		(* Старый вход: проверяет сроки и, если известен издатель,
+		   подпись. Цепочка до корня — VerifyChain. *)
+		VAR err : AO.SIGNED32;
+	BEGIN
+		err := CheckDate(chain, flags);
+		RETURN err = Ok
 	END Verify;
 
 	PROCEDURE FormatEntity (triplet : ASN1.Triplet; VAR entity : Entity);
-		CONST
-			Country = 1;
-			Org = 2;
-			OrgUnit = 3;
-			DistNameQual = 4;
-			State = 5;
-			CommonName = 6;
-			Serial = 7;
-		VAR
-			data, key, value: ASN1.Triplet;
-			currentData: AO.SIGNED32;
+		VAR sets, seq, oid, value : ASN1.Triplet;
 	BEGIN
-				currentData := 0;
-		data := triplet.child;
-		WHILE data # NIL DO
-			key := data.child;
-			WHILE key # NIL DO
-				value := key.child;
-				WHILE value # NIL DO
-					IF currentData # 0 THEN
-						CASE currentData OF
-							Country :					       entity.country := value.svalue
-						|       Org :					   entity.organisation := value.svalue
-						|       OrgUnit :					       entity.organisationUnit := value.svalue
-						|       DistNameQual :					  entity.distName := value.svalue
-						|       State :						 entity.state := value.svalue
-						|       CommonName :					    entity.commonName := value.svalue
-						END;
-						currentData := 0
-					ELSIF (value.svalue[0] = 55X) & (value.svalue[1] = 4X) & (value.svalue[2] = 6X) THEN
-						currentData := Country
-					ELSIF (value.svalue[0] = 55X) & (value.svalue[1] = 4X) & (value.svalue[2] = 8X) THEN
-						currentData := State
-					ELSIF (value.svalue[0] = 55X) & (value.svalue[1] = 4X) & (value.svalue[2] = 0AX) THEN
-						currentData := Org
-					ELSIF (value.svalue[0] = 55X) & (value.svalue[1] = 4X) & (value.svalue[2] = 0BX) THEN
-						currentData := OrgUnit
-					ELSIF (value.svalue[0] = 55X) & (value.svalue[1] = 4X) & (value.svalue[2] = 3X) THEN
-						currentData := CommonName
-					END;
-					value := value.next
+		IF (triplet = NIL) OR (triplet.child = NIL) THEN
+			RETURN
+		END;
+		sets := triplet.child;
+		WHILE sets # NIL DO
+			seq := sets.child;
+			WHILE seq # NIL DO
+				oid := seq.child;
+				IF oid # NIL THEN
+					value := oid.next
+				ELSE
+					value := NIL
 				END;
-				key := key.next
+				IF (value # NIL) & (value.svalue # NIL) THEN
+					IF OidIs(oid, OidCommonName, 3) THEN
+						entity.commonName := value.svalue
+					ELSIF OidIs(oid, OidCountry, 3) THEN
+						entity.country := value.svalue
+					ELSIF OidIs(oid, OidOrganisation, 3) THEN
+						entity.organisation := value.svalue
+					ELSIF OidIs(oid, OidOrganisationUnit, 3) THEN
+						entity.organisationUnit := value.svalue
+					ELSIF OidIs(oid, OidState, 3) THEN
+						entity.state := value.svalue
+					END
+				END;
+				seq := seq.next
 			END;
-			data := data.next
+			sets := sets.next
 		END
 	END FormatEntity;
 
@@ -227,12 +354,12 @@ StdLog, AO := CryptoAosCompat;
 		IF ~IsDigit(char) THEN
 			RETURN FALSE
 		END;
-		INC(date.year, 100 * ORD(char) - ORD('0'));
+		INC(date.year, 100 * (ORD(char) - ORD('0')));
 		char := reader.Get();
 		IF ~IsDigit(char) THEN
 			RETURN FALSE
 		END;
-		INC(date.year, 10 * ORD(char) - ORD('0'));
+		INC(date.year, 10 * (ORD(char) - ORD('0')));
 		char := reader.Get();
 		IF ~IsDigit(char) THEN
 			RETURN FALSE
@@ -296,38 +423,58 @@ StdLog, AO := CryptoAosCompat;
 		END
 	END ReadGeneralizedTime;
 
-	PROCEDURE ReadTime (reader : Streams.Reader; VAR date : Dates.DateTime): BOOLEAN;
-		VAR pos: AO.SIGNED32; res: BOOLEAN;
+	PROCEDURE ReadTime (t : ASN1.Triplet; VAR date : Dates.DateTime): BOOLEAN;
+		VAR r : Streams.StringReader; res : BOOLEAN;
 	BEGIN
-		res := ReadUTCTime(reader, date);
-		IF ~res THEN
-			res := ReadGeneralizedTime(reader, date);
-			RETURN res
+		IF (t = NIL) OR (t.svalue = NIL) OR (LEN(t.svalue^) = 0) THEN
+			RETURN FALSE
 		END;
-		RETURN TRUE
+		NEW(r);
+		r.InitStringReader(LEN(t.svalue^));
+		r.SetRaw(t.svalue^, 0, LEN(t.svalue^));
+		IF t.tag = ASN1.UTCTime THEN
+			res := ReadUTCTime(r, date)
+		ELSE
+			res := ReadGeneralizedTime(r, date)
+		END;
+		RETURN res & Dates.ValidDateTime(date)
 	END ReadTime;
 
-	PROCEDURE FormatRsaPublicKey* (publicKey : ASN1.Triplet; VAR key : CryptoRSA.Key);
-		VAR
-			algo: POINTER TO ARRAY OF SHORTCHAR;
-			sequence, mod, exp: ASN1.Triplet;
-			sr: Streams.StringReader;
-			len0: AO.SIZE;
-			modulus, exponent: AosBigNumbers.BigNumber;
+	PROCEDURE AssignIntValue (t : ASN1.Triplet; VAR b : AosBigNumbers.BigNumber);
 	BEGIN
-		algo := publicKey.child.child.svalue;
-		NEW(sr);sr.InitStringReader(LEN(publicKey.child.next.svalue^));
-		sr.SetRaw(publicKey.child.next.svalue^, 0, LEN(publicKey.child.next.svalue^));
-		sequence := ASN1.Decode(sr, publicKey.child.next.level + 1, len0);
-		mod := sequence.child;
-		AosBigNumbers.AssignBin(modulus, mod.svalue^, 0, LEN(mod.svalue^));
-		exp := mod.next;
-		IF exp.ivalue # 0 THEN
-			AosBigNumbers.AssignInt(exponent, exp.ivalue)
+		IF (t # NIL) & (t.svalue # NIL) & (LEN(t.svalue^) > 0) THEN
+			AosBigNumbers.AssignBin(b, t.svalue^, 0, LEN(t.svalue^))
 		ELSE
-			AosBigNumbers.AssignBin(exponent, exp.svalue^, 0, LEN(exp.svalue^))
+			b := NIL
+		END
+	END AssignIntValue;
+
+	PROCEDURE FormatRsaPublicKey* (publicKey : ASN1.Triplet; VAR key : CryptoRSA.Key);
+		VAR r : Streams.StringReader; seq, mod, exp : ASN1.Triplet; len0 : AO.SIZE;
+	BEGIN
+		IF key = NIL THEN
+			NEW(key)
 		END;
-		key := CryptoRSA.PubKey(exponent, modulus)
+		key.modulus := NIL;
+		key.exponent := NIL;
+		IF (publicKey = NIL) OR (publicKey.child = NIL) OR (publicKey.child.next = NIL)
+			OR (publicKey.child.next.svalue = NIL) THEN
+			RETURN
+		END;
+		NEW(r);
+		r.InitStringReader(LEN(publicKey.child.next.svalue^));
+		r.SetRaw(publicKey.child.next.svalue^, 0, LEN(publicKey.child.next.svalue^));
+		seq := ASN1.Decode(r, 0, len0);
+		IF (seq = NIL) OR ~seq.ok OR (seq.child = NIL) OR (seq.child.next = NIL) THEN
+			RETURN
+		END;
+		mod := seq.child;
+		exp := mod.next;
+		IF (mod.svalue = NIL) OR (exp.svalue = NIL) THEN
+			RETURN
+		END;
+		AosBigNumbers.AssignBin(key.modulus, mod.svalue^, 0, LEN(mod.svalue^));
+		AosBigNumbers.AssignBin(key.exponent, exp.svalue^, 0, LEN(exp.svalue^))
 	END FormatRsaPublicKey;
 
 	PROCEDURE PrintEntity (IN entity : Entity; writer : Streams.Writer);
@@ -380,11 +527,7 @@ StdLog, AO := CryptoAosCompat;
 	END PrintDate;
 
 	PROCEDURE PrintCertificate* (certificate : Certificate; writer : Streams.Writer);
-		VAR
-			count: AO.SIZE;
-			mod: ARRAY 16 * 4096 OF SHORTCHAR;
-
-
+		VAR count : AO.SIZE;
 	BEGIN
 		writer.String("== Begin of Certificate ==");
 		writer.Ln;
@@ -393,14 +536,6 @@ StdLog, AO := CryptoAosCompat;
 		writer.Ln;
 		writer.String("serial:  ");
 		writer.Int(certificate.serial, 0);
-		writer.Ln;
-		writer.String("signature:");
-		writer.Ln;
-		writer.String(" algorithm:      ");
-		FOR count := 0 TO LEN(certificate.algorithm) - 1 DO
-			writer.Hex(ORD(certificate.algorithm[count]), (-2));
-			writer.String(" ")
-		END;
 		writer.Ln;
 		writer.String("Issuer:");
 		writer.Ln;
@@ -428,88 +563,615 @@ StdLog, AO := CryptoAosCompat;
 		writer.Ln
 	END PrintCertificate;
 
-	PROCEDURE Read* (reader : Streams.Reader): Certificate;
-		CONST
-			TimeLength = 15;
-		VAR
-			c: Certificate;
-			res: BOOLEAN;
-			root, segment, data: ASN1.Triplet;
-			length: AO.SIZE;
-			r: Streams.StringReader;
-			writer: Streams.Writer;
-						stdLogSender : StdLogSender;
+	PROCEDURE AddSan (cert : Certificate; val : POINTER TO ARRAY OF SHORTCHAR; len : AO.SIZE; isIP : BOOLEAN);
 	BEGIN
-				NEW(stdLogSender);
-		NEW(c);
-		root := ASN1.Decode(reader, 0, length);
-		segment := root.child;
-		data := segment.child;
-		IF (data.next.tag = ASN1.Integer) THEN
-			IF data.tag = ASN1.Integer THEN
-				c.version := data.ivalue + 1
-			ELSE
-				c.version := ORD(data.svalue[0])
+		IF cert.sanCount < MaxSans THEN
+			cert.sanValue[cert.sanCount] := val;
+			cert.sanLen[cert.sanCount] := len;
+			cert.sanIsIP[cert.sanCount] := isIP;
+			INC(cert.sanCount)
+		END
+	END AddSan;
+
+	PROCEDURE ParseExtensions (ext : ASN1.Triplet; cert : Certificate; VAR res : AO.SIGNED32);
+		VAR exts, e, oid, val, gns, gn : ASN1.Triplet; r : Streams.StringReader; len0 : AO.SIZE;
+	BEGIN
+		IF (ext = NIL) OR (ext.child = NIL) OR (ext.child.child = NIL) THEN
+			res := ErrMalformed;
+			RETURN
+		END;
+		exts := ext.child;
+		e := exts.child;
+		WHILE e # NIL DO
+			oid := e.child;
+			val := NIL;
+			IF oid # NIL THEN
+				val := oid.next;
+				WHILE (val # NIL) & ~((val.class = ASN1.ASN1Universal) & (val.tag = ASN1.String)) DO
+					val := val.next
+				END
 			END;
-			data := data.next
-		ELSE
-			c.version := 1
+			IF (oid # NIL) & (val # NIL) & (val.svalue # NIL) THEN
+				IF OidIs(oid, OidSubjectAltName, 3) THEN
+					NEW(r);
+					r.InitStringReader(LEN(val.svalue^));
+					r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
+					gns := ASN1.Decode(r, 0, len0);
+					IF (gns # NIL) & gns.ok THEN
+						gn := gns.child;
+						WHILE gn # NIL DO
+							IF (gn.class = ASN1.ASN1Context) & ~gn.constructed & (gn.svalue # NIL) THEN
+								IF gn.tag MOD 32 = 2 THEN
+									AddSan(cert, gn.svalue, LEN(gn.svalue^), FALSE)
+								ELSIF gn.tag MOD 32 = 7 THEN
+									AddSan(cert, gn.svalue, LEN(gn.svalue^), TRUE)
+								END
+							END;
+							gn := gn.next
+						END
+					ELSE
+						res := ErrMalformed
+					END
+				ELSIF OidIs(oid, OidBasicConstraints, 3) THEN
+					NEW(r);
+					r.InitStringReader(LEN(val.svalue^));
+					r.SetRaw(val.svalue^, 0, LEN(val.svalue^));
+					gns := ASN1.Decode(r, 0, len0);
+					IF (gns # NIL) & gns.ok & (gns.child # NIL) THEN
+						gn := gns.child;
+						IF (gn.class = ASN1.ASN1Universal) & (gn.tag = ASN1.Boolean) THEN
+							cert.isCA := gn.bvalue
+						END
+					END
+				END
+			END;
+			e := e.next
+		END
+	END ParseExtensions;
+
+	PROCEDURE ReadCert* (IN der : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE; VAR res : AO.SIGNED32): Certificate;
+		VAR
+			c : Certificate;
+			r : Streams.StringReader;
+			root, tbs, sigAlg, sigVal, d, alg, spki, ext : ASN1.Triplet;
+			len0 : AO.SIZE;
+			ok : BOOLEAN;
+	BEGIN
+		res := Ok;
+		c := NIL;
+		IF (ofs < 0) OR (len <= 0) OR (ofs + len > LEN(der)) THEN
+			res := ErrMalformed;
+			RETURN NIL
 		END;
-		c.serial := data.ivalue;
-		data := data.next;
-		c.algorithm := data.child.svalue;
-		data := data.next;
-		FormatEntity(data, c.issuer);
-		data := data.next;
-		NEW(r); r.InitStringReader(TimeLength);
-		r.SetRaw(data.child.svalue^, 0, LEN(data.child.svalue^));
-		res := ReadTime(r, c.validity.notBefore);
-		r.SetRaw(data.child.next.svalue^, 0, LEN(data.child.next.svalue^));
-		r.SetPos(0);
-		res := ReadTime(r, c.validity.notAfter);
-		data := data.next;
-		FormatEntity(data, c.subject);
-		data := data.next;
-		FormatRsaPublicKey(data, c.publicKey);
-		IF c.version > 2 THEN
-			data := data.next
+		NEW(r);
+		r.InitStringReader(len);
+		r.SetRaw(der, ofs, len);
+		root := ASN1.Decode(r, 0, len0);
+		IF (root = NIL) OR ~root.ok OR (root.class # ASN1.ASN1Universal) OR (root.tag # ASN1.Sequence)
+			OR (root.child = NIL) OR (root.child.next = NIL) OR (root.child.next.next = NIL) THEN
+			res := ErrMalformed;
+			RETURN NIL
 		END;
-		segment := segment.next;
-		segment := segment.next;
+		NEW(c);
+		c.sanCount := 0;
+		c.isCA := FALSE;
+		c.version := 1;
+		(* Полная DER-запись и подписанная часть. *)
+		IF root.raw # NIL THEN
+			c.raw := root.raw;
+			c.rawLen := root.rawLen
+		END;
+		tbs := root.child;
+		sigAlg := tbs.next;
+		sigVal := sigAlg.next;
+		IF (tbs.class # ASN1.ASN1Universal) OR (tbs.tag # ASN1.Sequence) OR ~tbs.ok
+			OR (tbs.raw = NIL) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		c.tbs := tbs.raw;
+		c.tbsLen := tbs.rawLen;
+		IF ~AlgHashName(sigAlg, c.hashName) THEN
+			res := ErrUnsupported;
+			RETURN NIL
+		END;
+		IF (sigVal.class # ASN1.ASN1Universal) OR (sigVal.tag # ASN1.BitString)
+			OR (sigVal.svalue = NIL) OR (LEN(sigVal.svalue^) = 0) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		c.signature := sigVal.svalue;
+		c.sigLen := LEN(sigVal.svalue^);
+		(* Поля TBSCertificate. *)
+		d := tbs.child;
+		IF (d # NIL) & (d.class = ASN1.ASN1Context) & (d.tag MOD 32 = 0) & d.constructed THEN
+			IF (d.child # NIL) & (d.child.ivalue >= 0) THEN
+				c.version := d.child.ivalue + 1
+			END;
+			d := d.next
+		END;
+		IF (d = NIL) OR (d.tag # ASN1.Integer) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		c.serial := d.ivalue;
+		d := d.next;
+		IF (d = NIL) OR (d.tag # ASN1.Sequence) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		(* Внутренний AlgorithmIdentifier должен совпасть с внешним. *)
+		IF ~AlgHashName(d, c.hashName) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		d := d.next;
+		IF d = NIL THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		FormatEntity(d, c.issuer);
+		c.issuerRaw := d.raw;
+		c.issuerLen := d.rawLen;
+		d := d.next;
+		IF (d = NIL) OR (d.child = NIL) OR (d.child.next = NIL) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		ok := ReadTime(d.child, c.validity.notBefore) & ReadTime(d.child.next, c.validity.notAfter);
+		IF ~ok THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		d := d.next;
+		IF d = NIL THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		FormatEntity(d, c.subject);
+		c.subjectRaw := d.raw;
+		c.subjectLen := d.rawLen;
+		d := d.next;
+		IF (d = NIL) OR (d.child = NIL) OR (d.child.next = NIL) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		spki := d;
+		alg := spki.child;
+		IF ~OidIs(alg.child, OidRsaEncryption, 9) THEN
+			res := ErrUnsupported;
+			RETURN NIL
+		END;
+		FormatRsaPublicKey(spki, c.publicKey);
+		IF (c.publicKey = NIL) OR (c.publicKey.modulus = NIL) OR (c.publicKey.exponent = NIL) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
+		(* Дополнительные поля: extensions [3]. *)
+		d := d.next;
+		WHILE d # NIL DO
+			IF (d.class = ASN1.ASN1Context) & (d.tag MOD 32 = 3) & d.constructed THEN
+				ParseExtensions(d, c, res);
+				IF res # Ok THEN
+					RETURN NIL
+				END
+			END;
+			d := d.next
+		END;
+		IF (c.issuerRaw = NIL) OR (c.subjectRaw = NIL) OR (c.raw = NIL) THEN
+			res := ErrMalformed;
+			RETURN NIL
+		END;
 		IF Trace THEN
 			StdLog.String("========== Read X509 Certificate =========");
 			StdLog.Ln;
-			Streams.OpenWriter(writer, stdLogSender);
-			PrintCertificate(c, writer);
 			StdLog.String("========== End X509 Certificate =========");
 			StdLog.Ln
 		END;
 		RETURN c
+	END ReadCert;
+
+	PROCEDURE Read* (reader : Streams.Reader): Certificate;
+		VAR buf : ARRAY MaxPem OF SHORTCHAR; n, len0 : AO.SIZE; res : AO.SIGNED32; c : Certificate;
+	BEGIN
+		(* Совместимый вход: читаем весь доступный DER во временный буфер. *)
+		n := reader.Available();
+		IF (n <= 0) OR (n > MaxPem) THEN
+			RETURN NIL
+		END;
+		reader.Bytes(buf, 0, n, len0);
+		IF len0 # n THEN
+			RETURN NIL
+		END;
+		c := ReadCert(buf, 0, n, res);
+		RETURN c
 	END Read;
 
-	PROCEDURE Write* (writer : Streams.Writer; cert : Certificate);
-	END Write;
-
-	PROCEDURE AddToTrusted* (certificate : Certificate);
-
+	PROCEDURE FindPem (IN pem : ARRAY OF SHORTCHAR; from : AO.SIZE; IN header : ARRAY OF SHORTCHAR;
+			VAR start, stop : AO.SIZE): BOOLEAN;
+		VAR i, j, hlen, plen : AO.SIZE; found : BOOLEAN;
 	BEGIN
-(*WARN CONV NOT SUPPORTED: {EXCLUSIVE}*)
-		certificate.next := roots;
-		roots := certificate
-	END AddToTrusted;
+		hlen := 0;
+		WHILE (hlen < LEN(header)) & (header[hlen] # 0X) DO INC(hlen) END;
+		plen := 0;
+		WHILE (plen < LEN(pem)) & (pem[plen] # 0X) DO INC(plen) END;
+		i := from;
+		WHILE i + hlen <= plen DO
+			found := TRUE;
+			j := 0;
+			WHILE found & (j < hlen) DO
+				IF pem[i + j] # header[j] THEN found := FALSE END;
+				INC(j)
+			END;
+			IF found THEN
+				start := i + hlen;
+				WHILE (start < plen) & (pem[start] <= ' ') DO INC(start) END;
+				stop := start;
+				WHILE (stop < plen) & (pem[stop] # '-') & (pem[stop] # 0X) DO INC(stop) END;
+				RETURN TRUE
+			END;
+			INC(i)
+		END;
+		RETURN FALSE
+	END FindPem;
 
-
-	PROCEDURE WriteUTCTime (writer : Streams.Writer; date : Dates.DateTime);
+	PROCEDURE PemToDer (IN pem : ARRAY OF SHORTCHAR; start, stop : AO.SIZE;
+			VAR der : ARRAY OF SHORTCHAR; VAR derLen : AO.SIZE): BOOLEAN;
+		VAR b64 : ARRAY MaxPem OF SHORTCHAR; i, n : AO.SIZE; got : AO.SIGNED32;
 	BEGIN
-	END WriteUTCTime;
+		n := 0;
+		i := start;
+		WHILE (i < stop) & (n < LEN(b64) - 1) DO
+			IF pem[i] > ' ' THEN
+				b64[n] := pem[i];
+				INC(n)
+			END;
+			INC(i)
+		END;
+		b64[n] := 0X;
+		got := Base64.Decode(b64, der);
+		IF got < 0 THEN
+			RETURN FALSE
+		END;
+		derLen := got;
+		RETURN TRUE
+	END PemToDer;
 
-	PROCEDURE WriteGeneralizedTime (writer : Streams.Writer; date : Dates.DateTime);
+	PROCEDURE ReadPemChain* (IN pem : ARRAY OF SHORTCHAR; VAR res : AO.SIGNED32): Certificate;
+		CONST
+			CertHeader = "-----BEGIN CERTIFICATE-----";
+		VAR
+			head, tail, c : Certificate;
+			start, stop, from, derLen : AO.SIZE;
+			der : ARRAY MaxPem OF SHORTCHAR;
 	BEGIN
-		writer.Int(date.year, 4);
-		writer.Int(date.month, 2);
-		writer.Int(date.day, 2);
-		writer.Char('Z')
-	END WriteGeneralizedTime;
+		res := Ok;
+		head := NIL;
+		tail := NIL;
+		from := 0;
+		WHILE FindPem(pem, from, CertHeader, start, stop) DO
+			IF ~PemToDer(pem, start, stop, der, derLen) THEN
+				res := ErrMalformed;
+				RETURN head
+			END;
+			c := ReadCert(der, 0, derLen, res);
+			IF c = NIL THEN
+				RETURN head
+			END;
+			IF head = NIL THEN
+				head := c
+			ELSE
+				tail.next := c
+			END;
+			tail := c;
+			from := stop
+		END;
+		IF head = NIL THEN
+			res := ErrMalformed
+		END;
+		RETURN head
+	END ReadPemChain;
+
+	PROCEDURE ReadPemCert* (IN pem : ARRAY OF SHORTCHAR; VAR res : AO.SIGNED32): Certificate;
+	BEGIN
+		RETURN ReadPemChain(pem, res)
+	END ReadPemCert;
+
+	PROCEDURE AddTrusted* (certificate : Certificate);
+	BEGIN
+		IF certificate # NIL THEN
+			certificate.next := roots;
+			roots := certificate
+		END
+	END AddTrusted;
+
+	PROCEDURE AddTrustedPem* (IN pem : ARRAY OF SHORTCHAR): BOOLEAN;
+		VAR c, tail : Certificate; res : AO.SIGNED32;
+	BEGIN
+		c := ReadPemChain(pem, res);
+		IF c = NIL THEN
+			RETURN FALSE
+		END;
+		tail := c;
+		WHILE tail.next # NIL DO tail := tail.next END;
+		tail.next := roots;
+		roots := c;
+		RETURN TRUE
+	END AddTrustedPem;
+
+	PROCEDURE TrustedRoots* (): Certificate;
+	BEGIN
+		RETURN roots
+	END TrustedRoots;
+
+	PROCEDURE FindIssuer (cert, pool : Certificate): Certificate;
+		VAR c : Certificate;
+	BEGIN
+		IF (cert = NIL) OR (cert.issuerRaw = NIL) THEN
+			RETURN NIL
+		END;
+		c := pool;
+		WHILE c # NIL DO
+			IF (c.subjectRaw # NIL) & ~SameCert(cert, c)
+				& SameBytes(cert.issuerRaw^, c.subjectRaw^, cert.issuerLen, c.subjectLen) THEN
+				RETURN c
+			END;
+			c := c.next
+		END;
+		RETURN NIL
+	END FindIssuer;
+
+	PROCEDURE MatchDNS (IN pattern, host : ARRAY OF SHORTCHAR;
+			pOfs, plen, hOfs, hlen : AO.SIZE): BOOLEAN;
+		VAR i : AO.SIZE; ok : BOOLEAN;
+	BEGIN
+		IF (plen <= 0) OR (hlen <= 0) OR (pOfs < 0) OR (hOfs < 0)
+			OR (pOfs + plen > LEN(pattern)) OR (hOfs + hlen > LEN(host)) THEN
+			RETURN FALSE
+		END;
+		(* Один шаблон '*' в начале: ровно одна метка. *)
+		IF pattern[pOfs] = '*' THEN
+			IF (plen < 3) OR (pattern[pOfs + 1] # '.') THEN
+				RETURN FALSE
+			END;
+			i := 0;
+			WHILE (i < hlen) & (host[hOfs + i] # '.') DO INC(i) END;
+			IF (i = 0) OR (i >= hlen) THEN
+				RETURN FALSE
+			END;
+			RETURN MatchDNS(pattern, host, pOfs + 1, plen - 1, hOfs + i, hlen - i)
+		END;
+		IF plen # hlen THEN
+			RETURN FALSE
+		END;
+		ok := TRUE;
+		FOR i := 0 TO plen - 1 DO
+			IF CAP(pattern[pOfs + i]) # CAP(host[hOfs + i]) THEN
+				ok := FALSE
+			END
+		END;
+		RETURN ok
+	END MatchDNS;
+
+	PROCEDURE ParseIPv4 (IN host : ARRAY OF SHORTCHAR; hostLen : AO.SIZE; VAR addr : ARRAY OF SHORTCHAR): BOOLEAN;
+		VAR i, part, digits : AO.SIZE; v : AO.SIGNED32; ok : BOOLEAN;
+	BEGIN
+		IF (hostLen <= 0) OR (hostLen > LEN(host)) OR (LEN(addr) < 4) THEN
+			RETURN FALSE
+		END;
+		part := 0;
+		v := 0;
+		digits := 0;
+		ok := TRUE;
+		FOR i := 0 TO hostLen - 1 DO
+			IF (host[i] >= '0') & (host[i] <= '9') THEN
+				v := 10 * v + ORD(host[i]) - ORD('0');
+				INC(digits);
+				IF v > 255 THEN ok := FALSE END
+			ELSIF host[i] = '.' THEN
+				IF (digits = 0) OR (part >= 4) OR ~ok THEN
+					RETURN FALSE
+				END;
+				addr[part] := SHORT(CHR(v));
+				INC(part);
+				v := 0;
+				digits := 0
+			ELSE
+				RETURN FALSE
+			END
+		END;
+		IF (part # 3) OR (digits = 0) OR ~ok THEN
+			RETURN FALSE
+		END;
+		addr[3] := SHORT(CHR(v));
+		RETURN TRUE
+	END ParseIPv4;
+
+	PROCEDURE MatchHost* (cert : Certificate; IN host : ARRAY OF SHORTCHAR): BOOLEAN;
+		VAR i, hostLen : AO.SIZE; ip : ARRAY 4 OF SHORTCHAR; isIP : BOOLEAN;
+	BEGIN
+		IF cert = NIL THEN
+			RETURN FALSE
+		END;
+		hostLen := 0;
+		WHILE (hostLen < LEN(host)) & (host[hostLen] # 0X) DO INC(hostLen) END;
+		IF hostLen = 0 THEN
+			RETURN FALSE
+		END;
+		isIP := ParseIPv4(host, hostLen, ip);
+		IF cert.sanCount > 0 THEN
+			FOR i := 0 TO cert.sanCount - 1 DO
+				IF cert.sanIsIP[i] THEN
+					IF isIP & (cert.sanLen[i] = 4) THEN
+						IF U.EqualBytesCT(ip, cert.sanValue[i]^, 0, 0, 4) THEN
+							RETURN TRUE
+						END
+					END
+				ELSE
+					IF ~isIP & MatchDNS(cert.sanValue[i]^, host, 0, cert.sanLen[i], 0, hostLen) THEN
+						RETURN TRUE
+					END
+				END
+			END;
+			RETURN FALSE
+		END;
+		(* CN — только если SAN нет (RFC 6125, 6.4.4). *)
+		IF cert.subject.commonName # NIL THEN
+			RETURN ~isIP & MatchDNS(cert.subject.commonName^, host, 0, LEN(cert.subject.commonName^), 0, hostLen)
+		END;
+		RETURN FALSE
+	END MatchHost;
+
+	PROCEDURE HostOk (cert : Certificate; IN host : ARRAY OF SHORTCHAR): BOOLEAN;
+	BEGIN
+		IF (LEN(host) > 0) & (host[0] = 0X) THEN
+			RETURN TRUE	(* клиентский сертификат: имя проверяет вызывающий *)
+		END;
+		RETURN MatchHost(cert, host)
+	END HostOk;
+
+	(* Цепочка: лист -> издатели из chain (может включать лист) -> корень
+	   из roots. Проверяются подписи, сроки и флаг CA у издателей. *)
+	PROCEDURE VerifyChain* (leaf, chain, rootsList : Certificate; IN host : ARRAY OF SHORTCHAR;
+			flags : SET; VAR err : AO.SIGNED32): BOOLEAN;
+		VAR current, issuer, pool : Certificate; depth : AO.SIZE;
+	BEGIN
+		err := Ok;
+		IF leaf = NIL THEN
+			err := ErrMalformed;
+			RETURN FALSE
+		END;
+		current := leaf;
+		depth := 0;
+		REPEAT
+			err := CheckDate(current, flags);
+			IF err # Ok THEN
+				RETURN FALSE
+			END;
+			IF InList(current, rootsList) THEN
+				IF HostOk(leaf, host) THEN
+					RETURN TRUE
+				END;
+				err := ErrHostname;
+				RETURN FALSE
+			END;
+			(* Издателя ищем среди промежуточных и корней. *)
+			issuer := FindIssuer(current, chain);
+			IF issuer = NIL THEN
+				issuer := FindIssuer(current, rootsList)
+			END;
+			IF issuer = NIL THEN
+				err := ErrUntrusted;
+				RETURN FALSE
+			END;
+			IF ~CheckSignature(current, issuer.publicKey) THEN
+				err := ErrBadSignature;
+				RETURN FALSE
+			END;
+			IF ~issuer.isCA THEN
+				err := ErrNoCA;
+				RETURN FALSE
+			END;
+			err := CheckDate(issuer, flags);
+			IF err # Ok THEN
+				RETURN FALSE
+			END;
+			IF InList(issuer, rootsList) THEN
+				IF HostOk(leaf, host) THEN
+					RETURN TRUE
+				END;
+				err := ErrHostname;
+				RETURN FALSE
+			END;
+			current := issuer;
+			INC(depth);
+			IF depth > MaxChainDepth THEN
+				err := ErrUntrusted;
+				RETURN FALSE
+			END
+		UNTIL FALSE;
+		err := ErrUntrusted;
+		RETURN FALSE
+	END VerifyChain;
+
+	PROCEDURE ReadPemPrivateKey* (IN pem : ARRAY OF SHORTCHAR; VAR p, q, e : AosBigNumbers.BigNumber;
+			VAR res : AO.SIGNED32): BOOLEAN;
+		CONST
+			RsaHeader = "-----BEGIN RSA PRIVATE KEY-----";
+			Pkcs8Header = "-----BEGIN PRIVATE KEY-----";
+		VAR
+			start, stop, derLen, len0 : AO.SIZE;
+			der, inner : ARRAY MaxPem OF SHORTCHAR;
+			r, r2 : Streams.StringReader;
+			root, seq, field, version : ASN1.Triplet;
+			n, d, pp, qq, ee : ASN1.Triplet;
+			nBn, prod : AosBigNumbers.BigNumber;
+			ok : BOOLEAN;
+	BEGIN
+		res := ErrMalformed;
+		IF FindPem(pem, 0, RsaHeader, start, stop) THEN
+			ok := TRUE
+		ELSIF FindPem(pem, 0, Pkcs8Header, start, stop) THEN
+			ok := TRUE
+		ELSE
+			res := ErrUnsupported;
+			RETURN FALSE
+		END;
+		IF ~ok OR ~PemToDer(pem, start, stop, der, derLen) THEN
+			RETURN FALSE
+		END;
+		NEW(r);
+		r.InitStringReader(derLen);
+		r.SetRaw(der, 0, derLen);
+		root := ASN1.Decode(r, 0, len0);
+		IF (root = NIL) OR ~root.ok OR (root.child = NIL) THEN
+			RETURN FALSE
+		END;
+		seq := root;
+		IF (root.child.next # NIL) & (root.child.next.class = ASN1.ASN1Universal)
+			& (root.child.next.tag = ASN1.Sequence) THEN
+			(* PKCS#8: PrivateKeyInfo -> OCTET STRING с PKCS#1. *)
+			field := root.child.next.next;
+			IF (field = NIL) OR (field.tag # ASN1.String) OR (field.svalue = NIL) THEN
+				RETURN FALSE
+			END;
+			NEW(r2);
+			r2.InitStringReader(LEN(field.svalue^));
+			r2.SetRaw(field.svalue^, 0, LEN(field.svalue^));
+			seq := ASN1.Decode(r2, 0, len0);
+			IF (seq = NIL) OR ~seq.ok OR (seq.child = NIL) THEN
+				RETURN FALSE
+			END
+		END;
+		(* PKCS#1 RSAPrivateKey: version, n, e, d, p, q, ... *)
+		version := seq.child;
+		n := version.next;
+		IF (n = NIL) OR (n.next = NIL) OR (n.next.next = NIL)
+			OR (n.next.next.next = NIL) OR (n.next.next.next.next = NIL) THEN
+			RETURN FALSE
+		END;
+		ee := n.next;
+		d := ee.next;
+		pp := d.next;
+		qq := pp.next;
+		IF (pp.svalue = NIL) OR (qq.svalue = NIL) OR (ee.svalue = NIL) THEN
+			RETURN FALSE
+		END;
+		AosBigNumbers.AssignBin(p, pp.svalue^, 0, LEN(pp.svalue^));
+		AosBigNumbers.AssignBin(q, qq.svalue^, 0, LEN(qq.svalue^));
+		AosBigNumbers.AssignBin(e, ee.svalue^, 0, LEN(ee.svalue^));
+		(* Проверка согласованности ключа: p*q должно совпасть с n. *)
+		IF (n.svalue # NIL) & (LEN(n.svalue^) > 0) THEN
+			AosBigNumbers.AssignBin(nBn, n.svalue^, 0, LEN(n.svalue^));
+			prod := AosBigNumbers.Mul(p, q);
+			IF AosBigNumbers.Cmp(prod, nBn) # 0 THEN
+				res := ErrMalformed;
+				RETURN FALSE
+			END
+		END;
+		res := Ok;
+		RETURN (p # NIL) & (q # NIL) & (e # NIL)
+	END ReadPemPrivateKey;
 
 	PROCEDURE Check (b : BOOLEAN);
 	BEGIN
