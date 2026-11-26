@@ -248,3 +248,6 @@
 - helpmd влит в main-obx (1b45b2f1; конфликты AGENTS/building — объединены): build --clean 1065 .odc, 47/47, examples 136/0 102/0, links 0; отправлен.
 - maindocs запущен (ветка main-docs от main): перенос check-links и справки, доводка доков main.
 - simholes2 сдал (56 поймано, 2 эквив., 0 выживших); моя мутация Sleep без CheckWait поймана. sim-holes влит: main 960bed30, main-obx b4f191f9 (47/47), отправлены. BB GUI перезапущен.
+- maindocs влит в main (907455eb, 15/15, links 0, отправлен); main→main-obx b4c3be1f (8 конфликтов: доки устройства — main-obx, исправления README/Tasks/check-links/gui-world — main). Финальная приёмка обеих веток идёт (.work/accept-final.sh).
+- Финальная приёмка: main 907455eb и main-obx b4c3be1f — всё rc=0 (bootstrap, build --clean, test 15/47, test32, check-reject, win64, check-examples 136/102, GUI, DemoAnts, MPI 12/12, Robust 1/4/16, резолвер, links 0).
+- Найдено в приёмке: под wine кириллица в консоли «??????» (WinConsole писал в OEM). Исправлено 4deed507 (UTF-8 + SetConsoleOutputCP), test-win64 проверяет строку — красная до, зелёная после. main 4deed507, main-obx — merge, оба отправлены. 32-битный Win/Mod/Console.cp (исходный BB, не собирается) не тронут.
