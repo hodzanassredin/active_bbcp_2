@@ -247,9 +247,15 @@ TYPE
 		RETURN UMod32Raw(x, y);
 	END UMod32;
 	
-	PROCEDURE ULssRaw (x, y: SIGNED32): BOOLEAN;	(* unsigned <: flip sign bits *)
+	PROCEDURE ULssRaw (x, y: SIGNED32): BOOLEAN;	(* unsigned <: сравнение по старшему биту *)
 	BEGIN
-		RETURN ORD(BITS(x) / {31}) < ORD(BITS(y) / {31})
+		IF (x < 0) & (y >= 0) THEN
+			RETURN FALSE
+		ELSIF (x >= 0) & (y < 0) THEN
+			RETURN TRUE
+		ELSE
+			RETURN x < y
+		END
 	END ULssRaw;
 		
 	PROCEDURE ULss8* (x, y: UNSIGNED8): BOOLEAN;
@@ -284,7 +290,13 @@ TYPE
 	
 	PROCEDURE UGtrRaw (x, y: SIGNED32): BOOLEAN;
 	BEGIN
-		RETURN ORD(BITS(y) / {31}) < ORD(BITS(x) / {31})
+		IF (x < 0) & (y >= 0) THEN
+			RETURN TRUE
+		ELSIF (x >= 0) & (y < 0) THEN
+			RETURN FALSE
+		ELSE
+			RETURN x > y
+		END
 	END UGtrRaw;
 		
 	PROCEDURE UGeq8* (x, y: UNSIGNED8): BOOLEAN;
@@ -369,7 +381,7 @@ TYPE
 	BEGIN
 		px := SYSTEM.VAL(LONGINT_PARTS, x); py := SYSTEM.VAL(LONGINT_PARTS, y);
 		lo := ZE32(px[low_part]) + ZE32(py[low_part]);	(* 0..2^33-2 *)
-		hi := ZE32(px[high_part]) + ZE32(py[high_part]) + SYSTEM.LSH(lo, -32);
+		hi := ZE32(px[high_part]) + ZE32(py[high_part]) + (lo DIV 100000000L);	(* 2^32 *)
 		pr[low_part] := LOW32(lo); pr[high_part] := LOW32(hi);
 		RETURN SYSTEM.VAL(SIGNED64, pr)
 	END UAdd64Raw;
@@ -384,7 +396,7 @@ TYPE
 	BEGIN
 		px := SYSTEM.VAL(LONGINT_PARTS, x); py := SYSTEM.VAL(LONGINT_PARTS, y);
 		lo := ZE32(px[low_part]) - ZE32(py[low_part]);
-		IF lo < 0 THEN lo := lo + 4294967296; hi := -1 ELSE hi := 0 END;
+		IF lo < 0 THEN lo := lo + 100000000L;	(* 2^32 *) hi := -1 ELSE hi := 0 END;
 		hi := hi + ZE32(px[high_part]) - ZE32(py[high_part]);
 		pr[low_part] := LOW32(lo); pr[high_part] := LOW32(hi);
 		RETURN SYSTEM.VAL(SIGNED64, pr)
@@ -403,8 +415,39 @@ TYPE
 	END UGetHighBits64;
 	
 	PROCEDURE ULSH64Raw (x: SIGNED64; n : INTEGER): SIGNED64;
+		(* Логический сдвиг 64-битного значения. SYSTEM.LSH для LONGINT
+		   с отрицательным счётчиком на amd64 работает неверно, поэтому
+		   сдвиг вправо собирается из 32-битных половин. *)
+		VAR px, pr: LONGINT_PARTS; k: INTEGER;
 	BEGIN
-		RETURN SYSTEM.LSH(x, n)	(* amd64: native logical Int64 shift *)
+		IF n = 0 THEN
+			RETURN x
+		END;
+		px := SYSTEM.VAL(LONGINT_PARTS, x);
+		IF n > 0 THEN
+			k := n;
+			IF k >= 64 THEN
+				pr[low_part] := 0; pr[high_part] := 0
+			ELSIF k >= 32 THEN
+				pr[low_part] := 0;
+				pr[high_part] := SYSTEM.LSH(px[low_part], k - 32)
+			ELSE
+				pr[low_part] := SYSTEM.LSH(px[low_part], k);
+				pr[high_part] := SYSTEM.LSH(px[high_part], k) + SYSTEM.LSH(px[low_part], k - 32)
+			END
+		ELSE
+			k := -n;
+			IF k >= 64 THEN
+				pr[low_part] := 0; pr[high_part] := 0
+			ELSIF k >= 32 THEN
+				pr[low_part] := SYSTEM.LSH(px[high_part], -(k - 32));
+				pr[high_part] := 0
+			ELSE
+				pr[low_part] := SYSTEM.LSH(px[low_part], -k) + SYSTEM.LSH(px[high_part], 32 - k);
+				pr[high_part] := SYSTEM.LSH(px[high_part], -k)
+			END
+		END;
+		RETURN SYSTEM.VAL(SIGNED64, pr)
 	END ULSH64Raw;
 	
 	PROCEDURE ULSH64* (x: UNSIGNED64; n : INTEGER): UNSIGNED64;
@@ -506,6 +549,13 @@ TYPE
 		quotient := 0;
 
 		IF dividend = 0 THEN remainder := 0; RETURN; END;
+		(* Основание цифр BigNumbers — 2^32; это самый частый делитель
+		   в умножении, и он не требует двоичного деления. *)
+		IF divisor = 100000000L THEN
+			quotient := ULSH64Raw(dividend, -32);
+			remainder := ZE32(LOW32(dividend));
+			RETURN
+		END;
 		IF ULss64Raw(dividend, divisor) THEN remainder := dividend; RETURN; END;
 
 		m := Clz64(divisor) - Clz64(dividend);
@@ -532,26 +582,18 @@ TYPE
 		DivModU64(x,y, quotient, remainder);
 		RETURN quotient;
 	END UDiv64;
-	
+
 	PROCEDURE UMod64* (x, y: UNSIGNED64): UNSIGNED64;
 		VAR quotient, remainder: UNSIGNED64;
 	BEGIN
 		DivModU64(x,y, quotient, remainder);
 		RETURN remainder;
 	END UMod64;
-	
 	PROCEDURE UMul64Raw(n,m: SIGNED64) : SIGNED64;
-		VAR res : SIGNED64;
-    BEGIN
-		res := 0;
-		WHILE m # 0 DO
-			IF 0 IN BITS(SYSTEM.VAL(INTEGER, m)) THEN
-				res := UAdd64Raw(res, n)
-			END;
-			n := ULSH64Raw(n, 1);
-			m := ULSH64Raw(m, -1)
-		END;
-		RETURN res;
+		(* Младшие 64 бита произведения: на amd64 LONGINT-умножение
+		   аппаратное и переполнение заворачивается, что и нужно. *)
+	BEGIN
+		RETURN n * m
 	END UMul64Raw;
 	
 	PROCEDURE UMul64*(n,m: UNSIGNED64) : UNSIGNED64;

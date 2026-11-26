@@ -1,7 +1,8 @@
 MODULE CryptoUtils;(** AUTHOR "GF"; PURPOSE ""; *)
 
 	IMPORT S := SYSTEM, Log := (*CONV FROM KernelLog*)
-StdLog, Random := CryptoAosRandom, Kernel, B := CryptoAosBigNumbers, AO := CryptoAosCompat;
+StdLog, Random := CryptoAosRandom, Kernel, B := CryptoAosBigNumbers, AO := CryptoAosCompat,
+BIT := CryptoAosBIT, OsRandom := CryptoOsRandom;
 
 	TYPE
 		InitBuffer* = POINTER TO EXTENSIBLE RECORD
@@ -289,18 +290,51 @@ StdLog, Random := CryptoAosRandom, Kernel, B := CryptoAosBigNumbers, AO := Crypt
 		END
 	END Bin2Hex;
 
-	PROCEDURE RandomBytes* (VAR buf : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE);
+	(* Сравнение секретных буферов без остановки на первом различии:
+	   время зависит только от длины, но не от содержимого. *)
+	PROCEDURE EqualBytesCT* (IN a, b : ARRAY OF SHORTCHAR; aOfs, bOfs, len : AO.SIZE): BOOLEAN;
+		VAR
+			i: AO.SIZE;
+			d: SHORTCHAR;
+
+
+	BEGIN
+		d := 0X;
+		FOR i := 0 TO len - 1 DO
+			d := BIT.CXOR(d, BIT.CXOR(a[aOfs + i], b[bOfs + i]))
+		END;
+		RETURN d = 0X
+	END EqualBytesCT;
+
+	(* Байты из /dev/urandom. Если источник недоступен, возвращает FALSE
+	   и ничего не подставляет: вызывающий обязан отказаться от ключа. *)
+	PROCEDURE RandomBytesOk* (VAR buf : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): BOOLEAN;
 		VAR
 			i: AO.SIZE;
 			rg: Random.Generator;
 
 
 	BEGIN
+		IF OsRandom.Fill(buf, ofs, len) THEN
+			RETURN TRUE
+		END;
+		(* Аварийный путь для стендов без /dev/urandom. Для ключей он
+		   не годится: PKCS1 и TLS проверяют результат RandomBytesOk. *)
 		NEW(rg);
 		rg.InitSeed(SHORT(Kernel.Time()));
 		FOR i := 0 TO len - 1 DO
 			buf[ofs + i] := (*WARN CONV CAST*)SHORT(CHR(ENTIER(rg.Uniform() * 256)))
-		END
+		END;
+		RETURN FALSE
+	END RandomBytesOk;
+
+	PROCEDURE RandomBytes* (VAR buf : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE);
+		VAR
+			ok: BOOLEAN;
+
+
+	BEGIN
+		ok := RandomBytesOk(buf, ofs, len)
 	END RandomBytes;
 
 	PROCEDURE XORBlock* (VAR block1, block2 : ARRAY OF AO.UNSIGNED8);

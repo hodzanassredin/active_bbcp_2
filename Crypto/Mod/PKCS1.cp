@@ -10,6 +10,12 @@ StdLog, AO := CryptoAosCompat;
 
 	CONST
 		Trace = FALSE;
+		MaxModulusBytes = 1024;
+		(* DER-кодировка DigestInfo из RFC 8017, раздел 9.2, для трёх
+		   хешей, которые есть в подсистеме. *)
+		DigestInfoMD5 = "3020300C06082A864886F70D020505000410";
+		DigestInfoSHA1 = "3021300906052B0E03021A05000414";
+		DigestInfoSHA256 = "3031300D060960864801650304020105000420";
 
 	PROCEDURE Encrypt* (IN src : ARRAY OF SHORTCHAR; srcOfs, srcLen : AO.SIZE; key : CryptoRSA.Key; blockType : AO.SIGNED32; VAR dest : ARRAY OF SHORTCHAR; destOfs : AO.SIZE; VAR destLen : AO.SIZE);
 		VAR
@@ -59,7 +65,10 @@ StdLog, AO := CryptoAosCompat;
 			encryptionBlock[counter] := 0FFX
 		END
 		|       2 :	     REPEAT
-			CryptoUtils.RandomBytes(encryptionBlock^, ofs, padd);
+			IF ~CryptoUtils.RandomBytesOk(encryptionBlock^, ofs, padd) THEN
+				destLen := 0;
+				RETURN
+			END;
 			nonzero := TRUE;
 			FOR counter := ofs TO ofs + padd - 1 DO
 				nonzero := nonzero & (encryptionBlock[counter] # 0X)
@@ -90,58 +99,192 @@ StdLog, AO := CryptoAosCompat;
 
 	PROCEDURE Decrypt* (IN src : ARRAY OF SHORTCHAR; srcOfs, srcLen : AO.SIZE; key : CryptoRSA.Key; blockType : AO.SIGNED32; VAR dest : ARRAY OF SHORTCHAR; destOfs : AO.SIZE; VAR destLen : AO.SIZE);
 		VAR
-			k, padd: AO.SIZE;
-			ofs, counter: AO.SIZE;
+			k, ofs, counter, n: AO.SIZE;
 			decryptedBlock: POINTER TO ARRAY OF SHORTCHAR;
 			clear, cipher: AosBigNumbers.BigNumber;
 
 
 	BEGIN
-		k := 4 * key.modulus.len;
-		IF srcLen # k THEN
-			destLen := 0;
+		destLen := 0;
+		IF (key = NIL) OR (key.modulus = NIL) THEN
 			RETURN
 		END;
-		IF src[srcOfs] # 0X THEN
-			destLen := 0;
+		k := 4 * key.modulus.len;
+		IF (k = 0) OR (k > MaxModulusBytes) OR (srcLen # k)
+			OR (srcOfs < 0) OR (srcOfs + srcLen > LEN(src)) THEN
 			RETURN
 		END;
 		AosBigNumbers.AssignBin(cipher, src, srcOfs, srcLen);
 		clear := key.Decrypt(cipher);
-		NEW(decryptedBlock, padd);
-		AosBigNumbers.GetBinaryValue(clear, decryptedBlock^, 0);
-		ofs := 0;
-		IF decryptedBlock[ofs] # 0X THEN
-			destLen := 0;
+		IF clear = NIL THEN
 			RETURN
 		END;
-		INC(ofs);
-		IF decryptedBlock[ofs] # CHR(blockType) THEN
-			destLen := 0;
+		NEW(decryptedBlock, k);
+		FOR counter := 0 TO k - 1 DO
+			decryptedBlock[counter] := 0X
+		END;
+		n := 4 * clear.len;
+		IF n > k THEN
 			RETURN
 		END;
-		INC(ofs);
+		AosBigNumbers.GetBinaryValue(clear, decryptedBlock^, k - n);
+		IF decryptedBlock[0] # 0X THEN
+			RETURN
+		END;
+		IF decryptedBlock[1] # SHORT(CHR(blockType)) THEN
+			RETURN
+		END;
+		ofs := 2;
 		CASE blockType OF
-			0 :	     REPEAT
+			0 :	     WHILE (ofs < k) & (decryptedBlock[ofs] = 0X) DO INC(ofs) END;
+			IF ofs >= k THEN RETURN END
+		|       1 :	     WHILE (ofs < k) & (decryptedBlock[ofs] = 0FFX) DO INC(ofs) END;
+			IF ofs >= k THEN RETURN END;
+			IF decryptedBlock[ofs] # 0X THEN RETURN END;
 			INC(ofs)
-		UNTIL decryptedBlock[ofs] # 0X
-		|       1 :	     REPEAT
+		|       2 :	     WHILE (ofs < k) & (decryptedBlock[ofs] # 0X) DO INC(ofs) END;
+			IF ofs >= k THEN RETURN END;
 			INC(ofs)
-		UNTIL decryptedBlock[ofs] # 0FFX;
-		IF decryptedBlock[ofs] # 0X THEN
-			destLen := 0;
-			RETURN
 		END;
-		INC(ofs)
-		|       2 :	     REPEAT
-			INC(ofs)
-		UNTIL decryptedBlock[ofs] = 0X;
-		INC(ofs)
+		IF (ofs > k) OR (k - ofs > LEN(dest) - destOfs) THEN
+			RETURN
 		END;
 		FOR counter := 0 TO k - ofs - 1 DO
 			dest[destOfs + counter] := decryptedBlock[ofs + counter]
 		END;
-		destLen := k - ofs - 1
+		destLen := k - ofs
 	END Decrypt;
+
+	(* EM = 00 || 01 || FF...FF || 00 || DigestInfo, RFC 8017 9.2. *)
+	PROCEDURE BuildEM (IN hashName, digest : ARRAY OF SHORTCHAR; digestLen, k : AO.SIZE;
+			VAR em : ARRAY OF SHORTCHAR; VAR emLen : AO.SIZE): BOOLEAN;
+		VAR
+			prefix : ARRAY 32 OF SHORTCHAR;
+			prefixLen, tLen, i : AO.SIZE;
+
+
+	BEGIN
+		IF hashName = "CryptoMD5" THEN
+			prefixLen := 18;
+			CryptoUtils.Hex2Bin(DigestInfoMD5, 0, prefix, 0, prefixLen)
+		ELSIF hashName = "CryptoSHA1" THEN
+			prefixLen := 15;
+			CryptoUtils.Hex2Bin(DigestInfoSHA1, 0, prefix, 0, prefixLen)
+		ELSIF hashName = "CryptoSHA256" THEN
+			prefixLen := 19;
+			CryptoUtils.Hex2Bin(DigestInfoSHA256, 0, prefix, 0, prefixLen)
+		ELSE
+			RETURN FALSE
+		END;
+		tLen := prefixLen + digestLen;
+		IF (k > LEN(em)) OR (k < tLen + 11) THEN
+			RETURN FALSE
+		END;
+		em[0] := 0X;
+		em[1] := 1X;
+		i := 2;
+		WHILE i < k - tLen - 1 DO
+			em[i] := 0FFX;
+			INC(i)
+		END;
+		em[k - tLen - 1] := 0X;
+		FOR i := 0 TO prefixLen - 1 DO
+			em[k - tLen + i] := prefix[i]
+		END;
+		FOR i := 0 TO digestLen - 1 DO
+			em[k - digestLen + i] := digest[i]
+		END;
+		emLen := k;
+		RETURN TRUE
+	END BuildEM;
+
+	(* Число в k байт с ведущими нулями: подпись и модуль должны
+	   сравниваться побайтно при одной длине. *)
+	PROCEDURE ToFixed (b : AosBigNumbers.BigNumber; VAR out : ARRAY OF SHORTCHAR;
+			ofs, k : AO.SIZE): BOOLEAN;
+		VAR
+			raw : ARRAY MaxModulusBytes OF SHORTCHAR;
+			n, i : AO.SIZE;
+
+
+	BEGIN
+		IF (b = NIL) OR (ofs < 0) OR (k < 0) OR (ofs + k > LEN(out)) THEN
+			RETURN FALSE
+		END;
+		n := 4 * b.len;
+		IF (n > k) OR (n > LEN(raw)) THEN
+			RETURN FALSE
+		END;
+		AosBigNumbers.GetBinaryValue(b, raw, 0);
+		FOR i := 0 TO k - 1 DO
+			out[ofs + i] := 0X
+		END;
+		FOR i := 0 TO n - 1 DO
+			out[ofs + k - n + i] := raw[i]
+		END;
+		RETURN TRUE
+	END ToFixed;
+
+	(* Подпись PKCS#1 v1.5: EM строится из digest, затем EM^d mod n.
+	   Для секретного показателя используется CRT (Key.Decrypt). *)
+	PROCEDURE SignHash* (IN hashName, digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			key : CryptoRSA.Key; VAR sig : ARRAY OF SHORTCHAR; sigOfs : AO.SIZE;
+			VAR sigLen : AO.SIZE);
+		VAR
+			em : ARRAY MaxModulusBytes OF SHORTCHAR;
+			emLen, k : AO.SIZE;
+			clear, signed : AosBigNumbers.BigNumber;
+
+
+	BEGIN
+		sigLen := 0;
+		IF (key = NIL) OR ~key.private THEN
+			RETURN
+		END;
+		k := 4 * key.modulus.len;
+		IF (k = 0) OR (k > MaxModulusBytes) THEN
+			RETURN
+		END;
+		IF ~BuildEM(hashName, digest, digestLen, k, em, emLen) THEN
+			RETURN
+		END;
+		AosBigNumbers.AssignBin(clear, em, 0, k);
+		signed := key.Decrypt(clear);
+		IF ToFixed(signed, sig, sigOfs, k) THEN
+			sigLen := k
+		END
+	END SignHash;
+
+	(* Проверка PKCS#1 v1.5. Сравнение EM с ожидаемым — постоянного
+	   времени: подпись и digest не должны утекать по таймингу. *)
+	PROCEDURE VerifyHash* (IN hashName, digest : ARRAY OF SHORTCHAR; digestLen : AO.SIZE;
+			key : CryptoRSA.Key; IN sig : ARRAY OF SHORTCHAR; sigOfs, sigLen : AO.SIZE): BOOLEAN;
+		VAR
+			em, got : ARRAY MaxModulusBytes OF SHORTCHAR;
+			emLen, k : AO.SIZE;
+			enc, recovered : AosBigNumbers.BigNumber;
+
+
+	BEGIN
+		IF (key = NIL) OR (sigLen <= 0) OR (sigOfs < 0) OR (sigOfs + sigLen > LEN(sig)) THEN
+			RETURN FALSE
+		END;
+		k := 4 * key.modulus.len;
+		IF (k = 0) OR (k > MaxModulusBytes) OR (sigLen > k) THEN
+			RETURN FALSE
+		END;
+		IF ~BuildEM(hashName, digest, digestLen, k, em, emLen) THEN
+			RETURN FALSE
+		END;
+		AosBigNumbers.AssignBin(enc, sig, sigOfs, sigLen);
+		IF enc.GEQ(key.modulus) THEN
+			RETURN FALSE
+		END;
+		recovered := key.Encrypt(enc);
+		IF ~ToFixed(recovered, got, 0, k) THEN
+			RETURN FALSE
+		END;
+		RETURN CryptoUtils.EqualBytesCT(got, em, 0, 0, k)
+	END VerifyHash;
 
 END CryptoPKCS1.

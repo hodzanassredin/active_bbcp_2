@@ -261,15 +261,17 @@ PROCEDURE (SELF:Receiver) Receive* (VAR buf : ARRAY OF SHORTCHAR; ofs, size, min
 	PROCEDURE (SELF: Writer) Net64* (x : AO.SIGNED64), NEW;
 
 	BEGIN
-		SELF.Net32(SHORT(x DIV 100000000 MOD 100000000));
-		SELF.Net32(SHORT(x MOD 100000000))
+		(* 64 бита передаются двумя 32-битными половинами; прежнее
+		   деление на 1e8 теряло старшие биты при x >= 4.3e17. *)
+		SELF.Net32(AO.SHORT64Raw(x));
+		SELF.Net32(AO.SHORTHIGH64Raw(x))
 	END Net64;
 
 	PROCEDURE (SELF: Writer) UNet64* (x : AO.UNSIGNED64), NEW;
 
 	BEGIN
-		SELF.UNet32(AO.SHORT64(AO.UDiv64(x, AO.TOUNSIGNED64(100000000))));
-		SELF.UNet32(AO.SHORT64(AO.UMod64(x, AO.TOUNSIGNED64(100000000))))
+		SELF.UNet32(AO.SHORT64(x));
+		SELF.UNet32(AO.SHORTHIGH64(x))
 	END UNet64;
 
 	
@@ -948,8 +950,11 @@ PROCEDURE (SELF: Reader) Net32* (): AO.SIGNED32, NEW;
 	END Net32;
 
 	PROCEDURE (SELF: Reader) Net64* (): AO.SIGNED64, NEW;
+		VAR low, high: AO.SIGNED32;
 	BEGIN
-		RETURN SELF.Net32() * 100000000 + SELF.Net32()
+		low := SELF.Net32();
+		high := SELF.Net32();
+		RETURN AO.CDQ(AO.TOUNSIGNED32(low), AO.TOUNSIGNED32(high))
 	END Net64;
 
 	PROCEDURE (SELF: Reader) UNet32* (): AO.UNSIGNED32, NEW;
@@ -960,8 +965,8 @@ PROCEDURE (SELF: Reader) Net32* (): AO.SIGNED32, NEW;
 	PROCEDURE (SELF: Reader) UNet64* (): AO.UNSIGNED64, NEW;
 			VAR high, low : AO.UNSIGNED32;
 	BEGIN
-				high:=SELF.UNet32();
-				low:=SELF.UNet32();
+				low := SELF.UNet32();
+				high := SELF.UNet32();
 		RETURN AO.CDQ(low,high)
 	END UNet64;
 

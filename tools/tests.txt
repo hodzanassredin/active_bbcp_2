@@ -86,8 +86,14 @@ Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer 
 Crypto_devHashes||180|CryptoHashes CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoUtils CryptoAosCompat
 Crypto_devHMAC||180|CryptoHMAC CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoUtils CryptoAosCompat
 Crypto_devCiphers||180|CryptoCiphers CryptoAES CryptoDES CryptoDES3 CryptoARC4 CryptoCAST CryptoIDEA CryptoUtils CryptoAosCompat
-Crypto_devGcm||180|CryptoGcm CryptoCiphers CryptoAES CryptoUtils CryptoAosCompat
+Crypto_devGcm||180|CryptoGcm CryptoCiphers CryptoAES CryptoUtils CryptoAosCompat CryptoAosBIT
 Crypto_devBigNumbers||180|CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoAosCompat
 Crypto_devDH|slow|300|CryptoDiffieHellman CryptoAosBigNumbers CryptoAosCompat
 Crypto_devRSA|slow|900|CryptoRSA CryptoPrimes CryptoAosBigNumbers CryptoMD5 CryptoBase64 CryptoAosStreams CryptoAosClock CryptoAosCompat
 Crypto_devX25519||180|CryptoX25519 CryptoFieldElement CryptoAosBigNumbers CryptoFortuna CryptoFortunaRng CryptoSHA256 CryptoCiphers CryptoAosCompat
+# X.509: разбор, цепочка, сроки, SAN/CN, повреждённый DER (векторы в Crypto_dev/Vectors/x509).
+Crypto_devX509||180|Crypto_devX509Data CryptoX509 CryptoRSA CryptoPKCS1 CryptoASN1 CryptoHashes CryptoAosBigNumbers CryptoAosStreams CryptoAosCompat CryptoBase64 CryptoUtils
+# PKCS#1 v1.5: подпись/проверка, отказы при подделке, шифрование/расшифровка.
+Crypto_devPKCS1|slow|900|CryptoPKCS1 CryptoRSA CryptoPrimes CryptoAosBigNumbers CryptoUtils CryptoAosCompat
+# PRF TLS 1.2 (RFC 5246) по независимому вектору, постоянное время, энтропия ОС.
+Crypto_devPRF||180|CryptoTLS CryptoOsRandom CryptoUtils CryptoFortuna CryptoFortunaRng CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoAosCompat CryptoHashes CryptoSHA256 CryptoCiphers CryptoMD5 CryptoSHA1 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoHMAC CryptoRSA CryptoPKCS1 CryptoX509 CryptoASN1 CryptoBase64 CryptoX25519 CryptoFieldElement CryptoGcm CryptoAosTCP CryptoAosPipes CryptoAosDates CryptoAosStrings CryptoAosFileStreams CryptoAosIP CryptoAosCommStreams CryptoAosClock CryptoAosBIT

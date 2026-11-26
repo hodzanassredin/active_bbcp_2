@@ -354,10 +354,10 @@ MODULE CryptoGcm;
 		res := DECRYPTION_SUCCESS;
 		(*StdLog.String("Decrypt"); StdLog.Ln;*)
 		g.GetTag(A, C, len_A, ofs_C, len_C, len_T, T2);
-		FOR i := 0 TO(len_T DIV 8) - 1 DO
-			IF T[i] # T2[i] THEN
-				res := DECRYPTION_FAIL;
-			END;
+		(* Тег аутентификации — секрет: сравниваем без остановки на
+		   первом различии. *)
+		IF ~U.EqualBytesCT(T, T2, 0, 0, len_T DIV 8) THEN
+			res := DECRYPTION_FAIL
 		END;
 		
 		INC_32(g.J0, J01);

@@ -5,8 +5,8 @@ MODULE CryptoFortunaRng;
 	PURPOSE: Fortuna cryptographic pseudorandom generator for A2
 *)
 
-	IMPORT Fortuna := CryptoFortuna, Kernel, Random := CryptoAosRandom, Strings := CryptoAosStrings, Files := CryptoAosFileStreams, Streams :=  CryptoAosStreams, 
-StdLog, AO := CryptoAosCompat, Services, DevHeapSpy, Dates;
+	IMPORT Fortuna := CryptoFortuna, Kernel, Random := CryptoAosRandom, Strings := CryptoAosStrings, Files := CryptoAosFileStreams, Streams :=  CryptoAosStreams,
+StdLog, AO := CryptoAosCompat, Services, DevHeapSpy, Dates, OsRandom := CryptoOsRandom;
 
 	CONST
 		CollectEntropyIntervalMs* = 1000;
@@ -221,16 +221,22 @@ StdLog, AO := CryptoAosCompat, Services, DevHeapSpy, Dates;
 	PROCEDURE (SELF: EntropyCollector) SeedFirstGenerator (gen : Generator), NEW;
 		VAR
 			k, m, n: AO.SIZE;
-			buf: ARRAY Fortuna.MinPoolSize OF SHORTCHAR;
+			buf: ARRAY Fortuna.MaxRandomEventDataLen OF SHORTCHAR;
 						sourceNum : INTEGER;
 
 	BEGIN
 		FOR k := 0 TO Fortuna.NumPools - 1 DO
 			m := 0;
 			WHILE m < Fortuna.MinPoolSize DO
-				n := 0;
-				RandSource(SELF, 0, buf, n);
-				ASSERT(n # 0);
+				(* Первым делом — энтропия ОС; тики и статистика кучи
+				   остаются только добавкой. *)
+				IF OsRandom.Fill(buf, 0, LEN(buf)) THEN
+					n := LEN(buf)
+				ELSE
+					n := 0;
+					RandSource(SELF, 0, buf, n);
+					ASSERT(n # 0)
+				END;
 				sourceNum := (gen.sourceNums.Get(k MOD SELF.numSources));
 				gen.FeedEntropy(sourceNum, buf, 0, n);
 				INC(m, n)
@@ -378,9 +384,16 @@ StdLog, AO := CryptoAosCompat, Services, DevHeapSpy, Dates;
 	END Exit;
 
 	PROCEDURE (SELF: Generator) Generate* (VAR data : ARRAY OF SHORTCHAR; dataOffs, dataLen : AO.SIZE), NEW;
+		VAR
+			buf: ARRAY 32 OF SHORTCHAR;
 
 	BEGIN
 		ASSERT(entropyCollector.alive);
+		(* Свежая энтропия ОС на каждый запрос: даже при утечке состояния
+		   пула предсказать следующий ключ нельзя. *)
+		IF OsRandom.Fill(buf, 0, LEN(buf)) THEN
+			SELF.FeedEntropy(0, buf, 0, LEN(buf))
+		END;
 		SELF.accumulator.Generate(SHORT(Services.Ticks()), data, dataOffs, dataLen)
 	END Generate;
 

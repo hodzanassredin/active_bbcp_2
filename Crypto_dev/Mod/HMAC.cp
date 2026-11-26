@@ -59,6 +59,10 @@ MODULE Crypto_devHMAC;
 	PROCEDURE Test1SHA256*;
 		VAR key, text: ARRAY 128 OF SHORTCHAR;
 	BEGIN
+		Fill(key, 20, 0BX);
+		DoTest("CryptoSHA256", "Hi There", key,
+			"b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+			8, 20, 32, "HMAC-SHA256 RFC 4231 case 1");
 		DoTest("CryptoSHA256", "The quick brown fox jumps over the lazy dog", "key",
 			"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
 			43, 3, 32, "HMAC-SHA256 RFC vector 1");
