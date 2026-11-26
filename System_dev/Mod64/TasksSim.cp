@@ -33,10 +33,12 @@ MODULE System_devTasksSim;
 	Await и AwaitCond, отмена, Spawn, JoinAll, повторный Start, оба вида
 	трапа, вложенный Do, FIFO, трап на отпускании, остановка после
 	передачи, Await после вложенного Do) проверяется в конце теста.
-	Две пробы не входят в случайные планы и проверяются отдельно: готовый
-	ждущий получает монитор раньше входящего из очереди входа, а ожидание
-	без срока завершается отменой за ограниченное число шагов, а не
-	следующим событием.
+	Пробы вне случайных планов проверяются отдельно: готовый ждущий
+	получает монитор раньше входящего из очереди входа; ожидание без срока
+	завершается отменой за ограниченное число шагов, а не следующим
+	событием; отмена ждущего в Join снимает его с очереди цели за
+	ограниченное число шагов, не задевая цель; Unpark ждущего в Join будит
+	его (состояние Ready сразу после Unpark), но ожидание не прерывает.
 
 	Часы: подменяемых в ядре нет, сроки идут по Kernel.Time(). Сама
 	программа от зерна не зависит от времени, но чередование задач и
@@ -70,6 +72,8 @@ MODULE System_devTasksSim;
 		   монитор; aTouch входит и метит порядок; aWaitPrio ждёт затвор без
 		   срока и метит пробуждение; aWaitForever ждёт без срока условие {3}. *)
 		aGateYield = 15; aTouch = 16; aWaitPrio = 17; aWaitForever = 18;
+		(* Проба Join: задача ждёт завершения joinTarget. *)
+		aJoinTask = 19;
 
 		(* вид очереди в зеркале ждущих *)
 		wFlag = 1; wCond = 2;
@@ -227,6 +231,8 @@ MODULE System_devTasksSim;
 		   2 — вошёл входящий, 9 — ждущего разбудили без условия *)
 		prioLog: ARRAY 8 OF INTEGER;
 		prioN: INTEGER;
+		(* проба Join: цель действия aJoinTask *)
+		joinTarget: Tasks.Task;
 
 	PROCEDURE^ PlanChild (c: SimTask; sd: LONGINT; parentId, actIdx, id: INTEGER);
 	PROCEDURE^ KidAt (slot: INTEGER): SimTask;
@@ -965,6 +971,9 @@ MODULE System_devTasksSim;
 				(* Условие {3} не ставит никто: разбудить может только отмена. *)
 				opW.need := {3}; opW.dms := 0; opW.ok := FALSE;
 				mons[m].Do(ctx, opW)
+			| aJoinTask:
+				(* Ожидание завершения конкретной задачи (проба Join). *)
+				Tasks.Join(joinTarget)
 			ELSE
 				HALT(20)
 			END;
@@ -1695,6 +1704,166 @@ MODULE System_devTasksSim;
 		mons[0] := saved;
 		UnitAssert.True(ok, s)
 	END TestProcCancelNoDeadline;
+
+	PROCEDURE WordAt (t: Tasks.Task; off: INTEGER): S.ADDRESS;
+	(* Слово записи задачи по смещению off. Поля Task идут первыми в записи
+	   наследника, поэтому префикс читается и у SimTask. *)
+		VAR w: S.ADDRESS;
+	BEGIN
+		S.GET(S.VAL(S.ADDRESS, t) + off, w);
+		RETURN w
+	END WordAt;
+
+	PROCEDURE FindTaskWord (t, target: Tasks.Task; OUT off: INTEGER): BOOLEAN;
+	(* Найти слово записи t, равное адресу target. Так проба читает закрытую
+	   очередь t.waiters: B запущена раньше C, а C раньше A, поэтому next/prev
+	   B на A не указывают и единственная ссылка B на A — очередь ждущих. *)
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE i < 128 DO
+			IF WordAt(t, i) = S.VAL(S.ADDRESS, target) THEN off := i; RETURN TRUE END;
+			INC(i, SIZE(S.ADDRESS))
+		END;
+		off := -1;
+		RETURN FALSE
+	END FindTaskWord;
+
+	PROCEDURE TestProcCancelJoin*;
+	(** Отмена задачи A, ждущей в Join незавершённой B: Cancel обязан
+		разбудить состояние Waiting (иначе A не снимется за ограниченное
+		число шагов), а A — уйти из очереди B.waiters (RemoveWaiter).
+		B остаётся нетронутой: её состояние и очередь монитора те же. *)
+		VAR m, saved: Mon; b, c, a: SimTask; steps, off: INTEGER;
+			ok, found, gone: BOOLEAN; queuedBefore: INTEGER;
+			s: UnitAssert.Message;
+	BEGIN
+		ok := FALSE; found := FALSE; gone := FALSE; off := -1;
+		queuedBefore := 0; s := "";
+		gcMode := FALSE;
+		NEW(m); InitMon(m, 0, FALSE);
+		saved := mons[0]; mons[0] := m;
+		NEW(b); MakeProbe(b, 1, aWaitForever, 0, 0); Tasks.SetStackSize(b, kidStack);
+		NEW(c); MakeProbe(c, 2, aWaitForever, 0, 0); Tasks.SetStackSize(c, kidStack);
+		NEW(a); MakeProbe(a, 3, aJoinTask, 0, 0); Tasks.SetStackSize(a, kidStack);
+		joinTarget := b;
+		Tasks.Start(b);
+		steps := 0;
+		WHILE (Tasks.State(b) # Tasks.Parked) & ~TaskDone(b) & (steps < 100) DO
+			Tasks.Step; INC(steps)
+		END;
+		Tasks.Start(c);
+		steps := 0;
+		WHILE (Tasks.State(c) # Tasks.Parked) & ~TaskDone(c) & (steps < 100) DO
+			Tasks.Step; INC(steps)
+		END;
+		Tasks.Start(a);
+		steps := 0;
+		WHILE (Tasks.State(a) # Tasks.Waiting) & ~TaskDone(a) & (steps < 100) DO
+			Tasks.Step; INC(steps)
+		END;
+		IF (Tasks.State(b) # Tasks.Parked) OR (Tasks.State(a) # Tasks.Waiting) THEN
+			s := "cancel-join: setup failed, b state "; AppNum(s, Tasks.State(b));
+			App(s, ", a state "); AppNum(s, Tasks.State(a))
+		ELSE
+			queuedBefore := Tasks.Queued(m);
+			found := FindTaskWord(b, a, off);
+			Tasks.Cancel(a);
+			steps := 0;
+			WHILE (Tasks.State(a) # Tasks.Cancelled) & (steps < 8) DO
+				Tasks.Step; INC(steps)
+			END;
+			IF found THEN gone := WordAt(b, off) = 0 END;
+			ok := (Tasks.State(a) = Tasks.Cancelled) & (steps <= 4)
+				& (Tasks.State(b) = Tasks.Parked)
+				& (Tasks.Queued(m) = queuedBefore) & found & gone;
+			s := "cancel-join: a state "; AppNum(s, Tasks.State(a));
+			App(s, " in "); AppNum(s, steps); App(s, " steps, b state ");
+			AppNum(s, Tasks.State(b)); App(s, ", queued "); AppNum(s, Tasks.Queued(m));
+			App(s, " (was "); AppNum(s, queuedBefore); App(s, "), waiter slot ");
+			IF ~found THEN App(s, "not found")
+			ELSIF gone THEN App(s, "empty")
+			ELSE App(s, "still refers to a")
+			END
+		END;
+		(* Уборка: при выжившей мутации A всё ещё ждёт — вернуть её. *)
+		IF Tasks.State(a) # Tasks.Cancelled THEN
+			Tasks.Cancel(a);
+			IF Tasks.State(a) IN {Tasks.Sleeping, Tasks.Waiting, Tasks.Parked} THEN
+				Tasks.Unpark(a)
+			END;
+			steps := 0;
+			WHILE (Tasks.State(a) # Tasks.Cancelled) & (steps < 200) DO
+				Tasks.Step; INC(steps)
+			END
+		END;
+		Tasks.Cancel(c); Tasks.Cancel(b);
+		steps := 0;
+		WHILE ~(TaskDone(a) & TaskDone(b) & TaskDone(c)) & (steps < 200) DO
+			Tasks.Step; INC(steps)
+		END;
+		mons[0] := saved;
+		UnitAssert.True(ok, s)
+	END TestProcCancelJoin;
+
+	PROCEDURE TestProcUnparkJoinWaiter*;
+	(** Unpark ждущего в Join: задача проснулась (признак — состояние Ready
+		сразу после Unpark, до шага), но ожидание не прервано: пройдя шаг,
+		задача снова ждёт незавершённую цель. *)
+		VAR m, saved: Mon; b, a: SimTask; steps: INTEGER;
+			okWoke, okWaits: BOOLEAN; s: UnitAssert.Message;
+	BEGIN
+		okWoke := FALSE; okWaits := FALSE; s := "";
+		gcMode := FALSE;
+		NEW(m); InitMon(m, 0, FALSE);
+		saved := mons[0]; mons[0] := m;
+		NEW(b); MakeProbe(b, 1, aWaitForever, 0, 0); Tasks.SetStackSize(b, kidStack);
+		NEW(a); MakeProbe(a, 2, aJoinTask, 0, 0); Tasks.SetStackSize(a, kidStack);
+		joinTarget := b;
+		Tasks.Start(b);
+		steps := 0;
+		WHILE (Tasks.State(b) # Tasks.Parked) & ~TaskDone(b) & (steps < 100) DO
+			Tasks.Step; INC(steps)
+		END;
+		Tasks.Start(a);
+		steps := 0;
+		WHILE (Tasks.State(a) # Tasks.Waiting) & ~TaskDone(a) & (steps < 100) DO
+			Tasks.Step; INC(steps)
+		END;
+		IF (Tasks.State(b) # Tasks.Parked) OR (Tasks.State(a) # Tasks.Waiting) THEN
+			s := "unpark-join: setup failed, b state "; AppNum(s, Tasks.State(b));
+			App(s, ", a state "); AppNum(s, Tasks.State(a))
+		ELSE
+			Tasks.Unpark(a);
+			okWoke := Tasks.State(a) = Tasks.Ready;
+			steps := 0;
+			WHILE (Tasks.State(a) # Tasks.Waiting) & ~TaskDone(a) & (steps < 100) DO
+				Tasks.Step; INC(steps)
+			END;
+			okWaits := Tasks.State(a) = Tasks.Waiting;
+			s := "unpark-join: after Unpark a state was ";
+			IF okWoke THEN App(s, "ready") ELSE App(s, "not ready") END;
+			App(s, ", after a step ");
+			IF okWaits THEN App(s, "waiting") ELSE AppNum(s, Tasks.State(a)) END
+		END;
+		IF ~TaskDone(a) THEN
+			Tasks.Cancel(a);
+			IF Tasks.State(a) IN {Tasks.Sleeping, Tasks.Waiting, Tasks.Parked} THEN
+				Tasks.Unpark(a)
+			END;
+			steps := 0;
+			WHILE ~TaskDone(a) & (steps < 200) DO
+				Tasks.Step; INC(steps)
+			END
+		END;
+		Tasks.Cancel(b);
+		steps := 0;
+		WHILE ~(TaskDone(a) & TaskDone(b)) & (steps < 200) DO
+			Tasks.Step; INC(steps)
+		END;
+		mons[0] := saved;
+		UnitAssert.True(okWoke & okWaits, s)
+	END TestProcUnparkJoinWaiter;
 
 	PROCEDURE TestSeeds*;
 	(** Зёрна 1..80 без сборщика. *)
