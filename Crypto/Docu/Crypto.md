@@ -70,13 +70,21 @@ srv.Accept(client, res);                       (* completes the handshake *)
 - The default cipher suite list contains only `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. CBC,
   3DES, RC4, NULL and RSA key transport remain in the code and can be enabled explicitly with
   `Policy.SetCipherSuites`; they are not offered by default.
-- The client verifies the certificate chain to a trusted root, the validity period and the
-  server name (SAN, then CN only when SAN is absent). A wildcard matches exactly one label.
+- The client verifies the certificate chain to a trusted root, the validity period of every
+  link (including the root), `basicConstraints CA`, `keyUsage keyCertSign` when the extension is
+  present, `pathLenConstraint` and unknown critical extensions. A certificate with the same name
+  as a trusted root but a different key, an unfinished path and a chain longer than
+  `MaxChainDepth` are rejected. The server name is matched against SAN `dNSName`/`iPAddress`;
+  CN is used only when SAN is absent. An IP address never matches a DNS name and vice versa; a
+  wildcard matches exactly one label and is not allowed over a top-level domain (`*.com`).
 - `ServerKeyExchange` is signed with RSA PKCS#1 v1.5/SHA-256; the client recomputes the signature
   over `client_random || server_random || ECDHParams`. A server certificate without a trusted root,
   an expired certificate, a wrong name or a forged signature aborts the handshake with an alert.
 - A server that requires a client certificate sends `CertificateRequest` and verifies the client
   chain and `CertificateVerify` before accepting the client's `Finished`.
+- A rejected `Finished`, a `ChangeCipherSpec` with a wrong value and a record with a bad GCM tag
+  close the connection; `ReceiveFinished` returns the result and the handshake state is not
+  advanced to `Established`.
 - Secret comparisons use `CryptoUtils.EqualBytesCT`: the record MAC, the GCM tag, `Finished` and
   the PKCS#1 encoded message are not compared with an early exit.
 - Keys and nonces come from `CryptoOsRandom`, which reads `/dev/urandom`; the Fortuna generator
@@ -126,13 +134,18 @@ Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devHMAC`, `Crypto_d
 implementation.
 
 The TLS handshake needs a peer process, so it has a separate scenario:
-`tools/test-crypto-tls.sh` creates a CA, server, client, expired and wrong-host certificates in a
-temporary directory, runs the client against `openssl s_server -rev` and the server against
-`openssl s_client`, checks mutual authentication in both directions, and requires refusal (without a
-process trap) for an untrusted CA, an expired certificate, a wrong name, a forged
-`ServerKeyExchange` signature, an oversized signature length, a bad certificate length, an
-impossible extension length, a missing `ServerKeyExchange`, an SSLv2 `ClientHello` and an unknown
-handshake type. `Crypto_devTLS` and `Crypto_devTLSServer` are not in `tools/tests.txt`,
+`tools/test-crypto-tls.sh` creates a CA, an intermediate CA, a `CA:FALSE` issuer, server,
+client, expired, wrong-host and expired-root certificates in a temporary directory, runs the
+client against `openssl s_server -rev` and the server against `openssl s_client`, checks mutual
+authentication in both directions, and requires refusal (without a process trap) for an untrusted
+CA, an expired certificate or intermediate root, a wrong name, a `CA:FALSE` issuer, a forged
+`ServerKeyExchange` signature, a bad `Finished`, a wrong `ChangeCipherSpec`, a corrupted GCM tag,
+an oversized signature length, a bad certificate length, an impossible extension length, a
+missing `ServerKeyExchange`, a zero X25519 public key, an SSLv2 `ClientHello` and an unknown
+handshake type. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py` and `crypto_tls_client.py` are
+the Python peers used for the cases that need a correct handshake transcript: bad `Finished`,
+bad `ChangeCipherSpec`, corrupted record tag, zero X25519 point and a bad or good
+`CertificateVerify`. `Crypto_devTLS` and `Crypto_devTLSServer` are not in `tools/tests.txt`,
 because without a peer they cannot run.
 
 

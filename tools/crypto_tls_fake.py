@@ -17,6 +17,9 @@ import socket
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import crypto_tls_lib as L
+
 
 def recv_exact(sock, n):
     buf = b""
@@ -56,7 +59,147 @@ def load_cert_der(path):
     return base64.b64decode(b"".join(data[start:end].split()))
 
 
-def serve(mode, port, cert_path):
+def serve_handshake(conn, mode, cert_path, key_path):
+    """Полное рукопожатие с корректной подписью SKE.
+
+    goodfinished — верный Finished (положительный контроль);
+    badfinished  — испорченные 12 байт verify_data;
+    badccs       — ChangeCipherSpec со значением 2 и верный Finished;
+    badtag       — верное рукопожатие, затем запись с испорченным GCM-тегом;
+    shortrec     — верное рукопожатие, затем GCM-запись короче nonce и тега;
+    oldversion   — ServerHello с версией TLS 1.1;
+    longfinished — Finished из 13 байт вместо 12;
+    longccs      — ChangeCipherSpec из 2 байт с верным первым байтом;
+    zeropub      — SKE с нулевым открытым ключом X25519 (общий секрет 0).
+    """
+    rec = read_record(conn)
+    if rec is None:
+        return
+    _, _, _, body = rec
+    msgs = L.split_handshake(body)
+    if not msgs or msgs[0][0] != 1:
+        return
+    client_hs = msgs[0][1]
+    transcript = client_hs
+    _, client_random, _ = L.parse_client_hello(client_hs[4:])
+
+    server_random = os.urandom(32)
+    version = b"\x03\x02" if mode == "oldversion" else L.VERSION
+    sh = version + server_random + b"\x00" + L.SUITE + b"\x00" + b"\x00\x00"
+    msg = L.handshake(2, sh)
+    transcript += msg
+    conn.sendall(L.plain_record(22, msg))
+
+    der = load_cert_der(cert_path)
+    msg = L.handshake(11, (3 + len(der)).to_bytes(3, "big") + len(der).to_bytes(3, "big") + der)
+    transcript += msg
+    conn.sendall(L.plain_record(22, msg))
+
+    priv, pub = L.new_x25519()
+    if mode == "zeropub":
+        pub = b"\x00" * 32
+    params = b"\x03\x00\x1d\x20" + pub
+    key = L.load_rsa_key(key_path)
+    signed = client_random + server_random + params
+    sig = L.sign_transcript(key, L.sha256(signed))
+    ske = params + b"\x04\x01" + len(sig).to_bytes(2, "big") + sig
+    msg = L.handshake(12, ske)
+    transcript += msg
+    conn.sendall(L.plain_record(22, msg))
+
+    msg = L.handshake(14, b"")
+    transcript += msg
+    conn.sendall(L.plain_record(22, msg))
+
+    # ClientKeyExchange (клиентский сертификат мы не запрашивали).
+    client_pub = None
+    while client_pub is None:
+        rec = read_record(conn)
+        if rec is None:
+            return
+        typ, _, _, body = rec
+        if typ != 22:
+            return
+        for mt, raw in L.split_handshake(body):
+            transcript += raw
+            if mt == 16:
+                client_pub = L.parse_cke(raw[4:])
+    if mode == "zeropub":
+        shared = b"\x00" * 32
+    else:
+        shared = priv.exchange(L.x25519.X25519PublicKey.from_public_bytes(client_pub))
+    master = L.prf(shared, b"master secret", client_random + server_random, 48)
+    keys = L.derive_keys(master, client_random, server_random)
+
+    # CCS клиента — открытый, Finished — первый шифрованный, seq=0.
+    seen_ccs = False
+    while True:
+        rec = read_record(conn)
+        if rec is None:
+            return
+        typ, _, _, body = rec
+        if typ == 20:
+            seen_ccs = True
+        elif typ == 22 and seen_ccs:
+            plain = L.aead_open(body, keys["client_key"], keys["client_iv"], 0, typ)
+            if plain is None:
+                return
+            transcript += plain
+            break
+        elif typ == 21:
+            return
+
+    verify = L.prf(master, b"server finished", L.sha256(transcript), 12)
+    if mode == "badfinished":
+        verify = bytes([verify[0] ^ 1]) + verify[1:]
+    if mode == "longfinished":
+        verify = verify + b"\x00"
+    ccs_value = 2 if mode == "badccs" else 1
+    ccs_body = b"\x01\x00" if mode == "longccs" else bytes([ccs_value])
+    conn.sendall(L.plain_record(20, ccs_body))
+    conn.sendall(L.aead_record(22, L.handshake(20, verify),
+                               keys["server_key"], keys["server_iv"], 0))
+
+    if mode not in ("goodfinished", "badtag", "shortrec", "zeropub"):
+        # Клиент обязан ответить алертом и закрыться; читаем до закрытия.
+        conn.settimeout(2)
+        try:
+            while conn.recv(1024):
+                pass
+        except (socket.timeout, ConnectionResetError, BrokenPipeError):
+            pass
+        return
+
+    # Приложение: вернуть перевёрнутую строку, как openssl s_server -rev.
+    seq = 1
+    conn.settimeout(5)
+    while True:
+        rec = read_record(conn)
+        if rec is None:
+            return
+        typ, _, _, body = rec
+        if typ == 23:
+            plain = L.aead_open(body, keys["client_key"], keys["client_iv"], seq, typ)
+            if plain is None:
+                return
+            if mode == "shortrec":
+                conn.sendall(L.plain_record(23, b"\x00" * 8))
+                return
+            seq += 1
+            reply = plain[::-1]
+            if plain.endswith(b"\n"):
+                reply = plain[:-1][::-1] + b"\n"
+            rec = L.aead_record(23, reply,
+                                keys["server_key"], keys["server_iv"], 1)
+            if mode == "badtag":
+                rec = rec[:-1] + bytes([rec[-1] ^ 1])
+            conn.sendall(rec)
+            return
+        if typ == 21:
+            return
+
+
+def serve(mode, port, cert_path, key_path=None):
     der = load_cert_der(cert_path)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -68,6 +211,9 @@ def serve(mode, port, cert_path):
     conn, _ = srv.accept()
     conn.settimeout(15)
     try:
+        if mode in ("goodfinished", "badfinished", "badccs", "badtag", "shortrec", "oldversion", "longfinished", "longccs", "zeropub"):
+            serve_handshake(conn, mode, cert_path, key_path)
+            return 0
         # ClientHello
         rec = read_record(conn)
         if rec is None:
@@ -141,7 +287,8 @@ def serve(mode, port, cert_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        sys.stderr.write("usage: crypto_tls_fake.py MODE PORT CERT.pem\n")
+    if len(sys.argv) not in (4, 5):
+        sys.stderr.write("usage: crypto_tls_fake.py MODE PORT CERT.pem [KEY.pem]\n")
         sys.exit(2)
-    sys.exit(serve(sys.argv[1], int(sys.argv[2]), sys.argv[3]))
+    key = sys.argv[4] if len(sys.argv) == 5 else None
+    sys.exit(serve(sys.argv[1], int(sys.argv[2]), sys.argv[3], key))

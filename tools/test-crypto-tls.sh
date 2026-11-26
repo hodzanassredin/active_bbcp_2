@@ -95,6 +95,27 @@ printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsag
 sign -in "$TMP/exp.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
 	-out "$TMP/exp.pem" -days 0 -extfile "$TMP/exp.ext"
 
+# Промежуточный CA и сервер за ним: цепочка обязана приниматься.
+req -newkey rsa:2048 -nodes -keyout "$TMP/int.key" -out "$TMP/int.csr" -subj "/CN=Test Intermediate CA"
+printf 'basicConstraints=critical,CA:TRUE,pathlen:1\nkeyUsage=critical,keyCertSign,cRLSign\n' >"$TMP/int.ext"
+sign -in "$TMP/int.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/int.pem" -days 1 -extfile "$TMP/int.ext"
+req -newkey rsa:2048 -nodes -keyout "$TMP/srvint.key" -out "$TMP/srvint.csr" -subj "/CN=127.0.0.1"
+printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' >"$TMP/srvint.ext"
+sign -in "$TMP/srvint.csr" -CA "$TMP/int.pem" -CAkey "$TMP/int.key" -CAcreateserial \
+	-out "$TMP/srvint.pem" -days 1 -extfile "$TMP/srvint.ext"
+
+# Издатель с basicConstraints CA:FALSE, подписавший серверный сертификат:
+# клиент обязан отвергнуть такую цепочку.
+req -newkey rsa:2048 -nodes -keyout "$TMP/badsigner.key" -out "$TMP/badsigner.csr" -subj "/CN=Bad Signer"
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n' >"$TMP/badsigner.ext"
+sign -in "$TMP/badsigner.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/badsigner.pem" -days 1 -extfile "$TMP/badsigner.ext"
+req -newkey rsa:2048 -nodes -keyout "$TMP/noca.key" -out "$TMP/noca.csr" -subj "/CN=127.0.0.1"
+printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n' >"$TMP/noca.ext"
+sign -in "$TMP/noca.csr" -CA "$TMP/badsigner.pem" -CAkey "$TMP/badsigner.key" -CAcreateserial \
+	-out "$TMP/noca.pem" -days 1 -extfile "$TMP/noca.ext"
+
 # Чужое имя.
 req -newkey rsa:2048 -nodes -keyout "$TMP/wh.key" -out "$TMP/wh.csr" -subj "/CN=example.com"
 printf 'subjectAltName=DNS:example.com\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n' >"$TMP/wh.ext"
@@ -128,9 +149,9 @@ no_trap() {
 
 # Наш клиент. ca/cert/key могут быть пустыми.
 client_case() {
-	desc=$1; port=$2; ca=$3; cert=$4; key=$5; expectFail=$6
+	desc=$1; port=$2; ca=$3; cert=$4; key=$5; expectFail=$6; badapp=${7:-0}
 	log="$TMP/client-$desc.log"
-	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_EXPECT_FAIL=$expectFail"
+	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_EXPECT_FAIL=$expectFail --CRYPTO_TLS_EXPECT_BAD_APP=$badapp"
 	[ -n "$ca" ] && args="$args --CRYPTO_TLS_CA=$ca"
 	[ -n "$cert" ] && args="$args --CRYPTO_TLS_CERT=$cert"
 	[ -n "$key" ] && args="$args --CRYPTO_TLS_KEY=$key"
@@ -140,6 +161,11 @@ client_case() {
 			LD_LIBRARY_PATH="$INSTALL" exec "$INTERP" $args
 	) >"$log" 2>&1
 	no_trap "$log" "клиенте ($desc)"
+	# Итоговая строка «failed 0» печатается и для нуля исполненных
+	# тестов (например, модуль не загрузился), поэтому нужен именно PASS.
+	if ! grep -q '^PASS Crypto_devTLS.TestProcHandshake' "$log"; then
+		cat "$log" >&2; fail "клиент ($desc): тест не исполнился"
+	fi
 	grep -q 'failed 0,' "$log" || { cat "$log" >&2; fail "клиент ($desc)"; }
 	echo "  ok: client $desc"
 }
@@ -147,11 +173,12 @@ client_case() {
 # Наш клиент против openssl s_server.
 client_vs_openssl() {
 	desc=$1; cert=$2; key=$3; ca=$4; ccert=$5; ckey=$6; expectFail=$7; verify=$8
+	server_extra=${9:-}
 	port=$(free_port)
 	extra=""
 	[ "$verify" = "1" ] && extra="-Verify 1 -CAfile $TMP/ca.pem"
 	(sleep 60 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -cert "$cert" -key "$key" \
-		-tls1_2 -cipher "$CIPHER" -rev $extra >"$TMP/server-$desc.log" 2>&1) &
+		-tls1_2 -cipher "$CIPHER" -rev $extra $server_extra >"$TMP/server-$desc.log" 2>&1) &
 	spid=$!
 	i=0; ready=0
 	while [ $i -lt 100 ]; do
@@ -189,6 +216,9 @@ server_vs_openssl() {
 		$client_extra -quiet >"$TMP/sclient-$desc.out" 2>"$TMP/sclient-$desc.err"
 	wait "$spid" 2>/dev/null; spid=""
 	no_trap "$log" "сервере ($desc)"
+	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
+		cat "$log" >&2; fail "сервер ($desc): тест не исполнился"
+	fi
 	grep -q 'failed 0,' "$log" || { cat "$log" >&2; fail "сервер ($desc)"; }
 	if [ "$expectReject" != "1" ]; then
 		tr -d '\r' <"$TMP/sclient-$desc.out" | grep -q "$want" ||
@@ -198,9 +228,9 @@ server_vs_openssl() {
 }
 
 # Поддельный сервер для отрицательных проверок клиента.
-fake_case() {	mode=$1
+fake_case() {	mode=$1; expect=${2:-1}; badapp=${3:-0}
 	port=$(free_port)
-	python3 -I "$BB/tools/crypto_tls_fake.py" "$mode" "$port" "$TMP/srv.pem" \
+	python3 -I "$BB/tools/crypto_tls_fake.py" "$mode" "$port" "$TMP/srv.pem" "$TMP/srv.key" \
 		>"$TMP/fake-$mode.log" 2>&1 &
 	fpid=$!
 	i=0
@@ -208,11 +238,16 @@ fake_case() {	mode=$1
 		grep -q ready "$TMP/fake-$mode.log" 2>/dev/null && break
 		sleep 0.05; i=$((i + 1))
 	done
-	client_case "fake-$mode" "$port" "$TMP/ca.pem" "" "" 1
+	client_case "fake-$mode" "$port" "$TMP/ca.pem" "" "" "$expect" "$badapp"
 	wait "$fpid" 2>/dev/null; fpid=""
-	if grep -q saw_cke "$TMP/fake-$mode.log"; then
-		fail "клиент дошёл до ClientKeyExchange при плохом SKE ($mode)"
-	fi
+	case "$mode" in
+		goodfinished|badfinished|badccs|badtag|shortrec|oldversion|longfinished|longccs) ;;	# CKE здесь обязателен
+		*)
+			if grep -q saw_cke "$TMP/fake-$mode.log"; then
+				fail "клиент дошёл до ClientKeyExchange при плохом SKE ($mode)"
+			fi
+			;;
+	esac
 }
 
 # Некорректный клиент против нашего сервера: отказ без трапа.
@@ -233,14 +268,48 @@ evil_server_case() {
 		>"$TMP/evil-$desc.out" 2>&1 || true
 	wait "$spid" 2>/dev/null; spid=""
 	no_trap "$log" "сервере ($desc)"
+	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
+		cat "$log" >&2; fail "сервер ($desc): тест не исполнился"
+	fi
 	grep -q 'failed 0,' "$log" || { cat "$log" >&2; fail "сервер ($desc)"; }
+	echo "  ok: server $desc"
+}
+
+# Наш сервер против Python-клиента: проверка CertificateVerify.
+python_client_case() {
+	desc=$1; mode=$2; expectReject=$3
+	port=$(free_port)
+	log="$TMP/tlsserver-$desc.log"
+	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
+	args="$args --CRYPTO_TLS_REQUIRE_CLIENT=1 --CRYPTO_TLS_EXPECT_REJECT=$expectReject --CRYPTO_TLS_CA=$TMP/ca.pem"
+	(
+		cd "$INSTALL" &&
+		printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' |
+			LD_LIBRARY_PATH="$INSTALL" exec "$INTERP" $args
+	) >"$log" 2>&1 &
+	spid=$!
+	sleep 1
+	python3 -I "$BB/tools/crypto_tls_client.py" "$mode" 127.0.0.1 "$port" \
+		"$TMP/cl.pem" "$TMP/cl.key" >"$TMP/pyclient-$desc.log" 2>&1
+	pyrc=$?
+	wait "$spid" 2>/dev/null; spid=""
+	no_trap "$log" "сервере ($desc)"
+	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
+		cat "$log" >&2; cat "$TMP/pyclient-$desc.log" >&2
+		fail "сервер ($desc): тест не исполнился"
+	fi
+	grep -q 'failed 0,' "$log" || { cat "$log" >&2; fail "сервер ($desc)"; }
+	[ "$pyrc" -eq 0 ] || { cat "$TMP/pyclient-$desc.log" >&2; fail "python-клиент ($desc)"; }
 	echo "  ok: server $desc"
 }
 
 echo "test-crypto-tls: положительные случаи"
 client_vs_openssl "client-serverhello" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/ca.pem" "" "" 0 0
+client_vs_openssl "client-intermediate" "$TMP/srvint.pem" "$TMP/srvint.key" "$TMP/ca.pem" \
+	"" "" 0 0 "-cert_chain $TMP/int.pem"
 server_vs_openssl "server" "$TMP/ca.pem" 0 0 "" "" "olleh"
 server_vs_openssl "server-mutual" "$TMP/ca.pem" 1 0 "$TMP/cl.pem" "$TMP/cl.key" "olleh"
+python_client_case goodcertverify goodcertverify 0
 client_vs_openssl "client-mutual" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/ca.pem" \
 	"$TMP/cl.pem" "$TMP/cl.key" 0 1
 
@@ -248,7 +317,18 @@ echo "test-crypto-tls: отрицательные случаи"
 client_vs_openssl "untrusted" "$TMP/srv.pem" "$TMP/srv.key" "" "" "" 1 0
 client_vs_openssl "expired" "$TMP/exp.pem" "$TMP/exp.key" "$TMP/ca.pem" "" "" 1 0
 client_vs_openssl "wrong-host" "$TMP/wh.pem" "$TMP/wh.key" "$TMP/ca.pem" "" "" 1 0
+client_vs_openssl "noca" "$TMP/noca.pem" "$TMP/noca.key" "$TMP/ca.pem" "" "" 1 0 \
+	"-cert_chain $TMP/badsigner.pem"
 fake_case badsig
+fake_case goodfinished 0
+fake_case badfinished
+fake_case badccs
+fake_case badtag 0 1
+fake_case shortrec 0 1
+fake_case oldversion
+fake_case longfinished
+fake_case longccs
+fake_case zeropub
 fake_case noske
 fake_case oversize
 fake_case badcert
@@ -257,6 +337,10 @@ fake_case hugerecord
 fake_case badlist
 server_vs_openssl "server-no-client-cert" "$TMP/ca.pem" 1 1 "" "" ""
 server_vs_openssl "server-foreign-client" "$TMP/ca.pem" 1 1 "$TMP/badcl.pem" "$TMP/badcl.key" ""
+python_client_case badcertverify badcertverify 1
+python_client_case badfinished badfinished 1
+python_client_case nocertcv nocertcv 1
+python_client_case oldversion oldversion 1
 evil_server_case v2hello v2hello
 evil_server_case v2record v2record
 evil_server_case hstype hstype

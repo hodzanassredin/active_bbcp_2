@@ -37,7 +37,7 @@ MODULE Crypto_devTLS;
 	END GetPar;
 
 	PROCEDURE TestProcHandshake*;
-		VAR addr, ca, cert, key, expectFail: ARRAY 256 OF CHAR;
+		VAR addr, ca, cert, key, expectFail, badApp: ARRAY 256 OF CHAR;
 			deadline: LONGINT;
 			stateAfterOpen: INTEGER;
 			req, want, buf: ARRAY 16 OF SHORTCHAR;
@@ -51,6 +51,7 @@ MODULE Crypto_devTLS;
 		GetPar("CRYPTO_TLS_CERT", cert);
 		GetPar("CRYPTO_TLS_KEY", key);
 		GetPar("CRYPTO_TLS_EXPECT_FAIL", expectFail);
+		GetPar("CRYPTO_TLS_EXPECT_BAD_APP", badApp);
 		UnitAssert.True(addr[0] # 0X, "CRYPTO_TLS_ADDR is set");
 		IF addr[0] = 0X THEN RETURN END;
 
@@ -88,8 +89,15 @@ MODULE Crypto_devTLS;
 					con.Receive(buf, got, LEN(buf) - got, 1, read, res);
 					INC(got, read)
 				UNTIL (got >= repLen) OR (Services.Ticks() > deadline);
-				UnitAssert.EqualInt(repLen, got, "TLS receives the reply");
-				UnitAssert.True(EqualBytes(buf, want, repLen), "TLS reply is reversed request");
+				IF badApp[0] = '1' THEN
+					(* Запись с испорченным тегом GCM не должна дойти
+					   до приложения. *)
+					UnitAssert.True((got < repLen) OR ~EqualBytes(buf, want, repLen),
+						"corrupted record rejected")
+				ELSE
+					UnitAssert.EqualInt(repLen, got, "TLS receives the reply");
+					UnitAssert.True(EqualBytes(buf, want, repLen), "TLS reply is reversed request")
+				END;
 				con.Close
 			END
 		END

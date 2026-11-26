@@ -2036,7 +2036,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		RETURN TRUE
 	END ReceiveClientKeyExchange;
 
-	PROCEDURE (SELF: Connection) ReceiveFinished (IN data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE), NEW;
+	PROCEDURE (SELF: Connection) ReceiveFinished (IN data : ARRAY OF SHORTCHAR; ofs, len : AO.SIZE): BOOLEAN, NEW;
 		VAR
 			seed: ARRAY 36 OF SHORTCHAR;
 			verifyData: ARRAY 12 OF SHORTCHAR;
@@ -2052,7 +2052,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		END;
 		IF len # 12 THEN
 			SELF.SendError(DecodeError);
-			RETURN
+			RETURN FALSE
 		END;
 		IF SELF.version[1] < 03X THEN
 			SELF.hsMD5verify.GetHash(seed, 0);
@@ -2073,8 +2073,9 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		(* Сравнение постоянного времени: verify_data — секрет. *)
 		IF ~U.EqualBytesCT(verifyData, data, 0, ofs, 12) THEN
 			SELF.SendError(DecryptError);
-			RETURN
-		END
+			RETURN FALSE
+		END;
+		RETURN TRUE
 	END ReceiveFinished;
 	PROCEDURE (SELF: Connection) SendChangeCipherSpec , NEW;
 
@@ -2735,7 +2736,9 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 							SELF.SendError(BadCertificate);
 							RETURN
 						END;
-						SELF.ReceiveFinished(data, ofs, len);
+						IF ~SELF.ReceiveFinished(data, ofs, len) THEN
+							RETURN
+						END;
 						SELF.handshakeState := GenerateChangeCipherSpec;
 						SELF.Transition(dummy, Handshake, 0, 0, 0)
 						ELSE
@@ -2771,7 +2774,9 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 						SELF.handshakeState := AwaitChangeSpecWithResumption
 				|       AwaitFinishedWithResumption :			   
 										IF subAction = Finished THEN
-						SELF.ReceiveFinished(data, ofs, len);
+						IF ~SELF.ReceiveFinished(data, ofs, len) THEN
+							RETURN
+						END;
 						SELF.handshakeState := HandshakeFinished;
 						SELF.SetState(TCP.Established)
 						ELSE
@@ -2823,7 +2828,9 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 					SELF.SendError(UnexpectedMessage)
 				|       AwaitFinished :
 					IF subAction = Finished THEN
-						SELF.ReceiveFinished(data, ofs, len);
+						IF ~SELF.ReceiveFinished(data, ofs, len) THEN
+							RETURN
+						END;
 						SELF.SetState(TCP.Established)
 					ELSE
 						SELF.SendError(UnexpectedMessage)
