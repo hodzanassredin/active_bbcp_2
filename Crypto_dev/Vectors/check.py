@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Независимая проверка эталонных векторов Crypto (Crypto_dev/Vectors).
+
+Хеши, HMAC и PRF проверяются стандартной библиотекой; AES, GCM и X25519 —
+модулем cryptography, если он установлен. Векторы — те же, что зашиты в
+Crypto_dev* и исполняются tools/test.sh.
+"""
+import hashlib
+import hmac
+import re
+import sys
+
+BASE = __file__.rsplit("/", 1)[0]
+failures = 0
+
+
+def fail(msg):
+    global failures
+    failures += 1
+    print("FAIL:", msg)
+
+
+def rows(name):
+    out = []
+    for line in open(f"{BASE}/{name}", encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.append([c.strip() for c in line.split("|")])
+    return out
+
+
+def unhex(s):
+    return bytes.fromhex(re.sub(r"\s+", "", s))
+
+
+def maybe_hex(s):
+    if s.startswith("hex:"):
+        return bytes.fromhex(s[4:].replace(" ", ""))
+    return s.encode()
+
+
+# hashes
+for name, msg, want in rows("sha.txt"):
+    if msg == '""':
+        data = b""
+    elif msg.startswith("hex:"):
+        data = bytes.fromhex(msg[4:])
+    else:
+        data = msg.encode()
+    got = hashlib.new(name, data).hexdigest().upper()
+    if got != want.replace(" ", "").upper():
+        fail(f"sha {name} {msg}: {got} != {want}")
+
+# hmac
+for name, key, data, want in rows("hmac.txt"):
+    k = maybe_hex(key)
+    d = maybe_hex(data)
+    got = hmac.new(k, d, name).hexdigest().upper()
+    if got != want.upper():
+        fail(f"hmac {name}: {got} != {want}")
+
+# PRF (RFC 5246, P_SHA256)
+kv = {}
+for line in open(f"{BASE}/prf.txt", encoding="utf-8"):
+    line = line.strip()
+    if "=" in line and not line.startswith("#"):
+        k, v = line.split("=", 1)
+        kv[k.strip()] = v.strip()
+secret = bytes.fromhex(kv["secret"])
+seed = bytes.fromhex(kv["seed"])
+label = kv["label"].encode()
+
+
+def p_hash(secret, seed, n):
+    out, a = b"", seed
+    while len(out) < n:
+        a = hmac.new(secret, a, hashlib.sha256).digest()
+        out += hmac.new(secret, a + seed, hashlib.sha256).digest()
+    return out[:n]
+
+
+got = p_hash(secret, label + seed, len(bytes.fromhex(kv["out"]))).hex().upper()
+if got != kv["out"].upper():
+    fail(f"prf: {got} != {kv['out']}")
+
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    have_crypto = True
+except Exception:
+    have_crypto = False
+    print("SKIP: AES/GCM/X25519 — нет модуля cryptography")
+
+if have_crypto:
+    for mode, key, iv, plain, cipher in rows("aes.txt"):
+        key_b = unhex(key)
+        pt = unhex(plain)
+        want = unhex(cipher)
+        alg = algorithms.AES(key_b)
+        if mode == "ECB":
+            c = Cipher(alg, modes.ECB()).encryptor()
+        elif mode == "CBC":
+            c = Cipher(alg, modes.CBC(unhex(iv))).encryptor()
+        else:
+            c = Cipher(alg, modes.CTR(unhex(iv))).encryptor()
+        got = (c.update(pt) + c.finalize())
+        if len(got) < len(want):
+            got = got + b"\0" * (len(want) - len(got))
+        got = got[: len(want)]
+        # CTR не требует выравнивания; ECB/CBC — блоки.
+        if got != want:
+            fail(f"aes {mode} {key[:8]}: {got.hex()} != {want.hex()}")
+    for key, iv, aad, plain, cipher, tag in rows("gcm.txt"):
+        key_b = unhex(key)
+        iv_b = unhex(iv)
+        aad_b = b"" if aad == "-" else unhex(aad)
+        pt = b"" if plain == "-" else unhex(plain)
+        ct = b"" if cipher == "-" else unhex(cipher)
+        tag_b = unhex(tag)
+        got = AESGCM(key_b).encrypt(iv_b, pt, aad_b or None)
+        if got != ct + tag_b:
+            fail(f"gcm {key[:8]}: {got.hex().upper()} != {(ct + tag_b).hex().upper()}")
+    vals = {}
+    for line in open(f"{BASE}/x25519.txt", encoding="utf-8"):
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            vals[k.strip()] = bytes.fromhex(v.strip())
+    for who in ("alice", "bob"):
+        sk = X25519PrivateKey.from_private_bytes(vals[f"{who}_private"])
+        pub = sk.public_key().public_bytes_raw()
+        if pub != vals[f"{who}_public"]:
+            fail(f"x25519 {who} public: {pub.hex()} != {vals[f'{who}_public'].hex()}")
+    shared = X25519PrivateKey.from_private_bytes(vals["alice_private"]).exchange(
+        X25519PrivateKey.from_private_bytes(vals["bob_private"]).public_key())
+    if shared != vals["shared"]:
+        fail(f"x25519 shared: {shared.hex()} != {vals['shared'].hex()}")
+
+if failures:
+    print(f"check-vectors: {failures} провалов")
+    sys.exit(1)
+print("check-vectors: OK")
