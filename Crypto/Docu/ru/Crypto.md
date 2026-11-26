@@ -6,8 +6,10 @@
 используется через `CryptoTLSStream`, протокол `CommStreams`: `Paket` выбирает его по имени
 `"CryptoTLSStream"` для HTTPS.
 
-Реализация TLS поддерживает клиентскую сторону и версию TLS 1.2. К коду A2 она добавляет обмен
-ключами Диффи — Хеллмана на эллиптических кривых, расширение SNI и режим шифра GCM.
+В подсистеме есть и клиент, и сервер TLS 1.2. Клиент проверяет цепочку сертификата
+сервера до настроенного доверенного корня, срок действия и имя сервера (SAN/CN), а также
+подпись `ServerKeyExchange`. Сервер может запросить и проверить клиентский сертификат; на
+этом держится взаимная проверка сертификатов узлов кластера.
 
 ## Модули
 
@@ -20,7 +22,7 @@
 | Примитивы | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
 | Хеши и MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoBase64` |
 | Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoASN1`, `CryptoX509` |
-| Случайные числа | `CryptoFortuna`, `CryptoFortunaRng` |
+| Случайные числа | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
 
 ## Применение
@@ -33,6 +35,77 @@ TLS доступен через интерфейс потоков так, как
 `CommStreams`. Вместо имени `CommTCP` в `CommStreams.NewStream` передаётся имя `CryptoTLSStream`.
 Прямое использование `CryptoTLS.Connection` не рекомендуется.
 
+Прямой интерфейс даёт управление доверенными корнями и клиентским сертификатом:
+
+```componentpascal
+ctx := CryptoTLS.NewContext();
+ctx.AddTrustedFile("ca.pem");                 (* корень кластера *)
+ctx.LoadClientCertificateFile("node.pem");    (* необязательно, для mutual auth *)
+ctx.LoadClientPrivateKeyFile("node.key");
+con := CryptoTLS.GetConnection();
+con.SetContext(ctx);
+con.Open("0.0.0.0:0", "host:443", res)
+```
+
+Сервер загружает свой сертификат и ключ, а при взаимной проверке — и корень, которым
+проверяются клиентские сертификаты:
+
+```componentpascal
+ctx := CryptoTLS.NewContext();
+ctx.LoadCertificateFile("server.pem");
+ctx.LoadPrivateKeyFile("server.key");
+ctx.AddTrustedFile("ca.pem");
+ctx.RequireClientCertificate(TRUE);
+srv := CryptoTLS.GetConnection();
+srv.SetContext(ctx);
+srv.Open("0.0.0.0:443", "", res);             (* слушает *)
+srv.Accept(client, res);                       (* завершает рукопожатие *)
+```
+
+`CryptoTLS.ReadFile` читает PEM по абсолютному пути; `X509.ReadPemChain` и
+`X509.ReadPemPrivateKey` разбирают PEM без файловой системы.
+
+## Безопасность
+
+- В наборе шифров по умолчанию только `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. CBC, 3DES,
+  RC4, NULL и RSA key transport остаются в коде и включаются явно через
+  `Policy.SetCipherSuites`; по умолчанию они не предлагаются.
+- Клиент проверяет цепочку до доверенного корня, срок действия и имя (SAN, CN — только если
+  SAN нет). Шаблон `*` совпадает ровно с одной меткой.
+- `ServerKeyExchange` подписан RSA PKCS#1 v1.5/SHA-256; клиент пересчитывает подпись по
+  `client_random || server_random || ECDHParams`. Чужой корень, просроченный сертификат,
+  неверное имя или подделанная подпись прерывают рукопожатие алертом.
+- Сервер, требующий клиентский сертификат, шлёт `CertificateRequest` и проверяет цепочку и
+  `CertificateVerify` клиента до приёма его `Finished`.
+- Секреты сравниваются через `CryptoUtils.EqualBytesCT`: MAC записи, тег GCM, `Finished` и
+  PKCS#1-блок не сравниваются с ранним выходом.
+- Ключи и nonce берутся из `CryptoOsRandom` (`/dev/urandom`); генератор Fortuna подмешивает
+  свежую энтропию ОС на каждый запрос. PKCS#1-дополнение и TLS pre-master при недоступном
+  источнике завершаются ошибкой, а не предсказуемыми байтами. Генерация простых чисел
+  (`CryptoAosBigNumbers.NewRand`) читает тот же источник, но не умеет сообщить об ошибке
+  через свою сигнатуру; это отмечено в обзоре как оставшееся ограничение.
+- Длины из сети проверяются до копирования; некорректные данные рукопожатия дают алерт и
+  закрытое соединение, а не `ASSERT`. Сообщение рукопожатия, тип которого не соответствует
+  текущему состоянию, отвергается с `UnexpectedMessage`. SSLv2 `ClientHello` (и запись типа
+  128, и сообщение типа 30) отвергается.
+
+## Ограничения
+
+- TLS 1.3 не реализован.
+- Сертификаты только с RSA-ключами; обмен ключами только X25519, других named groups нет.
+- CRL, OCSP и certificate transparency не проверяются. Решение о доверии — настроенный
+  набор корней.
+- Арифметика больших чисел (закрытые операции RSA) и X25519 не постоянного времени на
+  уровне машины. В лестнице X25519 условная перестановка без ветвлений, но возведение в
+  степень по модулю в `CryptoAosBigNumbers` зависит от данных. Это отмечено в обзоре
+  безопасности и приемлемо для модели угроз кластера; для общего сервера, доступного
+  локальному атакующему с высоким разрешением таймингов, — нет.
+- Возобновление сессий и пересогласование поддержаны лишь в объёме исходного кода A2;
+  серверных тикетов TLS 1.3 нет.
+- Системного хранилища корневых CA нет. `CryptoTLSStream` использует контекст по умолчанию и
+  потому отвергает любой сертификат, пока вызывающий не настроит доверенные корни через прямой
+  интерфейс `CryptoTLS.NewContext`.
+
 ## Сборка
 
 Подсистема входит в мир AMD64, который собирает `tools/build64.sh`. Каталога `Mod64` у неё нет:
@@ -44,17 +117,24 @@ TLS доступен через интерфейс потоков так, как
 ## Тесты
 
 Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devHMAC`, `Crypto_devCiphers`,
-`Crypto_devBigNumbers`, `Crypto_devDH`, `Crypto_devRSA`, `Crypto_devX25519`. Их запускает
-`tools/test.sh` по списку `tools/tests.txt`.
+`Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`, `Crypto_devRSA`, `Crypto_devX25519`,
+`Crypto_devX509`, `Crypto_devPKCS1`, `Crypto_devPRF`. Их запускает `tools/test.sh` по списку
+`tools/tests.txt`. Эталонные значения также лежат файлами с указанием источника и лицензии в
+`Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их независимой реализацией на Python.
 
 Рукопожатию TLS нужен второй процесс, поэтому у него отдельный сценарий:
-`tools/test-crypto-tls.sh` создаёт самоподписанный сертификат во временном каталоге, поднимает
-`openssl s_server` на `127.0.0.1`, прогоняет тест `Crypto_devTLS` и снимает сервер по PID. Модуля
-`Crypto_devTLS` нет в `tools/tests.txt`, потому что без сервера он не может пройти. Клиент шлёт
-`hello`, читает перевёрнутую строку от `s_server -rev` и требует успеха рукопожатия и обмена.
+`tools/test-crypto-tls.sh` создаёт во временном каталоге CA, серверный, клиентский,
+просроченный сертификат и сертификат с чужим именем, гоняет клиент против
+`openssl s_server -rev`, сервер против `openssl s_client`, проверяет взаимную аутентификацию в
+обе стороны и требует отказа (без трапа процесса) для чужого CA, просроченного сертификата,
+неверного имени, подделанной подписи `ServerKeyExchange`, чрезмерной длины подписи, неверной
+длины сертификата, невозможной длины расширений, отсутствующего `ServerKeyExchange`, SSLv2
+`ClientHello` и неизвестного типа рукопожатия. Модулей `Crypto_devTLS` и
+`Crypto_devTLSServer` нет в `tools/tests.txt`, потому что без второго процесса они не проходят.
+
 
 ## Лицензия и известные ограничения
 
 Подсистема распространяется по лицензиям BSD ETH Zurich и Hirbod Behnam; полный текст лежит в
-`Crypto/LICENSE`. Обзор кода, включая отсутствие проверки сертификата сервера и подписи
-`ServerKeyExchange`, находится в `Crypto/Docu/Security-Review.md`.
+`Crypto/LICENSE`. Обзор безопасности со статусом каждой находки и покрывающим её тестом — в
+`Crypto/Docu/Security-Review.md`.

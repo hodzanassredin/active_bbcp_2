@@ -85,3 +85,5 @@ Crypto_devX25519||180|CryptoX25519 CryptoFieldElement CryptoAosBigNumbers Crypto
 Crypto_devX509||180|CryptoX509 CryptoRSA CryptoPKCS1 CryptoASN1 CryptoHashes CryptoAosBigNumbers CryptoAosStreams CryptoAosCompat CryptoBase64 CryptoUtils
 # PKCS#1 v1.5: подпись/проверка, отказы при подделке, шифрование/расшифровка.
 Crypto_devPKCS1|slow|900|CryptoPKCS1 CryptoRSA CryptoPrimes CryptoAosBigNumbers CryptoUtils CryptoAosCompat
+# PRF TLS 1.2 (RFC 5246) по независимому вектору, постоянное время, энтропия ОС.
+Crypto_devPRF||180|CryptoTLS CryptoOsRandom CryptoUtils CryptoFortuna CryptoFortunaRng CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoAosCompat CryptoHashes CryptoSHA256 CryptoCiphers CryptoMD5 CryptoSHA1 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoHMAC CryptoRSA CryptoPKCS1 CryptoX509 CryptoASN1 CryptoBase64 CryptoX25519 CryptoFieldElement CryptoGcm CryptoAosTCP CryptoAosPipes CryptoAosDates CryptoAosStrings CryptoAosFileStreams CryptoAosIP CryptoAosCommStreams CryptoAosClock CryptoAosBIT
