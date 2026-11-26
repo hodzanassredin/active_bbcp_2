@@ -90,9 +90,19 @@ if [ "$run" -eq 1 ]; then
 		' "$page" > "$tmp/want"
 		echo "$cmd" | timeout 120 tools/run64.sh > "$tmp/got" 2>&1 || true
 		r=$((r + 1))
-		if ! diff -q "$tmp/want" "$tmp/got" > /dev/null; then
+		# Страница может объявить, что числа в выводе зависят от времени:
+		# <!-- check-examples: numbers-vary -->. Тогда сравниваем текст
+		# с заменой любой последовательности цифр на N.
+		if grep -q 'check-examples: numbers-vary' "$page"; then
+			sed 's/[0-9][0-9]*/N/g' "$tmp/want" > "$tmp/want.n"
+			sed 's/[0-9][0-9]*/N/g' "$tmp/got" > "$tmp/got.n"
+			want="$tmp/want.n"; got="$tmp/got.n"
+		else
+			want="$tmp/want"; got="$tmp/got"
+		fi
+		if ! diff -q "$want" "$got" > /dev/null; then
 			echo "check-examples: $page: вывод $cmd расходится с документом" >&2
-			diff "$tmp/want" "$tmp/got" | head -10 >&2
+			diff "$want" "$got" | head -10 >&2
 			bad=$((bad + 1))
 		fi
 	done

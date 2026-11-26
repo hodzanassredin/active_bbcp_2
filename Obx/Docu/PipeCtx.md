@@ -160,17 +160,28 @@ only). In the BlackBox window a commander executes the command:
    ObxPipeCtx.Do
 ```
 
-In the console the command `echo 'ObxPipeCtx.Do' | tools/run64.sh` prints the stage counters. This
-page has no exact "The log shows" block: the number of numbers that pass depends on time and on the
-scheduler, and two runs do not give the same numbers. One of the runs:
+In the console the same example runs as a command:
 
 ```
-pipeline sent=40464 processed=40463 received=40463
+echo 'ObxPipeCtx.Do' | tools/run64.sh
+```
+
+The number of numbers that pass depends on time and on the scheduler, so two runs do not give the
+same counters. `N` below stands for a non-negative integer.
+
+The log shows:
+
+<!-- check-examples: numbers-vary -->
+```
+pipeline sent=N processed=N received=N
 pipeline moved: yes
 pipeline balanced: yes
 pipeline stopped: yes yes yes
 pipeline deadline: yes
 ```
+
+The lines after the counters are stable: the pipeline moves, stays balanced, all three stages stop
+and the deadline expires.
 
 ## What happened
 
