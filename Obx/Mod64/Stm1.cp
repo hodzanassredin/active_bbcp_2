@@ -5,9 +5,9 @@ MODULE ObxStm1;
 
 	TYPE
 		Buy = POINTER TO RECORD (AsyncStm.Tx) tries: INTEGER END;
-		Buyer = POINTER TO RECORD (Tasks.Task) END;
-		Payroll = POINTER TO RECORD (Tasks.Task) END;
-		Opener = POINTER TO RECORD (Tasks.Task) END;
+		Buyer = POINTER TO RECORD (Tasks.Job) END;
+		Payroll = POINTER TO RECORD (Tasks.Job) END;
+		Opener = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		money: AsyncStm.IntVar;	(* счёт покупателя *)
@@ -27,28 +27,28 @@ MODULE ObxStm1;
 		money.Set(money.Get() - price)
 	END Do;
 
-	PROCEDURE (b: Buyer) Run;
+	PROCEDURE (b: Buyer) Body- (VAR ctx: Tasks.Ctx);
 		VAR t: Buy;
 	BEGIN
 		NEW(t); t.tries := 0;
 		AsyncStm.Atomically(t);
 		Say("bought, money = ", money.Get());
 		Say("transaction ran times: ", t.tries)
-	END Run;
+	END Body;
 
-	PROCEDURE (p: Payroll) Run;
+	PROCEDURE (p: Payroll) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(10);
 		money.Set(money.Get() + 200);
 		Say("salary paid, money = ", money.Get())
-	END Run;
+	END Body;
 
-	PROCEDURE (o: Opener) Run;
+	PROCEDURE (o: Opener) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(20);
 		open.Set(TRUE);
 		Console.WriteStr("shop opened"); Console.WriteLn
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR b: Buyer; p: Payroll; o: Opener;

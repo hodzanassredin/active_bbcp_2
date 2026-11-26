@@ -21,7 +21,7 @@ MODULE ObxRaft0;
 		(* местное: клиенту — кому и что послать *)
 		Send = POINTER TO RECORD (ActorCore.Msg) to: ActorCore.Ref; m: ActorNet.Msg END;
 		Client = POINTER TO RECORD (ActorCore.Actor) END;
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		net: ActorNetMem.Net;
@@ -149,7 +149,7 @@ MODULE ObxRaft0;
 		Console.WriteStr("read -> sum "); WriteInt(Int(reply.data)); Console.WriteLn
 	END Read;
 
-	PROCEDURE (t: Driver) Run;
+	PROCEDURE (t: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR l, i, k: INTEGER; cap: ARRAY RaftNode.capLen OF CHAR; kn: ActorNet.Node;
 	BEGIN
 		kn := ActorNet.New("K", net, 99); ActorNetMem.Add(net, kn);
@@ -174,7 +174,7 @@ MODULE ObxRaft0;
 		WriteInt(cfgs[l].actor.nd.term); Console.WriteStr(", applied up to entry "); WriteInt(cfgs[l].actor.nd.applied);
 		Console.WriteStr(", sum "); WriteInt(cfgs[l].actor.sm.sm(Sum).v); Console.WriteLn;
 		finished := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Driver; i: INTEGER; name: ARRAY 2 OF CHAR;

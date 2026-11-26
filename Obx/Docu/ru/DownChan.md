@@ -50,7 +50,7 @@ MODULE ObxDownChan;
 			pipe: AsyncChan.Buffer; dl: Downloader; sv: Saver
 		END;
 
-		Killer = POINTER TO RECORD (Tasks.Task) dl, sv: Tasks.Task END;
+		Killer = POINTER TO RECORD (Tasks.Job) dl, sv: Tasks.Job END;
 
 	VAR
 		deadlineExpired, deadlinePartial: BOOLEAN;
@@ -112,12 +112,12 @@ MODULE ObxDownChan;
 		p.expired := ctx.expired
 	END Body;
 
-	PROCEDURE (k: Killer) Run;
+	PROCEDURE (k: Killer) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(15);
 		Tasks.Cancel(k.dl);
 		Tasks.Cancel(k.sv)
-	END Run;
+	END Body;
 
 	PROCEDURE (p: CancelParent) Body- (VAR ctx: Tasks.Ctx);
 		VAR k: Killer;
@@ -198,7 +198,7 @@ channel cancel partial: yes
 двадцать кусков: срок кончается, `JoinAll` отменяет группу, и обе задачи выходят по `FALSE` от
 `SendCtx` и `RecvCtx`. Отсюда `channel deadline expired: yes` и `channel deadline partial: yes`.
 
-Вторая фаза запускает ещё и `Killer` — обычную задачу с методом `Run`. Через 15 мс она зовёт
+Вторая фаза запускает ещё и `Killer` — обычную задачу `Tasks.Job` с методом `Body`. Через 15 мс она зовёт
 `Tasks.Cancel` для загрузчика и сохранятеля. Отмена ставит флаг и будит задачу; канал видит
 остановку в ближайшей точке переключения, снимает предложение и возвращает `FALSE`. После `JoinAll`
 родитель проверяет `Tasks.State`: обе задачи в состоянии `Cancelled`, сохранятель взял меньше

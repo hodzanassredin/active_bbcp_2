@@ -10,7 +10,7 @@ MODULE ObxComputon;
 
 	TYPE
 		Square = POINTER TO RECORD (AsyncComputon.Computon) x, y: INTEGER END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR done: BOOLEAN; d: ARRAY 16 OF CHAR;
 
@@ -29,7 +29,7 @@ MODULE ObxComputon;
 		rd.ReadInt(c.x); rd.ReadInt(c.y)
 	END Internalize;
 
-	PROCEDURE (cl: Client) Run;
+	PROCEDURE (cl: Client) Body- (VAR ctx: Tasks.Ctx);
 		VAR c: Square; r: AsyncComputon.Computon;
 	BEGIN
 		NEW(c); c.x := 12; c.y := 0;
@@ -41,7 +41,7 @@ MODULE ObxComputon;
 			Strings.IntToString(AsyncComputon.LastError(), d)
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR cl: Client;

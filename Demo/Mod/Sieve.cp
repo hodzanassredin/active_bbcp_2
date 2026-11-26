@@ -9,7 +9,7 @@ MODULE DemoSieve;
 	В Active Oberon тот же алгоритм есть в Reali, Active Oberon Language
 	Report, C.2 "Sieve of Eratosthenes" — там стадии соединены
 	ограниченными буферами и активными объектами. Здесь взят вариант
-	с цепочкой задач Tasks и каналами-встречами, как в Go.
+	с цепочкой задач Tasks.Job и каналами-встречами, как в Go.
 
 	Команда DemoSieve.Run: числа 2..99. Итог детерминирован:
 	25 простых, сумма 1060, максимум 97. *)
@@ -22,12 +22,12 @@ MODULE DemoSieve;
 	TYPE
 		IntMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 
-		Sieve = POINTER TO RECORD (Tasks.Task)
+		Sieve = POINTER TO RECORD (Tasks.Job)
 			in: AsyncChan.Chan;
 			prime: INTEGER
 		END;
 
-		Generator = POINTER TO RECORD (Tasks.Task) out: AsyncChan.Chan END;
+		Generator = POINTER TO RECORD (Tasks.Job) out: AsyncChan.Chan END;
 
 	VAR
 		Primes*: INTEGER;
@@ -44,7 +44,7 @@ MODULE DemoSieve;
 		RETURN m
 	END NewInt;
 
-	PROCEDURE (s: Sieve) Run;
+	PROCEDURE (s: Sieve) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg; n: INTEGER;
 			out: AsyncChan.Chan; next: Sieve; prime: INTEGER;
 	BEGIN
@@ -63,14 +63,14 @@ MODULE DemoSieve;
 			IF n MOD prime # 0 THEN out.Send(NewInt(n)) END
 		END;
 		out.Send(NewInt(-1))	(* конец цепочки *)
-	END Run;
+	END Body;
 
-	PROCEDURE (g: Generator) Run;
+	PROCEDURE (g: Generator) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER;
 	BEGIN
 		FOR i := 2 TO limit - 1 DO g.out.Send(NewInt(i)) END;
 		g.out.Send(NewInt(-1))
-	END Run;
+	END Body;
 
 	PROCEDURE Run*;
 	(** Демонстрация: цепочка решёт для 2..99. *)

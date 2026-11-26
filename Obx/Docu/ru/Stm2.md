@@ -14,8 +14,8 @@ MODULE ObxStm2;
 	TYPE
 		Pay = POINTER TO RECORD (AsyncStm.Tx) card: AsyncStm.IntVar; n: INTEGER END;
 		Either = POINTER TO RECORD (AsyncStm.Tx) first, second: Pay END;
-		Customer = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
-		Bank = POINTER TO RECORD (Tasks.Task) END;
+		Customer = POINTER TO RECORD (Tasks.Job) n: INTEGER END;
+		Bank = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR card1, card2: AsyncStm.IntVar;
 
@@ -39,7 +39,7 @@ MODULE ObxStm2;
 		AsyncStm.OrElse(t.first, t.second)
 	END Do;
 
-	PROCEDURE (c: Customer) Run;
+	PROCEDURE (c: Customer) Body- (VAR ctx: Tasks.Ctx);
 		VAR t: Either;
 	BEGIN
 		NEW(t); NEW(t.first); NEW(t.second);
@@ -47,14 +47,14 @@ MODULE ObxStm2;
 		t.second.card := card2; t.second.n := c.n;
 		AsyncStm.Atomically(t);
 		Show("paid")
-	END Run;
+	END Body;
 
-	PROCEDURE (b: Bank) Run;
+	PROCEDURE (b: Bank) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(10);
 		card1.Set(card1.Get() + 100);
 		Show("deposit")
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: Customer; b: Bank;

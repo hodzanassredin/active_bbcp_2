@@ -56,6 +56,7 @@ MODULE ObxBankCtx;
 		VAR w: WithdrawOp; d: DepositOp;
 	BEGIN
 		WITH op: WithdrawOp DO
+			(* Цикл нужен: флаг 0 значит «есть хоть что-то», а не «хватает суммы». *)
 			WHILE a.balance < op.amount DO
 				IF ~a.Await(ctx, {0}) THEN op.ok := FALSE; RETURN END
 			END;

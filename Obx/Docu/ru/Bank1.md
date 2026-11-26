@@ -9,6 +9,8 @@
 
 ```
 MODULE ObxBank1;
+(** Задачи нижнего уровня: пример показывает Run, Join, Sleep, Cancel и
+	группу Task.Group. *)
 	IMPORT Tasks, Console, Strings;
 
 	CONST n = 3;

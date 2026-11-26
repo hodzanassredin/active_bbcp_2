@@ -18,7 +18,7 @@ MODULE ObxStm0;
 		Transfer = POINTER TO RECORD (AsyncStm.Tx)
 			from, to: AsyncStm.IntVar; n: INTEGER
 		END;
-		Clerk = POINTER TO RECORD (Tasks.Task) END;
+		Clerk = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR a, b: AsyncStm.IntVar;
 
@@ -36,10 +36,10 @@ MODULE ObxStm0;
 		AsyncStm.Atomically(t)
 	END Move;
 
-	PROCEDURE (c: Clerk) Run;
+	PROCEDURE (c: Clerk) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Move(100); Move(100)
-	END Run;
+	END Body;
 
 	PROCEDURE Show;
 		VAR s: ARRAY 16 OF CHAR;

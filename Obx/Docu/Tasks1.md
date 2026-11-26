@@ -7,6 +7,7 @@ example combines three kinds of waiting in one program. The example belongs to t
 
 ```
 MODULE ObxTasks1;
+(** Задачи нижнего уровня: пример показывает Park, Unpark, Sleep и Join. *)
 	IMPORT Tasks, Console;
 
 	TYPE

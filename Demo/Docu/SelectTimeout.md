@@ -27,14 +27,14 @@ MODULE DemoSelectTimeout;
 	TYPE
 		IntMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 
-		Receiver = POINTER TO RECORD (Tasks.Task)
+		Receiver = POINTER TO RECORD (Tasks.Job)
 			c: AsyncChan.Chan;
 			timeout: LONGINT;
 			idx, val: INTEGER;
 			elapsed: LONGINT
 		END;
 
-		Sender = POINTER TO RECORD (Tasks.Task)
+		Sender = POINTER TO RECORD (Tasks.Job)
 			c: AsyncChan.Chan; delay: LONGINT; val: INTEGER
 		END;
 
@@ -44,7 +44,7 @@ MODULE DemoSelectTimeout;
 		GotValue*: INTEGER;
 		Failed*: BOOLEAN;
 
-	PROCEDURE (r: Receiver) Run;
+	PROCEDURE (r: Receiver) Body- (VAR ctx: Tasks.Ctx);
 		VAR ops: ARRAY 2 OF AsyncSelect.Op; m: AsyncSelect.Msg;
 			t0: LONGINT;
 	BEGIN
@@ -58,15 +58,15 @@ MODULE DemoSelectTimeout;
 			m := ops[0].got;
 			WITH m: IntMsg DO r.val := m.n END
 		END
-	END Run;
+	END Body;
 
-	PROCEDURE (s: Sender) Run;
+	PROCEDURE (s: Sender) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: IntMsg;
 	BEGIN
 		Tasks.Sleep(s.delay);
 		NEW(m); m.n := s.val;
 		s.c.Send(m)
-	END Run;
+	END Body;
 
 	PROCEDURE Run*;
 	(** Демонстрация: тайм-аут 30 мс, затем отправитель через 5 мс. *)

@@ -54,7 +54,7 @@ MODULE AsyncStm;
 		(* Ожидание одной задачи в Retry. Инвариант: ~woken => запись Waiter
 		   с w = этой есть у каждой vars[i], i < LEN(vars). *)
 		Wait = POINTER TO RECORD (Kernel.TrapCleaner)
-			task: Tasks.Task;
+			task: Tasks.Task;	(* Task или Job: нужен только адрес для Unpark *)
 			woken: BOOLEAN;
 			vars: POINTER TO ARRAY OF Var
 		END;

@@ -31,7 +31,7 @@ MODULE ObxActor4;
 
 		History = POINTER TO RECORD (ActorPersist.Visitor) END;
 
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		acct, anna, boris: ActorCore.Ref;
@@ -167,7 +167,7 @@ MODULE ObxActor4;
 		WHILE seen < want DO Tasks.Sleep(1) END	(* по одной операции: история в одном порядке *)
 	END Send;
 
-	PROCEDURE (d: Driver) Run;
+	PROCEDURE (d: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR i, s, res: INTEGER; crash: Crash; h: History; last: LONGINT;
 	BEGIN
 		WHILE (acct = NIL) OR (starts = 0) DO Tasks.Sleep(1) END;
@@ -184,7 +184,7 @@ MODULE ObxActor4;
 		Console.WriteStr("account: history"); Console.WriteLn;
 		NEW(h); ActorPersist.Read(ActorJournal.dir, "bank/acct", 1, h, last, res);
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR p: ActorCore.Props; d: Driver;
@@ -193,7 +193,7 @@ MODULE ObxActor4;
 		acct := NIL; seen := 0; starts := 0;
 		IF ActorRun.n = 0 THEN ActorRun.Start(2) END;
 		p := ActorCore.NewProps(NewBank); p.strategy := ActorSup.NewOneForOne(ActorCore.Restart, 3, 1000);
-		IF ActorCore.Spawn(NIL, p, "bank") = NIL THEN END;
+		ASSERT(ActorCore.Spawn(NIL, p, "bank") # NIL, 100);
 		anna := ActorCore.Spawn(NIL, ActorCore.NewProps(NewClerk), "anna");
 		boris := ActorCore.Spawn(NIL, ActorCore.NewProps(NewClerk), "boris");
 		NEW(d); Tasks.Start(d);

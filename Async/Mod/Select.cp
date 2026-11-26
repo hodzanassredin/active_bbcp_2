@@ -36,7 +36,7 @@ MODULE AsyncSelect;
 		(** Решение одного Select или одного ожидания; сигнал получает его в
 			Arm и передаёт в SignalReady. *)
 		Ctx* = POINTER TO RECORD
-			task: Tasks.Task;
+			task: Tasks.Task;	(* Task или Job: адрес для пробуждения *)
 			nextFree: Ctx;	(* связь свободного списка *)
 			decided: BOOLEAN;
 			ready: BOOLEAN;	(* регистрация окончена, можно будить *)

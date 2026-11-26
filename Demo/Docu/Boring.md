@@ -33,12 +33,12 @@ MODULE DemoBoring;
 			n: INTEGER
 		END;
 
-		Generator = POINTER TO RECORD (Tasks.Task)
+		Generator = POINTER TO RECORD (Tasks.Job)
 			out: AsyncChan.Chan;
 			who: INTEGER
 		END;
 
-		Mux = POINTER TO RECORD (Tasks.Task)
+		Mux = POINTER TO RECORD (Tasks.Job)
 			a, b: AsyncChan.Chan
 		END;
 
@@ -55,7 +55,7 @@ MODULE DemoBoring;
 		RETURN m
 	END NewMsg;
 
-	PROCEDURE (g: Generator) Run;
+	PROCEDURE (g: Generator) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER;
 	BEGIN
 		FOR i := 1 TO perGenerator DO
@@ -63,9 +63,9 @@ MODULE DemoBoring;
 			Tasks.Sleep(1)		(* «скучная» работа *)
 		END;
 		g.out.Send(NewMsg(g.who, -1))
-	END Run;
+	END Body;
 
-	PROCEDURE (m: Mux) Run;
+	PROCEDURE (m: Mux) Body- (VAR ctx: Tasks.Ctx);
 		VAR ops: ARRAY 2 OF AsyncSelect.Op; done, idx: INTEGER;
 			msg: AsyncSelect.Msg; who, n: INTEGER;
 	BEGIN
@@ -86,7 +86,7 @@ MODULE DemoBoring;
 				IF who = 0 THEN INC(FromA) ELSE INC(FromB) END
 			END
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE Run*;
 	(** Демонстрация: два генератора и один мультиплексор. *)

@@ -3,19 +3,19 @@ MODULE ObxChan0;
 
 	TYPE
 		Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
-		Sender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
-		Receiver = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; sum: INTEGER END;
+		Sender = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Chan END;
+		Receiver = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Chan; sum: INTEGER END;
 
 	VAR done: BOOLEAN;
 
-	PROCEDURE (s: Sender) Run;
+	PROCEDURE (s: Sender) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: Num; i: INTEGER;
 	BEGIN
 		FOR i := 1 TO 5 DO NEW(m); m.n := i; s.c.Send(m) END;
 		s.c.Send(NIL)
-	END Run;
+	END Body;
 
-	PROCEDURE (r: Receiver) Run;
+	PROCEDURE (r: Receiver) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg;
 	BEGIN
 		LOOP
@@ -24,7 +24,7 @@ MODULE ObxChan0;
 			WITH m: Num DO r.sum := r.sum + m.n END
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: AsyncChan.Chan; s: Sender; r: Receiver; d: ARRAY 16 OF CHAR;

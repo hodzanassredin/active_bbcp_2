@@ -69,16 +69,12 @@ MODULE DemoBuffer;
 	BEGIN
 		WITH op: PutOp DO
 			(* AWAIT ~full *)
-			WHILE (b.in + 1) MOD BufLen = b.out DO
-				IF ~b.Await(ctx, {empty}) THEN RETURN END
-			END;
+			IF ~b.Await(ctx, {empty}) THEN RETURN END;
 			b.data[b.in] := op.i;
 			b.in := (b.in + 1) MOD BufLen
 		| op: GetOp DO
 			(* AWAIT ~empty *)
-			WHILE b.in = b.out DO
-				IF ~b.Await(ctx, {full}) THEN RETURN END
-			END;
+			IF ~b.Await(ctx, {full}) THEN RETURN END;
 			op.i := b.data[b.out];
 			b.out := (b.out + 1) MOD BufLen
 		ELSE

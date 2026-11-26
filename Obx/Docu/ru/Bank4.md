@@ -16,9 +16,9 @@ MODULE ObxBank4;
 	TYPE
 		Transfer = POINTER TO RECORD (AsyncStm.Tx) from, to, sum: INTEGER END;
 		Either = POINTER TO RECORD (AsyncStm.Tx) first, second: Transfer END;
-		Clerk = POINTER TO RECORD (Tasks.Task) END;
-		Buyer = POINTER TO RECORD (Tasks.Task) END;
-		Payroll = POINTER TO RECORD (Tasks.Task) END;
+		Clerk = POINTER TO RECORD (Tasks.Job) END;
+		Buyer = POINTER TO RECORD (Tasks.Job) END;
+		Payroll = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		balance: ARRAY n OF AsyncStm.IntVar;
@@ -57,25 +57,25 @@ MODULE ObxBank4;
 		RETURN t
 	END NewTransfer;
 
-	PROCEDURE (c: Clerk) Run;
+	PROCEDURE (c: Clerk) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		AsyncStm.Atomically(NewTransfer(0, 2, 50))
-	END Run;
+	END Body;
 
-	PROCEDURE (b: Buyer) Run;
+	PROCEDURE (b: Buyer) Body- (VAR ctx: Tasks.Ctx);
 		VAR t: Either;
 	BEGIN
 		NEW(t); t.first := NewTransfer(1, 0, 120); t.second := NewTransfer(2, 0, 120);
 		AsyncStm.Atomically(t);
 		Show("buyer paid 120")
-	END Run;
+	END Body;
 
-	PROCEDURE (p: Payroll) Run;
+	PROCEDURE (p: Payroll) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(10);
 		balance[2].Set(balance[2].Get() + 100);
 		Show("salary 100 to account 2")
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: Clerk; b: Buyer; p: Payroll;

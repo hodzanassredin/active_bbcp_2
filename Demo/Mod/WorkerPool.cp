@@ -22,12 +22,12 @@ MODULE DemoWorkerPool;
 	TYPE
 		IntMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 
-		Worker = POINTER TO RECORD (Tasks.Task)
+		Worker = POINTER TO RECORD (Tasks.Job)
 			jobs: AsyncChan.Buffer;
 			results: AsyncChan.Mailbox
 		END;
 
-		Controller = POINTER TO RECORD (Tasks.Task)
+		Controller = POINTER TO RECORD (Tasks.Job)
 			jobs: AsyncChan.Buffer;
 			results: AsyncChan.Mailbox
 		END;
@@ -44,7 +44,7 @@ MODULE DemoWorkerPool;
 		RETURN m
 	END NewInt;
 
-	PROCEDURE (w: Worker) Run;
+	PROCEDURE (w: Worker) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg; n: INTEGER;
 	BEGIN
 		LOOP
@@ -53,9 +53,9 @@ MODULE DemoWorkerPool;
 			IF n < 0 THEN EXIT END;
 			w.results.Send(NewInt(n * n))
 		END
-	END Run;
+	END Body;
 
-	PROCEDURE (c: Controller) Run;
+	PROCEDURE (c: Controller) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; m: AsyncSelect.Msg;
 	BEGIN
 		FOR i := 1 TO jobs DO c.jobs.Send(NewInt(i)) END;
@@ -64,7 +64,7 @@ MODULE DemoWorkerPool;
 			c.results.Recv(m);
 			WITH m: IntMsg DO INC(Sum, m.n); INC(Count) END
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE Run*;
 	(** Демонстрация: 3 рабочих, 9 заданий n -> n*n. *)

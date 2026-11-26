@@ -47,9 +47,7 @@ MODULE DemoPhilo;
 	BEGIN
 		WITH op: SemOp DO
 			IF op.take THEN
-				WHILE s.taken DO
-					IF ~s.Await(ctx, {isFree}) THEN RETURN END
-				END;
+				IF ~s.Await(ctx, {isFree}) THEN RETURN END;
 				s.taken := TRUE
 			ELSE
 				s.taken := FALSE

@@ -10,7 +10,7 @@ MODULE ObxChan2;
 
 	TYPE
 		Event = POINTER TO RECORD (AsyncSelect.Msg) code: INTEGER END;
-		Handler = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Handler = POINTER TO RECORD (Tasks.Job) n: INTEGER END;
 
 	VAR box: AsyncChan.Mailbox; done: BOOLEAN;
 
@@ -21,7 +21,7 @@ MODULE ObxChan2;
 		NEW(e); e.code := code; box.Send(e)
 	END Post;
 
-	PROCEDURE (h: Handler) Run;
+	PROCEDURE (h: Handler) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg;
 	BEGIN
 		LOOP
@@ -32,7 +32,7 @@ MODULE ObxChan2;
 			END
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR h: Handler; s: ARRAY 16 OF CHAR;

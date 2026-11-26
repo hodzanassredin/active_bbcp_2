@@ -28,8 +28,8 @@ MODULE ObxDownCtx;
 		Downloader = POINTER TO RECORD (Tasks.Job) pipe: Pipe END;
 		Saver = POINTER TO RECORD (Tasks.Job) pipe: Pipe; saved: INTEGER END;
 		DeadlineParent = POINTER TO RECORD (Tasks.Job) pipe: Pipe; sv: Saver END;
-		CancelParent = POINTER TO RECORD (Tasks.Job) pipe: Pipe; sv: Saver; dl: Tasks.Task END;
-		Killer = POINTER TO RECORD (Tasks.Task) dl, sv: Tasks.Task END;
+		CancelParent = POINTER TO RECORD (Tasks.Job) pipe: Pipe END;
+		Killer = POINTER TO RECORD (Tasks.Job) dl, sv: Tasks.Job END;
 
 	VAR
 		deadlineExpired, deadlinePartial: BOOLEAN;
@@ -54,15 +54,11 @@ MODULE ObxDownCtx;
 	PROCEDURE (p: Pipe) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: PutOp DO
-			WHILE p.count = cap DO
-				IF ~p.Await(ctx, {0}) THEN RETURN END
-			END;
+			IF ~p.Await(ctx, {0}) THEN RETURN END;
 			p.ring[p.tail] := op.seq;
 			p.tail := (p.tail + 1) MOD cap; INC(p.count)
 		| op: GetOp DO
-			WHILE p.count = 0 DO
-				IF ~p.Await(ctx, {1}) THEN op.ok := FALSE; RETURN END
-			END;
+			IF ~p.Await(ctx, {1}) THEN op.ok := FALSE; RETURN END;
 			op.seq := p.ring[p.head];
 			p.head := (p.head + 1) MOD cap; DEC(p.count); op.ok := TRUE
 		ELSE
@@ -108,12 +104,12 @@ MODULE ObxDownCtx;
 		deadlinePartial := sv.saved < total
 	END Body;
 
-	PROCEDURE (k: Killer) Run;
+	PROCEDURE (k: Killer) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(15);
 		Tasks.Cancel(k.dl);
 		Tasks.Cancel(k.sv)
-	END Run;
+	END Body;
 
 	PROCEDURE (p: CancelParent) Body- (VAR ctx: Tasks.Ctx);
 		VAR dl: Downloader; sv: Saver; k: Killer;
@@ -121,7 +117,6 @@ MODULE ObxDownCtx;
 		NEW(dl); dl.pipe := p.pipe;
 		NEW(sv); sv.pipe := p.pipe;
 		NEW(k); k.dl := dl; k.sv := sv;
-		p.sv := sv; p.dl := dl;
 		Tasks.Spawn(ctx, dl);
 		Tasks.Spawn(ctx, sv);
 		Tasks.Spawn(ctx, k);

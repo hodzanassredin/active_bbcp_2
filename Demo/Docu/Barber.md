@@ -88,31 +88,25 @@ MODULE DemoBarber;
 				op.got := FALSE; RETURN
 			END;
 			INC(s.waiting);
-			WHILE s.barbers = 0 DO		(* ждём свободного парикмахера *)
-				IF ~s.Await(ctx, {barberAvailable}) THEN op.got := FALSE; RETURN END
-			END;
+			(* ждём свободного парикмахера *)
+			IF ~s.Await(ctx, {barberAvailable}) THEN op.got := FALSE; RETURN END;
 			DEC(s.barbers);			(* забрали парикмахера *)
 			DEC(s.waiting);			(* ушли со стула в кресло *)
 			INC(s.serving);
-			WHILE s.open = 0 DO		(* ждём конца стрижки *)
-				IF ~s.Await(ctx, {openPositive}) THEN op.got := FALSE; RETURN END
-			END;
+			(* ждём конца стрижки *)
+			IF ~s.Await(ctx, {openPositive}) THEN op.got := FALSE; RETURN END;
 			DEC(s.open);			(* уходим, парикмахер может работать дальше *)
 			op.got := TRUE
 		| op: NextOp DO
 			(* Парикмахер свободен и ждёт посетителя. *)
 			INC(s.barbers);
-			WHILE s.serving = 0 DO
-				IF ~s.Await(ctx, {servingPositive}) THEN RETURN END
-			END;
+			IF ~s.Await(ctx, {servingPositive}) THEN RETURN END;
 			DEC(s.serving)
 		| op: FinishOp DO
 			(* Стрижка окончена; ждать, пока посетитель уйдёт. *)
 			INC(s.served);
 			INC(s.open);
-			WHILE s.open # 0 DO
-				IF ~s.Await(ctx, {openZero}) THEN RETURN END
-			END
+			IF ~s.Await(ctx, {openZero}) THEN RETURN END
 		ELSE
 			HALT(20)
 		END

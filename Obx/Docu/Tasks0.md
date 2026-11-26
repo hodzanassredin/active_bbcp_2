@@ -8,6 +8,7 @@ The example shows why this does not happen here, and thereby the main property o
 
 ```
 MODULE ObxTasks0;
+(** Задача нижнего уровня: Run без пропуска — это и есть предмет примера. *)
 	IMPORT Tasks, Console, Strings;
 
 	TYPE Counter = POINTER TO RECORD (Tasks.Task) END;

@@ -1,4 +1,5 @@
 MODULE ObxTasks3;
+(** Задачи нижнего уровня: пример показывает группу и ожидание её в TaskBoot. *)
 	IMPORT Tasks, Console, Strings;
 
 	TYPE

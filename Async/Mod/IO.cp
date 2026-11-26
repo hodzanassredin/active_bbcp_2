@@ -15,7 +15,7 @@ MODULE AsyncIO;
 
 	TYPE
 		Waiter = POINTER TO RECORD (Poller.Waiter)
-			task: Tasks.Task
+			task: Tasks.Task	(* Task или Job: нужен только адрес для Unpark *)
 		END;
 
 	PROCEDURE (w: Waiter) Ready (events: SET);

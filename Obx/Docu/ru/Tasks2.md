@@ -51,13 +51,9 @@ MODULE ObxTasks2;
 			IF q.tail = NIL THEN q.head := op.r ELSE q.tail.next := op.r END;
 			q.tail := op.r;
 			op.cond.r := op.r;
-			WHILE ~op.r.done DO
-				IF ~q.AwaitCond(ctx, op.cond) THEN RETURN END
-			END
+			IF ~q.AwaitCond(ctx, op.cond) THEN RETURN END
 		| op: TakeOp DO
-			WHILE q.head = NIL DO
-				IF ~q.Await(ctx, {0}) THEN op.r := NIL; RETURN END
-			END;
+			IF ~q.Await(ctx, {0}) THEN op.r := NIL; RETURN END;
 			op.r := q.head; q.head := op.r.next;
 			IF q.head = NIL THEN q.tail := NIL END
 		| op: AnswerOp DO

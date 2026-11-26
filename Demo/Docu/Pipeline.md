@@ -17,7 +17,7 @@ MODULE DemoPipeline;
 	Источники:
 	  https://go.dev/blog/pipelines
 	  https://go.dev/talks/2012/concurrency.slide#33 (fan-in)
-	В Go стадии — горутины и каналы; здесь задачи Tasks и каналы-
+	В Go стадии — горутины и каналы; здесь задачи Tasks.Job и каналы-
 	встречи AsyncChan.Chan. Признак конца — сообщение с n = -1.
 
 	Команда DemoPipeline.Run: квадраты чисел 1..10. Итог
@@ -32,17 +32,17 @@ MODULE DemoPipeline;
 	TYPE
 		IntMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
 
-		Generator = POINTER TO RECORD (Tasks.Task) out: AsyncChan.Chan END;
+		Generator = POINTER TO RECORD (Tasks.Job) out: AsyncChan.Chan END;
 
-		Dispatcher = POINTER TO RECORD (Tasks.Task)
+		Dispatcher = POINTER TO RECORD (Tasks.Job)
 			in, a, b: AsyncChan.Chan
 		END;
 
-		Worker = POINTER TO RECORD (Tasks.Task)
+		Worker = POINTER TO RECORD (Tasks.Job)
 			in, out: AsyncChan.Chan
 		END;
 
-		Merger = POINTER TO RECORD (Tasks.Task) in: AsyncChan.Chan END;
+		Merger = POINTER TO RECORD (Tasks.Job) in: AsyncChan.Chan END;
 
 	VAR
 		Sum*: INTEGER;
@@ -56,14 +56,14 @@ MODULE DemoPipeline;
 		RETURN m
 	END NewInt;
 
-	PROCEDURE (g: Generator) Run;
+	PROCEDURE (g: Generator) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER;
 	BEGIN
 		FOR i := 1 TO count DO g.out.Send(NewInt(i)) END;
 		g.out.Send(NewInt(-1))
-	END Run;
+	END Body;
 
-	PROCEDURE (d: Dispatcher) Run;
+	PROCEDURE (d: Dispatcher) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg; n, turn: INTEGER;
 	BEGIN
 		turn := 0;
@@ -78,9 +78,9 @@ MODULE DemoPipeline;
 			IF turn = 0 THEN d.a.Send(NewInt(n)) ELSE d.b.Send(NewInt(n)) END;
 			turn := 1 - turn
 		END
-	END Run;
+	END Body;
 
-	PROCEDURE (w: Worker) Run;
+	PROCEDURE (w: Worker) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg; n: INTEGER;
 	BEGIN
 		LOOP
@@ -89,9 +89,9 @@ MODULE DemoPipeline;
 			IF n < 0 THEN w.out.Send(NewInt(-1)); EXIT END;
 			w.out.Send(NewInt(n * n))
 		END
-	END Run;
+	END Body;
 
-	PROCEDURE (m: Merger) Run;
+	PROCEDURE (m: Merger) Body- (VAR ctx: Tasks.Ctx);
 		VAR msg: AsyncSelect.Msg; n: INTEGER;
 	BEGIN
 		LOOP
@@ -100,7 +100,7 @@ MODULE DemoPipeline;
 			IF n < 0 THEN EXIT END;
 			INC(Sum, n); INC(Count)		(* fan-in в общий итог *)
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE Run*;
 	(** Демонстрация: 1 -> 2 -> квадрат -> 2 слияния. *)
@@ -155,7 +155,7 @@ DemoPipeline: count=10 sum=385
 
 ## Что произошло
 
-Каждая стадия — `Tasks.Task`, каналы — встречи `AsyncChan.Chan`. Закрытия канала нет, поэтому
+Каждая стадия — `Tasks.Job`, каналы — встречи `AsyncChan.Chan`. Закрытия канала нет, поэтому
 конец потока — сообщение `IntMsg` с `n = -1`, которое каждая стадия передаёт дальше. Диспетчер
 раздаёт числа двум рабочим по кругу; две задачи слияния складывают результаты в общие счётчики.
 

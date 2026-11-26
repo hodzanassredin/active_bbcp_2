@@ -37,7 +37,7 @@ MODULE ObxActor7;
 		END;
 
 		Sum = POINTER TO RECORD (ActorPersist.Visitor) total: INTEGER END;
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		net: ActorNetMem.Net;
@@ -222,7 +222,7 @@ MODULE ObxActor7;
 		NEW(v); ActorPersist.Read(j, name, 1, v, last, res); RETURN 1000 + v.total
 	END Balance;
 
-	PROCEDURE (t: Driver) Run;
+	PROCEDURE (t: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR coord: ActorCore.Ref; b: Begin; tick: Tick; round: INTEGER;
 	BEGIN
 		ActorNet.Export(na, ActorCore.Spawn(NIL, ActorCore.NewProps(NewA), "A"), capA);
@@ -246,7 +246,7 @@ MODULE ObxActor7;
 		Console.WriteStr(", B = "); WriteInt(Balance(jb, "B"));
 		Console.WriteStr(", lost frames "); WriteInt(net.lost); Console.WriteLn;
 		finished := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Driver;

@@ -7,6 +7,7 @@
 
 ```
 MODULE ObxTasks1;
+(** Задачи нижнего уровня: пример показывает Park, Unpark, Sleep и Join. *)
 	IMPORT Tasks, Console;
 
 	TYPE

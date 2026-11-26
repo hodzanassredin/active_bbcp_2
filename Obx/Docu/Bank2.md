@@ -58,9 +58,7 @@ MODULE ObxBank2;
 	BEGIN
 		WITH op: WithdrawOp DO
 			op.cond.n := op.n;
-			WHILE a.balance < op.n DO
-				IF ~a.AwaitCond(ctx, op.cond) THEN RETURN END
-			END;
+			IF ~a.AwaitCond(ctx, op.cond) THEN RETURN END;
 			DEC(a.balance, op.n)
 		| op: DepositOp DO
 			INC(a.balance, op.n)

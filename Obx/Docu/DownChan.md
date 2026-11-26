@@ -51,7 +51,7 @@ MODULE ObxDownChan;
 			pipe: AsyncChan.Buffer; dl: Downloader; sv: Saver
 		END;
 
-		Killer = POINTER TO RECORD (Tasks.Task) dl, sv: Tasks.Task END;
+		Killer = POINTER TO RECORD (Tasks.Job) dl, sv: Tasks.Job END;
 
 	VAR
 		deadlineExpired, deadlinePartial: BOOLEAN;
@@ -113,12 +113,12 @@ MODULE ObxDownChan;
 		p.expired := ctx.expired
 	END Body;
 
-	PROCEDURE (k: Killer) Run;
+	PROCEDURE (k: Killer) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(15);
 		Tasks.Cancel(k.dl);
 		Tasks.Cancel(k.sv)
-	END Run;
+	END Body;
 
 	PROCEDURE (p: CancelParent) Body- (VAR ctx: Tasks.Ctx);
 		VAR k: Killer;
@@ -200,7 +200,7 @@ chunk and does not manage to put twenty chunks: the deadline expires, `JoinAll` 
 and both tasks leave on `FALSE` from `SendCtx` and `RecvCtx`. Hence
 `channel deadline expired: yes` and `channel deadline partial: yes`.
 
-The second phase also starts `Killer`, an ordinary task with method `Run`. After 15 ms it calls
+The second phase also starts `Killer`, an ordinary `Tasks.Job` with method `Body`. After 15 ms it calls
 `Tasks.Cancel` for the downloader and the saver. Cancellation sets the flag and wakes the task; the
 channel sees the stop at the next switch point, withdraws the alternative and returns `FALSE`. After
 `JoinAll` the parent checks `Tasks.State`: both tasks are in state `Cancelled`, and the saver took

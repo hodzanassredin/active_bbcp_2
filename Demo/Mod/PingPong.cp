@@ -5,7 +5,7 @@ MODULE DemoPingPong;
 	2012), пример ping-pong: две горутины перекидывают мяч по общему
 	каналу, счётчик ударов растёт до заданного предела.
 	Источник: https://go.dev/talks/2012/concurrency.slide#14
-	Здесь две задачи Tasks и канал AsyncChan.Chan (встреча); мяч —
+	Здесь две задачи Tasks.Job и канал AsyncChan.Chan (встреча); мяч —
 	сообщение AsyncSelect.Msg, после отправки не меняется.
 
 	Команда DemoPingPong.Run: 10 ударов. Итог детерминирован:
@@ -21,7 +21,7 @@ MODULE DemoPingPong;
 			n: INTEGER
 		END;
 
-		Player = POINTER TO RECORD (Tasks.Task)
+		Player = POINTER TO RECORD (Tasks.Job)
 			table: AsyncChan.Chan;
 			first: BOOLEAN	(* этот игрок подаёт первый мяч *)
 		END;
@@ -39,7 +39,7 @@ MODULE DemoPingPong;
 		RETURN m
 	END NewBall;
 
-	PROCEDURE (p: Player) Run;
+	PROCEDURE (p: Player) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg; n: INTEGER;
 	BEGIN
 		IF p.first THEN p.table.Send(NewBall(0)) END;
@@ -55,7 +55,7 @@ MODULE DemoPingPong;
 			END;
 			IF n + 1 >= total THEN EXIT END
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE Run*;
 	(** Демонстрация: два игрока, 10 ударов. *)

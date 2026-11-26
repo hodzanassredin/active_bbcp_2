@@ -61,16 +61,12 @@ MODULE DemoReaderWriter;
 		WITH op: RwOp DO
 			CASE op.kind OF
 			| enterReader:
-				WHILE rw.n < 0 DO
-					IF ~rw.Await(ctx, {readersMayEnter}) THEN RETURN END
-				END;
+				IF ~rw.Await(ctx, {readersMayEnter}) THEN RETURN END;
 				INC(rw.n)
 			| exitReader:
 				DEC(rw.n)
 			| enterWriter:
-				WHILE rw.n # 0 DO
-					IF ~rw.Await(ctx, {writerMayEnter}) THEN RETURN END
-				END;
+				IF ~rw.Await(ctx, {writerMayEnter}) THEN RETURN END;
 				DEC(rw.n)
 			| exitWriter:
 				INC(rw.n)

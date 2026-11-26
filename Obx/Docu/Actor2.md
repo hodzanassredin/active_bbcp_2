@@ -34,7 +34,7 @@ MODULE ObxActor2;
 		END;
 		Bank = POINTER TO RECORD (ActorCore.Actor) END;
 
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		acct: ARRAY accounts OF ActorCore.Ref;
@@ -124,7 +124,7 @@ MODULE ObxActor2;
 				seed := (seed * 1103 + 12345) MOD 65536; nextFrom := seed MOD accounts;
 				seed := (seed * 1103 + 12345) MOD 65536; nextTo := seed MOD accounts;
 				IF i MOD badEvery = 0 THEN nextAmount := 0 ELSE nextAmount := 1 + seed MOD 100 END;
-				IF ActorCore.Spawn(c, p, "") = NIL THEN END
+				ASSERT(ActorCore.Spawn(c, p, "") # NIL, 100)
 			END
 		| m: Report DO
 			INC(finished); IF m.ok THEN INC(succeeded) END
@@ -140,7 +140,7 @@ MODULE ObxActor2;
 
 	(* --- проверка и команда ----------------------------------------------- *)
 
-	PROCEDURE (d: Driver) Run;
+	PROCEDURE (d: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; r: Msg;
 	BEGIN
 		WHILE finished < transfers DO Tasks.Sleep(10) END;
@@ -158,7 +158,7 @@ MODULE ObxActor2;
 		IF total = accounts * initial THEN Console.WriteStr(": kept") ELSE Console.WriteStr(": BROKEN") END;
 		Console.WriteLn;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR p: ActorCore.Props; d: Driver;
@@ -167,7 +167,7 @@ MODULE ObxActor2;
 		finished := 0; succeeded := 0;
 		IF ActorRun.n = 0 THEN ActorRun.Start(4) END;
 		p := ActorCore.NewProps(NewBank); p.strategy := ActorSup.NewOneForOne(ActorCore.Resume, 0, 1000);
-		IF ActorCore.Spawn(NIL, p, "bank") = NIL THEN END;
+		ASSERT(ActorCore.Spawn(NIL, p, "bank") # NIL, 100);
 		NEW(d); Tasks.Start(d);
 		WHILE Tasks.Count() > 0 DO Services.actionHook.Step END
 	END Do;

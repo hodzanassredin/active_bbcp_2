@@ -71,19 +71,19 @@ MODULE ObxChan0;
 
 	TYPE
 		Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
-		Sender = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan END;
-		Receiver = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Chan; sum: INTEGER END;
+		Sender = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Chan END;
+		Receiver = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Chan; sum: INTEGER END;
 
 	VAR done: BOOLEAN;
 
-	PROCEDURE (s: Sender) Run;
+	PROCEDURE (s: Sender) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: Num; i: INTEGER;
 	BEGIN
 		FOR i := 1 TO 5 DO NEW(m); m.n := i; s.c.Send(m) END;
 		s.c.Send(NIL)
-	END Run;
+	END Body;
 
-	PROCEDURE (r: Receiver) Run;
+	PROCEDURE (r: Receiver) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg;
 	BEGIN
 		LOOP
@@ -92,7 +92,7 @@ MODULE ObxChan0;
 			WITH m: Num DO r.sum := r.sum + m.n END
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: AsyncChan.Chan; s: Sender; r: Receiver; d: ARRAY 16 OF CHAR;
@@ -148,12 +148,12 @@ MODULE ObxChan1;
 
 	TYPE
 		Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
-		Producer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; max: INTEGER END;
-		Consumer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; sum: INTEGER END;
+		Producer = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Buffer; max: INTEGER END;
+		Consumer = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Buffer; sum: INTEGER END;
 
 	VAR done: BOOLEAN;
 
-	PROCEDURE (p: Producer) Run;
+	PROCEDURE (p: Producer) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: Num; i: INTEGER;
 	BEGIN
 		FOR i := 1 TO 10 DO
@@ -161,9 +161,9 @@ MODULE ObxChan1;
 			IF p.c.count > p.max THEN p.max := p.c.count END
 		END;
 		p.c.Send(NIL)
-	END Run;
+	END Body;
 
-	PROCEDURE (k: Consumer) Run;
+	PROCEDURE (k: Consumer) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg;
 	BEGIN
 		LOOP
@@ -173,7 +173,7 @@ MODULE ObxChan1;
 			Tasks.Sleep(1)	(* потребитель медленнее производителя *)
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: AsyncChan.Buffer; p: Producer; k: Consumer; s: ARRAY 16 OF CHAR;
@@ -217,7 +217,7 @@ MODULE ObxChan2;
 
 	TYPE
 		Event = POINTER TO RECORD (AsyncSelect.Msg) code: INTEGER END;
-		Handler = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
+		Handler = POINTER TO RECORD (Tasks.Job) n: INTEGER END;
 
 	VAR box: AsyncChan.Mailbox; done: BOOLEAN;
 
@@ -228,7 +228,7 @@ MODULE ObxChan2;
 		NEW(e); e.code := code; box.Send(e)
 	END Post;
 
-	PROCEDURE (h: Handler) Run;
+	PROCEDURE (h: Handler) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg;
 	BEGIN
 		LOOP
@@ -239,7 +239,7 @@ MODULE ObxChan2;
 			END
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR h: Handler; s: ARRAY 16 OF CHAR;
@@ -294,16 +294,16 @@ MODULE ObxSelect0;
 
 	TYPE
 		Reply = POINTER TO RECORD (AsyncSelect.Msg) END;
-		Server = POINTER TO RECORD (Tasks.Task) delay: INTEGER; out: AsyncChan.Mailbox END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Server = POINTER TO RECORD (Tasks.Job) delay: INTEGER; out: AsyncChan.Mailbox END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR fast, slow: ARRAY 16 OF CHAR; done: BOOLEAN;
 
-	PROCEDURE (s: Server) Run;
+	PROCEDURE (s: Server) Body- (VAR ctx: Tasks.Ctx);
 		VAR r: Reply;
 	BEGIN
 		Tasks.Sleep(s.delay); NEW(r); s.out.Send(r)
-	END Run;
+	END Body;
 
 	PROCEDURE Ask (delay: INTEGER; OUT res: ARRAY OF CHAR);
 		VAR s: Server; ops: ARRAY 2 OF AsyncSelect.Op;
@@ -314,10 +314,10 @@ MODULE ObxSelect0;
 		IF AsyncChan.Select(ops) = 0 THEN res := "reply" ELSE res := "timeout" END
 	END Ask;
 
-	PROCEDURE (c: Client) Run;
+	PROCEDURE (c: Client) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Ask(10, fast); Ask(200, slow); done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: Client;
@@ -522,7 +522,7 @@ MODULE ObxStm0;
 		Transfer = POINTER TO RECORD (AsyncStm.Tx)
 			from, to: AsyncStm.IntVar; n: INTEGER
 		END;
-		Clerk = POINTER TO RECORD (Tasks.Task) END;
+		Clerk = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR a, b: AsyncStm.IntVar;
 
@@ -540,10 +540,10 @@ MODULE ObxStm0;
 		AsyncStm.Atomically(t)
 	END Move;
 
-	PROCEDURE (c: Clerk) Run;
+	PROCEDURE (c: Clerk) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Move(100); Move(100)
-	END Run;
+	END Body;
 
 	PROCEDURE Show;
 		VAR s: ARRAY 16 OF CHAR;
@@ -593,9 +593,9 @@ MODULE ObxStm1;
 
 	TYPE
 		Buy = POINTER TO RECORD (AsyncStm.Tx) tries: INTEGER END;
-		Buyer = POINTER TO RECORD (Tasks.Task) END;
-		Payroll = POINTER TO RECORD (Tasks.Task) END;
-		Opener = POINTER TO RECORD (Tasks.Task) END;
+		Buyer = POINTER TO RECORD (Tasks.Job) END;
+		Payroll = POINTER TO RECORD (Tasks.Job) END;
+		Opener = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		money: AsyncStm.IntVar;	(* счёт покупателя *)
@@ -615,28 +615,28 @@ MODULE ObxStm1;
 		money.Set(money.Get() - price)
 	END Do;
 
-	PROCEDURE (b: Buyer) Run;
+	PROCEDURE (b: Buyer) Body- (VAR ctx: Tasks.Ctx);
 		VAR t: Buy;
 	BEGIN
 		NEW(t); t.tries := 0;
 		AsyncStm.Atomically(t);
 		Say("bought, money = ", money.Get());
 		Say("transaction ran times: ", t.tries)
-	END Run;
+	END Body;
 
-	PROCEDURE (p: Payroll) Run;
+	PROCEDURE (p: Payroll) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(10);
 		money.Set(money.Get() + 200);
 		Say("salary paid, money = ", money.Get())
-	END Run;
+	END Body;
 
-	PROCEDURE (o: Opener) Run;
+	PROCEDURE (o: Opener) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(20);
 		open.Set(TRUE);
 		Console.WriteStr("shop opened"); Console.WriteLn
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR b: Buyer; p: Payroll; o: Opener;
@@ -758,16 +758,16 @@ thread finishes. The task waits; the other tasks and the main loop work. The rea
 MODULE ObxWork0;
 	IMPORT S := SYSTEM, AsyncWork, Tasks, Services, AsyncIO, Console, Strings;
 
-	TYPE Asker = POINTER TO RECORD (Tasks.Task) END;
+	TYPE Asker = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR req: AsyncWork.AddrReq; status: INTEGER; done: BOOLEAN;
 
-	PROCEDURE (a: Asker) Run;
+	PROCEDURE (a: Asker) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		req.host := "localhost"; req.count := 0; req.status := -1;
 		status := AsyncWork.Execute(S.ADR(AsyncWork.ResolveJob), S.ADR(req));
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR a: Asker; s: ARRAY 16 OF CHAR;
@@ -839,7 +839,7 @@ MODULE ObxComputon;
 
 	TYPE
 		Square = POINTER TO RECORD (AsyncComputon.Computon) x, y: INTEGER END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR done: BOOLEAN; d: ARRAY 16 OF CHAR;
 
@@ -858,7 +858,7 @@ MODULE ObxComputon;
 		rd.ReadInt(c.x); rd.ReadInt(c.y)
 	END Internalize;
 
-	PROCEDURE (cl: Client) Run;
+	PROCEDURE (cl: Client) Body- (VAR ctx: Tasks.Ctx);
 		VAR c: Square; r: AsyncComputon.Computon;
 	BEGIN
 		NEW(c); c.x := 12; c.y := 0;
@@ -870,7 +870,7 @@ MODULE ObxComputon;
 			Strings.IntToString(AsyncComputon.LastError(), d)
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR cl: Client;

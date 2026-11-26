@@ -25,7 +25,7 @@ MODULE ObxActor3;
 		END;
 		Bank = POINTER TO RECORD (ActorCore.Actor) END;
 
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		journal: ActorJournal.Journal;
@@ -126,7 +126,7 @@ MODULE ObxActor3;
 	BEGIN
 		acct := NIL;
 		p := ActorCore.NewProps(NewBank); p.strategy := ActorSup.NewOneForOne(ActorCore.Restart, 3, 1000);
-		IF ActorCore.Spawn(NIL, p, "bank") = NIL THEN END;
+		ASSERT(ActorCore.Spawn(NIL, p, "bank") # NIL, 100);
 		WHILE acct = NIL DO Tasks.Sleep(1) END
 	END StartBank;
 
@@ -150,7 +150,7 @@ MODULE ObxActor3;
 		Console.WriteStr(", events "); WriteInt(journal.Last("bank/acct")); Console.WriteLn
 	END Show;
 
-	PROCEDURE (d: Driver) Run;
+	PROCEDURE (d: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR dep: Deposit; w: Withdraw; crash: Crash; s: INTEGER;
 	BEGIN
 		StartBank;
@@ -168,7 +168,7 @@ MODULE ObxActor3;
 		Show("op 1 sent again");
 		StopBank; journal.Close;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR d: Driver;

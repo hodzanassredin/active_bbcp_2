@@ -16,6 +16,7 @@ MODULE ObxRestart;
 		batchN = 8;		(* задач в наборе *)
 		rounds = 100;		(* пачек *)
 
+	(* Задача нижнего уровня: пример про повторный Start одной задачи. *)
 	TYPE
 		RepeatTask = POINTER TO RECORD (Tasks.Task) runs: INTEGER END;
 

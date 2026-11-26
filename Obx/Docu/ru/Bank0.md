@@ -8,6 +8,8 @@
 
 ```
 MODULE ObxBank0;
+(** Задача нижнего уровня: пример сравнивает действие Services.Action и
+	задачу Tasks.Task, Run без пропуска — часть сравнения. *)
 	IMPORT Services, Tasks, Console, Strings;
 
 	CONST n = 3;	(* число счетов *)

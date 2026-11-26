@@ -26,7 +26,7 @@ MODULE ObxRaft1;
 		Added = POINTER TO RECORD (ActorPersist.Event) END;
 		Counter = POINTER TO RECORD (ActorPersist.Actor) v: INTEGER END;
 
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		net: ActorNetMem.Net;
@@ -113,7 +113,7 @@ MODULE ObxRaft1;
 		END
 	END Call;
 
-	PROCEDURE (t: Driver) Run;
+	PROCEDURE (t: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR l, k, i: INTEGER; inc: Inc; get: Get;
 	BEGIN
 		WHILE Leader() < 0 DO Tasks.Sleep(5) END;
@@ -132,7 +132,7 @@ MODULE ObxRaft1;
 		Console.WriteStr("inc"); Console.WriteLn; NEW(inc); Call(inc);
 		ActorRun.Shutdown;
 		finished := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Driver; i, k: INTEGER; name: ARRAY 2 OF CHAR;

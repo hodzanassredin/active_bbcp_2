@@ -47,17 +47,13 @@ MODULE AsyncOnce;
 			ASSERT(~o.done, 21);
 			o.n := op.x; o.done := TRUE
 		| op: ReadIntOp DO
-			WHILE ~o.done DO
-				IF ~o.Await(ctx, {filled}) THEN op.ok := FALSE; RETURN END
-			END;
+			IF ~o.Await(ctx, {filled}) THEN op.ok := FALSE; RETURN END;
 			op.x := o.n; op.ok := TRUE
 		| op: FillMsgOp DO
 			ASSERT(~o.done, 22);
 			o.m := op.m; o.done := TRUE
 		| op: ReadMsgOp DO
-			WHILE ~o.done DO
-				IF ~o.Await(ctx, {filled}) THEN op.ok := FALSE; RETURN END
-			END;
+			IF ~o.Await(ctx, {filled}) THEN op.ok := FALSE; RETURN END;
 			op.m := o.m; op.ok := TRUE
 		ELSE
 			HALT(20)

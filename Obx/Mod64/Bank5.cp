@@ -9,9 +9,9 @@ MODULE ObxBank5;
 			reply: AsyncChan.Chan	(* сюда кассир кладёт ответ *)
 		END;
 		Answer = POINTER TO RECORD (AsyncSelect.Msg) ok: BOOLEAN END;
-		Cashier = POINTER TO RECORD (Tasks.Task) END;
-		Client = POINTER TO RECORD (Tasks.Task) id, sum: INTEGER END;
-		Manager = POINTER TO RECORD (Tasks.Task) END;
+		Cashier = POINTER TO RECORD (Tasks.Job) END;
+		Client = POINTER TO RECORD (Tasks.Job) id, sum: INTEGER END;
+		Manager = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR window: AsyncChan.Mailbox;	(* окошко кассы *)
 
@@ -23,7 +23,7 @@ MODULE ObxBank5;
 	END Say;
 
 	(* Счета принадлежат кассиру: их видит только эта задача *)
-	PROCEDURE (c: Cashier) Run;
+	PROCEDURE (c: Cashier) Body- (VAR ctx: Tasks.Ctx);
 		VAR balance: ARRAY n OF INTEGER; m: AsyncSelect.Msg; a: Answer; i, total: INTEGER;
 	BEGIN
 		balance[0] := 100; balance[1] := 100; balance[2] := 100;
@@ -42,9 +42,9 @@ MODULE ObxBank5;
 		total := 0;
 		FOR i := 0 TO n - 1 DO Say("balance ", balance[i]); total := total + balance[i] END;
 		Say("total ", total)
-	END Run;
+	END Body;
 
-	PROCEDURE (c: Client) Run;
+	PROCEDURE (c: Client) Body- (VAR ctx: Tasks.Ctx);
 		VAR r: Request; m: AsyncSelect.Msg;
 	BEGIN
 		NEW(r); r.from := c.id; r.to := (c.id + 1) MOD n; r.sum := c.sum;
@@ -52,9 +52,9 @@ MODULE ObxBank5;
 		window.Send(r);
 		r.reply.Recv(m);
 		IF m(Answer).ok THEN Say("done, client ", c.id) ELSE Say("refused, client ", c.id) END
-	END Run;
+	END Body;
 
-	PROCEDURE (m: Manager) Run;
+	PROCEDURE (m: Manager) Body- (VAR ctx: Tasks.Ctx);
 		VAR c: ARRAY n OF Client; i: INTEGER;
 	BEGIN
 		FOR i := 0 TO n - 1 DO
@@ -64,7 +64,7 @@ MODULE ObxBank5;
 		END;
 		FOR i := 0 TO n - 1 DO Tasks.Join(c[i]) END;
 		window.Send(NIL)	(* закрыть кассу *)
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR k: Cashier; m: Manager;

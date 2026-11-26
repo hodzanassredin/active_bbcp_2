@@ -37,7 +37,7 @@ MODULE ObxDownChan;
 			pipe: AsyncChan.Buffer; dl: Downloader; sv: Saver
 		END;
 
-		Killer = POINTER TO RECORD (Tasks.Task) dl, sv: Tasks.Task END;
+		Killer = POINTER TO RECORD (Tasks.Job) dl, sv: Tasks.Job END;
 
 	VAR
 		deadlineExpired, deadlinePartial: BOOLEAN;
@@ -99,12 +99,12 @@ MODULE ObxDownChan;
 		p.expired := ctx.expired
 	END Body;
 
-	PROCEDURE (k: Killer) Run;
+	PROCEDURE (k: Killer) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(15);
 		Tasks.Cancel(k.dl);
 		Tasks.Cancel(k.sv)
-	END Run;
+	END Body;
 
 	PROCEDURE (p: CancelParent) Body- (VAR ctx: Tasks.Ctx);
 		VAR k: Killer;

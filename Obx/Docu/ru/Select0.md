@@ -10,16 +10,16 @@ MODULE ObxSelect0;
 
 	TYPE
 		Reply = POINTER TO RECORD (AsyncSelect.Msg) END;
-		Server = POINTER TO RECORD (Tasks.Task) delay: INTEGER; out: AsyncChan.Mailbox END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Server = POINTER TO RECORD (Tasks.Job) delay: INTEGER; out: AsyncChan.Mailbox END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR fast, slow: ARRAY 16 OF CHAR; done: BOOLEAN;
 
-	PROCEDURE (s: Server) Run;
+	PROCEDURE (s: Server) Body- (VAR ctx: Tasks.Ctx);
 		VAR r: Reply;
 	BEGIN
 		Tasks.Sleep(s.delay); NEW(r); s.out.Send(r)
-	END Run;
+	END Body;
 
 	PROCEDURE Ask (delay: INTEGER; OUT res: ARRAY OF CHAR);
 		VAR s: Server; ops: ARRAY 2 OF AsyncSelect.Op;
@@ -30,10 +30,10 @@ MODULE ObxSelect0;
 		IF AsyncChan.Select(ops) = 0 THEN res := "reply" ELSE res := "timeout" END
 	END Ask;
 
-	PROCEDURE (c: Client) Run;
+	PROCEDURE (c: Client) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Ask(10, fast); Ask(200, slow); done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: Client;

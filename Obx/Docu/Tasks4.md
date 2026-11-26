@@ -7,6 +7,7 @@ task scheduler notices that there are live tasks and nothing to wake them, and p
 
 ```
 MODULE ObxTasks4;
+(** Задача нижнего уровня: пример показывает Park без пробуждающего и Deadlocked. *)
 	IMPORT Tasks;
 
 	TYPE Lonely = POINTER TO RECORD (Tasks.Task) END;

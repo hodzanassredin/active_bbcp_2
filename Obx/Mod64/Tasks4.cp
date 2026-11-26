@@ -1,4 +1,5 @@
 MODULE ObxTasks4;
+(** Задача нижнего уровня: пример показывает Park без пробуждающего и Deadlocked. *)
 	IMPORT Tasks;
 
 	TYPE Lonely = POINTER TO RECORD (Tasks.Task) END;

@@ -21,7 +21,7 @@ MODULE ObxActor5;
 		Report = POINTER TO RECORD (ActorCore.Actor) t: ARRAY accounts OF Turnover END;
 		Adder = POINTER TO RECORD (ActorPersist.Visitor) t: POINTER TO Turnover; n: INTEGER END;
 
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		acct: ARRAY accounts OF ActorCore.Ref;
@@ -125,10 +125,10 @@ MODULE ObxActor5;
 	PROCEDURE Print;
 		VAR r: Msg; f: Refresh;
 	BEGIN
-		NEW(f); IF ActorCore.Ask(report, f, 1000, r) = ActorCore.ok THEN END
+		NEW(f); ASSERT(ActorCore.Ask(report, f, 1000, r) = ActorCore.ok, 100)
 	END Print;
 
-	PROCEDURE (d: Driver) Run;
+	PROCEDURE (d: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER;
 	BEGIN
 		FOR i := 0 TO accounts - 1 DO WHILE seen[i] < 0 DO Tasks.Sleep(1) END END;	(* счета восстановлены *)
@@ -138,7 +138,7 @@ MODULE ObxActor5;
 		Send(0, 20); Send(2, -100); Send(2, -100);
 		Print;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR i: INTEGER; name: ActorCore.Name; d: Driver;

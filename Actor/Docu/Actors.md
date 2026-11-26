@@ -41,7 +41,7 @@ MODULE ObxActor0;
 		Get = POINTER TO RECORD (ActorCore.Msg) END;
 		Num = POINTER TO RECORD (ActorCore.Msg) n: INTEGER END;
 		Counter = POINTER TO RECORD (ActorCore.Actor) n: INTEGER END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR counter: ActorCore.Ref;
 
@@ -60,7 +60,7 @@ MODULE ObxActor0;
 		NEW(a); RETURN a
 	END New;
 
-	PROCEDURE (t: Client) Run;
+	PROCEDURE (t: Client) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; inc: Inc; get: Get; r: ActorCore.Msg; s: ARRAY 16 OF CHAR;
 	BEGIN
 		NEW(inc); NEW(get);
@@ -71,7 +71,7 @@ MODULE ObxActor0;
 		END;
 		Console.WriteLn;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Client;
@@ -271,7 +271,7 @@ MODULE ObxActor1;
 		Boom = POINTER TO RECORD (ActorCore.Msg) END;
 		Worker = POINTER TO RECORD (ActorCore.Actor) n: INTEGER END;
 		Parent = POINTER TO RECORD (ActorCore.Actor) END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR worker: ActorCore.Ref; starts, last: INTEGER;
 
@@ -303,7 +303,7 @@ MODULE ObxActor1;
 		NEW(a); RETURN a
 	END NewParent;
 
-	PROCEDURE (t: Client) Run;
+	PROCEDURE (t: Client) Body- (VAR ctx: Tasks.Ctx);
 		VAR inc: Inc; boom: Boom; s: ARRAY 16 OF CHAR;
 	BEGIN
 		WHILE worker = NIL DO Tasks.Sleep(1) END;
@@ -316,7 +316,7 @@ MODULE ObxActor1;
 		Strings.IntToString(last, s); Console.WriteStr(", count after restart "); Console.WriteStr(s);
 		Console.WriteLn;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR p: ActorCore.Props; t: Client;
@@ -325,7 +325,7 @@ MODULE ObxActor1;
 		starts := 0; last := 0; worker := NIL;
 		p := ActorCore.NewProps(NewParent);
 		p.strategy := ActorSup.NewOneForOne(ActorCore.Restart, 3, 1000);
-		IF ActorCore.Spawn(NIL, p, "parent") = NIL THEN END;
+		ASSERT(ActorCore.Spawn(NIL, p, "parent") # NIL, 100);
 		NEW(t); Tasks.Start(t);
 		WHILE Tasks.Count() > 0 DO Services.actionHook.Step END
 	END Do;

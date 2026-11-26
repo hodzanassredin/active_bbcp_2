@@ -10,12 +10,12 @@ MODULE ObxChan1;
 
 	TYPE
 		Num = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
-		Producer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; max: INTEGER END;
-		Consumer = POINTER TO RECORD (Tasks.Task) c: AsyncChan.Buffer; sum: INTEGER END;
+		Producer = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Buffer; max: INTEGER END;
+		Consumer = POINTER TO RECORD (Tasks.Job) c: AsyncChan.Buffer; sum: INTEGER END;
 
 	VAR done: BOOLEAN;
 
-	PROCEDURE (p: Producer) Run;
+	PROCEDURE (p: Producer) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: Num; i: INTEGER;
 	BEGIN
 		FOR i := 1 TO 10 DO
@@ -23,9 +23,9 @@ MODULE ObxChan1;
 			IF p.c.count > p.max THEN p.max := p.c.count END
 		END;
 		p.c.Send(NIL)
-	END Run;
+	END Body;
 
-	PROCEDURE (k: Consumer) Run;
+	PROCEDURE (k: Consumer) Body- (VAR ctx: Tasks.Ctx);
 		VAR m: AsyncSelect.Msg;
 	BEGIN
 		LOOP
@@ -35,7 +35,7 @@ MODULE ObxChan1;
 			Tasks.Sleep(1)	(* потребитель медленнее производителя *)
 		END;
 		done := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR c: AsyncChan.Buffer; p: Producer; k: Consumer; s: ARRAY 16 OF CHAR;

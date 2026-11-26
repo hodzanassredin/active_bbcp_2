@@ -15,7 +15,7 @@ MODULE ObxActor0;
 		Get = POINTER TO RECORD (ActorCore.Msg) END;
 		Num = POINTER TO RECORD (ActorCore.Msg) n: INTEGER END;
 		Counter = POINTER TO RECORD (ActorCore.Actor) n: INTEGER END;
-		Client = POINTER TO RECORD (Tasks.Task) END;
+		Client = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR counter: ActorCore.Ref;
 
@@ -34,7 +34,7 @@ MODULE ObxActor0;
 		NEW(a); RETURN a
 	END New;
 
-	PROCEDURE (t: Client) Run;
+	PROCEDURE (t: Client) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER; inc: Inc; get: Get; r: ActorCore.Msg; s: ARRAY 16 OF CHAR;
 	BEGIN
 		NEW(inc); NEW(get);
@@ -45,7 +45,7 @@ MODULE ObxActor0;
 		END;
 		Console.WriteLn;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Client;

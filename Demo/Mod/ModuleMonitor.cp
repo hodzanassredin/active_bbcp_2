@@ -60,17 +60,13 @@ MODULE DemoModuleMonitor;
 	PROCEDURE (s: Store) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: PutOp DO
-			WHILE s.free = 0 DO
-				IF ~s.Await(ctx, {freeFlag}) THEN RETURN END
-			END;
+			IF ~s.Await(ctx, {freeFlag}) THEN RETURN END;
 			DEC(s.free);
 			s.buf[s.tail] := op.x;
 			s.tail := (s.tail + 1) MOD cap;
 			INC(s.available)
 		| op: GetOp DO
-			WHILE s.available = 0 DO
-				IF ~s.Await(ctx, {availableFlag}) THEN RETURN END
-			END;
+			IF ~s.Await(ctx, {availableFlag}) THEN RETURN END;
 			DEC(s.available);
 			op.x := s.buf[s.head];
 			s.head := (s.head + 1) MOD cap;

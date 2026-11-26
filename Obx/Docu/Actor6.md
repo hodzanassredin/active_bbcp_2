@@ -17,7 +17,7 @@ MODULE ObxActor6;
 
 		Teller = POINTER TO RECORD (ActorCore.Actor) END;
 		Watcher = POINTER TO RECORD (ActorCore.Actor) END;
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		net: ActorNetMem.Net;
@@ -71,7 +71,7 @@ MODULE ObxActor6;
 		NEW(w); RETURN w
 	END NewWatcher;
 
-	PROCEDURE (t: Driver) Run;
+	PROCEDURE (t: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR cap, forged: ARRAY 256 OF CHAR; r: ActorCore.Msg; bad: ActorCore.Ref; q: Query; i: INTEGER;
 	BEGIN
 		(* узел bank выдаёт пропуск к своему кассиру; shop знает только пропуск *)
@@ -89,12 +89,12 @@ MODULE ObxActor6;
 			Console.WriteStr("forged address: no answer, refused frames "); WriteInt(bank.refused); Console.WriteLn
 		END;
 		(* наблюдатель на shop; узел bank падает *)
-		IF ActorCore.Spawn(NIL, ActorCore.NewProps(NewWatcher), "shop") = NIL THEN END;
+		ASSERT(ActorCore.Spawn(NIL, ActorCore.NewProps(NewWatcher), "shop") # NIL, 100);
 		Tasks.Sleep(20);
 		ActorNetMem.Crash(net, "bank");
 		WHILE ~lost DO Tasks.Sleep(1) END;
 		ActorRun.Shutdown
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Driver;
@@ -104,7 +104,7 @@ MODULE ObxActor6;
 		net := ActorNetMem.NewAuto();
 		shop := ActorNet.New("shop", net, 1234); ActorNetMem.Add(net, shop);
 		bank := ActorNet.New("bank", net, 5678); ActorNetMem.Add(net, bank);
-		IF ActorCore.Spawn(NIL, ActorCore.NewProps(NewTeller), "bank") = NIL THEN END;
+		ASSERT(ActorCore.Spawn(NIL, ActorCore.NewProps(NewTeller), "bank") # NIL, 100);
 		NEW(t); Tasks.Start(t);
 		WHILE Tasks.Count() > 0 DO Services.actionHook.Step END
 	END Do;

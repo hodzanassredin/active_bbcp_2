@@ -15,7 +15,7 @@ MODULE ObxActor8;
 
 		Account = POINTER TO RECORD (ActorGrain.Actor) balance: INTEGER END;
 		Client = POINTER TO RECORD (ActorCore.Actor) END;
-		Driver = POINTER TO RECORD (Tasks.Task) END;
+		Driver = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR
 		net: ActorNetMem.Net;
@@ -115,7 +115,7 @@ MODULE ObxActor8;
 		NEW(d); d.sum := sum; NEW(s); s.to := to; s.m := d; ActorCore.Tell(client, s); Settle
 	END Pay;
 
-	PROCEDURE (t: Driver) Run;
+	PROCEDURE (t: Driver) Body- (VAR ctx: Tasks.Ctx);
 		VAR cap: ARRAY 256 OF CHAR; acct: ActorCore.Ref; owner: ActorCore.Name;
 	BEGIN
 		ActorGrain.HostCap(ca, cap); ActorGrain.Member(cb, cap);
@@ -129,7 +129,7 @@ MODULE ObxActor8;
 		ActorNetMem.Crash(net, owner); Settle;
 		Pay(acct, 25);
 		finished := TRUE
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR t: Driver; j: ActorJournal.Journal;

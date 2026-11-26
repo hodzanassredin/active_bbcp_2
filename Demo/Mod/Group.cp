@@ -34,6 +34,8 @@ MODULE DemoGroup;
 		ArriveOp = RECORD (Tasks.Op) END;
 
 		Worker = POINTER TO RECORD (Tasks.Job) barrier: Barrier; id: INTEGER END;
+		(* Родитель — задача без пропуска: пример показывает ожидание
+		   опустошения группы в TaskBoot. *)
 		Parent = POINTER TO RECORD (Tasks.Task) END;
 
 	VAR
@@ -63,9 +65,7 @@ MODULE DemoGroup;
 	BEGIN
 		WITH op: ArriveOp DO
 			INC(b.arrived);
-			WHILE b.arrived < n DO
-				IF ~b.Await(ctx, {allArrived}) THEN RETURN END
-			END
+			IF ~b.Await(ctx, {allArrived}) THEN RETURN END
 		ELSE
 			HALT(20)
 		END
