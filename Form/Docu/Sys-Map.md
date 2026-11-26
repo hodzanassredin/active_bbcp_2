@@ -2,8 +2,8 @@ Map to the Form Subsystem
 
 User Manual
 
-FormCmds	form command package
-FormGen	creation of default layout
-FormControllers	form controllers
-FormViews	form views
-FormModels	form models
+[FormCmds](Cmds.md)	form command package
+[FormGen](Gen.md)	creation of default layout
+[FormControllers](Controllers.md)	form controllers
+[FormViews](Views.md)	form views
+[FormModels](Models.md)	form models

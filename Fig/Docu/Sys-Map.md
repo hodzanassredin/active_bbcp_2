@@ -3,12 +3,12 @@ Map to the Fig Subsystem
 
 User's Guide
 
-FigModels docu	Models
-FigViews docu	Views
-FigCmds docu	Command package
+[FigModels](Models.md) [docu](Models.md)	[Models](Models.md)
+[FigViews](Views.md) [docu](Views.md)	[Views](Views.md)
+[FigCmds](Cmds.md) [docu](Cmds.md)	Command package
 
-FigBasic docu	Basic figures
-FigPoints docu	Points
+[FigBasic](Basic.md) [docu](Basic.md)	Basic figures
+[FigPoints](Points.md) [docu](Points.md)	[Points](Points.md)
 
 
 Original version of Brahe editor:
