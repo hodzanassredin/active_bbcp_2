@@ -4,6 +4,7 @@
 #   tools/build64.sh [Подсистема ...]     # по умолчанию все из DEFAULT_SUBSYSTEMS
 #   tools/build64.sh --clean             # сначала стереть .ocf/.osf установки
 #   tools/build64.sh --console-only      # не линковать GUI и не копировать Rsrc
+#   tools/build64.sh --no-help           # не собирать .odc справки (tools/gui-world.sh)
 #
 # dev0Linux запускается из корня репозитория; DevLibrarian.EnableDevLib
 # выбирает <Sub>/Mod64 (приоритет), иначе <Sub>/Mod, и пишет Code/Sym в
@@ -12,11 +13,12 @@
 set -e
 . "$(dirname "$0")/env.sh"
 
-clean=0; gui=1; subs=""
+clean=0; gui=1; help=1; subs=""
 for a in "$@"; do
 	case "$a" in
 		--clean) clean=1;;
 		--console-only) gui=0;;
+		--no-help) help=0;;
 		-*) echo "build64: неизвестный ключ $a" >&2; exit 2;;
 		*) subs="$subs $a";;
 	esac
@@ -87,6 +89,16 @@ if [ "$gui" -eq 1 ]; then
 		mkdir -p "$INSTALL/$d"
 		cp -a "$BB/$d/." "$INSTALL/$d/"
 	done
+fi
+
+# Справка в окне: .md и .cp становятся .odc с разметкой и ссылками.
+# Шаг отдельный: он зовёт dev0Linux ещё раз и нужен только собранному Obx.
+if [ "$gui" -eq 1 ] && [ "$help" -eq 1 ]; then
+	if [ -d "$INSTALL/Obx/Code" ]; then
+		"$BB/tools/gui-world.sh"
+	else
+		echo "build64: Obx не собран — .odc справки не строю"
+	fi
 fi
 
 echo "build64: готово"
