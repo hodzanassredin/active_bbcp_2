@@ -92,6 +92,9 @@ run() {
 }
 
 run Unit_devMain "" "passed 7"
+# Кириллица в выводе консоли: намеренный провал Unit_devCyr печатается в UTF-8.
+grep -q "TestFailRu.*провал" "$OUT/run-Unit_devMain.out" || {
+	echo "test-win64: кириллица в консоли испорчена" >&2; grep -a TestFailRu "$OUT/run-Unit_devMain.out" >&2; exit 1; }
 run System_devWinTasks proc "passed 5"
 run Async_devWinWorkers proc "passed 4"
 run Async_devStm proc "passed 19"
