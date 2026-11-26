@@ -729,6 +729,18 @@ node, and a cluster with a member list. Members are given explicitly: the capabi
 host (`HostCap`) is handed to another (`Member`). The journal `j` is shared by all nodes: the nodes
 share storage, like a common database, not memory.
 
+**Membership from the service.** The list of members need not be assembled by hand. On a cluster
+whose nodes are in the Raft membership service (the `Raft` guide, "Membership service"),
+`RaftGrainMembership` joins it with the host's capability, renews the lease and reads the list; each
+answer is passed to `ActorGrain.ApplyMembers`. That call adds a new member, revives a member that has
+returned, and marks a member that is absent from the list dead; a key stored in the list is kept in
+the member record (`Key`). Placement is computed from the live members on every send, so a change of
+the list changes the owners without a separate rebalancing step. A member whose lease is not renewed
+becomes dead for the others exactly as a node lost through `Terminated` does; the keys then move to
+the remaining members.
+
+Membership by `Member` remains for a fixed cluster and for tests.
+
 **Placement.** The owner of a key is the live member with the largest weight
 `hash(member, kind, key)`. This is rendezvous hashing, as in protoactor-go: when a member leaves,
 only its keys move. The owner is computed on every send. A letter to a key's address goes to the
@@ -1710,7 +1722,11 @@ DEFINITION ActorGrain;
 
 	CONST
 		maxMembers = 32;
+		capLen = 256;
 		notNetMsg = 31;
+		mutNoApply = 0;
+		mutKeepAlive = 1;
+		mutNoRejoin = 2;
 
 	TYPE
 		Actor = POINTER TO ABSTRACT RECORD (ActorPersist.Actor)
@@ -1725,12 +1741,25 @@ DEFINITION ActorGrain;
 			activations-, passivations-: LONGINT
 		END;
 
+		MemberInfo = RECORD
+			id: INTEGER;
+			cap: ARRAY capLen OF CHAR;
+			key: ActorJournal.Bytes;
+			alive: BOOLEAN
+		END;
+
 	PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster;
+	PROCEDURE HostRef (cl: Cluster): ActorCore.Ref;
 	PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR);
 	PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR);
+	PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER);
+	PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes;
 	PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Members (cl: Cluster): INTEGER;
+	PROCEDURE AliveCount (cl: Cluster): INTEGER;
+	PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name);
 	PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
 	PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR);
@@ -1749,8 +1778,20 @@ passivation); counters of activations and passivations.
 **PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster** — Pre: `n # NIL` — 20;
 `j # NIL` — 21; no root actor named after the node — 22. Post: the host is created, the node itself
 is the only member.
+**PROCEDURE HostRef (cl: Cluster): ActorCore.Ref** — Post: the address of the node's host.
 **PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR)** — Post: the host's capability for
 `Member` on other nodes.
+**PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER)** — Pre: each
+`list[i].cap` parses with `ActorNet.Import`; not checked. Post: the members of `cl` are the entries of
+`list[0 .. n-1]` with `alive = TRUE`; a new entry is added, a returning one is alive again, an absent
+one is marked dead; `id` and `key` are kept in the member record. Placement is computed from the live
+members on the next send.
+**PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes** — Post: the open key of
+the member from the last `ApplyMembers`; `NIL` if there is no such member. The key is not checked.
+**PROCEDURE Members (cl: Cluster): INTEGER** — Post: the number of members including the node itself.
+**PROCEDURE AliveCount (cl: Cluster): INTEGER** — Post: the number of live members including the node.
+**PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name)** — Post: the name of
+member `i` (0 is the node itself); empty outside the list.
 **PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR)** — Pre: the capability parses — 20; fewer
 than `maxMembers` members — 21. Post: the member is alive, its host is watched.
 **PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR)** — Pre: the member exists — 20. Post: the

@@ -33,9 +33,13 @@ MODULE RaftNode;
 	Отказ обработчика (трап) по умолчанию — тоже остановка.
 
 	Состав кластера хранится в ядре (RaftCore.voters/learners) и переживает
-	перезапуск в снимке хранилища; PreVote и CheckQuorum включены. Команды
-	смены состава (RaftCore.AddServer/RemoveServer) водитель пока не
-	принимает: это граница этапа, смена состава проверена в модели. *)
+	перезапуск в снимке хранилища; PreVote и CheckQuorum включены. Смену
+	состава водитель принимает письмами Conf: AddServer/RemoveServer уходят
+	в ядро (действует только лидер, остальные молча пропускают), SetPeer
+	дописывает пропуск нового узла — адрес берётся при первой отправке.
+	Номер узла в составе — он же индекс в массиве пропусков, поэтому новый
+	узел должен быть известен по номеру на всех узлах, которым он шлёт
+	письма. *)
 
 	IMPORT Services, Stores, ActorCore, ActorNet, Core := RaftCore, RaftSm, RaftStorage;
 
@@ -47,6 +51,12 @@ MODULE RaftNode;
 		(** переключатели мутаций водителя — только для тестов *)
 		mutSendFirst* = 0;	(** отправить письма до сохранения *)
 		mutEarlyReply* = 1;	(** ответить клиенту сразу, до фиксации *)
+		mutConfIgnore* = 2;	(** письма confAdd/confRemove не меняют состав *)
+		mutPeerStale* = 3;	(** письмо confPeer не дописывает пропуск *)
+		(** вид письма Conf *)
+		confPeer* = 0;	(** дописать пропуск узла id *)
+		confAdd* = 1;	(** ввести узел id в состав (учеником, затем избирателем) *)
+		confRemove* = 2;	(** вывести узел id из состава *)
 		capLen* = 256;
 		maxEnts = 65536;	(* предел числа записей в кадре: память под них берётся до чтения *)
 		maxBytes = 64 * 1024 * 1024;	(* предел длины байтов в кадре *)
@@ -68,6 +78,14 @@ MODULE RaftNode;
 		Query* = POINTER TO RECORD (ActorNet.Msg)
 			tag*: INTEGER;	(** метка клиента; вернётся в Reply.tag *)
 			body*: Bytes
+		END;
+
+		(** Смена состава и пропуски узлов. Письмо получает сам узел: только
+			его обработчик трогает cfg.peers и ядро. *)
+		Conf* = POINTER TO RECORD (ActorCore.Msg)
+			op*: INTEGER;	(** confPeer, confAdd, confRemove *)
+			id*: INTEGER;
+			cap*: ARRAY capLen OF CHAR	(** confPeer: пропуск узла id; пусто — забыть *)
 		END;
 
 		Reply* = POINTER TO RECORD (ActorNet.Msg)
@@ -107,6 +125,7 @@ MODULE RaftNode;
 
 		(** Устройство узла. *)
 		ConfigDesc* = RECORD
+			ref-: ActorCore.Ref;	(** адрес актора узла после Start *)
 			id*, n*: INTEGER;	(** номер узла и начальное число избирателей 0 .. n-1 *)
 			net*: ActorNet.Node;	(** узел ActorNet, на котором живёт актор *)
 			peers*: Caps;	(** пропуски узлов-акторов; свой — не нужен *)
@@ -416,6 +435,25 @@ MODULE RaftNode;
 		END
 	END OnQuery;
 
+	PROCEDURE^ CopyCap (IN src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
+
+	PROCEDURE (a: Node) OnConf (c: ActorCore.Context; m: Conf), NEW;
+	(* Пропуск нового узла или команда состава. Команду исполняет только
+		лидер; прочие узлы письмо пропускают — клиент шлёт его тому, кого
+		считает лидером, и повторяет при смене. *)
+	BEGIN
+		IF m.op = confPeer THEN
+			IF ~(mutPeerStale IN mutations) & (m.id >= 0) & (m.id < Core.maxNodes) & (m.id # a.cfg.id) THEN
+				CopyCap(m.cap, a.cfg.peers[m.id]); a.peer[m.id] := NIL	(* адрес возьмётся при первой отправке *)
+			END
+		ELSIF ~(mutConfIgnore IN mutations) & (a.nd # NIL) & (a.nd.role = Core.leader) THEN
+			IF m.op = confAdd THEN IF Core.AddServer(a.nd, m.id) > 0 THEN END
+			ELSIF m.op = confRemove THEN IF Core.RemoveServer(a.nd, m.id) > 0 THEN END
+			END;
+			a.Pump(c)
+		END
+	END OnConf;
+
 	PROCEDURE (a: Node) Receive* (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR x: Core.Msg;
 	BEGIN
@@ -430,12 +468,21 @@ MODULE RaftNode;
 				& (x.kind >= Core.voteReq) & (x.kind <= Core.prevoteResp) THEN
 				Core.Step(a.nd, x); a.Pump(c)
 			END
+		ELSIF m IS Conf THEN a.OnConf(c, m(Conf))
 		ELSIF m IS Propose THEN a.OnPropose(c, m(Propose))
 		ELSIF m IS Query THEN a.OnQuery(c, m(Query))
 		END
 	END Receive;
 
 	(* --- создание ----------------------------------------------------------- *)
+
+	PROCEDURE CopyCap (IN src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(dst) - 1) & (i < LEN(src)) & (src[i] # 0X) DO dst[i] := src[i]; INC(i) END;
+		dst[i] := 0X
+	END CopyCap;
 
 	PROCEDURE NewNode (): ActorCore.Actor;
 		VAR a: Node;
@@ -470,7 +517,8 @@ MODULE RaftNode;
 		ASSERT(cfg # NIL, 20);
 		pending := cfg;
 		p := ActorCore.NewProps(NewNode); p.dedicated := TRUE;
-		RETURN ActorCore.Spawn(NIL, p, cfg.net.name)
+		cfg.ref := ActorCore.Spawn(NIL, p, cfg.net.name);
+		RETURN cfg.ref
 	END Start;
 
 	PROCEDURE Status* (cfg: Config; OUT role, term, leader, last, lastTerm, commit, applied: INTEGER;
@@ -495,5 +543,61 @@ MODULE RaftNode;
 			END
 		END
 	END Status;
+
+	PROCEDURE SetPeer* (cfg: Config; id: INTEGER; IN cap: ARRAY OF CHAR);
+	(** Дописать пропуск узла id (ActorNet.Export) в устройство узла.
+		Пред: cfg # NIL — 20; 0 <= id < RaftCore.maxNodes — 21; id — не сам
+		узел. Пост: письмо Conf ушло узлу; адрес берётся при первой
+		отправке, прежний пропуск заменён. *)
+		VAR m: Conf;
+	BEGIN
+		ASSERT(cfg # NIL, 20); ASSERT((id >= 0) & (id < Core.maxNodes), 21);
+		IF id # cfg.id THEN
+			IF cfg.ref # NIL THEN
+				NEW(m); m.op := confPeer; m.id := id; CopyCap(cap, m.cap);
+				ActorCore.Tell(cfg.ref, m)
+			ELSE CopyCap(cap, cfg.peers[id])
+			END
+		END
+	END SetPeer;
+
+	PROCEDURE AddServer* (cfg: Config; id: INTEGER);
+	(** Ввести узел id в состав: учеником, затем избирателем после догона.
+		Пред: cfg # NIL — 20. Пост: письмо Conf ушло узлу; исполняет его
+		лидер, прочие пропускают. *)
+		VAR m: Conf;
+	BEGIN
+		ASSERT(cfg # NIL, 20);
+		IF cfg.ref # NIL THEN
+			NEW(m); m.op := confAdd; m.id := id;
+			ActorCore.Tell(cfg.ref, m)
+		END
+	END AddServer;
+
+	PROCEDURE RemoveServer* (cfg: Config; id: INTEGER);
+	(** Вывести узел id из состава. Пред: cfg # NIL — 20. Пост: письмо
+		Conf ушло узлу; исполняет его лидер. *)
+		VAR m: Conf;
+	BEGIN
+		ASSERT(cfg # NIL, 20);
+		IF cfg.ref # NIL THEN
+			NEW(m); m.op := confRemove; m.id := id;
+			ActorCore.Tell(cfg.ref, m)
+		END
+	END RemoveServer;
+
+	PROCEDURE ConfStatus* (cfg: Config; OUT voters, learners: SET; OUT confDirty, isVoter, isLearner: BOOLEAN);
+	(** Наблюдение за составом: действующие избиратели и ученики, признак
+		незафиксированной записи состава и место самого узла.
+		Пред: cfg # NIL — 20. Пост: значения на момент вызова. *)
+	BEGIN
+		ASSERT(cfg # NIL, 20);
+		voters := {}; learners := {}; confDirty := FALSE; isVoter := FALSE; isLearner := FALSE;
+		IF (cfg.actor # NIL) & (cfg.actor.nd # NIL) THEN
+			voters := cfg.actor.nd.voters; learners := cfg.actor.nd.learners;
+			confDirty := cfg.actor.nd.confDirty;
+			isVoter := cfg.id IN voters; isLearner := cfg.id IN learners
+		END
+	END ConfStatus;
 
 END RaftNode.

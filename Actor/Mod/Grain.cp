@@ -21,7 +21,12 @@ MODULE ActorGrain;
 
 	CONST
 		maxMembers* = 32;
+		capLen* = 256;	(** размер пропуска узла в записи службы состава *)
 		notNetMsg* = 31;	(** трап: адресу ключа послано письмо не ActorNet.Msg *)
+		(** переключатели мутаций — только для тестов *)
+		mutNoApply* = 0;	(** ApplyMembers не меняет список членов *)
+		mutKeepAlive* = 1;	(** все записи списка считаются живыми *)
+		mutNoRejoin* = 2;	(** вернувшийся член не оживает *)
 
 	TYPE
 		Name = ActorCore.Name;
@@ -33,7 +38,21 @@ MODULE ActorGrain;
 
 		Kind = POINTER TO RECORD name: Name; f: ActorCore.Factory; next: Kind END;
 
-		Mem = RECORD name: Name; host: ActorCore.Ref; alive: BOOLEAN END;
+		Mem = RECORD
+			name: Name;
+			host: ActorCore.Ref;
+			alive: BOOLEAN;
+			id: INTEGER;	(** номер узла в службе состава; -1 — не из службы *)
+			key: ActorJournal.Bytes	(** открытый ключ узла (проверка — этап 5) *)
+		END;
+
+		(** Запись службы состава для ApplyMembers. *)
+		MemberInfo* = RECORD
+			id*: INTEGER;
+			cap*: ARRAY capLen OF CHAR;
+			key*: ActorJournal.Bytes;
+			alive*: BOOLEAN	(** аренда не истекла и узел не вышел *)
+		END;
 
 		Cluster* = POINTER TO LIMITED RECORD
 			node-: ActorNet.Node;
@@ -65,6 +84,7 @@ MODULE ActorGrain;
 		GRef = POINTER TO RECORD (ActorCore.Ref) cl: Cluster; kind, key: Name END;
 
 	VAR
+		mutations*: SET;	(** включённые мутации; пусто в рабочем пути *)
 		newCl: Cluster;	(* для фабрик: кластер, вид и ключ создаваемого *)
 		newKind: Kind; newKey: Name;
 		tick: TickMsg; passivate: Passivate;
@@ -254,9 +274,16 @@ MODULE ActorGrain;
 		ASSERT(ActorCore.dir.Lookup(ActorCore.node, n.name) = NIL, 22);
 		NEW(cl); cl.node := n; cl.journal := j; cl.idle := 0;
 		newCl := cl; cl.host := ActorCore.Spawn(NIL, ActorCore.NewProps(NewHost), n.name); newCl := NIL;
-		cl.m[0].name := n.name$; cl.m[0].host := cl.host; cl.m[0].alive := TRUE; cl.n := 1;
+		cl.m[0].name := n.name$; cl.m[0].host := cl.host; cl.m[0].alive := TRUE; cl.m[0].id := -1; cl.n := 1;
 		RETURN cl
 	END New;
+
+	PROCEDURE HostRef* (cl: Cluster): ActorCore.Ref;
+	(** Пост: адрес хозяина узла cl (корневого актора); клиенты службы
+		состава вешают на него свои акторы. *)
+	BEGIN
+		RETURN cl.host
+	END HostRef;
 
 	PROCEDURE HostCap* (cl: Cluster; OUT cap: ARRAY OF CHAR);
 	(** Пост: пропуск хозяина узла для Member других узлов. *)
@@ -271,7 +298,7 @@ MODULE ActorGrain;
 		VAR r: ActorCore.Ref; w: WatchHost;
 	BEGIN
 		r := ActorNet.Import(cl.node, cap); ASSERT(r # NIL, 20); ASSERT(cl.n < maxMembers, 21);
-		cl.m[cl.n].name := r.node$; cl.m[cl.n].host := r; cl.m[cl.n].alive := TRUE;
+		cl.m[cl.n].name := r.node$; cl.m[cl.n].host := r; cl.m[cl.n].alive := TRUE; cl.m[cl.n].id := -1;
 		NEW(w); w.i := cl.n; INC(cl.n);
 		cl.host.Post(w, NIL)
 	END Member;
@@ -306,6 +333,78 @@ MODULE ActorGrain;
 		ASSERT(i < cl.n, 20);
 		cl.m[i].alive := FALSE
 	END Leave;
+
+	PROCEDURE ApplyMembers* (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER);
+	(** Состав из службы: привести список членов cl к list[0 .. n-1].
+		Пост: новый член добавлен (Member), вернувшийся снова живой
+		(Rejoin), пропавший из списка — мёртвый (Leave); ключи и номера
+		записаны в записи членов. Сами ключи не проверяются: это этап 5.
+		Размещение ключей считается по живым членам при каждом обращении,
+		поэтому меняется вместе с составом. *)
+		VAR i, j: INTEGER; r: ActorCore.Ref; seen: ARRAY maxMembers OF BOOLEAN; found: BOOLEAN;
+	BEGIN
+		IF mutNoApply IN mutations THEN RETURN END;
+		FOR i := 0 TO maxMembers - 1 DO seen[i] := FALSE END;
+		FOR i := 0 TO n - 1 DO
+			IF (i < LEN(list)) & (list[i].cap # "") THEN
+				r := ActorNet.Import(cl.node, list[i].cap);
+				IF r # NIL THEN
+					found := FALSE;
+					IF r.node = cl.node.name THEN	(* сам узел: запись 0 уже есть *)
+						seen[0] := TRUE; found := TRUE;
+						cl.m[0].id := list[i].id; cl.m[0].key := list[i].key
+					ELSIF ~list[i].alive & ~(mutKeepAlive IN mutations) THEN	(* вышел или аренда истекла: считается пропавшим *)
+					ELSE
+						j := 1;
+						WHILE (j < cl.n) & (cl.m[j].name # r.node) DO INC(j) END;
+						IF j < cl.n THEN
+							seen[j] := TRUE; found := TRUE;
+							cl.m[j].id := list[i].id; cl.m[j].key := list[i].key;
+							IF ~cl.m[j].alive & ~(mutNoRejoin IN mutations) THEN Rejoin(cl, cl.m[j].name) END
+						END
+					END;
+					IF ~found & (list[i].alive OR (mutKeepAlive IN mutations)) & (cl.n < maxMembers) THEN
+						j := cl.n;
+						Member(cl, list[i].cap);	(* добавляет запись j и наблюдает хозяина *)
+						cl.m[j].id := list[i].id; cl.m[j].key := list[i].key;
+						seen[j] := TRUE
+					END
+				END
+			END
+		END;
+		FOR j := 1 TO cl.n - 1 DO
+			IF ~seen[j] & cl.m[j].alive THEN Leave(cl, cl.m[j].name) END
+		END
+	END ApplyMembers;
+
+	PROCEDURE Key* (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes;
+	(** Пост: открытый ключ члена name из последнего ApplyMembers; NIL — нет. *)
+		VAR i: INTEGER;
+	BEGIN
+		i := 0; WHILE (i < cl.n) & (cl.m[i].name # name) DO INC(i) END;
+		IF i = cl.n THEN RETURN NIL ELSE RETURN cl.m[i].key END
+	END Key;
+
+	PROCEDURE Members* (cl: Cluster): INTEGER;
+	(** Пост: число членов в списке cl, включая сам узел. *)
+	BEGIN
+		RETURN cl.n
+	END Members;
+
+	PROCEDURE AliveCount* (cl: Cluster): INTEGER;
+	(** Пост: число живых членов, включая сам узел. *)
+		VAR i, k: INTEGER;
+	BEGIN
+		k := 1;
+		FOR i := 1 TO cl.n - 1 DO IF cl.m[i].alive THEN INC(k) END END;
+		RETURN k
+	END AliveCount;
+
+	PROCEDURE MemberName* (cl: Cluster; i: INTEGER; OUT name: Name);
+	(** Пост: имя члена i (0 — сам узел); "" — за пределами списка. *)
+	BEGIN
+		IF (i < 0) OR (i >= cl.n) THEN name := "" ELSE name := cl.m[i].name END
+	END MemberName;
 
 	PROCEDURE Register* (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
 	(** Вид kind: воплощения создаёт f (наследник Actor). Пред: kind # "",

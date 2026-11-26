@@ -704,6 +704,17 @@ c.Tell(acct, deposit)
 другому (`Member`). Журнал `j` общий для всех узлов: узлы делят хранилище, как общую базу, а не
 память.
 
+**Состав из службы.** Список членов не обязательно собирать вручную. В кластере, чьи узлы входят в
+службу состава Raft (руководство `Raft`, раздел «Служба состава»), `RaftGrainMembership` вступает в
+неё с пропуском хозяина, продлевает аренду и читает список; каждый ответ передаётся в
+`ActorGrain.ApplyMembers`. Этот вызов добавляет нового члена, оживляет вернувшегося и помечает
+мёртвым пропавшего из списка; ключ из списка хранится в записи члена (`Key`). Размещение считается
+по живым членам при каждой отправке, поэтому смена списка меняет владельцев без отдельного
+переразмещения. Член, чья аренда не продлена, для остальных умирает так же, как узел, потерянный
+через `Terminated`; ключи после этого переезжают к оставшимся.
+
+`Member` остаётся для постоянного состава и для тестов.
+
 **Размещение.** Владелец ключа — живой член с наибольшим весом `хеш(член, вид, ключ)`. Это
 рандеву-хеш, как в protoactor-go: когда член уходит, переезжают только его ключи. Владелец
 считается при каждой отправке. Письмо адресу ключа уходит хозяину владельца конвертом; хозяин
@@ -1666,7 +1677,11 @@ DEFINITION ActorGrain;
 
 	CONST
 		maxMembers = 32;
+		capLen = 256;
 		notNetMsg = 31;
+		mutNoApply = 0;
+		mutKeepAlive = 1;
+		mutNoRejoin = 2;
 
 	TYPE
 		Actor = POINTER TO ABSTRACT RECORD (ActorPersist.Actor)
@@ -1681,12 +1696,25 @@ DEFINITION ActorGrain;
 			activations-, passivations-: LONGINT
 		END;
 
+		MemberInfo = RECORD
+			id: INTEGER;
+			cap: ARRAY capLen OF CHAR;
+			key: ActorJournal.Bytes;
+			alive: BOOLEAN
+		END;
+
 	PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster;
+	PROCEDURE HostRef (cl: Cluster): ActorCore.Ref;
 	PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR);
 	PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR);
+	PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER);
+	PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes;
 	PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Members (cl: Cluster): INTEGER;
+	PROCEDURE AliveCount (cl: Cluster): INTEGER;
+	PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name);
 	PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
 	PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR);
@@ -1704,8 +1732,20 @@ END ActorGrain.
 
 **PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster** — Пред: `n # NIL` — 20;
 `j # NIL` — 21; корневого актора с именем узла нет — 22. Пост: хозяин создан, член — сам узел.
+**PROCEDURE HostRef (cl: Cluster): ActorCore.Ref** — Пост: адрес хозяина узла.
 **PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR)** — Пост: пропуск хозяина для `Member`
 других узлов.
+**PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER)** — Пред: каждый
+`list[i].cap` разбирается `ActorNet.Import`; не проверяется. Пост: члены `cl` — записи
+`list[0 .. n-1]` с `alive = TRUE`; новый член добавлен, вернувшийся снова живой, пропавший помечен
+мёртвым; `id` и `key` записаны в запись члена. Размещение считается по живым членам при следующей
+отправке.
+**PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes** — Пост: открытый ключ
+члена из последнего `ApplyMembers`; `NIL` — такого члена нет. Ключ не проверяется.
+**PROCEDURE Members (cl: Cluster): INTEGER** — Пост: число членов, включая сам узел.
+**PROCEDURE AliveCount (cl: Cluster): INTEGER** — Пост: число живых членов, включая сам узел.
+**PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name)** — Пост: имя члена `i`
+(0 — сам узел); пусто — вне списка.
 **PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR)** — Пред: пропуск разобран — 20; мест меньше
 `maxMembers` — 21. Пост: член живой, его хозяин наблюдается.
 **PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR)** — Пред: член есть — 20. Пост: член живой

@@ -220,6 +220,50 @@ together with the nodes, and a run is a function of the seed. The journal client
 `Client` incarnation. `failed` from a write means "unknown" (no answer within `giveUp`): `ActorPersist`
 traps, and the actor's restart re-reads the journal. `Close` stops the agent. Example: `ObxRaft1`.
 
+### Membership service
+
+A cluster needs one list of who is in it. A node that joins must be found by the others, a node that
+leaves or dies must lose its keys, and a node that returns must be taken back. The list also carries
+the address of each node and its open key, so a node does not need every other address in advance.
+
+`RaftMembership` keeps that list in a separate Raft cluster of three or five nodes. Its state machine
+holds one record per member: the node number, the capability of the member's grain host
+(`ActorNet.Export`), the open key, the moment of joining and the end of the lease. Join, Leave and
+Renew are log commands; List is a query and therefore goes through `RaftNode.Query`, that is, through
+ReadIndex: a read sees a state that a majority has confirmed. The machine is deterministic: the time
+`now` comes in the command and in the query rather than from a clock, so replicas apply the same bytes
+and answer with the same list. All participants use one clock: in processes it is `Services.Ticks`, in
+the model the driver's counter (`RaftGrainMembership.time`).
+
+Liveness is a lease. A member is alive while `leaseUntil > now`; each participant renews its lease
+every few ticks. A node that stops renewing becomes dead for the others after the lease, and its keys
+are placed among the living. A snapshot carries the records, the active flags and the leases; a
+restarted service node restores them.
+
+`RaftMembership.Client` is the actor-side agent. It sends `Propose` and `Query` to the node it believes
+is the leader, follows the leader hint, repeats on a timeout and lowers the answer into a `Result` in
+the requester's mailbox. One client executes one operation at a time, so the Raft session makes a
+repeated command idempotent.
+
+`RaftGrainMembership` is the bridge to `ActorGrain`. It joins with the host's capability, renews the
+lease, reads the list and calls `ActorGrain.ApplyMembers`; that call adds new members, revives the
+returning ones and marks those absent from the list dead. Placement of keys is computed from the live
+members on every send, so it changes with the list. The key is stored and handed to `ActorGrain`;
+signature and certificate checks are not done.
+
+The node driver accepts the configuration commands: `SetPeer` writes the capability of a new node,
+`AddServer` and `RemoveServer` post commands to the core (only the leader acts, the others ignore the
+letter), and `ConfStatus` reports the effective voters and learners. A new node starts as a learner,
+catches up and becomes a voter after the leader sees its `match` reach `commit`.
+
+`Raft_devMembership` checks the machine directly, the client against three service nodes (join, list,
+`kill -9` of the leader, renew, leave), the driver's configuration commands, four state-machine mutations and three mutations of the driver's configuration path.
+`Raft_devGrain` runs two grains whose members come from the service: a key moves on leave and on node
+loss, and twelve seeds cover a partition of the service minority, a lost owner and a leaving owner; each
+operation is applied once. The process scenario `tools/test-cluster.sh --only membership` starts five
+service processes, brings two of them into the voters, starts a fourth participant, removes and kills a member, kills the
+service leader and checks that deposits are applied once.
+
 ## Testing
 
 `Raft_devSim` is a deterministic simulation of 3 and 5 nodes. Messages are lost, duplicated and
@@ -332,14 +376,16 @@ measured.
 ## What is missing
 
 - The `RaftNode` actor runs on `ActorNetTcp` between processes in `tools/test-cluster.sh` (elections,
-  `kill -9` of the leader, restart with the same storage), without partitions and without membership
-  changes.
+  `kill -9` of the leader, restart with the same storage, addition and removal of servers, `kill -9`
+  of a member and of the leader). A process run does not partition the network; partitions are checked
+  in the model.
 - The `RaftJournal` journal under `ActorSim` is tested only on `ActorNetMem`; `ActorGrain` is tested on
   it only in the process scenario of `tools/test-cluster.sh`, without partitions. The journal state
   machine's snapshot is all accepted commands in a row; there is no separate truncation for it.
-- Membership commands are in the core (`RaftCore.AddServer`, `RemoveServer`) and in the model; the actor
-  driver `RaftNode` does not accept them yet. `Config.n` is the initial number of voters; peers up to
-  `RaftCore.maxNodes` can be given. Addresses and keys of the members are not part of Raft.
+- The driver accepts membership commands and peer capabilities. `Config.n` is the initial number of
+  voters; peers up to `RaftCore.maxNodes` can be given. The list of application members with addresses
+  and open keys is a state machine of a separate Raft cluster, not Raft's own configuration. The key is
+  stored but not checked; signatures, certificates and the protected channel are not checked.
 - No joint consensus: only one server changes at a time, and a change is not batched with another.
 - A configuration entry takes effect when it is committed, not when it is appended as in the
   dissertation. The 2015 barrier is kept. The model shows no loss with this order; the exact choice is
@@ -360,9 +406,15 @@ fields `id`, `n`, `term`, `vote`, `role`, `leader`, `last`, `commit`, `applied`,
 `RaftSm`: `StateMachine` (`Apply`, `Snapshot`, `Restore`), `Sessions` (`Apply`, `Snapshot`, `Restore`,
 `SetExpiry`, `Count`, `Has`), `New`, `Encode`, `Decode`.
 `RaftStorage`: `Storage` (`Save`, `Compact`, `Load`), `NewMem`. `RaftKvStorage`: `New(db)`.
-`RaftNode`: `NewConfig`, `Start`, `Config` (`peers`, `tickMs`, `electionTicks`, `sessionExpiry`,
-`compactEvery`, `seed`, `actor`), `Status`, messages `Tick`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`),
-`Caps`.
+`RaftNode`: `NewConfig`, `Start`, `Config` (`ref`, `peers`, `tickMs`, `electionTicks`,
+`sessionExpiry`, `compactEvery`, `seed`, `actor`), `Status`, `SetPeer`, `AddServer`, `RemoveServer`,
+`ConfStatus`, messages `Tick`, `Conf`, `Propose`, `Query`, `Reply` (`ok`, `notLeader`, `lost`), `Caps`.
+`RaftMembership`: `NewMachine`, `Machine` (`Apply`, `Snapshot`, `Restore`, `Query`), `JoinCmd`,
+`LeaveCmd`, `RenewCmd`, `ListQuery`, `DecodeList`, `Member`, `Members`, `New(net, caps, n, id)` →
+`Client` (`Submit`, `Tick`, `SetPeer`, `Close`, `Stats`, `Trace`), mutations `mutNoLeave`,
+`mutNoExpire`, `mutNoJoin`, `mutNoRenew`.
+`RaftGrainMembership`: `NewConfig`, `Start`, `Tick`, `Leave`, `Status`, `Errors`, `time`, mutations
+`mutIgnoreList`, `mutAllAlive`, `mutNoJoin`, `mutNoRenew`.
 `RaftJournal`: `NewMachine`, `New(net, caps, n, id)` → `Client` (`tickMs`, `timeoutMs`, `giveUpMs`,
 `timeoutTicks`, `giveUpTicks`, `Close`), `Tick(c)`, mutations `mutNoWait`, `mutNoExpected`.
 `RaftSm.StateMachine.Query` is the read for `RaftNode.Query`.
