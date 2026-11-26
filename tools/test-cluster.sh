@@ -192,16 +192,24 @@ if [ "${INNER:-0}" = 1 ]; then
 		alloc_role E 1; alloc_role Q 2
 		printf 'E %s\nQ %s\n' "$(addr_of E)" "$(addr_of Q)" > "$dir/nodes"
 		PIDS=()
-		launch_role "$dir" E --SCENARIO=ask; pE=$LASTPID; PIDS[E]=$pE
-		launch_role "$dir" Q --SCENARIO=ask; pQ=$LASTPID; PIDS[Q]=$pQ
+		launch_role "$dir" Q --SCENARIO=ask --BURST=300; pQ=$LASTPID; PIDS[Q]=$pQ
+		launch_role "$dir" E --SCENARIO=ask --BURST=300; pE=$LASTPID; PIDS[E]=$pE
 		waitfile "$dir/Q.ready" 1000 || { bad "$dir" "ask: Q не готов"; return 1; }
-		waitfile "$dir/Q.watching" 1000 || { bad "$dir" "ask: Q не наблюдает"; return 1; }
+		waitfile "$dir/E.cap" 1000 || { bad "$dir" "ask: E не готов"; return 1; }
+		waitfile "$dir/E.burstSent" 2000 || { bad "$dir" "ask: E не послал пачку"; return 1; }
+		waitfile "$dir/Q.burst" 3000 || { bad "$dir" "ask: Q не принял пачку"; return 1; }
+		waitfile "$dir/Q.watching" 2000 || { bad "$dir" "ask: Q не наблюдает"; return 1; }
 		[ "$(cat "$dir/Q.ask" 2>/dev/null)" = "ok 42" ] || { bad "$dir" "ask: нет ответа"; return 1; }
 		kill -9 "$pE"; wait "$pE" 2>/dev/null
 		waitfile "$dir/Q.result" 1500 || { bad "$dir" "ask: нет Terminated"; return 1; }
 		[ "$(cat "$dir/Q.result" 2>/dev/null)" = "2" ] || { bad "$dir" "ask: причина не byNodeLoss"; return 1; }
+		# Узел E поднимается снова: его первый кадр должен пройти окно повторов.
+		rm -f "$dir/E.ready"
+		launch_role "$dir" E --SCENARIO=ask --BURST=300; PIDS[E]=$LASTPID
+		waitfile "$dir/E.afterSent" 2000 || { bad "$dir" "ask: E не поднялся"; return 1; }
+		waitfile "$dir/Q.after" 3000 || { bad "$dir" "ask: кадр нового воплощения не дошёл"; return 1; }
 		check_no_traps "$dir" || { bad "$dir" "ask: трап"; return 1; }
-		stop_role "$dir" Q
+		stop_all "$dir"
 		return 0
 	}
 
@@ -325,11 +333,15 @@ if [ "${INNER:-0}" = 1 ]; then
 		[ -s "$dir/C.jrn" ] || { bad "$dir" "saga: шаг не записан в журнал C"; return 1; }
 		kill -9 "$pC"; wait "$pC" 2>/dev/null
 		touch "$dir/C.resume"
-		rm -f "$dir/C.ready"
+		rm -f "$dir/C.ready" "$dir/C.states"
 		launch_role "$dir" C --SCENARIO=saga; PIDS[C]=$LASTPID
 		waitfile "$dir/C.result" 5000 || { bad "$dir" "saga: нет итога"; return 1; }
-		[ "$(cat "$dir/C.result" 2>/dev/null)" = "A=700 B=1300 sum=2000" ] \
+		[ "$(cat "$dir/C.result" 2>/dev/null)" = "A=700 B=1300 sum=2000 dup=700" ] \
 			|| { bad "$dir" "saga: итог $(cat "$dir/C.result" 2>/dev/null)"; return 1; }
+		# после перечитывания журнала первое состояние — withdrawn (1);
+		# -1 или 0 значили бы, что журнал не прочитан и сага начата заново
+		[ "$(cut -c1 "$dir/C.states" 2>/dev/null)" = 1 ] \
+			|| { bad "$dir" "saga: состояние после перезапуска $(cat "$dir/C.states" 2>/dev/null)"; return 1; }
 		check_no_traps "$dir" || { bad "$dir" "saga: трап"; return 1; }
 		stop_all "$dir"
 		return 0

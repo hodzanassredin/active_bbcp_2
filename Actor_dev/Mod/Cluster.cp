@@ -56,6 +56,7 @@ MODULE Actor_devCluster;
 
 		Echo = POINTER TO RECORD (ActorCore.Actor) END;
 		Watcher = POINTER TO RECORD (ActorCore.Actor) END;
+		Sink = POINTER TO RECORD (ActorCore.Actor) END;
 
 		(* --- raft -------------------------------------------------------------- *)
 		Counter = POINTER TO RECORD (RaftSm.StateMachine) n: INTEGER END;
@@ -99,6 +100,7 @@ MODULE Actor_devCluster;
 		clock: Ticker;
 		rootRef: ActorCore.Ref;
 		ndQ: ActorNet.Node;
+		burst, sinkCount: INTEGER;
 		raftCfg: RaftNode.Config;
 		raftRef: ActorCore.Ref;
 		nodes: INTEGER;
@@ -107,6 +109,9 @@ MODULE Actor_devCluster;
 		sagaJournal: ActorJournal.Journal;
 		sagaFrom, sagaTo: ActorCore.Ref;
 		sagaState: INTEGER;
+		sagaReady: BOOLEAN;
+		sagaDup: INTEGER;
+		stateLog: ARRAY 128 OF CHAR; nStates: INTEGER;
 		capA, capB: ARRAY 256 OF CHAR;
 		statusName: Name;
 		grainCl: ActorGrain.Cluster;
@@ -380,6 +385,22 @@ MODULE Actor_devCluster;
 		NEW(a); RETURN a
 	END NewWatcher;
 
+	PROCEDURE (a: Sink) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+	BEGIN
+		WITH m: Ping DO
+			INC(sinkCount);
+			IF sinkCount = burst THEN PutText("Q.burst", "1") END;
+			IF sinkCount = burst + 1 THEN PutText("Q.after", "1") END
+		ELSE
+		END
+	END Receive;
+
+	PROCEDURE NewSink (): ActorCore.Actor;
+		VAR a: Sink;
+	BEGIN
+		NEW(a); RETURN a
+	END NewSink;
+
 	(* --- транспорт и узел ------------------------------------------------------ *)
 
 	PROCEDURE OpenNode (IN node: ARRAY OF CHAR; OUT t: ActorNetTcp.Net; OUT nd: ActorNet.Node);
@@ -407,18 +428,34 @@ MODULE Actor_devCluster;
 	(* --- роль ask: узел E ------------------------------------------------------ *)
 
 	PROCEDURE RunEcho;
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; cap: ARRAY 256 OF CHAR;
+		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; cap, qcap: ARRAY 256 OF CHAR;
+			remote: ActorCore.Ref; p: Ping; i: INTEGER;
 	BEGIN
 		OpenNode("E", t, nd); PeerAll(t, "E");
 		rootRef := ActorCore.Spawn(NIL, ActorCore.NewProps(NewEcho), "E");
 		ActorNet.Export(nd, rootRef, cap);
 		PutText("E.cap", cap);
+		WHILE ~Exists("Q.cap") & ~stop DO Pump; CheckStop END;
+		GetText("Q.cap", qcap);
+		remote := ActorNet.Import(nd, qcap);
+		IF Exists("E.burstSent") THEN
+			(* Узел уже работал: окно повторов соседа помнит прежние номера.
+				Один кадр нового процесса дойдёт только после смены
+				воплощения (ActorNet.SetIncarnation в OpenNode). *)
+			NEW(p); p.n := burst + 1; ActorCore.Tell(remote, p);
+			PutText("E.afterSent", "1")
+		ELSE
+			FOR i := 1 TO burst DO NEW(p); p.n := i; ActorCore.Tell(remote, p) END;
+			PutText("E.burstSent", "1")
+		END;
 		PutText("E.ready", "1");
 		Serve;
 		ActorNetTcp.Close(t)
 	END RunEcho;
 
-	(* --- роль ask: узел Q ------------------------------------------------------ *)	PROCEDURE AskBody;
+	(* --- роль ask: узел Q ------------------------------------------------------ *)
+
+	PROCEDURE AskBody;
 		VAR cap: ARRAY 256 OF CHAR; s: ARRAY 128 OF CHAR; r: ActorCore.Msg; p: Ping; w: WatchMe;
 			remote, watcher: ActorCore.Ref;
 	BEGIN
@@ -437,9 +474,12 @@ MODULE Actor_devCluster;
 	END AskBody;
 
 	PROCEDURE RunAsker;
-		VAR t: ActorNetTcp.Net; d: Driver;
+		VAR t: ActorNetTcp.Net; d: Driver; sink: ActorCore.Ref; cap: ARRAY 256 OF CHAR;
 	BEGIN
 		OpenNode("Q", t, ndQ); PeerAll(t, "Q");
+		sink := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSink), "sink");
+		ActorNet.Export(ndQ, sink, cap);
+		PutText("Q.cap", cap);
 		PutText("Q.ready", "1");
 		NEW(d); d.body := AskBody; Tasks.Start(d);
 		Serve;
@@ -816,6 +856,7 @@ MODULE Actor_devCluster;
 	PROCEDURE (k: Coord) Handle (c: ActorCore.Context; m: ActorCore.Msg);
 	BEGIN
 		WITH m: Begin DO IF ~k.started THEN k.sum := m.sum; k.Go(c, 0) END
+		| m: ActorPersist.ReplayComplete DO sagaReady := TRUE
 		| m: SagaTick DO k.Command(c)
 		| m: SagaReply DO
 			IF (m.op = 1) & (k.state = 0) THEN
@@ -875,15 +916,48 @@ MODULE Actor_devCluster;
 		IntToText(a, x); s := "A=" + x;
 		IntToText(b, x); s := s + " B=" + x;
 		IntToText(sum, x); s := s + " sum=" + x;
+		IntToText(sagaDup, x); s := s + " dup=" + x;
 		PutText("C.result", s)
 	END SagaResult;
 
-	PROCEDURE SagaDriver;
-		VAR b: Begin; tick: SagaTick; i: INTEGER;
+	PROCEDURE SagaDuplicate (OUT bal: INTEGER): BOOLEAN;
+		(* Повтор шага 1 (списание 300) после конца саги: счёт узнаёт
+			операцию и отвечает прежним итогом, остаток не меняется. *)
+		VAR m: Move; g: GetBalance; r: ActorCore.Msg;
 	BEGIN
+		bal := -1;
+		NEW(m); m.op := 1; m.sum := -300;
+		IF ActorCore.Ask(sagaFrom, m, askMs, r) = ActorCore.ok THEN
+			NEW(g);
+			IF ActorCore.Ask(sagaFrom, g, askMs, r) = ActorCore.ok THEN
+				WITH r: Balance DO bal := r.n ELSE END
+			END
+		END;
+		RETURN bal >= 0
+	END SagaDuplicate;
+
+	PROCEDURE LogState (st: INTEGER);
+		VAR x: ARRAY 16 OF CHAR; i: INTEGER;
+	BEGIN
+		IntToText(st, x); i := 0;
+		WHILE (x[i] # 0X) & (nStates < LEN(stateLog) - 1) DO
+			stateLog[nStates] := x[i]; INC(nStates); INC(i)
+		END;
+		stateLog[nStates] := 0X;
+		PutText("C.states", stateLog)
+	END LogState;
+
+	PROCEDURE SagaDriver;
+		VAR b: Begin; tick: SagaTick; i, last: INTEGER;
+	BEGIN
+		(* Ждём конец перечитывания журнала: состояние до него — не то,
+			с которым координатор работает. *)
+		WHILE ~sagaReady & ~stop DO Tasks.Sleep(10) END;
+		last := -99;
 		NEW(b); b.sum := 300; ActorCore.Tell(rootRef, b);
 		i := 0;
 		WHILE ~stop & (sagaState < 2) & (sagaState # 5) DO
+			IF sagaState # last THEN LogState(sagaState); last := sagaState END;
 			INC(i);
 			IF (sagaState = 1) & ~Exists("C.resume") THEN
 				(* процесс не убит: ждём обрыва снаружи, команд не шлём *)
@@ -893,6 +967,8 @@ MODULE Actor_devCluster;
 			IF i MOD 4 = 0 THEN NEW(tick); ActorCore.Tell(rootRef, tick) END;
 			Tasks.Sleep(10)
 		END;
+		IF sagaState # last THEN LogState(sagaState) END;
+		IF ~SagaDuplicate(sagaDup) THEN sagaDup := -1 END;
 		SagaResult;
 		finished := TRUE
 	END SagaDriver;
@@ -906,7 +982,8 @@ MODULE Actor_devCluster;
 		GetText("A.cap", capA); GetText("B.cap", capB);
 		sagaFrom := ActorNet.Import(nd, capA); sagaTo := ActorNet.Import(nd, capB);
 		ASSERT((sagaFrom # NIL) & (sagaTo # NIL), 118);
-		sagaState := -1;
+		sagaState := -1; sagaReady := FALSE; sagaDup := -1;
+		stateLog := ""; nStates := 0;
 		rootRef := ActorCore.Spawn(NIL, ActorCore.NewProps(NewCoord), "C");
 		PutText("C.ready", "1");
 		NEW(d); d.body := SagaDriver; Tasks.Start(d);
@@ -1089,6 +1166,7 @@ MODULE Actor_devCluster;
 		stop := FALSE; finished := FALSE;
 		GetPar("DIR", dir); GetPar("ROLE", role); GetPar("SCENARIO", scenario);
 		idx := GetInt("IDX", 0); n := GetInt("N", 0); tickMs := GetInt("TICK", 20);
+		burst := GetInt("BURST", 300);
 		ASSERT(dir # "", 20); ASSERT(role # "", 21); ASSERT(scenario # "", 22);
 		t0 := Services.Ticks();
 		LoadNodes();

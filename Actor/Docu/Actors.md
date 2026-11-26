@@ -667,7 +667,9 @@ would be dropped as duplicates. Therefore a node that lives in a process keeps i
 a file and calls `ActorNet.SetIncarnation` with the next number before the first frame. The secret of
 the node stays the same, so the capabilities handed out before the restart remain valid. A killed
 process is noticed by the peer as a broken connection: the reader of `ActorNetTcp` reports
-`ActorNet.Lost`, and the watchers receive `Terminated` with `byNodeLoss`.
+`ActorNet.Lost`, and the watchers receive `Terminated` with `byNodeLoss`. The scenario checks the
+window directly: a node sends a burst of frames, is killed, starts again, and its first frame must
+reach the peer.
 
 The scenario also runs the saga of `ObxActor7` and the virtual actors of `ObxActor8` in three
 processes. The sagas and the virtual actors use the same messages and journals as the examples; the
