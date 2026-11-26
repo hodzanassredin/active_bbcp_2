@@ -200,7 +200,8 @@ task not yet started notices it when started, and then its body does not execute
 A finished task returns to the main stack, and the scheduler removes it: unregisters it from the
 kernel's stack registry, gives the stack to the pool, wakes the tasks waiting for it in `Join` and
 decrements the count of live tasks. `Count()` no longer counts the task after that. The task
-object stays with the program, and `State`, `Failed` and `GetName` keep working on it.
+object stays with the program, and `State`, `Failed` and `GetName` keep working on it; `Start` or
+`StartIn` may run it again, and the fields of the previous run are reset.
 
 ## 3. Waiting
 
@@ -743,7 +744,7 @@ it into group `g`.
 
 ```
 Pre: t # NIL — 20
-Pre: State(t) = New — 21
+Pre: State(t) IN {New, Finished, Cancelled} — 21
 Pre: a stack was allocated (size at most 64 MB, the platform gave memory) — 22
 Post: State(t) = Ready; with g # NIL GroupCount(g) increased by 1
 ```
