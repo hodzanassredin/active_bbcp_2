@@ -4,7 +4,7 @@ MODULE Crypto_devX25519;
 	Проверяются генерация пары, совпадение общего секрета, вывод открытого
 	ключа из закрытого и два известных набора ключей. *)
 
-	IMPORT CryptoX25519, CryptoBase64, UnitAssert;
+	IMPORT CryptoX25519, CryptoBase64, CryptoUtils, UnitAssert;
 
 	PROCEDURE NonZero (IN a: ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
 		VAR i: INTEGER;
@@ -70,6 +70,23 @@ MODULE Crypto_devX25519;
 		UnitAssert.True(secret1 = secret2, "X25519 known secret encodings agree");
 		UnitAssert.True(secret1 = secret, "X25519 known shared secret")
 	END TestKnownSecrets;
+
+	PROCEDURE TestRFC7748*;
+		VAR apriv, apub, bpriv, bpub, shared, want: ARRAY 32 OF SHORTCHAR;
+			ka, kb: CryptoX25519.X25519KeyPair; got: ARRAY 32 OF SHORTCHAR;
+	BEGIN
+		CryptoUtils.Hex2Bin("77076D0A7318A57D3C16C17251B26645DF4C2F87EBC0992AB177FBA51DB92C2A", 0, apriv, 0, 32);
+		CryptoUtils.Hex2Bin("8520F0098930A754748B7DDCB43EF75A0DBF3A0D26381AF4EBA4A98EAA9B4E6A", 0, apub, 0, 32);
+		CryptoUtils.Hex2Bin("5DAB087E624A8A4B79E17F8B83800EE66F3BB1292618B6FD1C2F8B27FF88E0EB", 0, bpriv, 0, 32);
+		CryptoUtils.Hex2Bin("DE9EDB7D7B7DC1B4D35B61C2ECE435373F8343C85B78674DADFC7E146F882B4F", 0, bpub, 0, 32);
+		CryptoUtils.Hex2Bin("4A5D9D5BA4CE2DE1728E3BF480350F25E07E21C947D19E3376F09B3C1E161742", 0, want, 0, 32);
+		CryptoX25519.GenerateKeyFromPrivateKey(apriv, ka);
+		CryptoX25519.GenerateKeyFromPrivateKey(bpriv, kb);
+		UnitAssert.True(Equal(ka.PublicKey, apub, 32), "RFC 7748 Alice public");
+		UnitAssert.True(Equal(kb.PublicKey, bpub, 32), "RFC 7748 Bob public");
+		CryptoX25519.Agreement(apriv, bpub, got);
+		UnitAssert.True(Equal(got, want, 32), "RFC 7748 shared secret")
+	END TestRFC7748;
 
 	PROCEDURE TestKnownPublic*;
 		VAR key: CryptoX25519.X25519KeyPair;

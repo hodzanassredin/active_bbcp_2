@@ -4,7 +4,7 @@ MODULE Crypto_devGcm;
 	Проверяются тег пустого сообщения, шифрование с AAD и дешифрование,
 	а также работа на месте. *)
 
-	IMPORT CryptoGcm, CryptoCiphers, CryptoUtils, UnitAssert;
+	IMPORT CryptoGcm, CryptoCiphers, CryptoUtils, BIT := CryptoAosBIT, UnitAssert;
 
 	PROCEDURE Equal (IN a, b: ARRAY OF SHORTCHAR; len: INTEGER): BOOLEAN;
 		VAR i: INTEGER;
@@ -75,5 +75,34 @@ MODULE Crypto_devGcm;
 		UnitAssert.EqualInt(0, res, "GCM in-place decrypt status");
 		UnitAssert.True(text = "123hello world456", "GCM in-place plaintext")
 	END TestInplace;
+
+	PROCEDURE TestTampered*;
+		(* Тег и шифртекст аутентифицируются: изменение последнего байта
+		   тега или первого байта шифртекста обязано дать отказ. *)
+		VAR key, iv, text, ad, cipher, tag, out: ARRAY 64 OF SHORTCHAR;
+			g: CryptoGcm.GcmMode; c: CryptoCiphers.Cipher; res: INTEGER;
+	BEGIN
+		CryptoUtils.Hex2Bin("c7d9358af0fd737b118dbf4347fd252a", 0, key, 0, 16);
+		CryptoUtils.Hex2Bin("5adb9609dbaeb58cbd6e7275", 0, iv, 0, 12);
+		text := "0123456789abcdef";
+		ad := "aad";
+		c := CryptoCiphers.NewCipher("CryptoAES");
+		c.InitKey(key, 128);
+		NEW(g);
+		g.Init(c, iv, 12);
+		g.Encrypt(text, ad, 0, 16, 3, 128, cipher, tag, 0);
+		res := -1;
+		g.Decrypt(cipher, ad, tag, 0, 16, 3, 128, out, 0, res);
+		UnitAssert.EqualInt(0, res, "GCM valid tag accepted");
+		tag[15] := BIT.CXOR(tag[15], 1X);
+		res := 0;
+		g.Decrypt(cipher, ad, tag, 0, 16, 3, 128, out, 0, res);
+		UnitAssert.True(res # 0, "GCM tampered tag rejected");
+		tag[15] := BIT.CXOR(tag[15], 1X);
+		cipher[0] := BIT.CXOR(cipher[0], 1X);
+		res := 0;
+		g.Decrypt(cipher, ad, tag, 0, 16, 3, 128, out, 0, res);
+		UnitAssert.True(res # 0, "GCM tampered ciphertext rejected")
+	END TestTampered;
 
 END Crypto_devGcm.

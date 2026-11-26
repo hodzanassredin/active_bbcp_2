@@ -71,14 +71,18 @@ MODULE CryptoAosTCP;
 	(** Accept a client waiting on a listening connection. Never blocks*)
 	PROCEDURE (c: Connection) Accept* (VAR client: Connection; VAR res: INTEGER), NEW, EXTENSIBLE;
 	BEGIN
+		res := (-1);
 		c.l.Accept(client.s);
 		IF client.s # NIL THEN
 			StdLog.String("Accepted TCP client");
 			CryptoAosCommStreams.OpenReader(client.r, client.s, 0, c.timeoutSeconds);
 			CryptoAosCommStreams.OpenWriter(client.w, client.s, 0);
+			client.receiver := client.r.receive;
+			client.sender := client.w.send;
+			client.state := Established;
 			res := Ok;
 		END;
-		
+
 	END Accept;
 
 	PROCEDURE (s: Connection) Close* (), EXTENSIBLE;

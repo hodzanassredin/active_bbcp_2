@@ -8,7 +8,7 @@ MODULE CryptoAosBigNumbers;
 (* 2010.01.12	g.f.	interface cleanup, most procedures got functions *)
 
 	IMPORT Streams := CryptoAosStreams, Random := CryptoAosRandom, Kernel, Log := (*CONV FROM KernelLog*)
-StdLog, AO := CryptoAosCompat, SYSTEM;
+StdLog, AO := CryptoAosCompat, SYSTEM, OsRandom := CryptoOsRandom;
 	
 	CONST
 		BufferPoolSize = 16;
@@ -982,28 +982,58 @@ StdLog, AO := CryptoAosCompat, SYSTEM;
 		RETURN c
 	END Mult;
 
-	PROCEDURE RandomBytes* (VAR buf : ARRAY OF SHORTCHAR; p, n : AO.SIZE);
+	PROCEDURE RandomBytesOk* (VAR buf : ARRAY OF SHORTCHAR; p, n : AO.SIZE) : BOOLEAN;
 		VAR i: AO.SIZE;
 	BEGIN
+		IF OsRandom.Fill(buf, p, n) THEN
+			RETURN TRUE
+		END;
+		(* Аварийный путь: LCG. Для ключей он не годится, поэтому
+		   вызывающий видит FALSE и может отказаться от генерации. *)
 		FOR i := 0 TO n - 1 DO
 			buf[p + i] := SHORT(CHR(ENTIER(randomgenerator.Uniform() * 256)))
-		END
+		END;
+		RETURN FALSE
+	END RandomBytesOk;
+
+	PROCEDURE RandomBytes* (VAR buf : ARRAY OF SHORTCHAR; p, n : AO.SIZE);
+		VAR ok: BOOLEAN;
+	BEGIN
+		ok := RandomBytesOk(buf, p, n)
 	END RandomBytes;
 
 	PROCEDURE NewRand* (bits : AO.SIZE; top, bottom : AO.SIGNED8): BigNumber;
 		VAR
-			n, len, i, topbit: AO.SIZE;
+			n, len, i, topbit, nbytes, pos, word, shift: AO.SIZE;
 			topword: SET;
 			b: BigNumber;
+			bytes: ARRAY 2048 OF SHORTCHAR;
+			ok: BOOLEAN;
 	BEGIN
 		len := bits;
 		INC(len, ((-len)) MOD 32);
 		NEW(b); b.Init(len);
-		n := len DIV 32;
+		n := (bits + 31) DIV 32;
+		b.len := n;
 		FOR i := 0 TO n - 1 DO
-			b.d[i] := AO.TOUNSIGNED32(randomgenerator.Integer())
+			b.d[i] := AO.TOUNSIGNED32(0)
 		END;
-		b.len := (bits + 31) DIV 32;
+		nbytes := (bits + 7) DIV 8;
+		IF nbytes > LEN(bytes) THEN
+			nbytes := LEN(bytes)
+		END;
+		ok := RandomBytesOk(bytes, 0, nbytes);
+		(* Байты читаются как большое-endian число: последний байт —
+		   младший разряд d[0]. *)
+		FOR i := 0 TO nbytes - 1 DO
+			pos := nbytes - 1 - i;
+			word := pos DIV 4;
+			shift := (pos MOD 4) * 8;
+			IF word < n THEN
+				b.d[word] := AO.UAdd32(b.d[word],
+					AO.UASH32(AO.TOUNSIGNED32(ORD(bytes[i])), shift))
+			END
+		END;
 		topbit := (bits - 1) MOD 32;
 		topword := AO.UBITS32(b.d[b.len - 1]) * (*CONV REMOVE SET32*)
 ({0..topbit});

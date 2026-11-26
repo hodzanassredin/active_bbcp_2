@@ -161,6 +161,20 @@ MODULE CryptoX25519;
 			ScalarMultiplication(myPrivateKey, otherPublicKey, res);
 		END Agreement;
 
+		(* Как Agreement, но проверяет, что общий секрет не нулевой
+		   (точка малого порядка, RFC 7748, раздел 6.1). *)
+		PROCEDURE AgreementChecked*(myPrivateKey, otherPublicKey: ARRAY OF SHORTCHAR;
+				OUT res:ARRAY OF SHORTCHAR): BOOLEAN;
+			VAR i: INTEGER; nonzero: BOOLEAN;
+		BEGIN
+			ScalarMult(myPrivateKey, otherPublicKey, res);
+			nonzero := FALSE;
+			FOR i := 0 TO 31 DO
+				IF res[i] # 0X THEN nonzero := TRUE END
+			END;
+			RETURN nonzero
+		END AgreementChecked;
+
 BEGIN
 	Basepoint := ""; (* fill zeroes*)
 	Basepoint[0] := 9X;
