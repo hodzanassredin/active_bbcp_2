@@ -269,7 +269,35 @@ X25519, SSLv2 `ClientHello` и неизвестного типа рукопож�
 второго процесса они не проходят.
 
 
-## Лицензия и известные ограничения
+### Публичные хосты (ручной прогон, нужна сеть)
+
+`tools/test-crypto-hosts.sh` (не входит в `tools/test.sh`) собирает `Crypto_devHosts`, загружает
+системный набор CA (`/etc/ssl/certs/ca-certificates.crt` по умолчанию), соединяется со списком
+публичных HTTPS-хостов и посылает `GET / HTTP/1.0`. Для каждого хоста печатаются версия, набор,
+группа ECDHE, схема подписи рукопожатия и первая строка ответа. Прогон 26.11.2026 соединился со
+всеми восемью хостами по TLS 1.2:
+
+| Хост | Набор | Группа | Подпись |
+|---|---|---|---|
+| google.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| cloudflare.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| github.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| letsencrypt.org | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| wikipedia.org | ECDHE-ECDSA-AES256-GCM-SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| microsoft.com | ECDHE-RSA-AES256-GCM-SHA384 | secp256r1 | rsa_pss_rsae_sha256 |
+| apple.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| amazon.com | ECDHE-RSA-AES128-GCM-SHA256 | x25519 | rsa_pss_rsae_sha256 |
+
+Прогон выявил и привёл к исправлению: отвергались подписи сертификатов
+`sha384WithRSAEncryption`/`sha512WithRSAEncryption`; DigestInfo в PKCS#1 знал только
+MD5/SHA-1/SHA-256, поэтому цепочки SHA-384/512 не проверялись; cross-signed корень (тот же
+субъект и ключ, что у доверенного корня, другой издатель) не сопоставлялся; список SAN
+обрезался на 16 записях; один нечитаемый сертификат отбрасывал весь набор корней, а у
+`AddTrustedFile` был буфер 16 КиБ. Всё это покрыто `tools/test-crypto-tls.sh` (цепочки
+SHA-384/SHA-512, список из 22 SAN, набор с мусорным сертификатом, набор 113 КиБ); случай
+cross-signed корня покрыт ручным прогоном и таблицей порч в обзоре безопасности.
+
+
 
 Подсистема распространяется по лицензиям BSD ETH Zurich и Hirbod Behnam; полный текст лежит в
 `Crypto/LICENSE`. Обзор безопасности со статусом каждой находки и покрывающим её тестом — в

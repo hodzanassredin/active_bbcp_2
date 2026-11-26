@@ -271,7 +271,35 @@ zero X25519 point and a bad or good `CertificateVerify`. `Crypto_devTLS` and
 `Crypto_devTLSServer` are not in `tools/tests.txt`, because without a peer they cannot run.
 
 
-## Licence and known limitations
+### Public hosts (manual, network)
+
+`tools/test-crypto-hosts.sh` (not in `tools/test.sh`) compiles `Crypto_devHosts`, loads the system
+CA bundle (`/etc/ssl/certs/ca-certificates.crt` by default), connects to a list of public HTTPS
+hosts and sends `GET / HTTP/1.0`. For each host it prints the negotiated version, cipher suite,
+ECDHE group, handshake signature scheme and the first response line. The run of 2026-11-26
+connected to all eight hosts over TLS 1.2:
+
+| Host | Suite | Group | Signature |
+|---|---|---|---|
+| google.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| cloudflare.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| github.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| letsencrypt.org | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| wikipedia.org | ECDHE-ECDSA-AES256-GCM-SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| microsoft.com | ECDHE-RSA-AES256-GCM-SHA384 | secp256r1 | rsa_pss_rsae_sha256 |
+| apple.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| amazon.com | ECDHE-RSA-AES128-GCM-SHA256 | x25519 | rsa_pss_rsae_sha256 |
+
+The run exposed and fixed the following: `sha384WithRSAEncryption`/`sha512WithRSAEncryption`
+certificate signatures were rejected; PKCS#1 DigestInfo knew only MD5/SHA-1/SHA-256, so SHA-384
+and SHA-512 chains failed; a cross-signed root (same subject and public key as a trusted root,
+different issuer) was not matched; SAN lists were truncated at 16 entries; one unreadable
+certificate aborted the whole trust bundle, and `AddTrustedFile` had a 16 KiB buffer. All of
+these are covered by `tools/test-crypto-tls.sh` (SHA-384/SHA-512 chains, a 22-entry SAN list, a
+bundle with a garbage certificate, a 113 KiB bundle); the cross-signed-root case is covered by
+the manual hosts run and by the mutation table in the security review.
+
+
 
 The subsystem is distributed under the BSD licences of ETH Zurich and Hirbod Behnam; the full text
 is in `Crypto/LICENSE`. The security review, with the status of every finding and the test that

@@ -287,6 +287,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			clientGroups : SET;
 			haveGroups : BOOLEAN;
 			serverScheme : AO.SIGNED32;
+			negotiatedSigScheme : AO.SIGNED32;
 			(* Результаты проверки сертификатов. *)
 			serverCert, clientCert : X509.Certificate;
 			peerVerified, certificateRequested, ownsContext, clientCertVerified : BOOLEAN;
@@ -1274,12 +1275,15 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	END AddTrustedPem;
 
 	PROCEDURE (SELF: Context) AddTrustedFile* (IN path : ARRAY OF CHAR): BOOLEAN, NEW;
-		VAR pem : ARRAY 16384 OF SHORTCHAR; len : INTEGER;
+		VAR pem : POINTER TO ARRAY OF SHORTCHAR; len : INTEGER; ok : BOOLEAN;
 	BEGIN
-		IF ~ReadFile(path, pem, len) THEN
+		(* Системный набор CA бывает больше 16 КиБ; читаем динамически. *)
+		NEW(pem, 1024 * 1024);
+		IF ~ReadFile(path, pem^, len) THEN
 			RETURN FALSE
 		END;
-		RETURN SELF.AddTrustedPem(pem)
+		ok := SELF.AddTrustedPem(pem^);
+		RETURN ok
 	END AddTrustedFile;
 
 	PROCEDURE (SELF: Context) LoadCertificatePem* (IN pem : ARRAY OF SHORTCHAR): BOOLEAN, NEW;
@@ -1825,6 +1829,32 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		BEGIN
 			RETURN s.conn.IsConnected();
 		END IsConnected;
+
+	PROCEDURE (SELF: Connection) NegotiatedVersion* (): AO.SIGNED32, NEW;
+	BEGIN
+		RETURN 256 * ORD(SELF.version[0]) + ORD(SELF.version[1])
+	END NegotiatedVersion;
+
+	PROCEDURE (SELF: Connection) NegotiatedSuite* (): AO.SIGNED32, NEW;
+	BEGIN
+		IF SELF.pendingSecurityParameters # NIL THEN
+			RETURN SELF.pendingSecurityParameters.cipherSuite
+		END;
+		RETURN 0
+	END NegotiatedSuite;
+
+	PROCEDURE (SELF: Connection) NegotiatedGroup* (): AO.SIGNED32, NEW;
+	BEGIN
+		IF SELF.group # NIL THEN
+			RETURN SELF.group.id
+		END;
+		RETURN 0
+	END NegotiatedGroup;
+
+	PROCEDURE (SELF: Connection) NegotiatedScheme* (): AO.SIGNED32, NEW;
+	BEGIN
+		RETURN SELF.negotiatedSigScheme
+	END NegotiatedScheme;
 
 
 	PROCEDURE (SELF: Connection) SetConnection* (c : TCP.Connection), NEW;
@@ -2739,6 +2769,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		END;
 		cipherSuite := chosen;
 		SELF.serverScheme := ServerScheme(SELF);
+		SELF.negotiatedSigScheme := SELF.serverScheme;
 		gid := ServerGroup(SELF);
 		IF (SELF.serverScheme = 0) OR (gid = 0) THEN
 			SELF.SendError(HandshakeFailure);
@@ -3352,6 +3383,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.SendError(DecryptError);
 			RETURN (-1)
 		END;
+		SELF.negotiatedSigScheme := scheme;
 		FOR pos := 0 TO pubLen - 1 DO
 			remotePubKey[pos] := data[ofs + 4 + pos]
 		END;

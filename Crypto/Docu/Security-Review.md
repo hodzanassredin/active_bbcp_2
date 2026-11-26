@@ -29,6 +29,7 @@
 | Ed25519 (проверка) | сделано | `crypto-fix` | `Crypto_devEd25519`, RFC 8032, Wycheproof, `Vectors/check.py` |
 | X.509: ECDSA, RSA-PSS, Ed25519, смешанные цепочки | сделано | `crypto-fix` | `Crypto_devX509Modern`, `Crypto_devX509` |
 | TLS 1.2: ECDHE-ECDSA/RSA, AES-128/256-GCM, ChaCha20-Poly1305, x25519/secp256r1/secp384r1, PSS/ECDSA | сделано | `crypto-fix` | `tools/test-crypto-tls.sh` (матрица 30 пар в обе стороны), `Crypto_devTLS`, `Crypto_devTLSServer` |
+| Публичные HTTPS-хосты | сделано, 8/8 | `crypto-fix` | `tools/test-crypto-hosts.sh` (ручной), исправления sha384/512 RSA, SameAnchor, SAN, PEM-набора — см. раздел ниже |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -255,6 +256,41 @@ ECDSA-сертификата — группу, равную кривой сер�
 | `X509.ReadPemEcPrivateKey`: длина скаляра | `4n` → `4n-1` | поймана: сервер ECDSA, ключ не загружается |
 | `X509.ReadPemEcPrivateKey`: выравнивание скаляра | слева → справа | эквивалентна: openssl пишет скаляр ровно `4n` байт, ветка дополнения на этих векторах не срабатывает |
 | `CryptoPSS.Encode`: буферы `db`/`dbMask` | `MaxModulusBytes` → `2*MaxHash+8` | поймана: `TestSign2048` трапом |
+
+## ПУБЛИЧНЫЕ ХОСТЫ (ЭТАП 3б, П. 6)
+
+`tools/test-crypto-hosts.sh` (ручной, нужна сеть) соединяется нашим клиентом с восемью
+публичными HTTPS-хостами, грузит системный набор CA и печатает версию, набор, группу и
+подпись. Прогон 26.11.2026: 8/8 по TLS 1.2 (google, cloudflare, github, letsencrypt,
+wikipedia, microsoft, apple, amazon; наборы ECDHE-ECDSA/RSA с AES-128/256-GCM и
+ChaCha20-Poly1305, группы x25519 и secp256r1, подписи ECDSA P-256 и RSA-PSS SHA-256).
+Прогон нашёл шесть дефектов, все исправлены:
+
+- не поддерживались OID `sha384WithRSAEncryption` и `sha512WithRSAEncryption` в
+  `AlgorithmIdentifier` сертификата;
+- `PKCS1.BuildEM` знал DigestInfo только для MD5/SHA-1/SHA-256, поэтому подпись цепочки
+  SHA-384/SHA-512 не проверялась;
+- доверенный корень сопоставлялся только по точному DER; cross-signed корень (тот же субъект
+  и ключ, другой издатель) не принимался — добавлено сопоставление по субъекту и открытому
+  ключу (`SameAnchor`);
+- `MaxSans = 16` обрезал длинные списки SAN;
+- `X509.ReadPemChain` прекращал разбор на первом нечитаемом сертификате, отбрасывая остальные
+  корни набора;
+- `Context.AddTrustedFile` читал файл в буфер 16 КиБ, а системный набор — 180 КиБ.
+
+Порчи (проверка — соответствующий сценарий `tools/test-crypto-tls.sh` или ручной прогон
+хостов):
+
+| Место | Порча | Результат |
+|---|---|---|
+| `PKCS1`: DigestInfo SHA-384 | первый байт `30` → `31` | поймана: клиент против CA-подписи SHA-384 |
+| `PKCS1`: DigestInfo SHA-512 | первый байт `30` → `31` | поймана: клиент против CA-подписи SHA-512 |
+| X509 `ParseSigAlg`: `sha384WithRSA` | ветка отключена | поймана: клиент, сертификат SHA-384 |
+| X509 `ParseSigAlg`: `sha512WithRSA` | ветка отключена | поймана: клиент, сертификат SHA-512 |
+| X509 `MaxSans` | 64 → 16 | поймана: `client-many-san` (совпадение дальше 16-го) |
+| X509 `ReadPemChain` | возврат на первом нечитаемом | поймана: `client-badca-skip` |
+| `AddTrustedFile`: буфер | динамический → 16 КиБ | поймана: `client-bigca` (113 КиБ) |
+| X509 `SameAnchor` | `RETURN FALSE` (только точный DER) | поймана ручным прогоном: google/cloudflare `certError=4` |
 
 ## ПРОВЕРКА ПОРЧЕЙ
 

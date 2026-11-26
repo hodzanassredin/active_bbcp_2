@@ -92,6 +92,14 @@ printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:
 sign -in "$TMP/srv.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
 	-out "$TMP/srv.pem" -days 1 -extfile "$TMP/srv.ext"
 
+# Сертификаты, подписанные CA с SHA-384/SHA-512 (DigestInfo PKCS#1).
+req -newkey rsa:2048 -nodes -keyout "$TMP/srv384.key" -out "$TMP/srv384.csr" -subj "/CN=localhost"
+sign -in "$TMP/srv384.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/srv384.pem" -days 1 -sha384 -extfile "$TMP/srv.ext"
+req -newkey rsa:2048 -nodes -keyout "$TMP/srv512.key" -out "$TMP/srv512.csr" -subj "/CN=localhost"
+sign -in "$TMP/srv512.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/srv512.pem" -days 1 -sha512 -extfile "$TMP/srv.ext"
+
 # Серверные сертификаты ECDSA P-256 и P-384.
 ec_cert() {
 	name=$1; curve=$2
@@ -104,6 +112,36 @@ ec_cert() {
 }
 ec_cert ec256 prime256v1
 ec_cert ec384 secp384r1
+
+# Сертификат с длинным списком SAN: совпадающее имя стоит дальше 16-го.
+req -newkey rsa:2048 -nodes -keyout "$TMP/many.key" -out "$TMP/many.csr" -subj "/CN=localhost"
+{
+	printf 'subjectAltName='
+	i=0
+	while [ $i -lt 20 ]; do
+		printf 'DNS:host%s.example,' "$i"
+		i=$((i + 1))
+	done
+	printf 'DNS:localhost,IP:127.0.0.1\n'
+	printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
+} >"$TMP/many.ext"
+sign -in "$TMP/many.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
+	-out "$TMP/many.pem" -days 1 -extfile "$TMP/many.ext"
+
+# Набор корней: сначала нечитаемый сертификат, затем настоящий CA.
+{
+	printf -- '-----BEGIN CERTIFICATE-----\n'
+	head -c 300 /dev/urandom | base64
+	printf -- '\n-----END CERTIFICATE-----\n'
+	cat "$TMP/ca.pem"
+} >"$TMP/badca.pem"
+
+# Большой набор корней (> 16 КиБ): буфер AddTrustedFile должен быть динамическим.
+i=0
+while [ $i -lt 100 ]; do
+	cat "$TMP/ca.pem" >>"$TMP/bigca.pem"
+	i=$((i + 1))
+done
 
 # Просроченный (notAfter = notBefore = сейчас).
 req -newkey rsa:2048 -nodes -keyout "$TMP/exp.key" -out "$TMP/exp.csr" -subj "/CN=127.0.0.1"
@@ -367,6 +405,21 @@ server_vs_openssl "server-mutual-ecdsa" "$TMP/ca.pem" 1 0 "$TMP/cl.pem" "$TMP/cl
 # Клиент openssl предлагает и ECDSA-, и RSA-наборы; сервер с RSA-ключом
 # обязан выбрать совместимый (проверка SuiteCompatible).
 server_vs_openssl "server-auto-suite" "$TMP/ca.pem" 0 0 "" "" "olleh" "-" "-"
+# Цепочка, подписанная CA хешем SHA-384/SHA-512.
+client_vs_openssl "client-rsa-sha384" "$TMP/srv384.pem" "$TMP/srv384.key" "$TMP/ca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+server_vs_openssl "server-rsa-sha384" "$TMP/ca.pem" 0 0 "" "" "olleh" \
+	"ECDHE-RSA-AES128-GCM-SHA256" x25519 "$TMP/srv384.pem" "$TMP/srv384.key"
+client_vs_openssl "client-rsa-sha512" "$TMP/srv512.pem" "$TMP/srv512.key" "$TMP/ca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+server_vs_openssl "server-rsa-sha512" "$TMP/ca.pem" 0 0 "" "" "olleh" \
+	"ECDHE-RSA-AES128-GCM-SHA256" x25519 "$TMP/srv512.pem" "$TMP/srv512.key"
+client_vs_openssl "client-many-san" "$TMP/many.pem" "$TMP/many.key" "$TMP/ca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+client_vs_openssl "client-badca-skip" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/badca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
+client_vs_openssl "client-bigca" "$TMP/srv.pem" "$TMP/srv.key" "$TMP/bigca.pem" \
+	"" "" 0 0 "" "ECDHE-RSA-AES128-GCM-SHA256" x25519
 
 echo "test-crypto-tls: отрицательные случаи"
 client_vs_openssl "untrusted" "$TMP/srv.pem" "$TMP/srv.key" "" "" "" 1 0

@@ -42,11 +42,13 @@ MODULE CryptoX509;
 		ErrNoCA* = 8;
 
 		MaxChainDepth = 8;
-		MaxSans = 16;
+		MaxSans = 64;
 		MaxPem = 16384;
 
 		(* OID в DER-содержимом (без заголовка). *)
 		OidSha256WithRsa = "2A864886F70D01010B";
+		OidSha384WithRsa = "2A864886F70D01010C";
+		OidSha512WithRsa = "2A864886F70D01010D";
 		OidSha1WithRsa = "2A864886F70D010105";
 		OidMd5WithRsa = "2A864886F70D010104";
 		OidRsaEncryption = "2A864886F70D010101";
@@ -182,6 +184,10 @@ MODULE CryptoX509;
 		oid := alg.child;
 		IF OidIs(oid, OidSha256WithRsa, 9) THEN
 			CopyStr("CryptoSHA256", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidSha384WithRsa, 9) THEN
+			CopyStr("CryptoSHA384", hashName); RETURN TRUE
+		ELSIF OidIs(oid, OidSha512WithRsa, 9) THEN
+			CopyStr("CryptoSHA512", hashName); RETURN TRUE
 		ELSIF OidIs(oid, OidSha1WithRsa, 9) THEN
 			CopyStr("CryptoSHA1", hashName); RETURN TRUE
 		ELSIF OidIs(oid, OidMd5WithRsa, 9) THEN
@@ -261,12 +267,53 @@ MODULE CryptoX509;
 		RETURN SameBytes(a.raw^, b.raw^, a.rawLen, b.rawLen)
 	END SameCert;
 
+	PROCEDURE SameKey (a, b : Certificate): BOOLEAN;
+		VAR ba, bb : ARRAY 128 OF SHORTCHAR; i : AO.SIZE;
+	BEGIN
+		IF (a = NIL) OR (b = NIL) OR (a.keyType # b.keyType) THEN
+			RETURN FALSE
+		END;
+		IF a.keyType = KeyRsa THEN
+			RETURN (a.publicKey # NIL) & (b.publicKey # NIL)
+				& (AosBigNumbers.Cmp(a.publicKey.modulus, b.publicKey.modulus) = 0)
+				& (AosBigNumbers.Cmp(a.publicKey.exponent, b.publicKey.exponent) = 0)
+		ELSIF a.keyType = KeyEc THEN
+			IF (a.ecCurve = NIL) OR (b.ecCurve = NIL) OR (a.ecCurve.n # b.ecCurve.n) THEN
+				RETURN FALSE
+			END;
+			FOR i := 0 TO LEN(ba) - 1 DO ba[i] := 0X; bb[i] := 0X END;
+			EC.GetBytes(a.ecCurve, a.ecX, ba, 0);
+			EC.GetBytes(b.ecCurve, b.ecX, bb, 0);
+			IF ~U.EqualBytesCT(ba, bb, 0, 0, 4 * a.ecCurve.n) THEN RETURN FALSE END;
+			FOR i := 0 TO LEN(ba) - 1 DO ba[i] := 0X; bb[i] := 0X END;
+			EC.GetBytes(a.ecCurve, a.ecY, ba, 0);
+			EC.GetBytes(b.ecCurve, b.ecY, bb, 0);
+			RETURN U.EqualBytesCT(ba, bb, 0, 0, 4 * a.ecCurve.n)
+		ELSIF a.keyType = KeyEd25519 THEN
+			RETURN U.EqualBytesCT(a.edKey, b.edKey, 0, 0, 32)
+		END;
+		RETURN FALSE
+	END SameKey;
+
+	(* Доверенный корень и предъявленный сертификат могут быть разными
+	   кодировками одного ключа (cross-signed root): сравниваем субъект
+	   и открытый ключ, как это делает построение пути по RFC 5280. *)
+	PROCEDURE SameAnchor (a, b : Certificate): BOOLEAN;
+	BEGIN
+		IF (a = NIL) OR (b = NIL) OR (a.subjectRaw = NIL) OR (b.subjectRaw = NIL)
+			OR (a.subjectLen # b.subjectLen) THEN
+			RETURN FALSE
+		END;
+		RETURN U.EqualBytesCT(a.subjectRaw^, b.subjectRaw^, 0, 0, a.subjectLen)
+			& SameKey(a, b)
+	END SameAnchor;
+
 	PROCEDURE InList (cert, list : Certificate): BOOLEAN;
 		VAR c : Certificate;
 	BEGIN
 		c := list;
 		WHILE c # NIL DO
-			IF SameCert(cert, c) THEN
+			IF SameCert(cert, c) OR SameAnchor(cert, c) THEN
 				RETURN TRUE
 			END;
 			c := c.next
@@ -1123,21 +1170,21 @@ MODULE CryptoX509;
 		tail := NIL;
 		from := 0;
 		WHILE FindPem(pem, from, CertHeader, start, stop) DO
-			IF ~PemToDer(pem, start, stop, der, derLen) THEN
-				res := ErrMalformed;
-				RETURN head
-			END;
-			c := ReadCert(der, 0, derLen, res);
-			IF c = NIL THEN
-				RETURN head
-			END;
-			IF head = NIL THEN
-				head := c
-			ELSE
-				tail.next := c
-			END;
-			tail := c;
-			from := stop
+			(* Набор доверенных корней может содержать сертификат,
+			   который мы не разбираем (неизвестный алгоритм). Один
+			   такой сертификат не должен отбрасывать остальные. *)
+			from := stop;
+			IF PemToDer(pem, start, stop, der, derLen) THEN
+				c := ReadCert(der, 0, derLen, res);
+				IF c # NIL THEN
+					IF head = NIL THEN
+						head := c
+					ELSE
+						tail.next := c
+					END;
+					tail := c
+				END
+			END
 		END;
 		IF head = NIL THEN
 			res := ErrMalformed
