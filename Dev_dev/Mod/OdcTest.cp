@@ -225,8 +225,8 @@ MODULE Dev_devOdcTest;
 	END TestLinks;
 
 	PROCEDURE TestOdcRoundTrip*;
-		VAR m, m2: TextModels.Model; tv: TextViews.View; v: Views.View;
-			loc: Files.Locator; f: Files.File; res: INTEGER; name: Files.Name;
+		VAR m, m2: TextModels.Model; tv: TextViews.View; v: Views.View; a, body: TextModels.Attributes;
+			loc: Files.Locator; f: Files.File; res: INTEGER; name: Files.Name; found: BOOLEAN;
 	BEGIN
 		Convert(m);
 		tv := TextViews.dir.New(m);
@@ -247,7 +247,16 @@ MODULE Dev_devOdcTest;
 			m2 := v(TextViews.View).ThisModel();
 			UnitAssert.True(HasLink(m2, "StdCmds.OpenDoc('Obx/Docu/Other.odc')"),
 				"ссылка на документ пережила запись и чтение");
-			UnitAssert.True(HasLink(m2, "Demo.Run"), "ссылка на команду пережила запись и чтение")
+			UnitAssert.True(HasLink(m2, "Demo.Run"), "ссылка на команду пережила запись и чтение");
+			FindAttr(m2, "Heading One", found, a);
+			UnitAssert.True(found, "заголовок пережил запись и чтение");
+			UnitAssert.EqualInt(Fonts.bold, a.font.weight, "жирность заголовка пережила запись");
+			FindAttr(m2, "Body", found, body);
+			UnitAssert.True(found, "текст пережил запись");
+			UnitAssert.True(a.font.size > body.font.size, "размер заголовка пережил запись");
+			FindAttr(m2, "x := 1", found, a);
+			UnitAssert.True(found, "код пережил запись");
+			UnitAssert.EqualStr("Courier", a.font.typeface, "моноширинный шрифт пережил запись")
 		END;
 		Files.dir.Delete(loc, name)
 	END TestOdcRoundTrip;
