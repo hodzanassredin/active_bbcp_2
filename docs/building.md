@@ -32,7 +32,8 @@
 | `.work/venv` | MPICH для `tools/test-mpi.sh` | — |
 | `.work/mpi` | `libbbmpi.so` для теста MPI | — |
 | `.work/gtk4-bin` | `gtk4-broadwayd` для GUI-тестов | — |
-| `.work/go` | компилятор Go и кеш `tools/bench-go.sh` | `GO` |
+| `.work/go` | компилятор Go для `tools/bench-go.sh` | `GO` |
+| `.work/go-cache` | кеш сборки Go | — |
 
 `tools/env.sh` задаёт `BB` (корень), `INSTALL` (`.work/BB64LIN`), `INTERP`
 (`blackbox-console`) и `DEV0` (`dev0Linux`).
