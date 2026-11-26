@@ -1,8 +1,8 @@
 Map to the Comm Subsystem
 
-CommStreams	reliable streams abstraction
-CommTCP	TCP/IP streams (sockets)
-CommV24	V24 unreliable streams
+[CommStreams](Streams.md)	reliable streams abstraction
+[CommTCP](TCP.md)	TCP/IP streams (sockets)
+[CommV24](V24.md)	V24 unreliable streams
 
-CommObxStreamsClient	CommStreams example
-CommObxStreamsServer	CommStreams example
+[CommObxStreamsClient](ObxStreamsClient.md)	CommStreams example
+[CommObxStreamsServer](ObxStreamsServer.md)	CommStreams example

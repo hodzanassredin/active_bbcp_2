@@ -7,11 +7,19 @@
 # открывает .odc: Help → Examples ищет Obx/Docu/Sys-Map.odc. Скрипт копирует
 # <Подсистема>/Docu и исходники (<Подсистема>/Mod, поверх — Mod64) в
 # установку и командой Dev_devOdc.All кладёт рядом с каждым текстом .odc.
-# Разметка .md не разбирается: в окне виден исходный текст документа.
+# Разметка .md разбирается: заголовки, жирный, курсив, код, списки и
+# таблицы получают атрибуты, ссылки [текст](Путь.md) и !Модуль.Процедура
+# становятся StdLinks-ссылками. После преобразования Check открывает
+# Obx/Docu/Sys-Map.odc через Views.OldView и требует непустые ссылки.
 # Запускать после tools/build64.sh.
 set -e
 . "$(dirname "$0")/env.sh"
 [ -x "$INTERP" ] || { echo "gui-world: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
+
+if [ -d "$BB/Docu" ]; then
+	mkdir -p "$INSTALL/Docu"
+	cp -a "$BB/Docu/." "$INSTALL/Docu/"
+fi
 
 for sub in "$BB"/*/; do
 	sub=$(basename "$sub")
@@ -34,4 +42,19 @@ printf '%s\n' "$out" | grep -q 'failed 0$' || { echo "gui-world: не все т�
 # .cp в установке нужны были только как вход преобразования.
 find "$INSTALL" -path '*/Mod/*.cp' -delete
 [ -f "$INSTALL/Obx/Docu/Sys-Map.odc" ] || { echo "gui-world: нет Obx/Docu/Sys-Map.odc" >&2; exit 1; }
+for spec in "Obx/Docu Sys-Map.odc" "Obx/Docu/ru Sys-Map.odc" "Dev/Docu/ru Sys-Map.odc"; do
+	set -- $spec
+	[ -f "$INSTALL/$1/$2" ] || continue
+	out=$(printf "Dev_devOdc.Check('%s', '%s')\n" "$1" "$2" | run64 2>&1) || {
+		printf '%s\n' "$out" | tail -20 >&2
+		echo "gui-world: Check $1/$2 не выполнился" >&2; exit 1
+	}
+	printf '%s\n' "$out" | grep 'Dev_devOdc: check' | tail -1
+	printf '%s\n' "$out" | grep -q 'empty 0$' || {
+		echo "gui-world: пустые ссылки в $1/$2" >&2; exit 1
+	}
+	printf '%s\n' "$out" | grep -q 'check links [1-9]' || {
+		echo "gui-world: в $1/$2 нет ссылок" >&2; exit 1
+	}
+done
 echo "gui-world: готово"

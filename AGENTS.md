@@ -183,9 +183,11 @@ Do not use spaces for indentation. Put an empty line before each new source bloc
 ### Build and Run
 
 ```sh
-tools/build64.sh                  # all subsystems, console + GUI
+tools/build64.sh                  # all subsystems, console + GUI + help .odc
 tools/build64.sh --clean          # erase .ocf/.osf in the installation
 tools/build64.sh --console-only   # console only
+tools/build64.sh --no-help        # skip Docu/*.md -> .odc conversion
+tools/gui-world.sh                # .odc help alone, after a build
 echo 'Команда' | tools/run64.sh
 tools/go64.sh System_devBasic         # amd64 CompileThis
 tools/go32.sh DevCPE                  # i386 CompileThis -> .work/i386
@@ -200,7 +202,9 @@ tools/worktree.sh ../active_bb-x x    # parallel worktree: links, bootstrap, bui
 `tools/build64.sh` compiles `Mod64` when present and writes `Code`/`Sym` to the installation. It
 then compiles `Taskarch`, `Tasks`, `LinThreads`, `LinNative`, the `Async` subsystem, `Robust`,
 `Kv`, `Actor`, `Raft`, the examples in `Obx/Mod64` and the modules of `Demo`. It links
-`blackbox-console` and, unless `--console-only` is given, `blackbox`.
+`blackbox-console` and, unless `--console-only` is given, `blackbox`. When `Obx` is built and
+`--no-help` is not given, it calls `tools/gui-world.sh` to turn `Docu/*.md` and `Mod/*.cp` into
+`.odc` with markup and links, and checks `Sys-Map.odc` through `Views.OldView`.
 
 `tools/env.sh:clean_host_temp` removes `odc` names with 5 or 9 digits from `/tmp` before starting
 `dev0Linux`.

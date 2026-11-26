@@ -8,23 +8,23 @@
 тесты — `tools/test.sh Demo_devExamples`.
 
 Active Oberon
-DemoBuffer  docu/sources		ограниченный буфер на мониторе объекта (Reali, B.6)
-DemoPhilo  docu/sources		обедающие философы на семафорах (Reali, C.1 и B.4)
-DemoReaderWriter  docu/sources		читатели и писатели (Reali, B.1)
-DemoBarber  docu/sources		спящий парикмахер (ETH System Construction)
-DemoModuleMonitor  docu/sources		производитель и потребитель на мониторе модуля
+[DemoBuffer](Buffer.md)  [docu](Buffer.md)/[sources](../Mod/Buffer.cp)		ограниченный буфер на мониторе объекта (Reali, B.6)
+[DemoPhilo](Philo.md)  [docu](Philo.md)/[sources](../Mod/Philo.cp)		обедающие философы на семафорах (Reali, C.1 и B.4)
+[DemoReaderWriter](ReaderWriter.md)  [docu](ReaderWriter.md)/[sources](../Mod/ReaderWriter.cp)		читатели и писатели (Reali, B.1)
+[DemoBarber](Barber.md)  [docu](Barber.md)/[sources](../Mod/Barber.cp)		спящий парикмахер (ETH System Construction)
+[DemoModuleMonitor](ModuleMonitor.md)  [docu](ModuleMonitor.md)/[sources](../Mod/ModuleMonitor.cp)		производитель и потребитель на мониторе модуля
 
 Go
-DemoPingPong  docu/sources		пинг-понг через один канал (Pike)
-DemoPipeline  docu/sources		конвейер с разветвлением и слиянием (Ajmani)
-DemoSieve  docu/sources		решето Эратосфена на каналах (Pike; Reali, C.2)
-DemoSelectTimeout  docu/sources		выбор с тайм-аутом (Tour of Go)
-DemoWorkerPool  docu/sources		пул рабочих (gobyexample)
-DemoBoring  docu/sources		генератор и мультиплексор (Pike)
-DemoGroup  docu/sources		отмена группы задач (Ajmani; errgroup)
+[DemoPingPong](PingPong.md)  [docu](PingPong.md)/[sources](../Mod/PingPong.cp)		пинг-понг через один канал (Pike)
+[DemoPipeline](Pipeline.md)  [docu](Pipeline.md)/[sources](../Mod/Pipeline.cp)		конвейер с разветвлением и слиянием (Ajmani)
+[DemoSieve](Sieve.md)  [docu](Sieve.md)/[sources](../Mod/Sieve.cp)		решето Эратосфена на каналах (Pike; Reali, C.2)
+[DemoSelectTimeout](SelectTimeout.md)  [docu](SelectTimeout.md)/[sources](../Mod/SelectTimeout.cp)		выбор с тайм-аутом (Tour of Go)
+[DemoWorkerPool](WorkerPool.md)  [docu](WorkerPool.md)/[sources](../Mod/WorkerPool.cp)		пул рабочих (gobyexample)
+[DemoBoring](Boring.md)  [docu](Boring.md)/[sources](../Mod/Boring.cp)		генератор и мультиплексор (Pike)
+[DemoGroup](Group.md)  [docu](Group.md)/[sources](../Mod/Group.cp)		отмена группы задач (Ajmani; errgroup)
 
 Задачи и окно
-DemoAnts  docu/sources		тысяча муравьёв на поле с окном
+[DemoAnts](Ants.md)  [docu](Ants.md)/[sources](../Mod/Ants.cp)		тысяча муравьёв на поле с окном
 
 Помощник
-DemoSupport  docu/sources		насос задач и вывод в консоль для команд без окна
+[DemoSupport](Support.md)  [docu](Support.md)/[sources](../Mod/Support.cp)		насос задач и вывод в консоль для команд без окна

@@ -41,9 +41,10 @@
 ## 3. Сборка Linux x64
 
 ```sh
-tools/build64.sh                  # все подсистемы, консоль и GUI
+tools/build64.sh                  # все подсистемы, консоль, GUI и справка .odc
 tools/build64.sh --clean          # стереть .ocf/.osf установки
 tools/build64.sh --console-only   # только blackbox-console
+tools/build64.sh --no-help        # без преобразования Docu/*.md в .odc
 tools/build64.sh System Lin       # выборочно, поверх готовой установки
 ```
 
@@ -65,6 +66,10 @@ tools/build64.sh System Lin       # выборочно, поверх готов�
    `--console-only`, окно `Kernel+ LinKernel Files LinFiles StdLoader LinLoader`.
 8. Копирует `Rsrc` подсистем и каталоги `Docu`, `Obx/Docu`, `Demo/Docu`, `Lin/Docu`, `Unit/Docu`,
    `Cas/Docu`, `Actor/Docu`, `Raft/Docu` в установку.
+9. Если собран `Obx` и не указан `--no-help`, зовёт `tools/gui-world.sh`: раскладывает
+   `Docu/*.md` и `Mod/*.cp` в установке как `.odc` с разметкой и ссылками и проверяет
+   `Obx/Docu/Sys-Map.odc` через `Views.OldView`. Отдельный запуск — `tools/gui-world.sh`
+   после готовой сборки.
 
 Линковка обязана напечатать `ok`. `CompileSubs` разрешает зависимости сам, поэтому первый
 прогон должен быть полным списком, а не одной подсистемой. Ключ с подсистемами сужает только

@@ -2,22 +2,22 @@ Map to the Direct-To-COM Examples
 
 
 COM Interface Usage
-ComEnumRect  docu	ComEnumRect  sources	simple COM object
-ComObject  docu	ComObject sources	minimal OLE server
-ComConnect  docu	ComConnect  sources	connection points
-ComAggregate  docu	ComAggregate  sources	usage of aggregation
+[ComEnumRect](EnumRect.md)  [docu](EnumRect.md)	[ComEnumRect](EnumRect.md)  [sources](../Mod/EnumRect.cp)	simple COM object
+[ComObject](Object.md)  [docu](Object.md)	[ComObject](Object.md) [sources](../Mod/Object.cp)	minimal OLE server
+[ComConnect](Connect.md)  [docu](Connect.md)	[ComConnect](Connect.md)  [sources](../Mod/Connect.cp)	connection points
+[ComAggregate](Aggregate.md)  [docu](Aggregate.md)	[ComAggregate](Aggregate.md)  [sources](../Mod/Aggregate.cp)	usage of aggregation
 
 Inprocess and Local Servers
-ComKoala  docu	ComKoala  sources	local server in BlackBox
-	ComKoalaTst  sources	test program for ComKoala
-ComKoalaExe  docu	ComKoalaExe  sources	independent local server
-ComKoalaDll  docu	ComKoalaDll  sources	in process server
+[ComKoala](Koala.md)  [docu](Koala.md)	[ComKoala](Koala.md)  [sources](../Mod/Koala.cp)	local server in BlackBox
+	[ComKoalaTst](KoalaTst.md)  [sources](../Mod/KoalaTst.cp)	test program for ComKoala
+[ComKoalaExe](KoalaExe.md)  [docu](KoalaExe.md)	[ComKoalaExe](KoalaExe.md)  [sources](../Mod/KoalaExe.cp)	independent local server
+[ComKoalaDll](KoalaDll.md)  [docu](KoalaDll.md)	[ComKoalaDll](KoalaDll.md)  [sources](../Mod/KoalaDll.cp)	in process server
 
 Tool Libraries
-ComTools  docu	ComTools  sources	tools for unsafe structures
-ComEnum  docu	ComEnum  sources	standard enumerators
+[ComTools](Tools.md)  [docu](Tools.md)	[ComTools](Tools.md)  [sources](../Mod/Tools.cp)	tools for unsafe structures
+[ComEnum](Enum.md)  [docu](Enum.md)	[ComEnum](Enum.md)  [sources](../Mod/Enum.cp)	standard enumerators
 
 Sample Control
-ComPhoneBook  docu	ComPhoneBook  sources	simple phonebook
-ComPhoneBookActiveX	ComPhoneBookActiveX	phonebook as ActiveX
-	ComPhoneBookClient	phonebook client
+[ComPhoneBook](PhoneBook.md)  [docu](PhoneBook.md)	[ComPhoneBook](PhoneBook.md)  [sources](../Mod/PhoneBook.cp)	simple phonebook
+[ComPhoneBookActiveX](PhoneBookActiveX.md)	[ComPhoneBookActiveX](PhoneBookActiveX.md)	phonebook as ActiveX
+	[ComPhoneBookClient](PhoneBookClient.md)	phonebook client
