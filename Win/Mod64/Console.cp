@@ -1,6 +1,7 @@
 MODULE WinConsole;
 	IMPORT S := SYSTEM, Console, A := WinApi;
 	TYPE Cons = POINTER TO RECORD (Console.Console) END;
+	CONST utf8 = 65001;	(* CP_UTF8: тот же вид вывода, что у консоли Linux *)
 	VAR cons: Cons; input, output: S.ADDRESS;
 	PROCEDURE Print (IN text: ARRAY OF CHAR);
 		VAR data: ARRAY 4096 OF SHORTCHAR; chars, bytes, written, result, offset: INTEGER;
@@ -8,7 +9,7 @@ MODULE WinConsole;
 		offset := 0;
 		WHILE offset < LEN(text$) DO
 			chars := MIN(1000, LEN(text$)-offset);
-			bytes := A.WideCharToMultiByte(1, 0, S.ADR(text[offset]), chars, S.ADR(data), LEN(data), 0, 0);
+			bytes := A.WideCharToMultiByte(utf8, 0, S.ADR(text[offset]), chars, S.ADR(data), LEN(data), 0, 0);
 			IF bytes <= 0 THEN RETURN END;
 			result := A.WriteFile(output, S.ADR(data), bytes, written, NIL);
 			IF (result = 0) OR (written # bytes) THEN RETURN END;
@@ -32,10 +33,13 @@ MODULE WinConsole;
 			INC(count);
 			IF (bytes[count-1] = 0AX) OR (count = LEN(bytes)) THEN EXIT END
 		END;
-		result := A.MultiByteToWideChar(1, 0, S.ADR(bytes), count, S.ADR(text), LEN(text)-1);
+		result := A.MultiByteToWideChar(utf8, 0, S.ADR(bytes), count, S.ADR(text), LEN(text)-1);
 		IF result < 0 THEN result := 0 END; text[result] := 0X
 	END ReadLn;
 BEGIN
 	input := A.GetStdHandle(-10); output := A.GetStdHandle(-11);
+	(* Окно консоли показывает байты в своей кодовой странице; для канала и файла
+	   вызов ничего не меняет. Прежняя страница OEM теряла кириллицу. *)
+	IF A.SetConsoleOutputCP(utf8) = 0 THEN END; IF A.SetConsoleCP(utf8) = 0 THEN END;
 	NEW(cons); Console.SetConsole(cons)
 END WinConsole.
