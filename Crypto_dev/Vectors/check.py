@@ -159,6 +159,45 @@ if have_crypto:
     if shared != vals["shared"]:
         fail(f"x25519 shared: {shared.hex()} != {vals['shared'].hex()}")
 
+    # Wycheproof ECDSA P-256: выбранные случаи.
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.exceptions import InvalidSignature
+
+    def der_int(x):
+        b = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
+        if b[0] & 0x80:
+            b = b"\x00" + b
+        return b"\x02" + bytes([len(b)]) + b
+
+    def der_sig(r, s):
+        body = der_int(r) + der_int(s)
+        return b"\x30" + bytes([len(body)]) + body
+
+    curves = {"secp256r1": ec.SECP256R1()}
+    for name, hashname, qx, qy, msg, r, s, expect, comment in rows("ecdsa-wycheproof.txt"):
+        try:
+            pub = ec.EllipticCurvePublicNumbers(int(qx, 16), int(qy, 16),
+                                                curves[name]).public_key()
+            pub.verify(der_sig(int(r, 16), int(s, 16)), unhex(msg),
+                       ec.ECDSA(hashes.SHA256()))
+            ok = True
+        except (InvalidSignature, ValueError):
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"ecdsa-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
+
+    for name, priv, x, y, shared, expect, comment in rows("ecdh-wycheproof.txt"):
+        try:
+            pub = ec.EllipticCurvePublicNumbers(int(x, 16), int(y, 16),
+                                                curves[name]).public_key()
+            got = ec.derive_private_key(int(priv, 16), curves[name]).exchange(ec.ECDH(), pub)
+            ok = (expect == "valid" and got.hex().upper() == shared.upper())
+        except (ValueError, Exception):
+            ok = (expect == "invalid")
+        if not ok:
+            fail(f"ecdh-wycheproof {comment}: не совпало с ожиданием")
+
 if failures:
     print(f"check-vectors: {failures} провалов")
     sys.exit(1)

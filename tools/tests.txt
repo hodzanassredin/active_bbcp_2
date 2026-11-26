@@ -90,3 +90,7 @@ Crypto_devX509||180|Crypto_devX509Data CryptoX509 CryptoRSA CryptoPKCS1 CryptoAS
 Crypto_devPKCS1|slow|900|CryptoPKCS1 CryptoRSA CryptoPrimes CryptoAosBigNumbers CryptoUtils CryptoAosCompat
 # PRF TLS 1.2 (RFC 5246) по независимому вектору, постоянное время, энтропия ОС.
 Crypto_devPRF||180|CryptoTLS CryptoOsRandom CryptoUtils CryptoFortuna CryptoFortunaRng CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoAosCompat CryptoHashes CryptoSHA256 CryptoCiphers CryptoMD5 CryptoSHA1 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoHMAC CryptoRSA CryptoPKCS1 CryptoX509 CryptoASN1 CryptoBase64 CryptoX25519 CryptoFieldElement CryptoGcm CryptoAosTCP CryptoAosPipes CryptoAosDates CryptoAosStrings CryptoAosFileStreams CryptoAosIP CryptoAosCommStreams CryptoAosClock CryptoAosBIT
+# P-256/P-384: скалярное умножение, ECDH, отказ от чужих точек.
+Crypto_devEC||300|CryptoEC CryptoUtils CryptoAosCompat
+# ECDSA P-256/P-384: RFC 6979, проверка подписи, отказы при подделке.
+Crypto_devECDSA|slow|600|CryptoHashes CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoHMAC CryptoUtils CryptoAosCompat CryptoEC CryptoECDSA

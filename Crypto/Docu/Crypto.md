@@ -21,7 +21,7 @@ The support modules keep the names of the A2 sources:
 | Host support | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
 | Primitives | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
 | Hashes and MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
-| Public key | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoASN1`, `CryptoX509` |
+| Public key | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoASN1`, `CryptoX509` |
 | Random | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
 
@@ -43,6 +43,25 @@ ok := CryptoHKDF.Expand("CryptoSHA256", prk, 32, info, infoLen, okm, okmLen)
 
 `CryptoHMAC` uses the block size of the underlying hash, so a key longer than the block is hashed
 once and the inner and outer pads have the size of the hash block.
+
+Elliptic-curve keys use `CryptoEC` for P-256 and P-384. A point is decoded from the uncompressed
+SEC1 form (`0x04 || X || Y`), decoded and validated before use, and ECDH returns the x-coordinate
+of the shared point:
+
+```componentpascal
+c := CryptoEC.P256();
+ok := CryptoEC.PointFromBytes(c, peer, 65, qx, qy);
+ok := CryptoEC.ECDH(c, privateKey, qx, qy, sharedX)
+```
+
+`CryptoECDSA` signs and verifies with the hash of the curve (SHA-256 for P-256, SHA-384 for
+P-384). The nonce is deterministic (RFC 6979), so the same key and hash give the same `r` and `s`;
+`r` and `s` are fixed-length big-endian values of the order size.
+
+```componentpascal
+ok := CryptoECDSA.Sign(c, privateKey, hash, hashLen, r, s);
+ok := CryptoECDSA.Verify(c, qx, qy, hash, hashLen, r, s)
+```
 
 TLS is reached through the stream interface, as described for the TCP protocol in the
 `CommStreams` documentation. Instead of the name `CommTCP`, pass the name `CryptoTLSStream` to
@@ -102,6 +121,21 @@ srv.Accept(client, res);                       (* completes the handshake *)
   the PKCS#1 encoded message are not compared with an early exit. `CryptoHKDF` builds on
   `CryptoHMAC`, so HMAC-SHA-256, HMAC-SHA-384 and HMAC-SHA-512 use the 128-byte block of SHA-384
   and SHA-512 and the 64-byte block of SHA-256.
+- P-256 and P-384 use the complete projective addition formulas of Renes, Costello and Batina.
+  They have no exceptional cases, so doubling, addition of a point to itself and addition of
+  opposite points use the same sequence. Scalar multiplication is a fixed 4-bit window: the number
+  of additions depends only on the curve size, the table entry is chosen by a masked scan of all
+  16 entries, and the conditional subtraction in field operations uses masks rather than
+  branches. `InRange` and `IsZeroN` do not exit early. `CryptoEC.Validate` checks that both
+  coordinates are below the field modulus and that the point satisfies the curve equation; ECDH,
+  ECDSA verification and point decoding reject a point outside the curve, the point (0,0) and an
+  empty encoding.
+- ECDSA follows RFC 6979: the nonce is HMAC-DRBG output over the private key and the reduced hash,
+  so a repeated signature is impossible without a repeated message. Verification rejects `r` or
+  `s` equal to zero or at least the order, and compares the recomputed `r` in constant time.
+- `CryptoEC` works on fixed 32-bit limbs with Montgomery multiplication. Field negation,
+  inversion and exponentiation use the public modulus and the public exponent; the private scalar
+  only enters through the masked window selection.
 - Keys and nonces come from `CryptoOsRandom`, which reads `/dev/urandom`; the Fortuna generator
   mixes fresh OS entropy on every request. PKCS#1 padding and the TLS pre-master secret abort if
   the source is unavailable instead of using predictable bytes. Prime generation
@@ -115,7 +149,9 @@ srv.Accept(client, res);                       (* completes the handshake *)
 ## Limitations
 
 - TLS 1.3 is not implemented.
-- Certificates must use RSA keys; the key exchange is X25519 only. No other named groups.
+- X.509 certificates are RSA-only; the TLS handshake uses X25519. `CryptoEC` supports P-256 and
+  P-384 for ECDH and ECDSA but is not yet part of X.509 or TLS. Compressed SEC1 points, P-521 and
+  the other named curves are not implemented.
 - CRL, OCSP and certificate transparency are not checked. The trust decision is the configured
   root set.
 - The big-number arithmetic (RSA private operations) and X25519 are not constant-time at the
@@ -143,7 +179,8 @@ from `tools/build32.sh` and `tools/test32.sh`.
 
 Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`,
-`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devX509`, `Crypto_devPKCS1` and `Crypto_devPRF`.
+`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devX509`,
+`Crypto_devPKCS1` and `Crypto_devPRF`.
 `tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files
 with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies
 them with an independent Python implementation.

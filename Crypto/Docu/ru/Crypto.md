@@ -21,7 +21,7 @@
 | Поддержка хоста | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
 | Примитивы | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
 | Хеши и MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
-| Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoASN1`, `CryptoX509` |
+| Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoASN1`, `CryptoX509` |
 | Случайные числа | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
 
@@ -43,6 +43,25 @@ ok := CryptoHKDF.Expand("CryptoSHA256", prk, 32, info, infoLen, okm, okmLen)
 
 `CryptoHMAC` использует размер блока лежащего в основе хеша: ключ длиннее блока хешируется один
 раз, а внутренние и внешние дополнения имеют размер блока хеша.
+
+Ключи на эллиптических кривых обслуживает `CryptoEC` для P-256 и P-384. Точка читается из
+несжатой формы SEC1 (`0x04 || X || Y`), проверяется и только потом используется; ECDH
+возвращает x-координату общей точки:
+
+```componentpascal
+c := CryptoEC.P256();
+ok := CryptoEC.PointFromBytes(c, peer, 65, qx, qy);
+ok := CryptoEC.ECDH(c, privateKey, qx, qy, sharedX)
+```
+
+`CryptoECDSA` подписывает и проверяет хешем своей кривой (SHA-256 для P-256, SHA-384 для P-384).
+Одноразовое число детерминировано (RFC 6979): те же ключ и хеш дают те же `r` и `s`; `r` и `s` —
+значения фиксированной длины в порядке байтов от старшего.
+
+```componentpascal
+ok := CryptoECDSA.Sign(c, privateKey, hash, hashLen, r, s);
+ok := CryptoECDSA.Verify(c, qx, qy, hash, hashLen, r, s)
+```
 
 TLS доступен через интерфейс потоков так, как описано для протокола TCP в документации
 `CommStreams`. Вместо имени `CommTCP` в `CommStreams.NewStream` передаётся имя `CryptoTLSStream`.
@@ -102,6 +121,20 @@ srv.Accept(client, res);                       (* завершает рукоп�
   PKCS#1-блок не сравниваются с ранним выходом. `CryptoHKDF` строится на `CryptoHMAC`, поэтому
   HMAC-SHA-256, HMAC-SHA-384 и HMAC-SHA-512 используют блок 128 байт у SHA-384 и SHA-512 и блок
   64 байта у SHA-256.
+- P-256 и P-384 используют полные проективные формулы сложения Ренеса, Костелло и Батины. У них
+  нет исключительных случаев, поэтому удвоение, сложение точки с собой и сложение
+  противоположных точек идут одной последовательностью. Умножение на скаляр — окно 4 бита:
+  число сложений зависит только от размера кривой, элемент таблицы выбирается маскированным
+  перебором всех 16, а условное вычитание в операциях поля идёт через маски, не через ветвления.
+  `InRange` и `IsZeroN` не выходят раньше времени. `CryptoEC.Validate` проверяет, что обе
+  координаты меньше модуля поля и что точка лежит на кривой; ECDH, проверка ECDSA и разбор
+  точки отвергают точку вне кривой, точку (0,0) и пустое представление.
+- ECDSA следует RFC 6979: одноразовое число — выход HMAC-DRBG по закрытому ключу и приведённому
+  хешу, поэтому повтор подписи невозможен без повтора сообщения. Проверка отвергает `r` или `s`,
+  равные нулю или не меньшие порядка, и сравнивает пересчитанный `r` постоянного времени.
+- `CryptoEC` работает на 32-битных разрядах с умножением Монтгомери. Отрицание, обращение и
+  возведение в степень в поле используют открытые модуль и показатель; закрытый скаляр входит
+  только через маскированный выбор окна.
 - Ключи и nonce берутся из `CryptoOsRandom` (`/dev/urandom`); генератор Fortuna подмешивает
   свежую энтропию ОС на каждый запрос. PKCS#1-дополнение и TLS pre-master при недоступном
   источнике завершаются ошибкой, а не предсказуемыми байтами. Генерация простых чисел
@@ -115,7 +148,9 @@ srv.Accept(client, res);                       (* завершает рукоп�
 ## Ограничения
 
 - TLS 1.3 не реализован.
-- Сертификаты только с RSA-ключами; обмен ключами только X25519, других named groups нет.
+- Сертификаты X.509 только с RSA-ключами; в рукопожатии TLS обмен только X25519. `CryptoEC`
+  даёт P-256 и P-384 для ECDH и ECDSA, но в X.509 и TLS они ещё не подключены. Сжатые точки
+  SEC1, P-521 и остальные named groups не реализованы.
 - CRL, OCSP и certificate transparency не проверяются. Решение о доверии — настроенный
   набор корней.
 - Арифметика больших чисел (закрытые операции RSA) и X25519 не постоянного времени на
@@ -143,7 +178,8 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`,
-`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devX509`, `Crypto_devPKCS1`, `Crypto_devPRF`. Их
+`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devX509`,
+`Crypto_devPKCS1`, `Crypto_devPRF`. Их
 запускает `tools/test.sh` по списку `tools/tests.txt`. Эталонные значения также лежат файлами с
 указанием источника и лицензии в `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их
 независимой реализацией на Python.

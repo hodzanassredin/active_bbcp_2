@@ -23,6 +23,7 @@
 | 8. TLS: результат `Finished` и состояние | исправлено | `crypto-fix` | `fake-badfinished`, `fake-badccs`, `fake-badtag`, `badcertverify`, `goodcertverify` |
 | 9. X.509: ограничения пути и расширения | исправлено | `f4ae77de`, `8b9d6d8c` | `Crypto_devX509` (`TestNoCA`, `TestPathLen`, `TestKeyUsage`, `TestCriticalExtension`, `TestCycle`, `TestAlgMismatch`) |
 | SHA-384/512, HMAC-SHA-384/512, HKDF | сделано | `crypto-fix` | `Crypto_devSHA512`, `Crypto_devHMAC`, `Crypto_devHKDF`, `Vectors/check.py` |
+| P-256/P-384: ECDH и ECDSA (RFC 6979) | сделано | `crypto-fix` | `Crypto_devEC`, `Crypto_devECDSA`, NIST CAVP, RFC 6979, Wycheproof, `Vectors/check.py` |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -317,6 +318,9 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 | SHA-384/512 | `sha512-rotr`, `sha512-iv`, `sha512-len`, `sha512-schedule`, `sha384-size` | `Crypto_devSHA512` (все пять красные) |
 | HMAC-SHA-384/512 | `hmac-block`, `hmac-ipad`, `hmac-trunc` | `Crypto_devHMAC` (все три красные) |
 | HKDF | `hkdf-counter`, `hkdf-prk`, `hkdf-salt` | `Crypto_devHKDF` (все три красные) |
+| P-256/P-384: поле и точка | `ec-mont-sub`, `ec-formula`, `ec-digit`, `ec-oncurve`, `ec-window`, `ec-inrange`, `ec-mont-zero`, `ec384-a`, `ec384-nbits` | `Crypto_devEC` (все красные; `ec384-nbits` покраснел после того, как векторы P-384 стали полной длины — с короткими скалярами старшие 128 бит не проверялись) |
+| ECDH | `ecdh-novalidate`, `ecdh-noprivcheck`, `ecdh-wrongpoint`, `ecdh-zero` | три красные; `ecdh-zero` эквивалентна: на проверенной точке простого порядка общий секрет ноль только у бесконечности, а её отвергает `Validate` |
+| ECDSA RFC 6979 | `ecdsa-sep`, `ecdsa-swap`, `ecdsa-sformula`, `ecdsa-u1`, `ecdsa-compare`, `ecdsa-range` | пять красные; `ecdsa-range` на выбранных векторах эквивалентна (r=0 и s=n отвергаются арифметикой, r=p не совпадает), но проверка диапазона оставлена по RFC 6979/ECDSA |
 
 Порча `uls-signed-compare` (возврат сравнения через XOR старшего бита) тест не
 краснит: на этом компиляторе эта форма эквивалентна явным ветвям, поэтому замена
