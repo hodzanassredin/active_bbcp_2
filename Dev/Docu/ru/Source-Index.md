@@ -6,7 +6,7 @@
 
 ## DevAlienTool
 
-[Исходник](../Mod/AlienTool.cp) · [Документация](AlienTool.md)
+[Исходник](../../Mod/AlienTool.cp) · [Документация](AlienTool.md)
 
 IMPORT: `Services, Ports, Stores, Models, Views, Controllers, Properties, Dialog, Containers, Documents, TextModels, TextMappers, TextViews, StdFolds`.
 
@@ -16,7 +16,7 @@ IMPORT: `Services, Ports, Stores, Models, Views, Controllers, Properties, Dialog
 
 ## DevAnalyzer
 
-[Исходник](../Mod/Analyzer.cp) · [Документация](Analyzer.md)
+[Исходник](../../Mod/Analyzer.cp) · [Документация](Analyzer.md)
 
 IMPORT: `TextMappers, TextModels, TextViews, DevMarkers, Stores, Models, Dialog, StdLog, CPT := DevCPT, CPS := DevCPS, CPM := DevCPM, CPB := DevCPB, StdRegistry, Utf`.
 
@@ -30,7 +30,7 @@ IMPORT: `TextMappers, TextModels, TextViews, DevMarkers, Stores, Models, Dialog,
 
 ## DevBootLinker
 
-[Исходник](../Mod/BootLinker.cp) · [Документация](BootLinker.md)
+[Исходник](../../Mod/BootLinker.cp) · [Документация](BootLinker.md)
 
 IMPORT: `Kernel, Librarian, Files, Dialog, Log, TextMappers, DevCommanders`.
 
@@ -41,7 +41,7 @@ IMPORT: `Kernel, Librarian, Files, Dialog, Log, TextMappers, DevCommanders`.
 
 ## DevBrowser
 
-[Исходник](../Mod/Browser.cp) · [Документация](Browser.md)
+[Исходник](../../Mod/Browser.cp) · [Документация](Browser.md)
 
 IMPORT: `Kernel, Files, Fonts, Dates, Ports, Stores, Views, Properties, Dialog, Documents, TextModels, TextMappers, TextRulers, TextViews, TextControllers, StdDialog, StdFolds, DevReferences, DevCPM, DevCPT, DevDecoder386, StdRegistry, Utf`.
 
@@ -57,7 +57,7 @@ IMPORT: `Kernel, Files, Fonts, Dates, Ports, Stores, Views, Properties, Dialog, 
 
 ## DevCPB
 
-[Исходник](../Mod/CPB.cp) · [Документация](CPB.md)
+[Исходник](../../Mod/CPB.cp) · [Документация](CPB.md)
 
 IMPORT: `DevCPT, DevCPM`.
 
@@ -106,7 +106,7 @@ IMPORT: `DevCPT, DevCPM`.
 
 ## DevCPC486
 
-[Исходник](../Mod/CPC486.cp) · [Документация](CPC486.md)
+[Исходник](../../Mod/CPC486.cp) · [Документация](CPC486.md)
 
 IMPORT: `SYSTEM, DevCPM, DevCPT, DevCPE, DevCPL486`.
 
@@ -184,7 +184,7 @@ IMPORT: `SYSTEM, DevCPM, DevCPT, DevCPE, DevCPL486`.
 
 ## DevCPE
 
-[Исходник](../Mod/CPE.cp) · [Документация](CPE.md)
+[Исходник](../../Mod/CPE.cp) · [Документация](CPE.md)
 
 IMPORT: `SYSTEM, Dates, DevCPM, DevCPT`.
 
@@ -217,7 +217,7 @@ IMPORT: `SYSTEM, Dates, DevCPM, DevCPT`.
 
 ## DevCPH
 
-[Исходник](../Mod/CPH.cp) · [Документация](CPH.md)
+[Исходник](../../Mod/CPH.cp) · [Документация](CPH.md)
 
 IMPORT: `DevCPT`.
 
@@ -228,7 +228,7 @@ IMPORT: `DevCPT`.
 
 ## DevCPL486
 
-[Исходник](../Mod/CPL486.cp) · [Документация](CPL486.md)
+[Исходник](../../Mod/CPL486.cp) · [Документация](CPL486.md)
 
 IMPORT: `DevCPM, DevCPT, DevCPE`.
 
@@ -288,7 +288,7 @@ IMPORT: `DevCPM, DevCPT, DevCPE`.
 
 ## DevCPM
 
-[Исходник](../Mod/CPM.cp) · [Документация](CPM.md)
+[Исходник](../../Mod/CPM.cp) · [Документация](CPM.md)
 
 IMPORT: `SYSTEM, Files, Stores, Models, TextModels, StdLog, DevMarkers, Dialog, Utf, Librarian`.
 
@@ -352,7 +352,7 @@ IMPORT: `SYSTEM, Files, Stores, Models, TextModels, StdLog, DevMarkers, Dialog, 
 
 ## DevCPP
 
-[Исходник](../Mod/CPP.cp) · [Документация](CPP.md)
+[Исходник](../../Mod/CPP.cp) · [Документация](CPP.md)
 
 IMPORT: `DevCPM, DevCPT, DevCPB, DevCPS`.
 
@@ -362,7 +362,7 @@ IMPORT: `DevCPM, DevCPT, DevCPB, DevCPS`.
 
 ## DevCPS
 
-[Исходник](../Mod/CPS.cp) · [Документация](CPS.md)
+[Исходник](../../Mod/CPS.cp) · [Документация](CPS.md)
 
 IMPORT: `SYSTEM, Math, Strings, Utf, DevCPM, DevCPT`.
 
@@ -374,7 +374,7 @@ IMPORT: `SYSTEM, Math, Strings, Utf, DevCPM, DevCPT`.
 
 ## DevCPT
 
-[Исходник](../Mod/CPT.cp) · [Документация](CPT.md)
+[Исходник](../../Mod/CPT.cp) · [Документация](CPT.md)
 
 IMPORT: `DevCPM, Utf`.
 
@@ -418,7 +418,7 @@ IMPORT: `DevCPM, Utf`.
 
 ## DevCPV486
 
-[Исходник](../Mod/CPV486.cp) · [Документация](CPV486.md)
+[Исходник](../../Mod/CPV486.cp) · [Документация](CPV486.md)
 
 IMPORT: `SYSTEM, DevCPM, DevCPT, DevCPE, DevCPH, DevCPL486, DevCPC486`.
 
@@ -432,7 +432,7 @@ IMPORT: `SYSTEM, DevCPM, DevCPT, DevCPE, DevCPH, DevCPL486, DevCPC486`.
 
 ## DevChmod__Fbsd
 
-[Исходник](../Mod/Chmod__Fbsd.cp) · [Документация](Chmod__Fbsd.md)
+[Исходник](../../Mod/Chmod__Fbsd.cp) · [Документация](Chmod__Fbsd.md)
 
 IMPORT: `Libc := FbsdLibc, Files, DevLnkBase, Utf`.
 
@@ -442,7 +442,7 @@ IMPORT: `Libc := FbsdLibc, Files, DevLnkBase, Utf`.
 
 ## DevChmod__Lin
 
-[Исходник](../Mod/Chmod__Lin.cp) · [Документация](Chmod__Lin.md)
+[Исходник](../../Mod/Chmod__Lin.cp) · [Документация](Chmod__Lin.md)
 
 IMPORT: `Libc := LinLibc, Files, DevLnkBase, Utf`.
 
@@ -452,7 +452,7 @@ IMPORT: `Libc := LinLibc, Files, DevLnkBase, Utf`.
 
 ## DevChmod__Nbsd
 
-[Исходник](../Mod/Chmod__Nbsd.cp) · [Документация](Chmod__Nbsd.md)
+[Исходник](../../Mod/Chmod__Nbsd.cp) · [Документация](Chmod__Nbsd.md)
 
 IMPORT: `Libc := NbsdLibc, Files, DevLnkBase, Utf`.
 
@@ -462,7 +462,7 @@ IMPORT: `Libc := NbsdLibc, Files, DevLnkBase, Utf`.
 
 ## DevChmod__Obsd
 
-[Исходник](../Mod/Chmod__Obsd.cp) · [Документация](Chmod__Obsd.md)
+[Исходник](../../Mod/Chmod__Obsd.cp) · [Документация](Chmod__Obsd.md)
 
 IMPORT: `Libc := ObsdLibc, Files, DevLnkBase, Utf`.
 
@@ -472,7 +472,7 @@ IMPORT: `Libc := ObsdLibc, Files, DevLnkBase, Utf`.
 
 ## DevCmds
 
-[Исходник](../Mod/Cmds.cp) · [Документация](Cmds.md)
+[Исходник](../../Mod/Cmds.cp) · [Документация](Cmds.md)
 
 IMPORT: `Services, Files, Fonts, Ports, Stores, Models, Views, Controllers, Dialog, Containers, Controls, Properties, Documents, TextModels, TextMappers, TextRulers, TextViews, TextControllers, StdDialog, StdCmds, StdMenuTool`.
 
@@ -489,7 +489,7 @@ IMPORT: `Services, Files, Fonts, Ports, Stores, Models, Views, Controllers, Dial
 
 ## DevCommanders
 
-[Исходник](../Mod/Commanders.cp) · [Документация](Commanders.md)
+[Исходник](../../Mod/Commanders.cp) · [Документация](Commanders.md)
 
 IMPORT: `Kernel, Strings, Fonts, Ports, Stores, Models, Views, Controllers, Properties, Dialog, Controls, TextModels, TextSetters, TextMappers, Services, StdLog`.
 
@@ -503,7 +503,7 @@ IMPORT: `Kernel, Strings, Fonts, Ports, Stores, Models, Views, Controllers, Prop
 
 ## DevCompiler
 
-[Исходник](../Mod/Compiler.cp) · [Документация](Compiler.md)
+[Исходник](../../Mod/Compiler.cp) · [Документация](Compiler.md)
 
 IMPORT: `Kernel, Files, Strings, Views, Dialog, Controls, Utf, Librarian, Converters, TextModels, TextMappers, TextViews, TextControllers, StdLog, DevMarkers, DevCommanders, DevSelectors, DevCPM, DevCPT, DevCPB, DevCPP, DevCPE, DevCPV := DevCPV486, DevCPS`.
 
@@ -522,7 +522,7 @@ IMPORT: `Kernel, Files, Strings, Views, Dialog, Controls, Utf, Librarian, Conver
 
 ## DevDebug
 
-[Исходник](../Mod/Debug.cp) · [Документация](Debug.md)
+[Исходник](../../Mod/Debug.cp) · [Документация](Debug.md)
 
 IMPORT: `SYSTEM, Kernel, Strings, Dates, Files, Fonts, Services, Ports, Stores, Converters, Models, Views, Controllers, Properties, Dialog, Containers, Controls, Windows, StdDialog, StdFolds, StdLinks, TextModels, TextMappers, TextControllers, TextViews, TextRulers, StdLog, DevReferences, DevCommanders, Utf, Librarian, DevCPS`.
 
@@ -542,7 +542,7 @@ IMPORT: `SYSTEM, Kernel, Strings, Dates, Files, Fonts, Services, Ports, Stores, 
 
 ## DevDecoder386
 
-[Исходник](../Mod/Decoder386.cp) · [Документация](Decoder386.md)
+[Исходник](../../Mod/Decoder386.cp) · [Документация](Decoder386.md)
 
 IMPORT: `SYSTEM, Kernel, Utf, Files, TextMappers, TextRulers, Ports, Strings, Views, TextModels, StdDialog, Dialog, TextViews, StdLinks, TextControllers`.
 
@@ -554,7 +554,7 @@ IMPORT: `SYSTEM, Kernel, Utf, Files, TextMappers, TextRulers, Ports, Strings, Vi
 
 ## DevDependencies
 
-[Исходник](../Mod/Dependencies.cp) · [Документация](Dependencies.md)
+[Исходник](../../Mod/Dependencies.cp) · [Документация](Dependencies.md)
 
 IMPORT: `Kernel, Files, Utf, Dialog, TextMappers, TextControllers, StdMenuTool, StdDialog, StdFolds, Strings, Views, Ports, Librarian, Fonts, Properties, Controllers, Stores, StdCmds, Math, TextModels, TextViews, Dates, DevReferences, DevCommanders`.
 
@@ -579,7 +579,7 @@ IMPORT: `Kernel, Files, Utf, Dialog, TextMappers, TextControllers, StdMenuTool, 
 
 ## DevHeapSpy
 
-[Исходник](../Mod/HeapSpy.cp) · [Документация](HeapSpy.md)
+[Исходник](../../Mod/HeapSpy.cp) · [Документация](HeapSpy.md)
 
 IMPORT: `S := SYSTEM, Kernel, Utf, Strings, Ports, Models, Views, Services, Stores, Properties, Dialog, Controllers, Documents, DevDebug`.
 
@@ -591,7 +591,7 @@ IMPORT: `S := SYSTEM, Kernel, Utf, Strings, Ports, Models, Views, Services, Stor
 
 ## DevInspector
 
-[Исходник](../Mod/Inspector.cp) · [Документация](Inspector.md)
+[Исходник](../../Mod/Inspector.cp) · [Документация](Inspector.md)
 
 IMPORT: `Kernel, Services, Stores, Views, Controllers, Properties, Containers, Dialog, Controls, Librarian, TextModels, Files, Models, StdDialog, TextViews, TextControllers, Strings`.
 
@@ -619,7 +619,7 @@ IMPORT: `Kernel, Services, Stores, Views, Controllers, Properties, Containers, D
 
 ## DevLinkChk
 
-[Исходник](../Mod/LinkChk.cp) · [Документация](LinkChk.md)
+[Исходник](../../Mod/LinkChk.cp) · [Документация](LinkChk.md)
 
 IMPORT: `Strings, Dialog, Files, Fonts, Ports, Converters, Views, Containers, TextModels, TextMappers, TextViews, TextControllers, StdLinks, StdCmds`.
 
@@ -635,7 +635,7 @@ IMPORT: `Strings, Dialog, Files, Fonts, Ports, Converters, Views, Containers, Te
 
 ## DevLinker
 
-[Исходник](../Mod/Linker.cp) · [Документация](Linker.md)
+[Исходник](../../Mod/Linker.cp) · [Документация](Linker.md)
 
 IMPORT: `Kernel, Files, Dates, Dialog, Strings, TextMappers, StdLog, DevCommanders, Utf, Librarian`.
 
@@ -648,7 +648,7 @@ IMPORT: `Kernel, Files, Dates, Dialog, Strings, TextMappers, StdLog, DevCommande
 
 ## DevLinker1
 
-[Исходник](../Mod/Linker1.cp) · [Документация](Linker1.md)
+[Исходник](../../Mod/Linker1.cp) · [Документация](Linker1.md)
 
 IMPORT: `LB := DevLnkBase, Load := DevLnkLoad, WrPe := DevLnkWritePe, WrElf := DevLnkWriteElf, WrElfS := DevLnkWriteElfStatic, Kernel, Files, Log := StdLog, Dialog, DevCommanders, TextMappers`.
 
@@ -664,7 +664,7 @@ IMPORT: `LB := DevLnkBase, Load := DevLnkLoad, WrPe := DevLnkWritePe, WrElf := D
 
 ## DevLnkBase
 
-[Исходник](../Mod/LnkBase.cp) · [Документация](LnkBase.md)
+[Исходник](../../Mod/LnkBase.cp) · [Документация](LnkBase.md)
 
 IMPORT: `Files, Log, Dialog, Kernel, Librarian`.
 
@@ -700,7 +700,7 @@ IMPORT: `Files, Log, Dialog, Kernel, Librarian`.
 
 ## DevLnkLoad
 
-[Исходник](../Mod/LnkLoad.cp) · [Документация](LnkLoad.md)
+[Исходник](../../Mod/LnkLoad.cp) · [Документация](LnkLoad.md)
 
 IMPORT: `LB := DevLnkBase, SYSTEM, Files`.
 
@@ -715,7 +715,7 @@ IMPORT: `LB := DevLnkBase, SYSTEM, Files`.
 
 ## DevLnkWriteElf
 
-[Исходник](../Mod/LnkWriteElf.cp) · [Документация](LnkWriteElf.md)
+[Исходник](../../Mod/LnkWriteElf.cp) · [Документация](LnkWriteElf.md)
 
 IMPORT: `Dialog, LB := DevLnkBase, Files, SYSTEM`.
 
@@ -727,7 +727,7 @@ IMPORT: `Dialog, LB := DevLnkBase, Files, SYSTEM`.
 
 ## DevLnkWriteElfStatic
 
-[Исходник](../Mod/LnkWriteElfStatic.cp) · [Документация](LnkWriteElfStatic.md)
+[Исходник](../../Mod/LnkWriteElfStatic.cp) · [Документация](LnkWriteElfStatic.md)
 
 IMPORT: `Dialog, LB := DevLnkBase, Files`.
 
@@ -740,7 +740,7 @@ IMPORT: `Dialog, LB := DevLnkBase, Files`.
 
 ## DevLnkWritePe
 
-[Исходник](../Mod/LnkWritePe.cp) · [Документация](LnkWritePe.md)
+[Исходник](../../Mod/LnkWritePe.cp) · [Документация](LnkWritePe.md)
 
 IMPORT: `LB := DevLnkBase, Files`.
 
@@ -752,7 +752,7 @@ IMPORT: `LB := DevLnkBase, Files`.
 
 ## DevMarkers
 
-[Исходник](../Mod/Markers.cp) · [Документация](Markers.md)
+[Исходник](../../Mod/Markers.cp) · [Документация](Markers.md)
 
 IMPORT: `Kernel, Files, Stores, Fonts, Ports, Models, Views, Controllers, Properties, Dialog, TextModels, TextSetters, TextViews, TextControllers, TextMappers, Windows`.
 
@@ -774,7 +774,7 @@ IMPORT: `Kernel, Files, Stores, Fonts, Ports, Models, Views, Controllers, Proper
 
 ## DevMsgSpy
 
-[Исходник](../Mod/MsgSpy.cp) · [Документация](MsgSpy.md)
+[Исходник](../../Mod/MsgSpy.cp) · [Документация](MsgSpy.md)
 
 IMPORT: `SYSTEM, Strings, DevDebug, Dialog, Stores, Models, Views, Controllers, Properties, Kernel, Ports, TextModels, TextViews, TextMappers, StdDialog, Files, Converters, FormViews, FormModels, Windows, Containers, Services`.
 
@@ -788,7 +788,7 @@ IMPORT: `SYSTEM, Strings, DevDebug, Dialog, Stores, Models, Views, Controllers, 
 
 ## DevPacker
 
-[Исходник](../Mod/Packer.cp) · [Документация](Packer.md)
+[Исходник](../../Mod/Packer.cp) · [Документация](Packer.md)
 
 IMPORT: `Kernel, Services, Strings, Files, Dialog, Stores, Views, Librarian, TextModels, TextViews, TextMappers, StdLog, DevCommanders`.
 
@@ -800,7 +800,7 @@ IMPORT: `Kernel, Services, Strings, Files, Dialog, Stores, Views, Librarian, Tex
 
 ## DevProfiler
 
-[Исходник](../Mod/Profiler.cp) · [Документация](Profiler.md)
+[Исходник](../../Mod/Profiler.cp) · [Документация](Profiler.md)
 
 IMPORT: `Kernel, Strings, Dialog, Utf, Fonts, Ports, Views, TextModels, TextRulers, TextViews, TextControllers, TextMappers, StdLog`.
 
@@ -822,7 +822,7 @@ IMPORT: `Kernel, Strings, Dialog, Utf, Fonts, Ports, Views, TextModels, TextRule
 
 ## DevProfiler__Win
 
-[Исходник](../Mod/Profiler__Win.cp) · [Документация](Profiler__Win.md)
+[Исходник](../../Mod/Profiler__Win.cp) · [Документация](Profiler__Win.md)
 
 IMPORT: `WinApi, WinMM, DevProfiler`.
 
@@ -830,7 +830,7 @@ IMPORT: `WinApi, WinMM, DevProfiler`.
 
 ## DevRBrowser
 
-[Исходник](../Mod/RBrowser.cp) · [Документация](RBrowser.md)
+[Исходник](../../Mod/RBrowser.cp) · [Документация](RBrowser.md)
 
 IMPORT: `Strings, Dialog, Files, Stores, Converters, Fonts, Ports, Views, Containers, TextModels, TextMappers, TextRulers, TextViews, StdLinks, StdFolds, Models`.
 
@@ -843,7 +843,7 @@ IMPORT: `Strings, Dialog, Files, Stores, Converters, Fonts, Ports, Views, Contai
 
 ## DevReferences
 
-[Исходник](../Mod/References.cp) · [Документация](References.md)
+[Исходник](../../Mod/References.cp) · [Документация](References.md)
 
 IMPORT: `Strings, Files, Fonts, Models, Views, Dialog, StdDialog, StdApi, Converters, DevCPS, Librarian, TextModels, TextMappers, TextViews, TextControllers`.
 
@@ -857,7 +857,7 @@ IMPORT: `Strings, Files, Fonts, Models, Views, Dialog, StdDialog, StdApi, Conver
 
 ## DevSearch
 
-[Исходник](../Mod/Search.cp) · [Документация](Search.md)
+[Исходник](../../Mod/Search.cp) · [Документация](Search.md)
 
 IMPORT: `Kernel, Files, Fonts, Ports, Models, Views, Containers, Dialog, Windows, Strings, TextModels, TextRulers, TextViews, TextControllers, TextMappers, TextCmds, StdLinks`.
 
@@ -871,7 +871,7 @@ IMPORT: `Kernel, Files, Fonts, Ports, Models, Views, Containers, Dialog, Windows
 
 ## DevSelectors
 
-[Исходник](../Mod/Selectors.cp) · [Документация](Selectors.md)
+[Исходник](../../Mod/Selectors.cp) · [Документация](Selectors.md)
 
 IMPORT: `Ports, Stores, Models, Views, Controllers, Fonts, Properties, TextModels, TextViews, TextSetters`.
 
@@ -890,7 +890,7 @@ IMPORT: `Ports, Stores, Models, Views, Controllers, Fonts, Properties, TextModel
 
 ## DevSubTool
 
-[Исходник](../Mod/SubTool.cp) · [Документация](SubTool.md)
+[Исходник](../../Mod/SubTool.cp) · [Документация](SubTool.md)
 
 IMPORT: `Strings, Files, Fonts, Views, TextModels, TextMappers, TextViews, StdCmds, Dialog, DevCommanders`.
 

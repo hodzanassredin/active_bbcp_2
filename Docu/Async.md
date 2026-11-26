@@ -29,6 +29,12 @@ tree. A channel is needed when tasks pass values to each other. The difference s
 the programmer asks. "Who may change this table now?" is a question for a monitor. "To whom do I
 give this result?" is a question for a channel.
 
+The channel examples of this chapter describe tasks with `Tasks.Task` and the method `Run`: `Send`
+and `Recv` take no pass. Code that enters a monitor object (`AsyncOnce`, `Tasks.Object`) is written
+with `Tasks.Job` and `Body-`: the library creates the pass `Tasks.Ctx` and releases the monitors
+taken when a trap occurs. `Task` is the lower level for a scheduler, an executor pool and a library
+on top of tasks.
+
 A channel carries a *message* — a pointer to a record that extends `AsyncSelect.Msg`:
 
 ```
@@ -125,7 +131,7 @@ prints `Tasks: deadlock: no ready tasks and no wake-up deadlines` to the console
 then never returns, because nobody sets `done`.
 
 A rendezvous costs two stack switches per message: the task goes to the scheduler, the scheduler
-goes on to the other task. The measurement `pingpong` (`docs/measurements.md`, section 2.2) — a
+goes on to the other task. The measurement `pingpong` (`docs/measurements.md`, section 2.5) — a
 round trip through two rendezvous channels — gives 389–483 ns per exchange with a machine load of
 about 15, twice as slow as single-threaded Go. A rendezvous allocates no memory: the waiting side
 takes its wait record from a free list.
@@ -358,7 +364,7 @@ in the channels until the next access to them: a channel considers an offer dead
 reached `Finished` or `Cancelled`, and skips it.
 
 Selection among two rendezvous channels costs 315–400 ns per operation, among eight 568–653 ns
-(`select2`, `select8`, `docs/measurements.md`, section 2.2). Selection without a timeout allocates no
+(`select2`, `select8`, `docs/measurements.md`, section 2.5). Selection without a timeout allocates no
 memory.
 
 ## 6. Dialogue Protocol
@@ -692,8 +698,7 @@ value into the record `AsyncStm.Saved` (fields `i`, `x`, `p`) and back. A record
 
 Cost. A transfer "two reads, two writes" as a transaction costs about 80 ns on AMD64, the same
 transfer through `IntVar` without a transaction about 20 ns, by direct writes to fields less than
-1 ns (one thread, a million operations, a loaded machine; `docs/measurements.md`, sections 3 and
-11). A transaction is dearer than a monitor-object operation by `Kernel.Try` and the log; it pays off by rollback and by waiting on several objects, not by speed.
+1 ns (one thread, a million operations, a loaded machine; `docs/measurements.md`, section 11). A transaction is dearer than a monitor-object operation by `Kernel.Try` and the log; it pays off by rollback and by waiting on several objects, not by speed.
 A waiting task is registered only at the variables it has read and is removed from them on wake-up
 or cancellation; the log lives until the end of the transaction. A trap with a number greater than
 128 (a run-time error) reaches the caller as trap 128: `HALT` accepts numbers 0–128.
@@ -1000,8 +1005,8 @@ the next access to the channel; unfinished computon requests stay occupied until
 `Stop`.
 
 A blocking channel operation and a selection allocate no memory: wait records are taken from free
-lists. The measured numbers and their conditions are collected in `docs/measurements.md`, sections 2
-and 5.
+lists. The measured numbers and their conditions are collected in `docs/measurements.md`, sections
+2.5 and 5.
 
 ## 13. Implementation
 
@@ -1095,8 +1100,8 @@ read set and a second log entry.
 commit: the log is cleared, and the tasks waiting for the written variables are woken. A trap is
 rollback of the log from the end to the start and passing the number on through `HALT` with the
 same number (`HALT` accepts only a constant, so the number is chosen by a `CASE` statement).
-`Retry` is a trap too, but a quiet one: number 126 under `Kernel.SetQuiet`, without a kernel report;
-`Atomically` recognises it by `Kernel.err`.
+`Retry` is a trap too, but a quiet one: number 128 is the kernel's `silentTrap`, and no report is
+printed for it; `Atomically` recognises it by `Kernel.err`.
 
 `OrElse` opens a new level: it remembers the log length and takes a new level number, so the first
 write in the branch puts into the log the value at the start of the branch. After a `Retry` of the

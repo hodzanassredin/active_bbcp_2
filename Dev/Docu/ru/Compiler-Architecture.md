@@ -26,7 +26,7 @@ flowchart TD
 
 ## Точный порядок одной компиляции
 
-См. `Module` в [Compiler.cp](../Mod/Compiler.cp):
+См. `Module` в [Compiler.cp](../../Mod/Compiler.cp):
 
 1. `DevCPM.Init` подключает Reader и очищает диагностику; устанавливаются языковые опции.
 2. `DevCPT.Init` создаёт область текущего модуля. `DevCPB.typSize := DevCPV.TypeSize` подключает вычисление размеров; `DevCPT.processor` получает ID backend.

@@ -1,6 +1,6 @@
 # DevCPP: грамматика и построение модуля
 
-[Исходник](../Mod/CPP.cp) · [Архитектура](Compiler-Architecture.md) · [Таблицы](CPT.md) · [Семантика](CPB.md)
+[Исходник](../../Mod/CPP.cp) · [Архитектура](Compiler-Architecture.md) · [Таблицы](CPT.md) · [Семантика](CPB.md)
 
 ## Контракт
 

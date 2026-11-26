@@ -1,6 +1,6 @@
 # DevChmod__Obsd: установка прав выходного файла
 
-[Исходник](../Mod/Chmod__Obsd.cp) · [DevLnkBase](LnkBase.md)
+[Исходник](../../Mod/Chmod__Obsd.cp) · [DevLnkBase](LnkBase.md)
 
 Платформенный адаптер для ObsdLibc. Определяет наследника DevLnkBase.ChmodHook; при загрузке создаёт экземпляр и вызывает SetChmodHook. Этим побочным эффектом модуль подключает установку прав для ELF writers.
 

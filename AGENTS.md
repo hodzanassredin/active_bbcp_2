@@ -3,7 +3,10 @@
 BlackBox Component Builder 2.0 (bbcb2) is a development framework for Component Pascal
 (description in `Docu/CP-Lang.md`). Sources are UTF-8 `.cp` files. This fork adds module `Tasks`:
 cooperative tasks on their own stacks, the monitor object `Tasks.Object`, the pass `Tasks.Ctx`,
-groups and `Spawn`. The language itself is not extended.
+groups and `Spawn`. The repository also contains the `Async` library (channels, selection,
+transactions, OS worker threads, computons), `Actor`, the content store `Cas`, the key-value store
+`Kv`, the replicated log `Raft`, the `RobustParallel` facade and the `Demo`/`Obx/Mod64` examples.
+The language itself is not extended.
 
 `OLD/` is an archived checkout. Do not compile sources or run tests from it.
 
@@ -194,9 +197,10 @@ tools/iso.sh tools/build64.sh         # any command with its own /tmp (parallel 
 tools/worktree.sh ../active_bb-x x    # parallel worktree: links, bootstrap, build64
 ```
 
-`tools/build64.sh` compiles `Mod64` when present, writes `Code`/`Sym` to the installation, then
-compiles `Taskarch` and `Tasks`. It links `blackbox-console` and, unless `--console-only` is given,
-`blackbox`.
+`tools/build64.sh` compiles `Mod64` when present and writes `Code`/`Sym` to the installation. It
+then compiles `Taskarch`, `Tasks`, `LinThreads`, `LinNative`, the `Async` subsystem, `Robust`,
+`Kv`, `Actor`, `Raft`, the examples in `Obx/Mod64` and the modules of `Demo`. It links
+`blackbox-console` and, unless `--console-only` is given, `blackbox`.
 
 `tools/env.sh:clean_host_temp` removes `odc` names with 5 or 9 digits from `/tmp` before starting
 `dev0Linux`.
@@ -217,9 +221,17 @@ whose name contains `_dev`.
 tools/test.sh                 # all modules from tools/tests.txt
 tools/test.sh --list
 tools/test.sh System_devMain  # selected modules
-tools/test32.sh               # i386: Unit, Files, Tasks, CoTests, UnloadGuard, OpenArr, PtrInit
+tools/test32.sh               # i386: Unit, Files, Tasks, Cas, Kv, CoTests, UnloadGuard, OpenArr, PtrInit
 tools/test-win64.sh           # Windows x64 under wine
+tools/test-gui.sh             # tasks in the window, gtk4-broadwayd
+tools/test-demo-gui.sh        # DemoAnts in the window, gtk4-broadwayd
+tools/check-examples.sh --run # examples in documentation against modules and logs
+tools/check-links.py          # relative links in .md
 tools/check-reject.sh         # negative checks of ordinary language rules on Tasks
+tools/test-mpi.sh             # computon MPI transport, optional
+tools/test-resolver.sh        # resolver without network, optional
+tools/test-robust.sh          # RobustParallel facade, optional
+tools/gui-world.sh            # .odc texts for Help -> Examples
 tools/unit.sh Check_devMain --marks proc --compile "CheckMath64 CheckRealFormat64 CheckCCallAlias"
 ```
 
@@ -236,7 +248,8 @@ subsystems: they are not in `CompileSubs`. Tests are built on demand by `tools/u
   `PAGE_NOACCESS` in `WinKernel`).
 - `Tasks.Object` is a monitor object: `Do` passes `Tasks.Ctx` and a `Tasks.Op` request to the
   method `Exclusive-`; `Await`/`AwaitCond` wait for flags or a condition object. A `Tasks.Job`
-  runs its body once, a `Tasks.Task` can be started again.
+  supplies the pass and calls `Body-`; a `Tasks.Task` writes its own `Run`. Both can be started
+  again after they finish.
 - A finished task returns its stack to the `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool`
   frees stacks above `poolMax`, at most `trimStep` per scheduler step. `Kernel.AllocStack`
   returns FALSE for a size above `maxStackScan`.
@@ -260,7 +273,8 @@ subsystems: they are not in `CompileSubs`. Tests are built on demand by `tools/u
 `WinKernel` provides `AllocateStackMem` (`VirtualAlloc` + `PAGE_NOACCESS`) and
 `Get/SetTryContext`. `tools/test-win64.sh` builds `@Win`, links the console PE (`WinIntInit`, with
 the subsystem patched to console) and runs `Unit_devMain` 7/7, `System_devWinTasks` 5/5,
-`Dev_devOpenArr` 8/8 and `Dev_devPtrInit` 7/7 under wine.
+`Async_devWinWorkers` 4/4, `Async_devStm` 19/19, `Dev_devOpenArr` 8/8 and `Dev_devPtrInit` 7/7
+under wine.
 
 ### Limitations
 
@@ -281,6 +295,12 @@ code, and the checks to run before a commit.
 | File | Content |
 |---|---|
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | `Tasks` module |
+| `Docu/ru/Async.md`, `Docu/Async.md` | channels, selection, transactions, workers, computons |
+| `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | actors, supervision, journals, nodes |
+| `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | content-addressed block store |
+| `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | key-value store |
+| `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | replicated log |
+| `Demo/Docu/Sys-Map.md` | map of the `Demo` examples |
 | `docs/implementation.md` | implementation |
 | `docs/building.md` | build, run, tests, rollback |
 | `docs/measurements.md` | measurements |

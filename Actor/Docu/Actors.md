@@ -3,7 +3,7 @@
 The `Actor` subsystem builds a program from objects that exchange messages and share no state. This
 chapter describes actors of one process, their execution by a shared pool of tasks, and the
 supervision of children by their parent. Tasks, monitors and switch points are defined in
-`Docu/Active-CP-Lang.md` and `Docu/Tasks.md`; messages and channels in `Docu/Async.md`. Like
+`Docu/CP-Lang.md` and `Docu/Tasks.md`; messages and channels in `Docu/Async.md`. Like
 `Async`, the subsystem is built for AMD64 only.
 
 ## 1. An Account Everybody Touches
@@ -92,7 +92,9 @@ message the handler receives is `Started`. `Tell` puts a message into the mailbo
 once. `Ask` sends a message with a temporary reply address and waits for the first letter to that
 address for at most the given number of milliseconds; the handler answers with `c.Respond`, which
 addresses the letter to the sender of the current message. `Ask` waits, so the client is a task: on
-the main stack `Ask` traps with code 20.
+the main stack `Ask` traps with code 20. `Ask` needs no `Tasks.Ctx`, so the client is written as a
+`Tasks.Task` with `Run`; this is the lower level. Application code that enters `Tasks.Object` is
+written with `Tasks.Job` and `Body-`.
 
 A message is an extension of `AsyncSelect.Msg` (called `ActorCore.Msg` in the subsystem) and does
 not change after sending. The counter above sends the same object `inc` a thousand times; this is
@@ -649,7 +651,7 @@ of an address on that node receives `Terminated` (`TestNodeLost`, `TestTcpLost`)
 `Terminated` tells the causes apart: `byStop` — the actor was stopped, `byFailure` — stopped by
 supervision after a failure, `byNodeLoss` — the node was lost (`TestReasonLocal`,
 `TestReasonRemoteStop`, `TestReasonRemoteFailure`, `TestReasonNodeLoss`). Code that does not read the
-field works as before.
+field need not parse it.
 
 **Saga.** A money transfer between accounts on nodes A and B is led by a coordinator on node C, a
 persistent actor. The steps: withdraw from A, deposit to B, and if the deposit is refused, refund to
@@ -748,8 +750,8 @@ other node.
 
 ## 12. Measurements
 
-`Actor_devBench` prints `BENCH` lines of the same form as `Async_devBench`. On the development machine
-(Linux x86-64, three runs in a row, `tools/test.sh Actor_devBench`) two actors answering each other
+`Actor_devBench` prints `BENCH` lines of the same form as `Async_devBench`. Measurements of
+25.11.2026 on the development machine (Linux x86-64, three runs in a row, `tools/test.sh Actor_devBench`) two actors answering each other
 with `Respond` spend 78–82 ns per letter, that is 156–164 ns per round trip, with one executor and
 with four; a round trip through two `AsyncChan` rendezvous channels costs 389–483 ns in
 `docs/measurements.md`. The difference comes from switches: a round trip between tasks over channels
@@ -775,9 +777,8 @@ a snapshot after the last event, 6–12 µs. Lines `BENCH persist-*` and `recove
 Nodes (`Actor_devNet`, network in memory, `ActorSim`): a saga run of 8 transfers with 10 % loss,
 10 % duplicates, delays of up to 3 steps, reordering and node crashes takes about 3.5 ms per seed
 (`TestSagaSeeds`: 200 seeds, each twice, 1.4 s). The long run `Actor_devNet.Long` on 3000 seeds takes
-4.5 s (1.5 ms per seed). It used to take 83 s: `ActorNet` kept every node created in a list, and with
-it the node's network and frames; the heap grew and the collector worked longer and longer. The list
-is gone (`TestSagaRunsFreeMemory`).
+4.5 s (1.5 ms per seed). The list of created nodes is not kept: it would grow together with their
+networks and frames, and the collector would work longer and longer (`TestSagaRunsFreeMemory`).
 
 Virtual actors (`Actor_devGrain.Bench`, one node, journal in memory, 2000 keys, three runs): the
 first letter to a key with activation and an event write costs 200–209 µs, a letter to an active
@@ -794,7 +795,7 @@ includes a scan of the host's activation list (2000 entries).
   formed only from tasks writing at the same time (section 8).
 - Nodes: frames are neither signed nor encrypted, and the "from" field is not authenticated: the
   holder of one valid capability can send under another name and move that name's repeat window;
-  channel protection (TLS, signing frames with a secret of the node pair) is out of this stage.
+  channel protection (TLS, signing frames with a secret of the node pair) is not implemented.
   At-most-once delivery; the TCP transport is Linux only;
   there is no consensus (Raft): when the network splits, two activations of a key are possible and
   only one can write (section 11). The host finds an activation by scanning a list, so a call grows

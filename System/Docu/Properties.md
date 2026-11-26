@@ -294,7 +294,7 @@ Can be set to indicate that the receiver's height should be adapted to the actua
 
 TYPE SizePref (Preference)
 The sender of this message proposes a size for the receiving view; the size may be Views.undefined. The receiving view may override the proposal, e.g., in order to establish constraints between its width and height. The procedures ProportionalConstraint and GridConstraint are useful standard implementations of constraints.
-Procedure PreferredSize implements the caller's side of the protocol, i.e., fills out, sends, and interprets a SizeMsg.
+Procedure PreferredSize implements the caller's side of the protocol, i.e., fills out, sends, and interprets a `SizePref` message.
 
 w, h: INTEGER	(w = Views.undefined) = (h = Views.undefined)
 (view => caller, preset to Views.undefined if view is new or to caller's preference otherwise)

@@ -19,9 +19,10 @@ procedure on its own stack. While a task waits, its local variables and its plac
 stay on its stack, and the programmer need not save them. A hundred clients are a hundred tasks,
 and each is written as straight text of three lines.
 
-A task is declared by extending record `Tasks.Task` and implementing method `Run`;
-`Tasks.Start` starts it. All tasks are executed by one operating system thread, and at any moment
-at most one task executes. Nobody interrupts a task: it gives up the processor itself, and only
+A job is declared by extending record `Tasks.Job` and implementing method `Body-`;
+`Tasks.Start` starts it. The job receives the pass `Tasks.Ctx`: through it the job enters a
+monitor object and waits for a condition. All tasks are executed by one operating system thread,
+and at any moment at most one task executes. Nobody interrupts a task: it gives up the processor itself, and only
 at known places. These places are called *switch points*:
 
 1. a call of `Yield`, `Sleep`, `Park` or `Join`;
@@ -38,18 +39,18 @@ other tasks as one indivisible action. That is why the counter needs no monitor:
 MODULE TasksSample0;
 	IMPORT Tasks, Console, Strings;
 
-	TYPE Counter = POINTER TO RECORD (Tasks.Task) END;
+	TYPE Counter = POINTER TO RECORD (Tasks.Job) END;
 
 	VAR count: INTEGER;
 
-	PROCEDURE (c: Counter) Run;
+	PROCEDURE (c: Counter) Body- (VAR ctx: Tasks.Ctx);
 		VAR i, x: INTEGER;
 	BEGIN
 		FOR i := 1 TO 1000 DO
-			x := count; count := x + 1;	(* чтение и запись без точки переключения между ними *)
+			x := count; count := x + 1;	(* read and write with no switch point between them *)
 			IF i MOD 10 = 0 THEN Tasks.Yield END
 		END
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR a, b: Counter; s: ARRAY 16 OF CHAR;
@@ -66,6 +67,12 @@ END TasksSample0.
 
 Command `TasksSample0.Do` prints `count = 2000` on every run. The tasks alternate after every ten
 increments, but no increment is torn apart.
+
+`Tasks.Task` is the lower level of the same library. With a task the program writes `Run` itself
+and gets no pass. This is how code that manages tasks itself is written: a scheduler, an executor
+pool, a library on top of tasks. Application code does not need `Run`: `Job` creates the pass,
+releases the monitors taken when a trap occurs and lets the body call `Do` and `Await`. Therefore
+the examples of this chapter use `Job`.
 
 The property holds as long as there is no switch point between the read and the write. Put
 `Tasks.Yield` between `x := count` and `count := x + 1`, and the second task will read the old
@@ -165,9 +172,9 @@ queue, switches to its stack, and the task becomes `Running`.
 
 A running task leaves this state in three ways. It may yield and queue up at once (`Yield`) — then
 it is `Ready` again. It may wait: `Sleep` makes it `Sleeping`, `Join` makes it `Waiting`, `Park`
-and waiting for a monitor make it `Parked`. Finally, the body `Run` may end: by a normal return, by
-a trap or by cancellation. A waiting task is woken by the event it waits for, by `Unpark` or by
-`Cancel`; the woken task enters the ready queue again.
+and waiting for a monitor make it `Parked`. Finally, the body of a job (`Body`) or of a task
+(`Run`) may end: by a normal return, by a trap or by cancellation. A waiting task is woken by the
+event it waits for, by `Unpark` or by `Cancel`; the woken task enters the ready queue again.
 
 There are eight states; the module exports their values, and `State(t)` returns the current one:
 
@@ -182,7 +189,7 @@ There are eight states; the module exports their values, and `State(t)` returns 
 | `Sleeping` | `Ready` | the time is up; `Unpark`; `Cancel` |
 | `Waiting` | `Ready` | the target ended; `Unpark`; `Cancel` |
 | `Parked` | `Ready` | `Unpark`; `Cancel`; a monitor was handed to the task |
-| `Running` | `Finished` (6) | body `Run` returned or trapped |
+| `Running` | `Finished` (6) | body `Body` or `Run` returned or trapped |
 | `Running` | `Cancelled` (7) | the task was cancelled |
 
 `Finished` and `Cancelled` are final states. A task whose body ended in a trap is also
@@ -223,32 +230,32 @@ MODULE TasksSample1;
 	IMPORT Tasks, Console;
 
 	TYPE
-		Sleeper = POINTER TO RECORD (Tasks.Task) END;
-		Waker = POINTER TO RECORD (Tasks.Task) who: Tasks.Task END;
-		Main = POINTER TO RECORD (Tasks.Task) END;
+		Sleeper = POINTER TO RECORD (Tasks.Job) END;
+		Waker = POINTER TO RECORD (Tasks.Job) who: Tasks.Task END;
+		Main = POINTER TO RECORD (Tasks.Job) END;
 
-	PROCEDURE (s: Sleeper) Run;
+	PROCEDURE (s: Sleeper) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Console.WriteStr("sleeper: park"); Console.WriteLn;
 		Tasks.Park;
 		Console.WriteStr("sleeper: woken"); Console.WriteLn
-	END Run;
+	END Body;
 
-	PROCEDURE (w: Waker) Run;
+	PROCEDURE (w: Waker) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		Tasks.Sleep(20);
 		Console.WriteStr("waker: unpark"); Console.WriteLn;
 		Tasks.Unpark(w.who)
-	END Run;
+	END Body;
 
-	PROCEDURE (m: Main) Run;
+	PROCEDURE (m: Main) Body- (VAR ctx: Tasks.Ctx);
 		VAR s: Sleeper; w: Waker;
 	BEGIN
 		NEW(s); Tasks.Start(s);
 		NEW(w); w.who := s; Tasks.Start(w);
 		Tasks.Join(s); Tasks.Join(w);
 		Console.WriteStr("main: both finished"); Console.WriteLn
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR m: Main;
@@ -284,7 +291,7 @@ and drives `Step`. `Join` on itself traps 23 — the task would wait for its own
 ## 4. Cancellation and groups
 
 A task started three helpers, and one of them failed. The other two keep working on a result
-nobody needs any more. The parent task finished `Run`, while the helpers are still alive and
+nobody needs any more. The parent task finished its body, while the helpers are still alive and
 hold resources the parent believes it released. One rule cures both troubles: children do not
 outlive their parent, and the failure of one child cancels the others. This rule is called
 structured concurrency.
@@ -301,7 +308,7 @@ joined into a *group*. `NewGroup` called in a task creates the task's own group 
 returns the same one; a task has one group), and `StartIn(t, g)` starts `t` as a member of group
 `g`. The owner of a group is the task that created it. Four rules apply to a group:
 
-1. An owner that returned from `Run` does not end while the group has live members: it becomes
+1. An owner that returned from its body does not end while the group has live members: it becomes
    `Parked` and waits for the last one.
 2. A trap in a member marks the group failed (`GroupFailed`) and cancels the other members.
 3. A trap or cancellation of the owner cancels all members of its group. The owner does not wait
@@ -309,7 +316,7 @@ returns the same one; a task has one group), and `StartIn(t, g)` starts `t` as a
 4. Cancelling the owner while it waits for the group cancels the members, and the owner becomes
    `Cancelled`.
 
-The example shows the second rule. The parent starts three children and leaves `Run`; the second
+The example shows the second rule. The parent starts three children and leaves its body; the second
 child traps after 10 ms, the two others sleep in an endless loop:
 
 ```
@@ -317,23 +324,23 @@ MODULE TasksSample3;
 	IMPORT Tasks, Console, Strings;
 
 	TYPE
-		Child = POINTER TO RECORD (Tasks.Task) n: INTEGER END;
-		Parent = POINTER TO RECORD (Tasks.Task) g: Tasks.Group END;
+		Child = POINTER TO RECORD (Tasks.Job) n: INTEGER END;
+		Parent = POINTER TO RECORD (Tasks.Job) g: Tasks.Group END;
 
 	VAR kids: ARRAY 3 OF Child;
 
-	PROCEDURE (c: Child) Run;
+	PROCEDURE (c: Child) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		IF c.n = 1 THEN Tasks.Sleep(10); HALT(30) END;
 		LOOP Tasks.Sleep(1000) END
-	END Run;
+	END Body;
 
-	PROCEDURE (p: Parent) Run;
+	PROCEDURE (p: Parent) Body- (VAR ctx: Tasks.Ctx);
 		VAR i: INTEGER;
 	BEGIN
 		p.g := Tasks.NewGroup();
 		FOR i := 0 TO 2 DO NEW(kids[i]); kids[i].n := i; Tasks.StartIn(kids[i], p.g) END
-	END Run;
+	END Body;
 
 	PROCEDURE Do*;
 		VAR p: Parent; i: INTEGER; s: ARRAY 8 OF CHAR;
@@ -368,7 +375,7 @@ Without the group the two sleeping children would live forever, and loop
 (7); the lines `Tasks: cancelled` are printed by their cancellation. All this time the parent was
 waiting for the group by rule 1 and ended last.
 
-A trap in a task does not bring the program down. Every body `Run` executes under `Kernel.Try`: a
+A trap in a task does not bring the program down. Every body executes under `Kernel.Try`: a
 trap ends only this task, the others go on. So a failure is learned from `Failed(t)` and
 `GroupFailed(g)`, not from BlackBox stopping.
 
@@ -412,12 +419,12 @@ what" and raises flag `Deadlocked()`:
 MODULE TasksSample4;
 	IMPORT Tasks;
 
-	TYPE Lonely = POINTER TO RECORD (Tasks.Task) END;
+	TYPE Lonely = POINTER TO RECORD (Tasks.Job) END;
 
-	PROCEDURE (l: Lonely) Run;
+	PROCEDURE (l: Lonely) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
-		Tasks.Park	(* разбудить некому *)
-	END Run;
+		Tasks.Park	(* nobody will wake it *)
+	END Body;
 
 	PROCEDURE Do*;
 		VAR l: Lonely;
@@ -437,8 +444,9 @@ Tasks: deadlock: no ready tasks and no wake-up deadlines
 Tasks: cancelled
 ```
 
-The log is a diagnosis, not a crash. The program can get out of the deadlock: `Unpark` or `Cancel` make a task ready again, and the
-flag is cleared. In the example the command cancels the lonely task, and it ends with trap 127.
+The log is a diagnosis, not a crash. The program can get out of the deadlock: `Unpark` or `Cancel`
+make a task ready again, and the flag is cleared. In the example the command cancels the lonely
+task, and it ends with trap 127.
 
 The scheduler detects only a complete deadlock. If even one task sleeps with a time or spins in a
 loop with `Yield`, some tasks may stand forever and no log appears. A task that never yields is
@@ -463,21 +471,18 @@ the task in state `New`. A program gets the same trap and text
 `no stack memory (platform does not support it)` when the platform gave no memory.
 
 Creating a task the first time is expensive: a system call per stack and, most often, a garbage
-collection that scans all live stacks. In the measurements of `docs/measurements.md` (section 2;
-Linux x86-64, one thread, three runs at load average 15.2–15.9) 10 thousand tasks with 64 KB
-stacks are created in 60–70 ms, while Go with `GOMAXPROCS=1` does it in 18.6–20.2 ms. Therefore
+collection that scans all live stacks. In `System_devTasks.TestSlowLoadTenThousand` (Linux x86-64,
+one thread, load average about 7) 10 thousand tasks with 64 KB stacks take 52 ms to create on fresh
+stacks and 4.3 ms on stacks from the pool. Therefore
 the stack of a finished task is not returned to the platform but goes to a pool, and the next
-task of the same size takes it without a system call. The same 10 thousand tasks with stacks
-from the pool are created in 2.3–3.1 ms, and creating and finishing one task costs 822–911 ns —
-as much as in Go (868–1,032 ns). The pool keeps up to 1024 free stacks; the scheduler returns the
+task of the same size takes it without a system call. The pool keeps up to 1024 free stacks; the scheduler returns the
 surplus to the kernel little by little, no more than 16 stacks per step, so that a mass end of
 tasks does not cost a mass of system calls at once.
 
 `System_devBench` gives the cost of one `Yield` switch — 29–30 ns — and of restarting a task —
 196–207 ns against 507–523 ns when each run does a `NEW`. Garbage collection with standing tasks:
 9–11 ms at 10 thousand, 72–77 ms at 50 thousand, 202–223 ms at 100 thousand
-(`System_devGcStacks`). Creating 10 thousand tasks with 64 KB stacks takes 52 ms on fresh stacks
-and 4.3 ms on stacks from the pool (`System_devTasks.TestSlowLoadTenThousand`).
+(`System_devGcStacks`).
 
 ```sh
 printf 'UnitRunner.Run System_devTasks slow noquit\n' | tools/run64.sh
@@ -492,56 +497,92 @@ cores.
 ```
 DEFINITION Tasks;
 
+	IMPORT SYSTEM;
+
 	CONST
 		New = 0; Ready = 1; Running = 2; Sleeping = 3;
 		Waiting = 4; Parked = 5; Finished = 6; Cancelled = 7;
 
 	TYPE
-		Task = POINTER TO ABSTRACT RECORD
-			(t: Task) Run, NEW, ABSTRACT
-		END;
-
+		Task = POINTER TO ABSTRACT RECORD END;
 		Group = POINTER TO RECORD END;
+		Op = ABSTRACT RECORD END;
+		Ctx = LIMITED RECORD END;
+		Job = POINTER TO ABSTRACT RECORD (Task) END;
+		Object = POINTER TO ABSTRACT RECORD END;
+		Cond = POINTER TO ABSTRACT RECORD END;
+		StackDir = POINTER TO ABSTRACT RECORD END;
+
+	PROCEDURE (t: Task) Run (), NEW, ABSTRACT;
+	PROCEDURE (t: Job) Body- (VAR ctx: Ctx), NEW, ABSTRACT;
+	PROCEDURE (t: Job) Run (), NEW;
+	PROCEDURE (o: Object) Exclusive- (VAR ctx: Ctx; VAR op: Op), NEW, ABSTRACT;
+	PROCEDURE (o: Object) Do (VAR ctx: Ctx; VAR op: Op), NEW;
+	PROCEDURE (o: Object) Await (VAR ctx: Ctx; need: SET): BOOLEAN, NEW;
+	PROCEDURE (o: Object) AwaitCond (VAR ctx: Ctx; c: Cond): BOOLEAN, NEW;
+	PROCEDURE (o: Object) Ready (): SET, NEW, EXTENSIBLE;
+	PROCEDURE (o: Object) HoldsWhileWaiting (): BOOLEAN, NEW, EXTENSIBLE;
+	PROCEDURE (o: Object) TransferOnRelease (): BOOLEAN, NEW, EXTENSIBLE;
+	PROCEDURE (c: Cond) Ready (o: Object): BOOLEAN, NEW, ABSTRACT;
+	PROCEDURE (VAR c: Ctx) Stopped (): BOOLEAN, NEW;
+	PROCEDURE (VAR c: Ctx) TaskOf (): Task, NEW;
+	PROCEDURE (VAR c: Ctx) GroupOf (): Group, NEW;
+	PROCEDURE (VAR c: Ctx) HeldCount (): INTEGER, NEW;
+	PROCEDURE (d: StackDir) NewStack- (size: INTEGER; OUT lo, hi: SYSTEM.ADDRESS): BOOLEAN, NEW, ABSTRACT;
+	PROCEDURE (d: StackDir) FreeStack- (lo, hi: SYSTEM.ADDRESS), NEW, ABSTRACT;
+	PROCEDURE (d: StackDir) Drain-, NEW, EMPTY;
 
 	PROCEDURE BeginAtomic;
 	PROCEDURE Cancel (t: Task);
 	PROCEDURE Count (): INTEGER;
 	PROCEDURE Current (): Task;
 	PROCEDURE Deadlocked (): BOOLEAN;
+	PROCEDURE Depth (o: Object): INTEGER;
 	PROCEDURE EndAtomic;
 	PROCEDURE Failed (t: Task): BOOLEAN;
 	PROCEDURE GetName (t: Task; OUT s: ARRAY OF CHAR);
 	PROCEDURE GroupCount (g: Group): INTEGER;
 	PROCEDURE GroupFailed (g: Group): BOOLEAN;
+	PROCEDURE Held (o: Object): BOOLEAN;
 	PROCEDURE InTask (): BOOLEAN;
 	PROCEDURE Join (t: Task);
+	PROCEDURE JoinAll (VAR ctx: Ctx);
 	PROCEDURE List;
 	PROCEDURE ListSize (): INTEGER;
 	PROCEDURE NewGroup (): Group;
+	PROCEDURE NewGuardDir (): StackDir;
+	PROCEDURE NewSlabDir (): StackDir;
 	PROCEDURE NextDeadline (): LONGINT;
 	PROCEDURE OwnGroup (t: Task): Group;
 	PROCEDURE Park;
+	PROCEDURE ParkCtx (VAR ctx: Ctx; external: BOOLEAN): BOOLEAN;
 	PROCEDURE ParkExternal;
+	PROCEDURE PoolCount (): INTEGER;
+	PROCEDURE Queued (o: Object): INTEGER;
 	PROCEDURE ResetStats;
+	PROCEDURE SetDeadline (VAR ctx: Ctx; ms: LONGINT);
 	PROCEDURE SetName (t: Task; IN s: ARRAY OF CHAR);
+	PROCEDURE SetStackDir (d: StackDir);
 	PROCEDURE SetStackSize (t: Task; size: INTEGER);
 	PROCEDURE Sleep (ms: LONGINT);
+	PROCEDURE Spawn (VAR ctx: Ctx; t: Task);
+	PROCEDURE StackDirOf (): StackDir;
+	PROCEDURE StackDirOfTask (t: Task): StackDir;
 	PROCEDURE Start (t: Task);
 	PROCEDURE StartIn (t: Task; g: Group);
 	PROCEDURE State (t: Task): INTEGER;
 	PROCEDURE Step;
 	PROCEDURE Switches (): LONGINT;
 	PROCEDURE Unpark (t: Task);
+	PROCEDURE UseGuardStacks;
+	PROCEDURE UseSlabStacks;
 	PROCEDURE Yield;
 
 END Tasks.
 ```
 
-Besides classic tasks, the module exports the monitor object and the pass: `Ctx` (`LIMITED
-RECORD`), `Job` with abstract `Body-` and ready `Run`, `Object` with `Do`, `Await`, `AwaitCond`,
-`Ready`, `HoldsWhileWaiting` and `TransferOnRelease`, `Op`, `Cond`, operations `Spawn`,
-`JoinAll`, `ParkCtx`, `SetDeadline`, diagnostics `Held`, `Depth`, `Queued`. Their signatures,
-rules and examples are in `docs/monitor-object.md`.
+The monitor object, the pass and the job are described above; the rules and examples of the
+monitor object are in `docs/monitor-object.md`.
 
 Before every trap the module writes a line `Tasks: <text>` to the console. The operations that
 suspend a task (`Yield`, `Sleep`, `Join`, `Park`) begin with one check; below it is called "the
@@ -564,7 +605,8 @@ Task states (section 2).
 
 **TYPE Task**
 ABSTRACT
-A task. The program extends the record and implements `Run`.
+The lower-level task. A program that does not manage tasks itself is written with `Job`
+(section 1); `Run` is for a scheduler, an executor pool and a library on top of tasks.
 
 **PROCEDURE (t: Task) Run**
 NEW, ABSTRACT
@@ -572,6 +614,127 @@ The task body. Executes on the task's stack under `Kernel.Try`.
 
 **TYPE Group**
 A group of tasks (section 4). Its state is read by `GroupCount` and `GroupFailed`.
+
+**TYPE Job**
+ABSTRACT
+A job: a task with a pass. A descendant writes `Body-`; `Run` is implemented by the library.
+Application code starts with `Job`, not with `Task` (section 1).
+
+**PROCEDURE (t: Job) Body- (VAR ctx: Ctx)**
+NEW, ABSTRACT
+The body of a job. It runs on the task's stack under `Kernel.Try`; `ctx` is the pass of this run.
+
+**PROCEDURE (t: Job) Run**
+NEW
+Creates `Ctx` on the task's stack, calls `Body`, waits for the children started by `Spawn`,
+releases the remaining monitors and finishes the pass. A repeated `Start` of the same job begins
+a new run.
+
+**TYPE Ctx**
+LIMITED
+The pass of a job. `Job.Run` creates it on the task's stack, and only a `VAR` parameter of `Body`
+carries it out. It is the way to `Do`, `Await`, `AwaitCond`, `Spawn`, `JoinAll`, `SetDeadline` and
+`ParkCtx`.
+
+**PROCEDURE (VAR c: Ctx) Stopped (): BOOLEAN**
+`TRUE` if the job is cancelled or its deadline has expired.
+
+**PROCEDURE (VAR c: Ctx) TaskOf (): Task**
+The task of this pass.
+
+**PROCEDURE (VAR c: Ctx) GroupOf (): Group**
+The group of the job's children; `NIL` if none were started.
+
+**PROCEDURE (VAR c: Ctx) HeldCount (): INTEGER**
+The number of monitors held by the job.
+
+**TYPE Object**
+ABSTRACT
+A monitor object: a descendant adds fields and writes `Exclusive-`. Details are in
+`docs/monitor-object.md`.
+
+**TYPE Op**
+ABSTRACT
+A request to a monitor: a descendant record on the caller's stack, passed to `Do` and `Exclusive-`.
+
+**TYPE Cond**
+ABSTRACT
+A condition object for `AwaitCond`: a descendant decides `Ready(o)` from the state of monitor `o`.
+
+**PROCEDURE (o: Object) Do (VAR ctx: Ctx; VAR op: Op)**
+Enters the monitor — free, re-entered by its owner or after waiting — and calls `Exclusive-` with
+the pass and the request.
+
+**PROCEDURE (o: Object) Await (VAR ctx: Ctx; need: SET): BOOLEAN**
+Releases the monitor and waits until `Ready()` covers `need`; `FALSE` means the pass was stopped.
+
+**PROCEDURE (o: Object) AwaitCond (VAR ctx: Ctx; c: Cond): BOOLEAN**
+The same, but `c.Ready(o)` decides the condition.
+
+**PROCEDURE (o: Object) Ready (): SET**
+The set of true flags of the object; a descendant overrides it.
+
+**PROCEDURE (o: Object) HoldsWhileWaiting (): BOOLEAN**
+`TRUE` means a waiting task keeps the monitor (the `Await` rule).
+
+**PROCEDURE (o: Object) TransferOnRelease (): BOOLEAN**
+`TRUE` means the monitor is handed to the first waiter on release instead of entering the entry
+queue.
+
+**PROCEDURE (c: Cond) Ready (o: Object): BOOLEAN**
+NEW, ABSTRACT
+True if the condition holds for the state of monitor `o`.
+
+**PROCEDURE Spawn (VAR ctx: Ctx; t: Task)**
+Starts `t` in the group of the pass's children; `JoinAll(ctx)` waits for their end.
+
+**PROCEDURE JoinAll (VAR ctx: Ctx)**
+Waits for the pass's children and then clears the owner of the group.
+
+**PROCEDURE ParkCtx (VAR ctx: Ctx; external: BOOLEAN): BOOLEAN**
+Waits like `Park`, keeping the pass; `external` is a wait for an event from outside tasks. `FALSE`
+means the pass was stopped.
+
+**PROCEDURE SetDeadline (VAR ctx: Ctx; ms: LONGINT)**
+Sets the deadline of `Await` and `ParkCtx` from the current moment; `ms <= 0` means it has expired.
+
+**PROCEDURE Held (o: Object): BOOLEAN**
+`TRUE` if the monitor is held by someone.
+
+**PROCEDURE Depth (o: Object): INTEGER**
+The depth of the owner's re-entries.
+
+**PROCEDURE Queued (o: Object): INTEGER**
+The number of tasks in the entry, flag and condition queues.
+
+**TYPE StackDir**
+ABSTRACT
+A stack provider. The methods `NewStack-` and `FreeStack-` allocate and free memory; `Drain-`
+empties the pool. The slab provider is the default.
+
+**PROCEDURE NewGuardDir (): StackDir**
+A provider with guard pages: one `mmap` per stack.
+
+**PROCEDURE NewSlabDir (): StackDir**
+A slab provider: 64 stacks in one mapping, a guard page under each.
+
+**PROCEDURE SetStackDir (d: StackDir)**
+Sets the provider for new tasks; live tasks return stacks to their own providers.
+
+**PROCEDURE StackDirOf (): StackDir**
+The provider for new tasks.
+
+**PROCEDURE StackDirOfTask (t: Task): StackDir**
+The provider that gave the stack of task `t`; `NIL` for `t = NIL`.
+
+**PROCEDURE UseGuardStacks**
+Selects the provider with guard pages.
+
+**PROCEDURE UseSlabStacks**
+Selects the slab.
+
+**PROCEDURE PoolCount (): INTEGER**
+The number of free stacks in the provider's pool.
 
 **PROCEDURE StartIn (t: Task; g: Group)**
 Allocates a stack for the task and puts it at the end of the ready queue; with `g # NIL` enters

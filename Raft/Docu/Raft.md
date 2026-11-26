@@ -5,8 +5,8 @@
 An account lives in an event journal, and the journal lives on one machine. The machine dies and the
 account is gone. Put the journal on three machines and write to all three. Now the network splits: two
 machines see each other, the third sees nobody, and its client writes too. When the network heals, one
-position of the journal has two different values. This is exactly the limit of stage 4 of the actors
-(`ActorGrain`): under a partition a key could get two incarnations, and nothing told which one was right.
+position of the journal has two different values. This is exactly the limit of the actors
+(`ActorGrain`): under a partition a key gets two incarnations, and nothing tells which one is right.
 
 Raft solves it this way: at any moment only the leader writes, and an entry counts as done (committed)
 when a majority of the nodes has stored it. Two majorities of three (or five) always intersect, so two
@@ -200,7 +200,15 @@ scenario.
 
 ## Cost
 
-`Raft_devBench.Run` (3 nodes in one process, a FIFO network without faults; measured, amd64 Linux): in
+`Raft_devBench.Run` was measured on 25.11.2026: 3 nodes in one process, a FIFO network without faults,
+amd64 Linux, one OS thread. Build and run:
+
+```sh
+tools/go64.sh RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb System_devClock Raft_devBench
+echo 'Raft_devBench.Run' | tools/run64.sh
+```
+
+The numbers: in
 memory 250 thousand commands per second with one client and about 450 thousand with 64; on Kv with
 fsync 207 commands per second with one client (each waits for three commits of two fsyncs), 1600 with 8
 and 11 thousand with 64, because 64 commands go in one commit per node (0.05 saves per command against

@@ -1,6 +1,6 @@
 # DevLnkWriteElf: ELF32 с динамическими связями
 
-[Исходник](../Mod/LnkWriteElf.cp) · [Драйвер](Linker1.md) · [Данные](LnkBase.md)
+[Исходник](../../Mod/LnkWriteElf.cp) · [Драйвер](Linker1.md) · [Данные](LnkBase.md)
 
 Записывает ELF32 x86 из глобального состояния LB: executable или shared library согласно выбранной цели. Это не генератор 64-битного ELF, несмотря на возможную 64-битную host ОС.
 
