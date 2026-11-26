@@ -96,3 +96,7 @@ Crypto_devEC||300|CryptoEC CryptoUtils CryptoAosCompat
 Crypto_devECDSA|slow|600|CryptoHashes CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoHMAC CryptoUtils CryptoAosCompat CryptoEC CryptoECDSA
 # ChaCha20-Poly1305 (RFC 8439): блок, поток, MAC, AEAD и длины не кратные блоку.
 Crypto_devChaCha20||180|CryptoChaCha20 CryptoUtils CryptoAosCompat
+# Ed25519 (RFC 8032): проверка подписи на векторах RFC, отказы.
+Crypto_devEd25519||180|CryptoEd25519 CryptoFieldElement CryptoSHA512 CryptoSHA384 CryptoHashes CryptoUtils CryptoAosCompat
+# RSA-PSS (RFC 8017): Wycheproof и подпись/проверка своим ключом, SHA-256/384.
+Crypto_devPSS|slow|900|CryptoHashes CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoHMAC CryptoUtils CryptoAosCompat CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoCiphers CryptoMD5 CryptoRSA CryptoPrimes CryptoPSS

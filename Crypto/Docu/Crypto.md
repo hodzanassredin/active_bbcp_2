@@ -21,7 +21,7 @@ The support modules keep the names of the A2 sources:
 | Host support | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
 | Primitives | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm`, `CryptoChaCha20` |
 | Hashes and MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
-| Public key | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoASN1`, `CryptoX509` |
+| Public key | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoEd25519`, `CryptoPSS`, `CryptoASN1`, `CryptoX509` |
 | Random | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
 
@@ -71,6 +71,21 @@ P-384). The nonce is deterministic (RFC 6979), so the same key and hash give the
 ```componentpascal
 ok := CryptoECDSA.Sign(c, privateKey, hash, hashLen, r, s);
 ok := CryptoECDSA.Verify(c, qx, qy, hash, hashLen, r, s)
+```
+
+`CryptoPSS` signs and verifies RSASSA-PSS with a salt as long as the hash and MGF1 over the same
+hash. The signature is the modulus-sized byte string; the hash is passed already computed:
+
+```componentpascal
+CryptoPSS.SignHash("CryptoSHA256", digest, 32, privateKey, sig, 0, sigLen);
+ok := CryptoPSS.VerifyHash("CryptoSHA256", digest, 32, publicKey, sig, 0, sigLen)
+```
+
+`CryptoEd25519.Verify` checks an Ed25519 signature (public key 32 bytes, signature 64 bytes) over
+a message. Signature creation is not implemented; verification is what certificates and TLS need:
+
+```componentpascal
+ok := CryptoEd25519.Verify(publicKey, message, messageLen, signature)
 ```
 
 TLS is reached through the stream interface, as described for the TCP protocol in the
@@ -148,6 +163,13 @@ srv.Accept(client, res);                       (* completes the handshake *)
 - `CryptoEC` works on fixed 32-bit limbs with Montgomery multiplication. Field negation,
   inversion and exponentiation use the public modulus and the public exponent; the private scalar
   only enters through the masked window selection.
+- RSA-PSS follows RFC 8017 with `emBits = modBits - 1`, a salt of the hash length and MGF1 over
+  the same hash. The final hash is compared with `EqualBytesCT`; the recovered encoded message is
+  checked for the leading zero octets, the `0xbc` trailer, the `0x01` separator and the salt.
+- Ed25519 follows RFC 8032. `Decode` rejects `y >= p`, a non-square `x`, and `x = 0` with the sign
+  bit set; `Verify` rejects `S >= L`, which removes the signature malleability of `S + L`. The
+  extended-coordinate addition formula is complete for the curve, so the same sequence handles
+  doubling and the neutral element.
 - Keys and nonces come from `CryptoOsRandom`, which reads `/dev/urandom`; the Fortuna generator
   mixes fresh OS entropy on every request. PKCS#1 padding and the TLS pre-master secret abort if
   the source is unavailable instead of using predictable bytes. Prime generation
@@ -162,8 +184,10 @@ srv.Accept(client, res);                       (* completes the handshake *)
 
 - TLS 1.3 is not implemented.
 - X.509 certificates are RSA-only; the TLS handshake uses X25519. `CryptoEC` supports P-256 and
-  P-384 for ECDH and ECDSA but is not yet part of X.509 or TLS. Compressed SEC1 points, P-521 and
-  the other named curves are not implemented.
+  P-384 for ECDH and ECDSA and `CryptoEd25519` verifies Ed25519, but they are not yet part of
+  X.509 or TLS. Compressed SEC1 points, P-521 and the other named curves are not implemented.
+- Ed25519 signing is not implemented. RSA-PSS uses a fixed salt length equal to the hash length;
+  other salt lengths are not accepted. PKCS#1 v1.5 signatures remain the default for X.509.
 - CRL, OCSP and certificate transparency are not checked. The trust decision is the configured
   root set.
 - The big-number arithmetic (RSA private operations) and X25519 are not constant-time at the
@@ -191,7 +215,7 @@ from `tools/build32.sh` and `tools/test32.sh`.
 
 Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
-`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devX509`,
+`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
 `Crypto_devPKCS1` and `Crypto_devPRF`.
 `tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files
 with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies

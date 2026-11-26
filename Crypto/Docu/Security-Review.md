@@ -25,6 +25,8 @@
 | SHA-384/512, HMAC-SHA-384/512, HKDF | сделано | `crypto-fix` | `Crypto_devSHA512`, `Crypto_devHMAC`, `Crypto_devHKDF`, `Vectors/check.py` |
 | P-256/P-384: ECDH и ECDSA (RFC 6979) | сделано | `crypto-fix` | `Crypto_devEC`, `Crypto_devECDSA`, NIST CAVP, RFC 6979, Wycheproof, `Vectors/check.py` |
 | AES-256-GCM, ChaCha20-Poly1305 | сделано | `crypto-fix` | `Crypto_devGcm` (`TestAES256`), `Crypto_devChaCha20`, RFC 8439, `Vectors/check.py` |
+| RSA-PSS | сделано | `crypto-fix` | `Crypto_devPSS`, Wycheproof, `Vectors/check.py` |
+| Ed25519 (проверка) | сделано | `crypto-fix` | `Crypto_devEd25519`, RFC 8032, Wycheproof, `Vectors/check.py` |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -326,6 +328,8 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 | ChaCha20 | `chacha-qr`, `chacha-sigma`, `chacha-counter`, `chacha-inc` | `Crypto_devChaCha20` (все четыре красные) |
 | Poly1305 | `poly-clamp`, `poly-fullbit`, `poly-mul`, `poly-addmask`, `poly-final5` | четыре красные; `poly-final5` (+5 → +4 в окончательном приведении) на выбранных векторах не меняет тег и остаётся эквивалентной без случая на границе приведения |
 | ChaCha20-Poly1305 AEAD | `aead-tag`, `aead-pad`, `aead-lens` | все три красные |
+| RSA-PSS | `pss-mgf`, `pss-hcompare`, `pss-dbmask`, `pss-sign`, `pss-zerobits` | четыре красные; `pss-zerobits` на выбранных 2048-битных векторах эквивалентна (старшие биты db[0] оказались нулевыми) |
+| Ed25519 | `ed-lessL`, `ed-sign`, `ed-nibble`, `ed-pointeq`, `ed-addD`, `ed-hashR` | `ed-pointeq` по одной оси не краснеет (X уже различается); при возврате `TRUE` из всего сравнения — красная. Остальные пять красные |
 
 Порча `uls-signed-compare` (возврат сравнения через XOR старшего бита) тест не
 краснит: на этом компиляторе эта форма эквивалентна явным ветвям, поэтому замена

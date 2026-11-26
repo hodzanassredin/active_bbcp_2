@@ -21,7 +21,7 @@
 | Поддержка хоста | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
 | Примитивы | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm`, `CryptoChaCha20` |
 | Хеши и MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
-| Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoASN1`, `CryptoX509` |
+| Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoEC`, `CryptoECDSA`, `CryptoEd25519`, `CryptoPSS`, `CryptoASN1`, `CryptoX509` |
 | Случайные числа | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
 
@@ -70,6 +70,21 @@ ok := CryptoEC.ECDH(c, privateKey, qx, qy, sharedX)
 ```componentpascal
 ok := CryptoECDSA.Sign(c, privateKey, hash, hashLen, r, s);
 ok := CryptoECDSA.Verify(c, qx, qy, hash, hashLen, r, s)
+```
+
+`CryptoPSS` подписывает и проверяет RSASSA-PSS с солью длины хеша и MGF1 по тому же хешу.
+Подпись — строка байтов длины модуля; хеш передаётся уже посчитанным:
+
+```componentpascal
+CryptoPSS.SignHash("CryptoSHA256", digest, 32, privateKey, sig, 0, sigLen);
+ok := CryptoPSS.VerifyHash("CryptoSHA256", digest, 32, publicKey, sig, 0, sigLen)
+```
+
+`CryptoEd25519.Verify` проверяет подпись Ed25519 (открытый ключ 32 байта, подпись 64 байта) по
+сообщению. Создание подписи не реализовано; для сертификатов и TLS нужна именно проверка:
+
+```componentpascal
+ok := CryptoEd25519.Verify(publicKey, message, messageLen, signature)
 ```
 
 TLS доступен через интерфейс потоков так, как описано для протокола TCP в документации
@@ -145,6 +160,13 @@ srv.Accept(client, res);                       (* завершает рукоп�
 - `CryptoEC` работает на 32-битных разрядах с умножением Монтгомери. Отрицание, обращение и
   возведение в степень в поле используют открытые модуль и показатель; закрытый скаляр входит
   только через маскированный выбор окна.
+- RSA-PSS следует RFC 8017: `emBits = modBits - 1`, соль длины хеша, MGF1 по тому же хешу.
+  Итоговый хеш сравнивается через `EqualBytesCT`; в восстановленном EM проверяются ведущие
+  нулевые байты, байт `0xbc`, разделитель `0x01` и соль.
+- Ed25519 следует RFC 8032. `Decode` отвергает `y >= p`, неквадрат `x` и `x = 0` при знаковом
+  бите; `Verify` отвергает `S >= L`, что снимает малеабельность подписи `S + L`. Формула
+  сложения в расширенных координатах полная для этой кривой, поэтому удвоение и нейтральный
+  элемент идут той же последовательностью.
 - Ключи и nonce берутся из `CryptoOsRandom` (`/dev/urandom`); генератор Fortuna подмешивает
   свежую энтропию ОС на каждый запрос. PKCS#1-дополнение и TLS pre-master при недоступном
   источнике завершаются ошибкой, а не предсказуемыми байтами. Генерация простых чисел
@@ -159,8 +181,10 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 - TLS 1.3 не реализован.
 - Сертификаты X.509 только с RSA-ключами; в рукопожатии TLS обмен только X25519. `CryptoEC`
-  даёт P-256 и P-384 для ECDH и ECDSA, но в X.509 и TLS они ещё не подключены. Сжатые точки
-  SEC1, P-521 и остальные named groups не реализованы.
+  даёт P-256 и P-384 для ECDH и ECDSA, `CryptoEd25519` проверяет Ed25519, но в X.509 и TLS они
+  ещё не подключены. Сжатые точки SEC1, P-521 и остальные named groups не реализованы.
+- Подпись Ed25519 не реализована. RSA-PSS использует фиксированную длину соли, равную длине
+  хеша; другие длины соли не принимаются. Для X.509 по умолчанию остаётся PKCS#1 v1.5.
 - CRL, OCSP и certificate transparency не проверяются. Решение о доверии — настроенный
   набор корней.
 - Арифметика больших чисел (закрытые операции RSA) и X25519 не постоянного времени на
@@ -188,7 +212,7 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
-`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devX509`,
+`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
 `Crypto_devPKCS1`, `Crypto_devPRF`. Их
 запускает `tools/test.sh` по списку `tools/tests.txt`. Эталонные значения также лежат файлами с
 указанием источника и лицензии в `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их

@@ -234,10 +234,36 @@ if have_crypto:
                                                 curves[name]).public_key()
             got = ec.derive_private_key(int(priv, 16), curves[name]).exchange(ec.ECDH(), pub)
             ok = (expect == "valid" and got.hex().upper() == shared.upper())
-        except (ValueError, Exception):
+        except Exception:
             ok = (expect == "invalid")
         if not ok:
             fail(f"ecdh-wycheproof {comment}: не совпало с ожиданием")
+
+    # RSA-PSS (Wycheproof)
+    from cryptography.hazmat.primitives.asymmetric import rsa as crsa, padding
+    for n, e, sha, msg, sig, expect, comment in rows("pss-wycheproof.txt"):
+        try:
+            pub = crsa.RSAPublicNumbers(int(e, 16), int(n, 16)).public_key()
+            pub.verify(unhex(sig), b"" if msg == '""' else unhex(msg),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                   salt_length=32), hashes.SHA256())
+            ok = True
+        except Exception:
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"pss-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
+
+    # Ed25519 (Wycheproof)
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    for pk, msg, sig, expect, comment in rows("ed25519-wycheproof.txt"):
+        try:
+            Ed25519PublicKey.from_public_bytes(unhex(pk)).verify(
+                unhex(sig), b"" if msg == '""' else unhex(msg))
+            ok = True
+        except Exception:
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"ed25519-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
 
 if failures:
     print(f"check-vectors: {failures} провалов")
