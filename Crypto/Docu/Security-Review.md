@@ -219,8 +219,39 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 (25 красных и 18 эквивалентных).
 
 Механизмы SHA-384/512, HKDF, P-256/P-384, ChaCha20-Poly1305, RSA-PSS,
-Ed25519 и новые подписи X.509 проверены 62 порчами: 57 красных,
-5 перечислены как эквивалентные на выбранных векторах с причиной.
+Ed25519 и новые подписи X.509 проверены 67 порчами: 63 красных,
+4 перечислены как эквивалентные на выбранных векторах с причиной.
+
+### Приёмка пунктов 1–5: структура EMSA-PSS
+
+Порча `Crypto/Mod/PSS.cp`, убирающая проверку разделителя `db[psLen] # 1X`,
+раньше выживала: в `Crypto_devPSS` не было вектора с испорченным
+разделителем. Добавлены отрицательные векторы
+`Crypto_dev/Vectors/pss-negative.txt` (генератор `make-pss-negative.py`):
+EM собирается с одним дефектом и подписывается настоящим ключом
+(`s = EM^d mod n`), поэтому проверяющая сторона после `s^e mod n`
+получает ровно этот EM. Вектор с ненулевым старшим битом maskedDB
+обнаружил настоящий пропуск: шаг 4 из RFC 8017, 9.1.2 (старшие
+`8*emLen - emBits` бита maskedDB нулевые) не проверялся, а маска `db[0]`
+ниже скрывала эти биты. Проверка добавлена в `CryptoPSS.VerifyHash`;
+контрольный вектор подтверждает, что годная подпись проходит.
+
+| Место | Порча | Результат |
+|---|---|---|
+| `VerifyHash`: `IF db[psLen] # 1X` | `IF FALSE` (порча приёмки) | поймана `TestNegativeEncoding` (разделитель 0x00 и 0x02) |
+| `VerifyHash`: `IF ORD(em[emLen-1]) # 0BCH` | проверка удалена | поймана `TestNegativeEncoding` (концевой 0xBB) |
+| `VerifyHash`: проверка старших бит maskedDB | `IF FALSE` | поймана `TestNegativeEncoding` (старший бит maskedDB) |
+| `VerifyHash`: `IF db[i] # 0X` | `IF FALSE` | поймана `TestNegativeEncoding` (ненулевой PS) |
+| `VerifyHash`: `saltLen := hLen` | `hLen - 1` | поймана `TestNegativeEncoding` (соль 31) и годные векторы |
+| `MGF1`: `INC(c)` | `INC(c, 0)` | поймана контрольным и годными векторами |
+| `VerifyHash`: `EqualBytesCT(h, hp)` | `ok := TRUE` | поймана `TestWycheproof` (изменённый m_hash) |
+| `VerifyHash`: `db[i] := em[i] XOR dbMask[i]` | `db[i] := em[i]` | поймана годными векторами |
+| `Encode`: `em[emLen-1] := 0BCH` | `0BBH` | поймана `TestSign` (своя подпись не проверяется) |
+| `VerifyHash`: обнуление старших бит `db[0]` | строка удалена | поймана годными векторами (маска делает PS ненулевым) |
+
+До этой приёмки порча `pss-zerobits` считалась эквивалентной; после
+добавления проверки старших бит и векторов она краснеет, как и остальные
+девять.
 
 ### X.509
 
@@ -333,7 +364,7 @@ Ed25519 и новые подписи X.509 проверены 62 порчами:
 | ChaCha20 | `chacha-qr`, `chacha-sigma`, `chacha-counter`, `chacha-inc` | `Crypto_devChaCha20` (все четыре красные) |
 | Poly1305 | `poly-clamp`, `poly-fullbit`, `poly-mul`, `poly-addmask`, `poly-final5` | четыре красные; `poly-final5` (+5 → +4 в окончательном приведении) на выбранных векторах не меняет тег и остаётся эквивалентной без случая на границе приведения |
 | ChaCha20-Poly1305 AEAD | `aead-tag`, `aead-pad`, `aead-lens` | все три красные |
-| RSA-PSS | `pss-mgf`, `pss-hcompare`, `pss-dbmask`, `pss-sign`, `pss-zerobits` | четыре красные; `pss-zerobits` на выбранных 2048-битных векторах эквивалентна (старшие биты db[0] оказались нулевыми) |
+| RSA-PSS | `pss-separator`, `pss-trailer`, `pss-topbits`, `pss-ps`, `pss-saltlen`, `pss-mgf`, `pss-hcompare`, `pss-dbmask`, `pss-sign`, `pss-zerobits` | все десять красные (приёмка п. 0); `pss-topbits` — новая проверка старших бит maskedDB по RFC 8017, 9.1.2; `pss-zerobits` после неё уже не эквивалентна |
 | Ed25519 | `ed-lessL`, `ed-sign`, `ed-nibble`, `ed-pointeq`, `ed-addD`, `ed-hashR` | `ed-pointeq` по одной оси не краснеет (X уже различается); при возврате `TRUE` из всего сравнения — красная. Остальные пять красные |
 | X.509: алгоритмы подписи и ключи | `x509-ecdsa-skip`, `x509-pss-skip`, `x509-ed-skip`, `x509-pss-type`, `x509-ec-curve`, `x509-ed-oid`, `x509-ecdsa-hash`, `x509-int-zero` | все восемь красные (`Crypto_devX509Modern`) |
 

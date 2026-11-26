@@ -19,6 +19,7 @@ Component Pascal. Те же значения зашиты в модулях `Cry
 | `prf.txt` | RFC 5246, P_SHA256; значения посчитаны независимо на Python/hmac | IETF Trust |
 | `chacha.txt` | RFC 8439: блок ChaCha20, поток, Poly1305, AEAD | IETF Trust |
 | `pss-wycheproof.txt` | Wycheproof `rsa_pss_2048_sha256_mgf1_32_test.json`, выбранные случаи | Apache License 2.0 |
+| `pss-negative.txt` | отрицательные векторы структуры EMSA-PSS (разделитель, PS, 0xBC, старшие биты, длина соли); `make-pss-negative.py` пересоздаёт файл, ключ детерминирован из seed=8017 | CC0 / public domain |
 | `ed25519-wycheproof.txt` | Wycheproof `ed25519_test.json`, выбранные случаи; векторы RFC 8032 в `Crypto_devEd25519` | Apache License 2.0 |
 | `x509/modern/` | сертификаты ECDSA P-256/P-384, RSA-PSS, Ed25519 и смешанная цепочка; `make-modern.py` и `make-modern-data.py` пересоздают `Crypto_devX509ModernData`; ключи удалены | CC0 / public domain |
 | `x509/` | сертификаты сгенерированы для этого репозитория (CA, лист, просроченный); ключи удалены | CC0 / public domain |

@@ -170,6 +170,16 @@ MODULE CryptoPSS;
 			IF got[i] # 0X THEN RETURN FALSE END
 		END;
 		FOR i := 0 TO emLen - 1 DO em[i] := got[k - emLen + i] END;
+		(* RFC 8017, 9.1.2, шаг 4: старшие 8*emLen - emBits бита
+		   maskedDB (то же, что em[0]) обязаны быть нулевыми. Без этой
+		   проверки маска db[0] ниже скрывает их, и подпись с
+		   ненулевыми старшими битами проходит. *)
+		zeroBits := 8 * emLen - (bits - 1);
+		IF zeroBits > 0 THEN
+			IF ORD(em[0]) # ORD(BITS(ORD(em[0])) * BITS(ASH(255, -zeroBits))) THEN
+				RETURN FALSE
+			END
+		END;
 		IF ORD(em[emLen - 1]) # 0BCH THEN RETURN FALSE END;
 
 		hLen := HashSeg(hashName, em, 0, em, 0, em, 0, hp);
@@ -181,7 +191,6 @@ MODULE CryptoPSS;
 			db[i] := SHORT(CHR(ORD(BITS(ORD(em[i])) / BITS(ORD(dbMask[i])))))
 		END;
 		(* Старшие zeroBits бита db[0] обнуляются (RFC 8017, 9.1.2). *)
-		zeroBits := 8 * emLen - (bits - 1);
 		db[0] := SHORT(CHR(ORD(BITS(ORD(db[0])) * BITS(ASH(255, -zeroBits)))));
 		(* db = 0x00... || 0x01 || salt, соль длины hLen. *)
 		saltLen := hLen;

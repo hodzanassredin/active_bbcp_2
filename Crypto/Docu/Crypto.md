@@ -168,7 +168,10 @@ srv.Accept(client, res);                       (* completes the handshake *)
   only enters through the masked window selection.
 - RSA-PSS follows RFC 8017 with `emBits = modBits - 1`, a salt of the hash length and MGF1 over
   the same hash. The final hash is compared with `EqualBytesCT`; the recovered encoded message is
-  checked for the leading zero octets, the `0xbc` trailer, the `0x01` separator and the salt.
+  checked for zero leading bits of `maskedDB`, the leading zero octets, the `0xbc` trailer, the
+  `0x01` separator and the salt. `Crypto_devPSS` rejects malformed encoded messages from
+  `Vectors/pss-negative.txt` (separator `0x00`/`0x02`, nonzero PS, trailer `0xbb`, a set leading
+  bit, salt length 31 or 33), each signed with the real key.
 - Ed25519 follows RFC 8032. `Decode` rejects `y >= p`, a non-square `x`, and `x = 0` with the sign
   bit set; `Verify` rejects `S >= L`, which removes the signature malleability of `S + L`. The
   extended-coordinate addition formula is complete for the curve, so the same sequence handles

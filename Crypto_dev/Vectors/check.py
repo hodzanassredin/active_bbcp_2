@@ -253,6 +253,19 @@ if have_crypto:
         if ok != (expect == "valid"):
             fail(f"pss-wycheproof {comment}: получено {'valid' if ok else 'invalid'}")
 
+    # RSA-PSS: отрицательные векторы структуры EM (свой ключ, EM подписан).
+    for n, e, sha, msg, sig, expect, comment in rows("pss-negative.txt"):
+        try:
+            pub = crsa.RSAPublicNumbers(int(e, 16), int(n, 16)).public_key()
+            pub.verify(unhex(sig), unhex(msg),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                   salt_length=32), hashes.SHA256())
+            ok = True
+        except Exception:
+            ok = False
+        if ok != (expect == "valid"):
+            fail(f"pss-negative {comment}: получено {'valid' if ok else 'invalid'}")
+
     # Ed25519 (Wycheproof)
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     for pk, msg, sig, expect, comment in rows("ed25519-wycheproof.txt"):
