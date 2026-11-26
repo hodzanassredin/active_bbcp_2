@@ -27,6 +27,11 @@ MODULE RaftJournal;
 	под ActorSim, где одна задача-водитель обслуживает и стойкие акторы, и
 	узлы Raft. Ставить tickMs до первого запроса.
 
+	SubmitLast — чтение номера последнего события потока тем же путём,
+	что и Replay: лидер отвечает после ReadIndex. Им пользуется
+	ActorPersist с fresh = TRUE, чтобы ответ не был старше подтверждённой
+	записи.
+
 	Append, SaveSnapshot, Last, Read и LoadSnapshot — те же запросы с
 	ожиданием ответа (AsyncChan): только из задачи и не под ActorSim.
 
@@ -317,6 +322,11 @@ MODULE RaftJournal;
 		ELSIF op.cmd THEN
 			IF got & (data # NIL) & (LEN(data^) >= 1) THEN op.r.Done(data[0]) ELSE op.r.Done(ActorJournal.failed) END
 		ELSIF ~got OR (data = NIL) THEN op.r.Done(ActorJournal.failed)
+		ELSIF op.what = qLast THEN
+			Open(rd, data, 0, LEN(data^)); res := SHORT(Get(rd, 1));
+			IF ~rd.ok THEN op.r.Done(ActorJournal.corrupt); RETURN END;
+			IF res = ActorJournal.ok THEN op.r.Last(Get(rd, 8)) END;
+			op.r.Done(res)
 		ELSE	(* qReplay *)
 			Open(rd, data, 0, LEN(data^)); res := SHORT(Get(rd, 1));
 			IF ~rd.ok THEN op.r.Done(ActorJournal.corrupt); RETURN END;
@@ -482,6 +492,13 @@ MODULE RaftJournal;
 		ASSERT(r # NIL, 20);
 		f.b := NIL; f.n := 0; Put(f, qReplay, 1); PutStr(f, stream); c.Post(FALSE, qReplay, f, r)
 	END Replay;
+
+	PROCEDURE (c: Client) SubmitLast* (IN stream: ARRAY OF CHAR; r: ActorJournal.Request);
+		VAR f: Buf;
+	BEGIN
+		ASSERT(r # NIL, 23);
+		f.b := NIL; f.n := 0; Put(f, qLast, 1); PutStr(f, stream); c.Post(FALSE, qLast, f, r)
+	END SubmitLast;
 
 	PROCEDURE (c: Client) Last* (IN stream: ARRAY OF CHAR): LONGINT;
 		VAR f: Buf; r: Rd; res: INTEGER; x: LONGINT;

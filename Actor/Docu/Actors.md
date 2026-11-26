@@ -527,6 +527,15 @@ bypassing `Props.capacity`: a full mailbox does not lose it. Stashed letters cou
 mailbox limit, so while the actor waits for an answer it holds at most `capacity` letters, and the
 extra ones become dead at once (`Actor_devBounded`).
 
+**Freshness before a letter.** An activation of a virtual actor (`fresh`, section 11) answers only
+from a state that is not older than the confirmed journal. Before handling a letter it asks the
+journal for the last number of its stream (`SubmitLast`); if the stream is ahead, it reads the
+missing events (`Replay`) while the letter waits in the stash. With `RaftJournal` that question goes
+through `ReadIndex`, so an activation cut off from the journal majority stops with `storeTrap`
+instead of answering a stale state. The price is one journal request per letter. The rule holds for
+every answer, including the answer to a repeated command, so a client never sees less than the last
+confirmed write of the key.
+
 Event versions. `Stores.Writer.WriteStore` writes the frame: the type name, then the fields from
 `Externalize`. The type reads its version number with `ReadVersion(min, max, v)` and parses the
 fields by `v`. A new field is a new version: `max` grows, old frames are read with the old layout,
@@ -729,6 +738,18 @@ node, and a cluster with a member list. Members are given explicitly: the capabi
 host (`HostCap`) is handed to another (`Member`). The journal `j` is shared by all nodes: the nodes
 share storage, like a common database, not memory.
 
+**Membership from the service.** The list of members need not be assembled by hand. On a cluster
+whose nodes are in the Raft membership service (the `Raft` guide, "Membership service"),
+`RaftGrainMembership` joins it with the host's capability, renews the lease and reads the list; each
+answer is passed to `ActorGrain.ApplyMembers`. That call adds a new member, revives a member that has
+returned, and marks a member that is absent from the list dead; a key stored in the list is kept in
+the member record (`Key`). Placement is computed from the live members on every send, so a change of
+the list changes the owners without a separate rebalancing step. A member whose lease is not renewed
+becomes dead for the others exactly as a node lost through `Terminated` does; the keys then move to
+the remaining members.
+
+Membership by `Member` remains for a fixed cluster and for tests.
+
 **Placement.** The owner of a key is the live member with the largest weight
 `hash(member, kind, key)`. This is rendezvous hashing, as in protoactor-go: when a member leaves,
 only its keys move. The owner is computed on every send. A letter to a key's address goes to the
@@ -756,17 +777,26 @@ the driver gives it, on a live node a `Services` action.
 lost; the client repeats it with the same operation number.
 
 **One activation without consensus.** If the network splits, each node may consider itself the owner
-and bring up its own activation of a key. Only one of them can write: an event is written with a
-number check (`Append` with the expected `seq`), the second activation gets `conflict` and stops
-(`ActorPersist.conflictTrap`), and the next letter brings it up with the other's event already in
-(`TestSplitBrainOneWriter`). Before writing, the second activation may read stale state. A replicated
-log is the `Raft` subsystem (`Raft/Docu/Raft.md`, decision record 0025); an `ActorPersist` journal on top
-of it is `RaftJournal` (example `ObxRaft1`); `ActorGrain` was not tested on it, and the limit stays.
+and bring up its own activation of a key. Before writing, an activation of a virtual actor compares
+its state with the last event of the stream (`SubmitLast`) and catches up (`Replay`), so two copies
+write one after the other instead of past each other. A write that still arrives with an old number
+gets `conflict`: it is not applied and the activation stops (`ActorPersist.conflictTrap`), and the
+next letter brings it up with the other's event already in (`TestSplitBrainOneWriter`). A replicated
+log is the `Raft` subsystem (`Raft/Docu/Raft.md`, decision record 0025); an `ActorPersist` journal on
+top of it is `RaftJournal` (example `ObxRaft1`). `Raft_devGrainJournal` runs virtual actors on
+`RaftJournal` under `ActorSim`: a journal cluster of three nodes, a membership service of three
+nodes, network splits, crashes of nodes of both clusters and changes of the membership list. It
+checks on every step and at the end that every operation is executed once, that the confirmed writes
+of a key form one chain (`prev` is the previous number), that no answer is older than the last
+confirmed write and that the sum is conserved. The read barrier is decision record 0035.
 
 `TestSeeds` runs 100 seeds: three nodes, five keys, twenty operations; the network loses and
 duplicates frames, nodes crash and come back, and the client repeats unacknowledged operations.
 Every operation is executed exactly once, and a rerun of a seed matches step by step; 2000 seeds are
-`Actor_devGrain.Long`.
+`Actor_devGrain.Long`. The same properties on `RaftJournal` are `Raft_devGrainJournal.TestSeeds`
+(100 seeds, three keys, four deposits and four reads per key, network splits, crashes of the journal,
+the service and the participants, a participant joining and leaving); the long run is
+`Raft_devGrainJournal.Long` (2000 seeds).
 
 Example: `ObxActor8`, an account on two nodes: access by number, a node crash, continuation on the
 other node.
@@ -1211,12 +1241,14 @@ DEFINITION ActorJournal;
 				IN body: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
 			(j: Journal) SubmitSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
 				IN data: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) SubmitLast (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE;
 			(j: Journal) Replay (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE
 		END;
 
 		Request = POINTER TO ABSTRACT RECORD (Sink)
 			(r: Request) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, EXTENSIBLE;
 			(r: Request) Snapshot (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
+			(r: Request) Last (seq: LONGINT), NEW, EMPTY;
 			(r: Request) Done (res: INTEGER), NEW, ABSTRACT
 		END;
 
@@ -1234,12 +1266,13 @@ A journal is a set of streams; a stream is events numbered 1, 2, 3 … without g
 `conflict`, the expected number does not match; `absent`, there is no snapshot; `failed`, an
 environment error; `corrupt`, the data cannot be read.
 
-`Submit`, `SubmitSnapshot` and `Replay` are the same `Append`, `SaveSnapshot` and reading of the
-snapshot with its events, but the result goes to the request `r` by `Done(res)` — exactly once, inside
-the call or later, from another context; `Replay` gives the snapshot to `r.Snapshot` and the events to
-`r.Event` before `Done`. By default they call the synchronous methods and answer at once, so a
-synchronous journal does not redefine them; a journal that answers later (`RaftJournal.Client`) does.
-Pre: `r # NIL` — trap 23 (`Replay`: 20).
+`Submit`, `SubmitSnapshot`, `SubmitLast` and `Replay` are the same `Append`, `SaveSnapshot`, `Last`
+and reading of the snapshot with its events, but the result goes to the request `r` by `Done(res)` —
+exactly once, inside the call or later, from another context; `Replay` gives the snapshot to
+`r.Snapshot` and the events to `r.Event` before `Done`, `SubmitLast` gives the number to `r.Last`. By
+default they call the synchronous methods and answer at once, so a synchronous journal does not
+redefine them; a journal that answers later (`RaftJournal.Client`) does. Pre: `r # NIL` — trap 23
+(`Replay`: 20).
 
 `Meta` is the event metadata: the number `seq`, the write time `time` (UTC, `YYYYMMDDhhmmss`), the
 cause `cause`, the author `author`. The journal keeps them apart from the body and returns them
@@ -1330,7 +1363,7 @@ DEFINITION ActorPersist;
 
 	CONST
 		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
-		mutNoStash = 0;
+		mutNoStash = 0; mutNoFresh = 1; mutKeepOnConflict = 2; mutNoCatchUp = 3;
 
 	TYPE
 		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
@@ -1341,6 +1374,7 @@ DEFINITION ActorPersist;
 
 		Actor = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
 			seq-: LONGINT;
+			fresh: BOOLEAN;
 			snapEvery: INTEGER;
 			journal: ActorJournal.Journal;
 			stream: ActorCore.Name;
@@ -1371,7 +1405,9 @@ END ActorPersist.
 The stream of an actor is `stream` or, when it is empty, the mailbox name (`c.name`); virtual actors
 set `stream` so that the stream does not depend on the node (section 11). `journal = NIL` means `ActorJournal.dir`. `seq` is the
 number of the last applied event. `snapEvery > 0` takes a snapshot after each event whose number is
-a multiple of `snapEvery`; 0 only on `SaveSnapshot`.
+a multiple of `snapEvery`; 0 only on `SaveSnapshot`. `fresh = TRUE` makes the actor compare `seq`
+with the last number of its stream before every user message (`SubmitLast`) and read the missing
+events; the reply thus cannot be older than the last confirmed write. Virtual actors set it.
 
 **PROCEDURE (a: Actor) Apply (e: Event)**
 Post: the state of `a` is changed by event `e`. No messages, no writes, no traps.
@@ -1386,7 +1422,9 @@ message whose handler wrote `e`. Reply to the command here; `Persist` may be cal
 **PROCEDURE (a: Actor) Busy (): BOOLEAN**
 Post: recovery or a write without the journal's answer is in progress — user messages are stashed.
 
-`mutations` (`mutNoStash`: a message arriving during a write is handled at once) is for tests only.
+`mutations` is for tests only: `mutNoStash` handles a message arriving during a write at once,
+`mutNoFresh` skips the freshness check, `mutNoCatchUp` sees the stream ahead but does not read the
+missing events, `mutKeepOnConflict` applies and confirms an event whose number did not match.
 
 **PROCEDURE (a: Actor) Snapshot (): Stores.Store**
 Post: the object whose frame is the snapshot of the state. By default the actor itself (its
@@ -1710,7 +1748,11 @@ DEFINITION ActorGrain;
 
 	CONST
 		maxMembers = 32;
+		capLen = 256;
 		notNetMsg = 31;
+		mutNoApply = 0;
+		mutKeepAlive = 1;
+		mutNoRejoin = 2;
 
 	TYPE
 		Actor = POINTER TO ABSTRACT RECORD (ActorPersist.Actor)
@@ -1725,12 +1767,25 @@ DEFINITION ActorGrain;
 			activations-, passivations-: LONGINT
 		END;
 
+		MemberInfo = RECORD
+			id: INTEGER;
+			cap: ARRAY capLen OF CHAR;
+			key: ActorJournal.Bytes;
+			alive: BOOLEAN
+		END;
+
 	PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster;
+	PROCEDURE HostRef (cl: Cluster): ActorCore.Ref;
 	PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR);
 	PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR);
+	PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER);
+	PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes;
 	PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Members (cl: Cluster): INTEGER;
+	PROCEDURE AliveCount (cl: Cluster): INTEGER;
+	PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name);
 	PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
 	PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR);
@@ -1749,8 +1804,20 @@ passivation); counters of activations and passivations.
 **PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster** — Pre: `n # NIL` — 20;
 `j # NIL` — 21; no root actor named after the node — 22. Post: the host is created, the node itself
 is the only member.
+**PROCEDURE HostRef (cl: Cluster): ActorCore.Ref** — Post: the address of the node's host.
 **PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR)** — Post: the host's capability for
 `Member` on other nodes.
+**PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER)** — Pre: each
+`list[i].cap` parses with `ActorNet.Import`; not checked. Post: the members of `cl` are the entries of
+`list[0 .. n-1]` with `alive = TRUE`; a new entry is added, a returning one is alive again, an absent
+one is marked dead; `id` and `key` are kept in the member record. Placement is computed from the live
+members on the next send.
+**PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes** — Post: the open key of
+the member from the last `ApplyMembers`; `NIL` if there is no such member. The key is not checked.
+**PROCEDURE Members (cl: Cluster): INTEGER** — Post: the number of members including the node itself.
+**PROCEDURE AliveCount (cl: Cluster): INTEGER** — Post: the number of live members including the node.
+**PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name)** — Post: the name of
+member `i` (0 is the node itself); empty outside the list.
 **PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR)** — Pre: the capability parses — 20; fewer
 than `maxMembers` members — 21. Post: the member is alive, its host is watched.
 **PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR)** — Pre: the member exists — 20. Post: the

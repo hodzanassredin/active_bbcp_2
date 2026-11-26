@@ -514,6 +514,15 @@ END Persisted;
 пока актор ждёт ответа, он держит не больше `capacity` писем, а лишние становятся мёртвыми сразу
 (`Actor_devBounded`).
 
+**Свежесть перед письмом.** Воплощение виртуального актора (`fresh`, раздел 11) отвечает только по
+состоянию не старше подтверждённого журнала. Перед обработкой письма оно спрашивает у журнала
+последний номер своего потока (`SubmitLast`) и, если поток ушёл вперёд, читает недостающие события
+(`Replay`), пока письмо ждёт в отложенных. У `RaftJournal` этот вопрос идёт через `ReadIndex`,
+поэтому воплощение, отрезанное от большинства журнала, останавливается с `storeTrap`, а не отвечает
+устаревшим состоянием. Цена — один запрос к журналу на письмо. Правило действует для любого ответа,
+включая ответ на повтор команды: клиент не видит состояния старше последней подтверждённой записи
+ключа.
+
 Версии событий. Кадр пишет `Stores.Writer.WriteStore`: имя типа, затем поля из `Externalize`. Тип
 читает свой номер версии `ReadVersion(min, max, v)` и разбирает поля по `v`. Новое поле — новая
 версия: `max` растёт, старые кадры читаются по старой раскладке, а у нового поля — значение по
@@ -704,6 +713,17 @@ c.Tell(acct, deposit)
 другому (`Member`). Журнал `j` общий для всех узлов: узлы делят хранилище, как общую базу, а не
 память.
 
+**Состав из службы.** Список членов не обязательно собирать вручную. В кластере, чьи узлы входят в
+службу состава Raft (руководство `Raft`, раздел «Служба состава»), `RaftGrainMembership` вступает в
+неё с пропуском хозяина, продлевает аренду и читает список; каждый ответ передаётся в
+`ActorGrain.ApplyMembers`. Этот вызов добавляет нового члена, оживляет вернувшегося и помечает
+мёртвым пропавшего из списка; ключ из списка хранится в записи члена (`Key`). Размещение считается
+по живым членам при каждой отправке, поэтому смена списка меняет владельцев без отдельного
+переразмещения. Член, чья аренда не продлена, для остальных умирает так же, как узел, потерянный
+через `Terminated`; ключи после этого переезжают к оставшимся.
+
+`Member` остаётся для постоянного состава и для тестов.
+
 **Размещение.** Владелец ключа — живой член с наибольшим весом `хеш(член, вид, ключ)`. Это
 рандеву-хеш, как в protoactor-go: когда член уходит, переезжают только его ключи. Владелец
 считается при каждой отправке. Письмо адресу ключа уходит хозяину владельца конвертом; хозяин
@@ -729,17 +749,23 @@ c.Tell(acct, deposit)
 номером операции.
 
 **Одно воплощение — без согласования.** Если сеть разделилась, каждый узел может считать владельцем
-себя и поднять своё воплощение ключа. Писать сможет только одно: событие пишется с проверкой номера
-(`Append` с ожидаемым `seq`), второе воплощение получает `conflict` и останавливается
-(`ActorPersist.conflictTrap`), а следующее письмо поднимает его уже с чужим событием
-(`TestSplitBrainOneWriter`). Читать устаревшее состояние второе воплощение до записи может.
-Согласованный журнал — подсистема `Raft` (`Raft/Docu/ru/Raft.md`, запись решения 0025); журнал
-`ActorPersist` поверх неё — `RaftJournal` (пример `ObxRaft1`); `ActorGrain` на нём не проверялся, и
-граница остаётся.
+себя и поднять своё воплощение ключа. Перед записью воплощение виртуального актора сверяет своё
+состояние с последним событием потока (`SubmitLast`) и догоняет его (`Replay`), поэтому две копии
+пишут по очереди, а не мимо друг друга. Запись, пришедшая со старым номером, получает `conflict`: она
+не применена, воплощение останавливается (`ActorPersist.conflictTrap`), а следующее письмо поднимает
+его уже с чужим событием (`TestSplitBrainOneWriter`). Согласованный журнал — подсистема `Raft`
+(`Raft/Docu/ru/Raft.md`, запись решения 0025); журнал `ActorPersist` поверх неё — `RaftJournal`
+(пример `ObxRaft1`). `Raft_devGrainJournal` прогоняет виртуальные акторы на `RaftJournal` под
+`ActorSim`: кластер журнала из трёх узлов, служба состава из трёх узлов, разрывы сети, падения узлов
+обоих кластеров и смена списка участников. Проверки каждого шага и итога: каждая операция исполнена
+один раз, подтверждённые записи ключа — одна цепь (`prev` равен предыдущему номеру), ни один ответ не
+старше последней подтверждённой записи, сумма сохраняется. Барьер чтения — запись решения 0035.
 
 `TestSeeds` прогоняет 100 зёрен: три узла, пять ключей, двадцать операций; сеть теряет и дублирует
 кадры, узлы падают и поднимаются, клиент повторяет неподтверждённые операции. Каждая операция
-исполнена ровно один раз, повтор зерна совпадает шаг в шаг; 2000 зёрен — `Actor_devGrain.Long`.
+исполнена ровно один раз, повтор зерна совпадает шаг в шаг; 2000 зёрен — `Actor_devGrain.Long`. Те же
+свойства на `RaftJournal` — `Raft_devGrainJournal.TestSeeds` (100 зёрен, три ключа, четыре вклада и
+четыре чтения на ключ); длинный прогон — `Raft_devGrainJournal.Long` (2000 зёрен).
 
 Пример: `ObxActor8` — счёт на двух узлах: обращение по номеру, падение узла, продолжение на другом.
 
@@ -792,8 +818,9 @@ c.Tell(acct, deposit)
   действующего пропуска может слать от чужого имени и двигать окно повторов этого имени; защита
   канала (TLS, подпись кадра секретом пары узлов) не реализована. Доставка «не более одного раза»,
   TCP-транспорт только на Linux;
-  согласования (Raft) нет: при разделении сети возможны два воплощения ключа, писать может одно
-  (раздел 11). Хозяин ищет воплощение перебором списка: обращение дорожает с числом активных ключей.
+  согласования (Raft) нет: при разделении сети возможны два воплощения ключа, писать может одно, а
+  второе перед записью догоняет поток (раздел 11). Хозяин ищет воплощение перебором списка:
+  обращение дорожает с числом активных ключей.
 - Стратегия одна — `OneForOne`; «все за одного» не реализована.
 - Пока пул жив, планировщик не объявляет тупик прочих задач (раздел 3).
 - `Ask` к самому себе из обработчика трапует с кодом 23.
@@ -1177,12 +1204,14 @@ DEFINITION ActorJournal;
 				IN body: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
 			(j: Journal) SubmitSnapshot (IN stream: ARRAY OF CHAR; seq: LONGINT;
 				IN data: ARRAY OF BYTE; len: INTEGER; r: Request), NEW, EXTENSIBLE;
+			(j: Journal) SubmitLast (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE;
 			(j: Journal) Replay (IN stream: ARRAY OF CHAR; r: Request), NEW, EXTENSIBLE
 		END;
 
 		Request = POINTER TO ABSTRACT RECORD (Sink)
 			(r: Request) Event (IN m: Meta; IN body: ARRAY OF BYTE; len: INTEGER): BOOLEAN, EXTENSIBLE;
 			(r: Request) Snapshot (seq: LONGINT; IN data: ARRAY OF BYTE; len: INTEGER), NEW, EMPTY;
+			(r: Request) Last (seq: LONGINT), NEW, EMPTY;
 			(r: Request) Done (res: INTEGER), NEW, ABSTRACT
 		END;
 
@@ -1200,9 +1229,10 @@ END ActorJournal.
 — ожидаемый номер не совпал; `absent` — снимка нет; `failed` — ошибка среды; `corrupt` — данные не
 читаются.
 
-`Submit`, `SubmitSnapshot` и `Replay` — те же `Append`, `SaveSnapshot` и чтение снимка с событиями,
-но итог приходит в запрос `r` методом `Done(res)` — ровно один раз, внутри вызова или позже, из
-чужого контекста; `Replay` отдаёт снимок в `r.Snapshot` и события в `r.Event` до `Done`. По умолчанию
+`Submit`, `SubmitSnapshot`, `SubmitLast` и `Replay` — те же `Append`, `SaveSnapshot`, `Last` и чтение
+снимка с событиями, но итог приходит в запрос `r` методом `Done(res)` — ровно один раз, внутри вызова
+или позже, из чужого контекста; `Replay` отдаёт снимок в `r.Snapshot` и события в `r.Event` до
+`Done`, `SubmitLast` — номер в `r.Last`. По умолчанию
 они зовут синхронные методы и отвечают сразу, поэтому синхронному журналу их не переопределяют;
 журнал с ответом позже (`RaftJournal.Client`) переопределяет. Пред: `r # NIL` — трап 23 (`Replay` — 20).
 
@@ -1294,7 +1324,7 @@ DEFINITION ActorPersist;
 
 	CONST
 		conflictTrap = 70; storeTrap = 71; decodeTrap = 72;
-		mutNoStash = 0;
+		mutNoStash = 0; mutNoFresh = 1; mutKeepOnConflict = 2; mutNoCatchUp = 3;
 
 	TYPE
 		Event = POINTER TO ABSTRACT RECORD (Stores.Store)
@@ -1305,6 +1335,7 @@ DEFINITION ActorPersist;
 
 		Actor = POINTER TO ABSTRACT RECORD (ActorCore.Actor)
 			seq-: LONGINT;
+			fresh: BOOLEAN;
 			snapEvery: INTEGER;
 			journal: ActorJournal.Journal;
 			stream: ActorCore.Name;
@@ -1335,7 +1366,9 @@ END ActorPersist.
 Поток актора — `stream`, а если оно пустое, — имя ящика (`c.name`); виртуальные акторы задают
 `stream`, чтобы поток не зависел от узла (раздел 11). `journal = NIL` — `ActorJournal.dir`. `seq` — номер последнего
 применённого события. `snapEvery > 0` — снимок после каждого события с номером, кратным `snapEvery`;
-0 — только по `SaveSnapshot`.
+0 — только по `SaveSnapshot`. `fresh = TRUE` — перед каждым пользовательским письмом актор сверяет
+`seq` с последним номером потока (`SubmitLast`) и дочитывает недостающие события, поэтому ответ не
+старше подтверждённой записи. Виртуальные акторы включают это поле.
 
 **PROCEDURE (a: Actor) Apply (e: Event)**
 Пост: состояние `a` изменено событием `e`. Без писем, записей и трапов.
@@ -1350,7 +1383,9 @@ END ActorPersist.
 **PROCEDURE (a: Actor) Busy (): BOOLEAN**
 Пост: идёт восстановление или запись без ответа журнала — пользовательские письма откладываются.
 
-`mutations` (`mutNoStash` — письмо во время записи обрабатывается сразу) — только для тестов.
+`mutations` — только для тестов: `mutNoStash` — письмо во время записи обрабатывается сразу;
+`mutNoFresh` — сверка свежести пропускается; `mutNoCatchUp` — отставание видно, но догона нет;
+`mutKeepOnConflict` — событие с несовпавшим номером применяется и подтверждается.
 
 **PROCEDURE (a: Actor) Snapshot (): Stores.Store**
 Пост: объект, кадр которого — снимок состояния. По умолчанию — сам актор (его `Externalize`).
@@ -1666,7 +1701,11 @@ DEFINITION ActorGrain;
 
 	CONST
 		maxMembers = 32;
+		capLen = 256;
 		notNetMsg = 31;
+		mutNoApply = 0;
+		mutKeepAlive = 1;
+		mutNoRejoin = 2;
 
 	TYPE
 		Actor = POINTER TO ABSTRACT RECORD (ActorPersist.Actor)
@@ -1681,12 +1720,25 @@ DEFINITION ActorGrain;
 			activations-, passivations-: LONGINT
 		END;
 
+		MemberInfo = RECORD
+			id: INTEGER;
+			cap: ARRAY capLen OF CHAR;
+			key: ActorJournal.Bytes;
+			alive: BOOLEAN
+		END;
+
 	PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster;
+	PROCEDURE HostRef (cl: Cluster): ActorCore.Ref;
 	PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR);
 	PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR);
+	PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER);
+	PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes;
 	PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Leave (cl: Cluster; IN name: ARRAY OF CHAR);
 	PROCEDURE Alive (cl: Cluster; IN name: ARRAY OF CHAR): BOOLEAN;
+	PROCEDURE Members (cl: Cluster): INTEGER;
+	PROCEDURE AliveCount (cl: Cluster): INTEGER;
+	PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name);
 	PROCEDURE Register (cl: Cluster; IN kind: ARRAY OF CHAR; f: ActorCore.Factory);
 	PROCEDURE Ref (cl: Cluster; IN kind, key: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR);
@@ -1704,8 +1756,20 @@ END ActorGrain.
 
 **PROCEDURE New (n: ActorNet.Node; j: ActorJournal.Journal): Cluster** — Пред: `n # NIL` — 20;
 `j # NIL` — 21; корневого актора с именем узла нет — 22. Пост: хозяин создан, член — сам узел.
+**PROCEDURE HostRef (cl: Cluster): ActorCore.Ref** — Пост: адрес хозяина узла.
 **PROCEDURE HostCap (cl: Cluster; OUT cap: ARRAY OF CHAR)** — Пост: пропуск хозяина для `Member`
 других узлов.
+**PROCEDURE ApplyMembers (cl: Cluster; IN list: ARRAY OF MemberInfo; n: INTEGER)** — Пред: каждый
+`list[i].cap` разбирается `ActorNet.Import`; не проверяется. Пост: члены `cl` — записи
+`list[0 .. n-1]` с `alive = TRUE`; новый член добавлен, вернувшийся снова живой, пропавший помечен
+мёртвым; `id` и `key` записаны в запись члена. Размещение считается по живым членам при следующей
+отправке.
+**PROCEDURE Key (cl: Cluster; IN name: ARRAY OF CHAR): ActorJournal.Bytes** — Пост: открытый ключ
+члена из последнего `ApplyMembers`; `NIL` — такого члена нет. Ключ не проверяется.
+**PROCEDURE Members (cl: Cluster): INTEGER** — Пост: число членов, включая сам узел.
+**PROCEDURE AliveCount (cl: Cluster): INTEGER** — Пост: число живых членов, включая сам узел.
+**PROCEDURE MemberName (cl: Cluster; i: INTEGER; OUT name: ActorCore.Name)** — Пост: имя члена `i`
+(0 — сам узел); пусто — вне списка.
 **PROCEDURE Member (cl: Cluster; IN cap: ARRAY OF CHAR)** — Пред: пропуск разобран — 20; мест меньше
 `maxMembers` — 21. Пост: член живой, его хозяин наблюдается.
 **PROCEDURE Rejoin (cl: Cluster; IN name: ARRAY OF CHAR)** — Пред: член есть — 20. Пост: член живой

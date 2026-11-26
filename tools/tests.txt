@@ -54,6 +54,12 @@ Actor_devBench|proc slow|900|ActorCore ActorSup ActorRun ActorJournal ActorCodec
 Raft_devSim||300|RaftCore RaftSm RaftStorage KvPages KvStore KvFault KvTree KvDb RaftKvStorage
 # Водитель узла RaftNode над ActorNetMem: сбои по зерну, инварианты, подтверждённое не теряется, мутации водителя.
 Raft_devNode|proc|900|ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim RaftCore RaftSm RaftStorage RaftNode
+# Служба состава: команды журнала, аренда, снимок, смена состава через RaftNode.
+Raft_devMembership|proc|300|RaftMembership RaftCore RaftSm RaftStorage RaftNode ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim
+# Состав из службы у ActorGrain: ключи переезжают, порчи моста и применения.
+Raft_devGrain|proc|300|RaftMembership RaftGrainMembership ActorGrain RaftCore RaftSm RaftStorage RaftNode ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim
+# Виртуальные акторы на RaftJournal: служба состава, разрывы, чтение через ReadIndex, 100 зёрен.
+Raft_devGrainJournal|proc|900|RaftMembership RaftGrainMembership ActorGrain RaftCore RaftSm RaftStorage RaftNode RaftJournal ActorCore ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim
 # Журнал стойких акторов поверх Raft: пул ActorRun, свои часы узлов, гибель и разрыв лидера.
 Raft_devJournal|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem RaftCore RaftSm RaftStorage RaftNode RaftJournal
 # Стойкие акторы на RaftJournal под ActorSim по зёрнам: запись с ответом позже, сбои, два воплощения, мутации.

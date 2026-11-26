@@ -30,7 +30,8 @@ MODULE Actor_devCluster;
 		ActorCore, ActorRun, ActorNet, ActorNetTcp, ActorJournal, ActorFileJournal,
 		ActorPersist, ActorGrain,
 		CasStore, KvLin, KvStore, KvDb,
-		Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, RaftNode, RaftJournal;
+		Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, RaftNode, RaftJournal,
+		RaftMembership, RaftGrainMembership;
 
 	CONST
 		maxRoles = 16;
@@ -117,6 +118,16 @@ MODULE Actor_devCluster;
 		grainCl: ActorGrain.Cluster;
 		grainJournal: RaftJournal.Client;
 		raftCaps: RaftNode.Caps;
+		(* --- членство в процессах --- *)
+		memCl: ActorGrain.Cluster;
+		memJournal: RaftJournal.Client;
+		memClient: RaftMembership.Client;
+		memCfg: RaftGrainMembership.Config;
+		memServiceCaps, memJournalCaps: RaftNode.Caps;
+		memKey: ARRAY 2 OF BYTE;
+		memOps, memOks, memBad: INTEGER;
+		memBalance, memExpect: INTEGER;	(* сумма по всем счетам и ожидаемый баланс текущего *)
+		memDone: BOOLEAN;
 
 	(* --- параметры ------------------------------------------------------------ *)
 
@@ -299,6 +310,14 @@ MODULE Actor_devCluster;
 	BEGIN
 		IF Exists("stop") THEN stop := TRUE END
 	END CheckStop;
+
+	PROCEDURE WaitFileTask (IN name: ARRAY OF CHAR; ms: LONGINT): BOOLEAN;
+		VAR t: LONGINT;
+	BEGIN
+		t := Services.Ticks();
+		WHILE ~Exists(name) & ~stop & (Services.Ticks() - t < ms) DO Tasks.Sleep(20); CheckStop END;
+		RETURN Exists(name)
+	END WaitFileTask;
 
 	PROCEDURE (t: Ticker) Do;
 		VAR m: RaftNode.Tick;
@@ -1159,6 +1178,345 @@ MODULE Actor_devCluster;
 		ActorNetTcp.Close(grainT); ActorNetTcp.Close(raftT)
 	END RunGrain;
 
+
+	(* --- служба состава в процессах ------------------------------------------- *)
+
+	PROCEDURE SetCount (s: SET): INTEGER;
+		VAR i, k: INTEGER;
+	BEGIN
+		k := 0; FOR i := 0 TO Core.maxNodes - 1 DO IF i IN s THEN INC(k) END END;
+		RETURN k
+	END SetCount;
+
+	PROCEDURE WaitRoleCaps (IN prefix: ARRAY OF CHAR; count: INTEGER; ms: LONGINT): BOOLEAN;
+		VAR i: INTEGER; s: ARRAY 64 OF CHAR; ok: BOOLEAN;
+	BEGIN
+		ok := FALSE;
+		WHILE ~ok & ~stop & (Services.Ticks() - t0 < ms) DO
+			ok := TRUE; i := 0;
+			WHILE (i < count) & ok DO
+				IntToText(i, s); ok := Exists(prefix + s + ".cap"); INC(i)
+			END;
+			IF ~ok THEN Pump END
+		END;
+		RETURN ok
+	END WaitRoleCaps;
+
+	PROCEDURE ReadCaps (IN prefix: ARRAY OF CHAR; count: INTEGER; OUT caps: RaftNode.Caps);
+		VAR i: INTEGER; s: ARRAY 64 OF CHAR;
+	BEGIN
+		FOR i := 0 TO count - 1 DO
+			IntToText(i, s); GetText(prefix + s + ".cap", caps[i]); ASSERT(caps[i] # "", 124)
+		END
+	END ReadCaps;
+
+	PROCEDURE StatusInt (IN name, key: ARRAY OF CHAR; def: INTEGER): INTEGER;
+		VAR t: ARRAY 512 OF CHAR; i, j, x: INTEGER; found: BOOLEAN;
+	BEGIN
+		GetText(name, t); i := 0; found := FALSE;
+		WHILE (i < LEN(t)) & (t[i] # 0X) & ~found DO
+			j := 0;
+			WHILE (key[j] # 0X) & (t[i + j] = key[j]) DO INC(j) END;
+			IF key[j] = 0X THEN found := TRUE; INC(i, j) ELSE INC(i) END
+		END;
+		IF ~found THEN RETURN def END;
+		IF t[i] = "=" THEN INC(i) END;
+		x := 0;
+		WHILE (i < LEN(t)) & (t[i] >= "0") & (t[i] <= "9") DO x := x * 10 + ORD(t[i]) - ORD("0"); INC(i) END;
+		RETURN x
+	END StatusInt;
+
+	PROCEDURE WriteSvcStatus;
+		VAR voters, learners: SET; rl, term, leader, last, lastTerm, commit, applied: INTEGER;
+			broken, dirty, isV, isL: BOOLEAN; s, x: ARRAY 256 OF CHAR;
+	BEGIN
+		RaftNode.Status(raftCfg, rl, term, leader, last, lastTerm, commit, applied, broken);
+		RaftNode.ConfStatus(raftCfg, voters, learners, dirty, isV, isL);
+		s := "role=" + role; IntToText(rl, x); s := s + " role=" + x;
+		IntToText(term, x); s := s + " term=" + x;
+		IntToText(leader, x); s := s + " leader=" + x;
+		IntToText(SetCount(voters), x); s := s + " voters=" + x;
+		IF isV THEN s := s + " isVoter=1" ELSE s := s + " isVoter=0" END;
+		IF dirty THEN s := s + " dirty=1" ELSE s := s + " dirty=0" END;
+		PutText(role + ".status", s)
+	END WriteSvcStatus;
+
+	PROCEDURE RunMembershipService;
+		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; store: RaftStorage.Storage;
+			cap: ARRAY RaftNode.capLen OF CHAR; i: INTEGER; last: LONGINT; xs: ARRAY 16 OF CHAR;
+			vs, ls: SET; dirty, isV, isL: BOOLEAN;
+	BEGIN
+		OpenNode(role, t, nd); PeerAll(t, role);
+		OpenRaftStorage(role, store);
+		raftCfg := RaftNode.NewConfig(idx, 3, nd, store, RaftMembership.NewMachine);
+		raftCfg.electionTicks := 10; raftCfg.seed := 5000 + idx * 37; raftCfg.tickMs := 0;
+		raftRef := RaftNode.Start(raftCfg);
+		statusName := role;
+		ActorNet.Export(nd, raftRef, cap); PutText(role + ".cap", cap);
+		ASSERT(WaitRoleCaps("S", 5, 20000), 120);
+		FOR i := 0 TO 4 DO
+			IF i # idx THEN IntToText(i, xs); GetText("S" + xs + ".cap", cap); RaftNode.SetPeer(raftCfg, i, cap) END
+		END;
+		StartTicker(raftRef);
+		PutText(role + ".ready", "1");
+		last := 0;
+		WHILE ~stop & (Services.Ticks() - t0 < serveMs) DO
+			Pump; CheckStop;
+			IF Services.Ticks() - last >= 50 THEN
+				last := Services.Ticks();
+				IF Exists("svc.add3") & Exists("S3.cap") THEN
+					GetText("S3.cap", cap); RaftNode.SetPeer(raftCfg, 3, cap); RaftNode.AddServer(raftCfg, 3)
+				END;
+				IF Exists("svc.add4") & Exists("S4.cap") THEN
+					RaftNode.ConfStatus(raftCfg, vs, ls, dirty, isV, isL);
+					IF SetCount(vs) = 4 THEN
+						GetText("S4.cap", cap); RaftNode.SetPeer(raftCfg, 4, cap); RaftNode.AddServer(raftCfg, 4)
+					END
+				END;
+				IF Exists("svc.remove4") THEN RaftNode.RemoveServer(raftCfg, 4) END;
+				WriteSvcStatus
+			END
+		END;
+		clock.dead := TRUE; ActorRun.Shutdown; ActorNetTcp.Close(t)
+	END RunMembershipService;
+
+
+	PROCEDURE WriteGrainStatus;
+		VAR joined: BOOLEAN; now, members, lists: INTEGER; s, x: ARRAY 256 OF CHAR;
+	BEGIN
+		RaftGrainMembership.Status(memCfg, joined, now, members, lists);
+		s := "role=" + role; IntToText(ActorGrain.AliveCount(memCl), x); s := s + " alive=" + x;
+		IntToText(ActorGrain.Members(memCl), x); s := s + " members=" + x;
+		IF joined THEN s := s + " joined=1" ELSE s := s + " joined=0" END;
+		IntToText(RaftGrainMembership.Errors(memCfg), x); s := s + " errors=" + x;
+		IntToText(lists, x); s := s + " lists=" + x;
+		PutText(role + ".status", s)
+	END WriteGrainStatus;
+
+	PROCEDURE MembershipGrainLoop;
+		VAR last, leftAt: LONGINT; t: RaftNode.Tick; s: ARRAY 128 OF CHAR;
+	BEGIN
+		last := 0; leftAt := -1;
+		WHILE ~stop & (Services.Ticks() - t0 < serveMs) DO
+			Pump; CheckStop;
+			IF Services.Ticks() - last >= tickMs THEN
+				last := Services.Ticks();
+				RaftGrainMembership.time := Services.Ticks();
+				RaftGrainMembership.Tick(memCfg);
+				RaftJournal.Tick(memJournal);
+				IF idx < 3 THEN NEW(t); ActorCore.Tell(raftRef, t) END;
+				IF (leftAt < 0) & Exists("leave") THEN
+					GetText("leave", s);
+					IF s = role THEN RaftGrainMembership.Leave(memCfg); leftAt := Services.Ticks() END
+				END;
+				WriteGrainStatus
+			END
+		END
+	END MembershipGrainLoop;
+
+	PROCEDURE^ MembershipDriver;
+
+	PROCEDURE RunMembershipGrain;
+		VAR grainT, raftT: ActorNetTcp.Net; grainNd, raftNd: ActorNet.Node;
+			store: RaftStorage.Storage; cap: ARRAY RaftNode.capLen OF CHAR;
+			s: ARRAY 64 OF CHAR; i, inc, id: INTEGER; d: Driver;
+	BEGIN
+		IntToText(idx, s);
+		OpenNode(role, grainT, grainNd); PeerAll(grainT, role);
+		IF idx < 3 THEN
+			statusName := "R" + s;
+			OpenNode(statusName, raftT, raftNd); PeerAll(raftT, statusName);
+			OpenRaftStorage(statusName, store);
+			raftCfg := RaftNode.NewConfig(idx, 3, raftNd, store, RaftJournal.NewMachine);
+			raftCfg.electionTicks := 10; raftCfg.seed := 7000 + idx * 37; raftCfg.tickMs := 0;
+			raftRef := RaftNode.Start(raftCfg);
+			ActorNet.Export(raftNd, raftRef, cap); PutText(statusName + ".cap", cap)
+		END;
+		ASSERT(WaitRoleCaps("S", 5, 30000), 121);
+		ReadCaps("S", 5, memServiceCaps);
+		ASSERT(WaitRoleCaps("R", 3, 60000), 122);
+		ReadCaps("R", 3, memJournalCaps);
+		IF idx < 3 THEN
+			FOR i := 0 TO 2 DO IF i # idx THEN RaftNode.SetPeer(raftCfg, i, memJournalCaps[i]) END END
+		END;
+		inc := SHORT(FileInt(role + ".inc")); IF inc < 1 THEN inc := 1 END;
+		id := (idx + 5) * 100000 + inc;
+		memJournal := RaftJournal.New(grainNd, memJournalCaps, 3, id);
+		memJournal.tickMs := 0;
+		memClient := RaftMembership.New(grainNd, memServiceCaps, 5, (idx + 5) * 1000000 + inc);
+		memClient.tickMs := 0;
+		memCl := ActorGrain.New(grainNd, memJournal); ActorGrain.Register(memCl, "acct", NewGrainAcct);
+		memKey[0] := SHORT(SHORT(idx + 1)); memKey[1] := 3;
+		memCfg := RaftGrainMembership.NewConfig(idx, memCl, memClient, memKey, 2, 5000, 10, 10, 0);
+		ASSERT(RaftGrainMembership.Start(memCfg) # NIL, 123);
+		PutText(role + ".ready", "1");
+		IF idx = 0 THEN NEW(d); d.body := MembershipDriver; Tasks.Start(d) END;
+		MembershipGrainLoop;
+		clock.dead := TRUE; memJournal.Close; RaftMembership.Close(memClient);
+		ActorRun.Shutdown;
+		ActorNetTcp.Close(grainT);
+		IF idx < 3 THEN ActorNetTcp.Close(raftT) END
+	END RunMembershipGrain;
+
+	PROCEDURE WaitGrainAlive (k: INTEGER; skip: SET; ms: LONGINT): BOOLEAN;
+		VAR i: INTEGER; t: LONGINT; ok: BOOLEAN; s: ARRAY 16 OF CHAR;
+	BEGIN
+		t := Services.Ticks(); ok := FALSE;
+		WHILE ~ok & ~stop & (Services.Ticks() - t < ms) DO
+			ok := TRUE; i := 0;
+			WHILE (i <= 3) & ok DO
+				IntToText(i, s);
+				IF ~(i IN skip) & Exists("G" + s + ".status") THEN
+					IF StatusInt("G" + s + ".status", "alive", -1) # k THEN ok := FALSE END
+				END;
+				INC(i)
+			END;
+			IF ok THEN ok := StatusInt("G0.status", "alive", -1) = k END;
+			IF ~ok THEN Tasks.Sleep(20) END
+		END;
+		RETURN ok
+	END WaitGrainAlive;
+
+	PROCEDURE WaitSvcVoters (k, ms: LONGINT): BOOLEAN;
+		VAR i: INTEGER; t: LONGINT; ok: BOOLEAN; s: ARRAY 16 OF CHAR;
+	BEGIN
+		t := Services.Ticks(); ok := FALSE;
+		WHILE ~ok & ~stop & (Services.Ticks() - t < ms) DO
+			ok := FALSE; i := 0;
+			WHILE (i < 5) & ~ok DO
+				IntToText(i, s);
+				IF Exists("S" + s + ".status") & (StatusInt("S" + s + ".status", "voters", -1) = k) THEN ok := TRUE END;
+				INC(i)
+			END;
+			IF ~ok THEN Tasks.Sleep(20) END
+		END;
+		RETURN ok
+	END WaitSvcVoters;
+
+	PROCEDURE KeyOwnedByRole (IN want: ARRAY OF CHAR; OUT key: ActorCore.Name): BOOLEAN;
+		VAR k: INTEGER; d: ARRAY 16 OF CHAR; o: ActorCore.Name; found: BOOLEAN;
+	BEGIN
+		found := FALSE; k := 1; key := "";
+		WHILE (k < 1000) & ~found DO
+			IntToText(k, d); key := d$;
+			ActorGrain.Owner(memCl, "acct", key, o);
+			found := o = want;
+			IF ~found THEN INC(k) END
+		END;
+		IF ~found THEN key := "" END;
+		RETURN found
+	END KeyOwnedByRole;
+
+	PROCEDURE MemDeposit (gr: ActorCore.Ref; op, sum: INTEGER; ms: LONGINT): BOOLEAN;
+	(* Вклад в текущий ключ: ответ — баланс этого ключа, не меньше суммы вкладов. *)
+		VAR bal: INTEGER;
+	BEGIN
+		IF ~GrainDeposit(gr, op, sum, bal, ms) THEN RETURN FALSE END;
+		INC(memExpect, sum);
+		IF bal # memExpect THEN PutText("driver.fail", "balance"); RETURN FALSE END;
+		INC(memBalance, sum);
+		RETURN TRUE
+	END MemDeposit;
+
+	PROCEDURE MembershipDriver;
+		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; i: INTEGER; ok, good: BOOLEAN;
+			s: ARRAY 512 OF CHAR; n16: ARRAY 16 OF CHAR; skipKill: SET;
+	BEGIN
+		good := TRUE;
+		IF ~WaitGrainAlive(3, {}, 60000) THEN good := FALSE; PutText("driver.fail", "grains3") END;
+		IF good & ~KeyOwnedByRole("G1", key) THEN good := FALSE; PutText("driver.fail", "key-g1") END;
+		IF good THEN
+			ref := ActorGrain.Ref(memCl, "acct", key);
+			ok := MemDeposit(ref, 1, 100, 30000); good := ok;
+			IF ok THEN INC(memOks) ELSE INC(memBad) END;
+			IF ok THEN ok := MemDeposit(ref, 2, 50, 30000); good := good & ok; IF ok THEN INC(memOks) ELSE INC(memBad) END END;
+			IF ~ok THEN PutText("driver.fail", "deposit1") END
+		END;
+		IF good THEN
+			PutText("svc.add3", "1");
+			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "voters4") END
+		END;
+		IF good THEN
+			PutText("svc.add4", "1");
+			IF ~WaitSvcVoters(5, 30000) THEN good := FALSE; PutText("driver.fail", "voters5") END
+		END;
+		IF good THEN
+			PutText("startG3", "1");
+			IF ~WaitGrainAlive(4, {}, 60000) THEN good := FALSE; PutText("driver.fail", "grains4") END
+		END;
+		IF good THEN
+			PutText("leave", "G1");
+			IF ~WaitGrainAlive(3, {1}, 30000) THEN good := FALSE; PutText("driver.fail", "leave") END
+		END;
+		IF good THEN
+			ActorGrain.Owner(memCl, "acct", key, owner);
+			IF owner = "G1" THEN good := FALSE; PutText("driver.fail", "owner-g1") END
+		END;
+		IF good THEN
+			ok := MemDeposit(ref, 3, 25, 40000); good := ok;
+			IF ok THEN INC(memOks) ELSE INC(memBad) END;
+			IF ~ok THEN PutText("driver.fail", "deposit3") END
+		END;
+		IF good THEN
+			IF owner = role THEN	(* владелец — сам водитель: взять ключ, которым владеет G2, и новый адрес *)
+				IF ~KeyOwnedByRole("G2", key) THEN good := FALSE; PutText("driver.fail", "key-g2")
+				ELSE
+					ref := ActorGrain.Ref(memCl, "acct", key); memExpect := 0;
+					PutText("driver.newkey", key);
+					ActorGrain.Owner(memCl, "acct", key, owner)
+				END
+			END;
+			IF good & (owner = role) THEN good := FALSE; PutText("driver.fail", "owner-self") END;
+			IF good THEN
+				PutText("kill-owner", owner);
+				IF ~WaitFileTask("killed", 30000) THEN good := FALSE; PutText("driver.fail", "kill-owner") END
+			END;
+			IF good THEN
+				skipKill := {1};
+				IF owner = "G2" THEN INCL(skipKill, 2)
+				ELSIF owner = "G3" THEN INCL(skipKill, 3)
+				END
+			END
+		END;
+		IF good THEN
+			IF ~WaitGrainAlive(2, skipKill, 60000) THEN good := FALSE; PutText("driver.fail", "grains2") END
+		END;
+		IF good THEN
+			ok := MemDeposit(ref, 4, 5, 60000); good := ok;
+			IF ok THEN INC(memOks) ELSE INC(memBad) END;
+			IF ~ok THEN PutText("driver.fail", "deposit4") END
+		END;
+		IF good THEN
+			i := StatusInt("S0.status", "leader", -1);
+			IF i < 0 THEN i := StatusInt("S1.status", "leader", -1) END;
+			IF i < 0 THEN i := StatusInt("S2.status", "leader", -1) END;
+			IF i < 0 THEN i := StatusInt("S3.status", "leader", -1) END;
+			IF i < 0 THEN i := StatusInt("S4.status", "leader", -1) END;
+			IF i < 0 THEN good := FALSE; PutText("driver.fail", "no-leader")
+			ELSE
+				IntToText(i, n16); roleName := "S" + n16$;
+				PutText("kill-svc", roleName);
+				IF ~WaitFileTask("killed-svc", 30000) THEN good := FALSE; PutText("driver.fail", "kill-svc") END
+			END
+		END;
+		IF good THEN
+			ok := MemDeposit(ref, 5, 5, 60000); good := ok;
+			IF ok THEN INC(memOks) ELSE INC(memBad) END;
+			IF ~ok THEN PutText("driver.fail", "deposit5") END
+		END;
+		IF good THEN
+			PutText("svc.remove4", "1");
+			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "remove4") END
+		END;
+		s := "oks="; IntToText(memOks, n16); s := s + n16$;
+		IntToText(memBad, n16); s := s + " bad=" + n16$;
+		IntToText(memBalance, n16); s := s + " balance=" + n16$;
+		IntToText(ActorGrain.AliveCount(memCl), n16); s := s + " alive=" + n16$;
+		IF good THEN s := s + " good=1" ELSE s := s + " good=0" END;
+		PutText("G0.result", s);
+		memDone := TRUE; finished := TRUE
+	END MembershipDriver;
+
 	(* --- диспетчер ------------------------------------------------------------- *)
 
 	PROCEDURE Run*;
@@ -1185,6 +1543,9 @@ MODULE Actor_devCluster;
 		ELSIF scenario = "grain" THEN
 			nodes := n; idx := GetInt("IDX", 0);
 			RunGrain
+		ELSIF scenario = "membership" THEN
+			idx := GetInt("IDX", 0);
+			IF role[0] = "S" THEN RunMembershipService ELSE RunMembershipGrain END
 		END
 	END Run;
 

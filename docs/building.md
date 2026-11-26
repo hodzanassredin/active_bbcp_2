@@ -264,7 +264,7 @@ tools/bench-gc.sh System_devGcBench.Do        # с 50 млн
 tools/iso.sh tools/test-cluster.sh                  # 20 прогонов подряд
 tools/iso.sh tools/test-cluster.sh --quick          # один короткий прогон
 tools/iso.sh tools/test-cluster.sh --runs 3
-tools/iso.sh tools/test-cluster.sh --only raft      # ask, raft, saga, grain, bench
+tools/iso.sh tools/test-cluster.sh --only raft      # ask, raft, saga, grain, membership, bench
 tools/iso.sh tools/test-cluster.sh --bench-ops 2000
 tools/iso.sh tools/test-cluster.sh --veth           # две «машины»: два netns с veth
 ```
@@ -284,8 +284,10 @@ tools/iso.sh tools/test-cluster.sh --veth           # две «машины»: �
 хранилищем, согласие журналов; `saga` — перевод между счетами A и B, координатор C убит в шаге
 «списано» и перезапущен; проверяются итог, повтор шага 1 без второго списания и то, что после
 перечитывания журнала первое состояние — «списано», а не начало саги; `grain` — виртуальные акторы
-на трёх процессах с журналом `RaftJournal`, владелец ключа убит, ключ переезжает; `bench` — запись
-в секунду по TCP. Каталог удачного прогона удаляется, `--keep` оставляет его в
+на трёх процессах с журналом `RaftJournal`, владелец ключа убит, ключ переезжает; `membership` —
+служба состава из пяти процессов: три избирателя, вступление S3 и S4, выход S4, участники G0..G2 и
+позже G3 берут состав из службы и пишут через `RaftJournal`, убиты владелец ключа и лидер службы;
+`bench` — запись в секунду по TCP. Каталог удачного прогона удаляется, `--keep` оставляет его в
 `.work/cluster-keep` (и при запуске через `tools/iso.sh`).
 
 Запуск на двух машинах. В файле `nodes` адреса записываются с адресами машин, например
