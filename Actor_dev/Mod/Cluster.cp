@@ -126,7 +126,7 @@ MODULE Actor_devCluster;
 		memServiceCaps, memJournalCaps: RaftNode.Caps;
 		memKey: ARRAY 2 OF BYTE;
 		memOps, memOks, memBad: INTEGER;
-		memBalance: INTEGER;
+		memBalance, memExpect: INTEGER;	(* сумма по всем счетам и ожидаемый баланс текущего *)
 		memDone: BOOLEAN;
 
 	(* --- параметры ------------------------------------------------------------ *)
@@ -1407,18 +1407,29 @@ MODULE Actor_devCluster;
 		RETURN found
 	END KeyOwnedByRole;
 
+	PROCEDURE MemDeposit (gr: ActorCore.Ref; op, sum: INTEGER; ms: LONGINT): BOOLEAN;
+	(* Вклад в текущий ключ: ответ — баланс этого ключа, не меньше суммы вкладов. *)
+		VAR bal: INTEGER;
+	BEGIN
+		IF ~GrainDeposit(gr, op, sum, bal, ms) THEN RETURN FALSE END;
+		INC(memExpect, sum);
+		IF bal # memExpect THEN PutText("driver.fail", "balance"); RETURN FALSE END;
+		INC(memBalance, sum);
+		RETURN TRUE
+	END MemDeposit;
+
 	PROCEDURE MembershipDriver;
-		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; bal, i: INTEGER; ok, good: BOOLEAN;
-			s, x: ARRAY 512 OF CHAR; n16: ARRAY 16 OF CHAR; skipKill: SET;
+		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; i: INTEGER; ok, good: BOOLEAN;
+			s: ARRAY 512 OF CHAR; n16: ARRAY 16 OF CHAR; skipKill: SET;
 	BEGIN
 		good := TRUE;
 		IF ~WaitGrainAlive(3, {}, 60000) THEN good := FALSE; PutText("driver.fail", "grains3") END;
 		IF good & ~KeyOwnedByRole("G1", key) THEN good := FALSE; PutText("driver.fail", "key-g1") END;
 		IF good THEN
 			ref := ActorGrain.Ref(memCl, "acct", key);
-			ok := GrainDeposit(ref, 1, 100, bal, 30000); good := ok;
+			ok := MemDeposit(ref, 1, 100, 30000); good := ok;
 			IF ok THEN INC(memOks) ELSE INC(memBad) END;
-			IF ok THEN ok := GrainDeposit(ref, 2, 50, bal, 30000); good := good & ok; IF ok THEN INC(memOks) ELSE INC(memBad) END END;
+			IF ok THEN ok := MemDeposit(ref, 2, 50, 30000); good := good & ok; IF ok THEN INC(memOks) ELSE INC(memBad) END END;
 			IF ~ok THEN PutText("driver.fail", "deposit1") END
 		END;
 		IF good THEN
@@ -1442,14 +1453,18 @@ MODULE Actor_devCluster;
 			IF owner = "G1" THEN good := FALSE; PutText("driver.fail", "owner-g1") END
 		END;
 		IF good THEN
-			ok := GrainDeposit(ref, 3, 25, bal, 40000); good := ok;
+			ok := MemDeposit(ref, 3, 25, 40000); good := ok;
 			IF ok THEN INC(memOks) ELSE INC(memBad) END;
 			IF ~ok THEN PutText("driver.fail", "deposit3") END
 		END;
 		IF good THEN
-			IF owner = role THEN
-				IF ~KeyOwnedByRole("G2", key) THEN good := FALSE END;
-				IF good THEN ActorGrain.Owner(memCl, "acct", key, owner) END
+			IF owner = role THEN	(* владелец — сам водитель: взять ключ, которым владеет G2, и новый адрес *)
+				IF ~KeyOwnedByRole("G2", key) THEN good := FALSE; PutText("driver.fail", "key-g2")
+				ELSE
+					ref := ActorGrain.Ref(memCl, "acct", key); memExpect := 0;
+					PutText("driver.newkey", key);
+					ActorGrain.Owner(memCl, "acct", key, owner)
+				END
 			END;
 			IF good & (owner = role) THEN good := FALSE; PutText("driver.fail", "owner-self") END;
 			IF good THEN
@@ -1467,7 +1482,7 @@ MODULE Actor_devCluster;
 			IF ~WaitGrainAlive(2, skipKill, 60000) THEN good := FALSE; PutText("driver.fail", "grains2") END
 		END;
 		IF good THEN
-			ok := GrainDeposit(ref, 4, 5, bal, 60000); good := ok;
+			ok := MemDeposit(ref, 4, 5, 60000); good := ok;
 			IF ok THEN INC(memOks) ELSE INC(memBad) END;
 			IF ~ok THEN PutText("driver.fail", "deposit4") END
 		END;
@@ -1485,7 +1500,7 @@ MODULE Actor_devCluster;
 			END
 		END;
 		IF good THEN
-			ok := GrainDeposit(ref, 5, 5, bal, 60000); good := ok;
+			ok := MemDeposit(ref, 5, 5, 60000); good := ok;
 			IF ok THEN INC(memOks) ELSE INC(memBad) END;
 			IF ~ok THEN PutText("driver.fail", "deposit5") END
 		END;
@@ -1493,10 +1508,9 @@ MODULE Actor_devCluster;
 			PutText("svc.remove4", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "remove4") END
 		END;
-		IntToText(bal, x);
 		s := "oks="; IntToText(memOks, n16); s := s + n16$;
 		IntToText(memBad, n16); s := s + " bad=" + n16$;
-		IntToText(bal, n16); s := s + " balance=" + n16$;
+		IntToText(memBalance, n16); s := s + " balance=" + n16$;
 		IntToText(ActorGrain.AliveCount(memCl), n16); s := s + " alive=" + n16$;
 		IF good THEN s := s + " good=1" ELSE s := s + " good=0" END;
 		PutText("G0.result", s);
