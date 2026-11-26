@@ -293,22 +293,23 @@ scenario.
 
 ## Cost
 
-`Raft_devBench.Run` was measured on 25.11.2026: 3 nodes in one process, a FIFO network without faults,
-amd64 Linux, one OS thread. Build and run:
+`Raft_devBench.Run` was measured on 26.11.2026: 3 nodes in one process, a FIFO network without faults,
+amd64 Linux, one OS thread; PreVote and CheckQuorum are on, and other test stands also ran on the
+machine. Build and run:
 
 ```sh
 tools/go64.sh System_devCRaw System_devClock RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb Raft_devBench
 echo 'Raft_devBench.Run' | tools/run64.sh
 ```
 
-The numbers are for a fixed cluster and predate PreVote and CheckQuorum; a run with membership changes
-was not measured. In
-memory 250 thousand commands per second with one client and about 450 thousand with 64; on Kv with
-fsync 207 commands per second with one client (each waits for three commits of two fsyncs), 1600 with 8
-and 11 thousand with 64, because 64 commands go in one commit per node (0.05 saves per command against
-3). An election after a leader crash takes 12 ticks on average, at most 17 (timeout 10..19); with a
-10 ms tick that is about 120 ms (derived). A node 100 000 commands behind catches up by a snapshot in
-15 ms in memory.
+Three runs gave 0.41–0.52 million commands per
+second in memory with one client, 0.46–0.68 with 8 and 0.45–0.47 with 64; on Kv with fsync 186–204
+commands per second with one client (each waits for three commits of two fsyncs), 1.4–1.6 thousand with
+8 and 8.9–10.9 thousand with 64, because 64 commands go in one commit per node (0.047 saves per command
+against 3). An election after a leader crash takes 19 ticks on average, at most 34 (timeout 10..19; the
+pre-vote round is included); with a 10 ms tick that is about 190 ms (derived). A node
+100 000 commands behind catches up by a snapshot in 2.4–2.7 ms in memory. Membership changes were not
+measured.
 
 ## What is missing
 
