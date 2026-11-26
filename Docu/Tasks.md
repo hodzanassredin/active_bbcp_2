@@ -200,7 +200,8 @@ task not yet started notices it when started, and then its body does not execute
 A finished task returns to the main stack, and the scheduler removes it: unregisters it from the
 kernel's stack registry, gives the stack to the pool, wakes the tasks waiting for it in `Join` and
 decrements the count of live tasks. `Count()` no longer counts the task after that. The task
-object stays with the program, and `State`, `Failed` and `GetName` keep working on it.
+object stays with the program, and `State`, `Failed` and `GetName` keep working on it; `Start` or
+`StartIn` may run it again, and the fields of the previous run are reset.
 
 ## 3. Waiting
 
@@ -472,16 +473,17 @@ the task in state `New`. A program gets the same trap and text
 
 Creating a task the first time is expensive: a system call per stack and, most often, a garbage
 collection that scans all live stacks. In `System_devTasks.TestSlowLoadTenThousand` (Linux x86-64,
-one thread, load average about 7) 10 thousand tasks with 64 KB stacks take 52 ms to create on fresh
-stacks and 4.3 ms on stacks from the pool. Therefore
+one thread, load average about 7, 25 November 2026) 10 thousand tasks with 64 KB stacks take 52 ms
+to create on fresh stacks and 4.3 ms on stacks from the pool. Therefore
 the stack of a finished task is not returned to the platform but goes to a pool, and the next
-task of the same size takes it without a system call. The pool keeps up to 1024 free stacks; the scheduler returns the
-surplus to the kernel little by little, no more than 16 stacks per step, so that a mass end of
-tasks does not cost a mass of system calls at once.
+task of the same size takes it without a system call. The pool keeps up to 1024 free stacks; the
+scheduler returns the surplus to the kernel little by little, no more than 16 stacks per step, so
+that a mass end of tasks does not cost a mass of system calls at once.
 
+The numbers of `System_devBench` and `System_devGcStacks` are from the same measurement:
 `System_devBench` gives the cost of one `Yield` switch — 29–30 ns — and of restarting a task —
-196–207 ns against 507–523 ns when each run does a `NEW`. Garbage collection with standing tasks:
-9–11 ms at 10 thousand, 72–77 ms at 50 thousand, 202–223 ms at 100 thousand
+196–207 ns against 507–523 ns when each run does a `NEW`; garbage collection with standing tasks
+takes 9–11 ms at 10 thousand, 72–77 ms at 50 thousand, 202–223 ms at 100 thousand
 (`System_devGcStacks`).
 
 ```sh
@@ -742,7 +744,7 @@ it into group `g`.
 
 ```
 Pre: t # NIL — 20
-Pre: State(t) = New — 21
+Pre: State(t) IN {New, Finished, Cancelled} — 21
 Pre: a stack was allocated (size at most 64 MB, the platform gave memory) — 22
 Post: State(t) = Ready; with g # NIL GroupCount(g) increased by 1
 ```

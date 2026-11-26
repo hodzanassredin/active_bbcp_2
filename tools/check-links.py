@@ -11,6 +11,7 @@
 """
 import os
 import re
+import subprocess
 import sys
 
 BB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,11 +21,17 @@ SKIP_PREFIX = ("http:", "https:", "mailto:", "ftp:", "#", "/")
 
 
 def docs():
-    for root, dirs, files in os.walk(BB):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
-        for name in sorted(files):
-            if name.endswith(".md"):
-                yield os.path.relpath(os.path.join(root, name), BB)
+    # Список берётся у git, а не жёстко: набор документов в ветках разный,
+    # а в рабочем каталоге могут лежать чужие или собранные файлы.
+    out = subprocess.run(
+        ["git", "-C", BB, "ls-files", "-z", "--", "*.md"],
+        check=True, capture_output=True, text=True).stdout
+    for path in out.split("\0"):
+        if not path:
+            continue
+        if path.split("/", 1)[0] in SKIP_DIRS:
+            continue
+        yield path
 
 
 def links(path):
