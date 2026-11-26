@@ -664,6 +664,52 @@ MODULE Raft_devGrain;
 	END TestMutNoRenew;
 
 
+	PROCEDURE ExpiredBody;
+	(* Участник с истёкшей арендой не должен получать ключи: его ключ
+		переезжает к живому, вклад доходит до него. *)
+		VAR key, owner: ActorCore.Name;
+	BEGIN
+		Reset; clock := 0; SetupService; AddGrain(0); AddGrain(1);
+		IF ~AllAlive(2, -1, 1500) THEN Fail("состав из двух не сошёлся") END;
+		KeyOwnedBy(1, key);
+		IF key = "" THEN Fail("ключ узла 1 не найден") END;
+		DownGrain(1);
+		IF ~AllAlive(1, 1, 2000) THEN Fail("аренда упавшего не истекла") END;
+		IF ActorGrain.Alive(cl[0], gnd[1].name) THEN Fail("участник с истёкшей арендой считается живым") END;
+		ActorGrain.Owner(cl[0], "acct", key, owner);
+		IF owner = gnd[1].name THEN Fail("ключ остался у участника с истёкшей арендой") END;
+		Ask(ActorGrain.Ref(cl[0], "acct", key), 1, 100); Settle;
+		IF lastBalance # 100 THEN Fail("вклад не дошёл до живого владельца") END;
+		Teardown
+	END ExpiredBody;
+
+	PROCEDURE TestExpiredLease*;
+	(* Аренда истекла: ключ уходит, вклад исполняется живым узлом. *)
+	BEGIN
+		seed := 3; genG := 0;
+		UnitAssert.True(TestRun(ExpiredBody, 40000), "run");
+		UnitAssert.True(runOk, runMsg)
+	END TestExpiredLease;
+
+	PROCEDURE TestMutAllAlive*;
+	(* Порча: мост считает всех живыми — ключ остаётся у участника с
+		истёкшей арендой, вклад до него не доходит. *)
+	BEGIN
+		seed := 4; genG := 0;
+		RaftGrainMembership.mutations := {RaftGrainMembership.mutAllAlive};
+		UnitAssert.True(TestRun(ExpiredBody, 40000), "run");
+		UnitAssert.True(~runOk, "порча mutAllAlive не поймана")
+	END TestMutAllAlive;
+
+	PROCEDURE TestMutNoExpire*;
+	(* Порча службы: живость не смотрит на аренду — мёртвый владелец остаётся живым. *)
+	BEGIN
+		seed := 5; genG := 0;
+		RaftMembership.mutations := {RaftMembership.mutNoExpire};
+		UnitAssert.True(TestRun(ExpiredBody, 40000), "run");
+		UnitAssert.True(~runOk, "порча mutNoExpire не поймана")
+	END TestMutNoExpire;
+
 	PROCEDURE TestMutGrainNoApply*;
 	(* Порча ActorGrain: список не применяется. *)
 		VAR ok: BOOLEAN;
