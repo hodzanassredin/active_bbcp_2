@@ -251,3 +251,8 @@
 - maindocs влит в main (907455eb, 15/15, links 0, отправлен); main→main-obx b4c3be1f (8 конфликтов: доки устройства — main-obx, исправления README/Tasks/check-links/gui-world — main). Финальная приёмка обеих веток идёт (.work/accept-final.sh).
 - Финальная приёмка: main 907455eb и main-obx b4c3be1f — всё rc=0 (bootstrap, build --clean, test 15/47, test32, check-reject, win64, check-examples 136/102, GUI, DemoAnts, MPI 12/12, Robust 1/4/16, резолвер, links 0).
 - Найдено в приёмке: под wine кириллица в консоли «??????» (WinConsole писал в OEM). Исправлено 4deed507 (UTF-8 + SetConsoleOutputCP), test-win64 проверяет строку — красная до, зелёная после. main 4deed507, main-obx — merge, оба отправлены. 32-битный Win/Mod/Console.cp (исходный BB, не собирается) не тронут.
+- 26.11: план docs/cluster-plan.md (влит, main-obx 9da6044a). Crypto скопирована в main-obx (924376b7, 8/8, TLS PASS). Запущены DeepSeek: clustertcp (этап 1), raftcore (этап 2), cryptofix (этап 3).
+- cmlevents запущен (ветка cml-events): события первого класса CML/Hopac + примеры Reppy/Hopac.
+- cmlevents сдал (AsyncEvent, ObxEvent0–5, 57/57, 11 порч поймано); моя порча Disarm без снятия из списка ВЫЖИЛА → cmlevents2.
+- raftcore влит (PreVote, CheckQuorum, смена состава по фиксации, вытеснение сессий; 14 порч + моя «ученик = избиратель» поймана): main-obx c2ad2e0f, 55/55, examples 0, links 0. ADR 0032 занят — cmlevents переименовать в 0033.
+- cmlevents2 сдал 519713af (37 тестов событий, перебор порч свободных списков — 0 выживших неэквив.), моя порча поймана 4 тестами. cml-events влит (ADR → 0033): main-obx 7a61b6a1, 57/57, examples 150/114, links 0. Хвост: TestTooManyLeaves принимает любой трап (кода трапа у Tasks наружу нет).
