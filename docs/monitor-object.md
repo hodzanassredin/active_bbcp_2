@@ -201,14 +201,10 @@ END Ready;
 PROCEDURE (b: Buf) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 BEGIN
 	WITH op: PutOp DO
-		WHILE b.count = LEN(b.ring) DO
-			IF ~b.Await(ctx, {0}) THEN RETURN END
-		END;
+		IF ~b.Await(ctx, {0}) THEN RETURN END;
 		b.ring[b.tail] := op.x; b.tail := (b.tail + 1) MOD LEN(b.ring); INC(b.count)
 	| op: GetOp DO
-		WHILE b.count = 0 DO
-			IF ~b.Await(ctx, {1}) THEN RETURN END
-		END;
+		IF ~b.Await(ctx, {1}) THEN RETURN END;
 		op.x := b.ring[b.head]; b.head := (b.head + 1) MOD LEN(b.ring); DEC(b.count)
 	END
 END Exclusive;

@@ -23,10 +23,10 @@ MODULE Buffer;
 	PROCEDURE (b: Buffer) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: PutOp DO
-			WHILE b.n = LEN(b.data) DO IF ~b.Await(ctx, {0}) THEN RETURN END END;
+			IF ~b.Await(ctx, {0}) THEN RETURN END;
 			b.data[b.n] := op.x; INC(b.n)
 		| op: GetOp DO
-			WHILE b.n = 0 DO IF ~b.Await(ctx, {1}) THEN RETURN END END;
+			IF ~b.Await(ctx, {1}) THEN RETURN END;
 			DEC(b.n); op.x := b.data[b.n]
 		END
 	END Exclusive;

@@ -106,15 +106,11 @@ MODULE TasksSample2;
 	PROCEDURE (q: Queue) Exclusive- (VAR ctx: Tasks.Ctx; VAR op: Tasks.Op);
 	BEGIN
 		WITH op: SubmitOp DO
-			WHILE q.count = cap DO
-				IF ~q.Await(ctx, {0}) THEN RETURN END
-			END;
+			IF ~q.Await(ctx, {0}) THEN RETURN END;
 			q.ring[q.tail] := op.r;
 			q.tail := (q.tail + 1) MOD cap; INC(q.count)
 		| op: TakeOp DO
-			WHILE q.count = 0 DO
-				IF ~q.Await(ctx, {1}) THEN RETURN END
-			END;
+			IF ~q.Await(ctx, {1}) THEN RETURN END;
 			op.r := q.ring[q.head];
 			q.head := (q.head + 1) MOD cap; DEC(q.count)
 		END
