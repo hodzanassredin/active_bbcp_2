@@ -32,9 +32,10 @@
 ## 3. Сборка Linux x64
 
 ```sh
-tools/build64.sh                  # все подсистемы, консоль и GUI
+tools/build64.sh                  # все подсистемы, консоль, GUI и справка .odc
 tools/build64.sh --clean          # стереть .ocf/.osf установки
 tools/build64.sh --console-only   # только blackbox-console
+tools/build64.sh --no-help        # без преобразования Docu/*.md в .odc
 tools/build64.sh System Lin       # выборочно, поверх готовой установки
 ```
 
@@ -49,6 +50,10 @@ tools/build64.sh System Lin       # выборочно, поверх готов�
 5. Линкует консоль `Kernel+ LinKernel Files LinFiles StdLoader LinIntInit` и, если не указан
    `--console-only`, окно `Kernel+ LinKernel Files LinFiles StdLoader LinLoader`.
 6. Копирует `Rsrc` подсистем и каталоги `Docu` в установку.
+7. Если собран `Obx` и не указан `--no-help`, зовёт `tools/gui-world.sh`: раскладывает
+   `Docu/*.md` и `Mod/*.cp` в установке как `.odc` с разметкой и ссылками и проверяет
+   `Obx/Docu/Sys-Map.odc` через `Views.OldView`. Отдельный запуск — `tools/gui-world.sh`
+   после готовой сборки.
 
 Линковка обязана напечатать `ok`. `CompileSubs` разрешает зависимости сам, поэтому первый
 прогон должен быть полным списком, а не одной подсистемой.
@@ -170,7 +175,7 @@ tools/test-win64.sh --rebuild          # пересобрать каркас @Wi
 console. Под wine идут `Unit_devMain` (7/7), `System_devWinTasks` (5/5), `Dev_devOpenArr` (8/8)
 и `Dev_devPtrInit` (7/7). Нет wine — `SKIP`.
 
-### 6.5. Негативные проверки компилятора
+### 6.4. Негативные проверки компилятора
 
 ```sh
 tools/check-reject.sh
@@ -180,7 +185,7 @@ tools/check-reject.sh
 `DevLibrarian`, компилирует их и ждёт `error:`. Проверяются обычные правила языка на `Tasks.Ctx`:
 переменная `Ctx` вне `Tasks`, копия пропуска и вызов `Exclusive` снаружи.
 
-### 6.6. Замер сборщика
+### 6.5. Замер сборщика
 
 ```sh
 tools/bench-gc.sh System_devGcBench.DoSmall   # 1 и 10 млн

@@ -1,6 +1,6 @@
 # DevCPT: таблица символов, граф типов и совместимость интерфейсов
 
-Исходник: [CPT.cp](../Mod/CPT.cp). Контекст: [архитектура компилятора](Compiler-Architecture.md).
+Исходник: [CPT.cp](../../Mod/CPT.cp). Контекст: [архитектура компилятора](Compiler-Architecture.md).
 Основа алгоритмов: Crelier, *Separate Compilation and Module Extension*, гл. 2, 4 и прежде всего 6; [путеводитель по книге](Compiler-Crelier.md).
 Документ описывает текущий исходник bbcb2, включая отличия от OP2 1994 года.
 

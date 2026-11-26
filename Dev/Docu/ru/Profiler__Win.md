@@ -1,6 +1,6 @@
 # DevProfiler__Win: Windows-источник выборок профиля
 
-[Исходник](../Mod/Profiler__Win.cp) · [Команды профилировщика](Profiler.md)
+[Исходник](../../Mod/Profiler__Win.cp) · [Команды профилировщика](Profiler.md)
 
 Платформенная реализация DevProfiler.ProfilerHook. При загрузке создаёт hook и регистрирует его через SetProfilerHook. Сам модуль не добавляет команд запуска: пользователь вызывает DevProfiler.Start/Stop.
 

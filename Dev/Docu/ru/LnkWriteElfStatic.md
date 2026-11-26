@@ -1,6 +1,6 @@
 # DevLnkWriteElfStatic: статический ELF32
 
-[Исходник](../Mod/LnkWriteElfStatic.cp) · [Драйвер](Linker1.md) · [Данные](LnkBase.md)
+[Исходник](../../Mod/LnkWriteElfStatic.cp) · [Драйвер](Linker1.md) · [Данные](LnkBase.md)
 
 Отдельный writer для цели tgtElfStatic. Использует общие секции и уже разрешённые адреса LB, формирует ELF header, program header table, код и данные.
 

@@ -1,6 +1,6 @@
 # DevCPM: среда компилятора и параметры машины
 
-[Исходник](../Mod/CPM.cp) · [Архитектура](Compiler-Architecture.md) · [DevCPT](CPT.md)
+[Исходник](../../Mod/CPM.cp) · [Архитектура](Compiler-Architecture.md) · [DevCPT](CPT.md)
 
 ## Назначение и состояние
 

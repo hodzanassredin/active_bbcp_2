@@ -1,6 +1,6 @@
 # DevCPB: семантика и построение AST
 
-[Исходник](../Mod/CPB.cp) · [Архитектура](Compiler-Architecture.md) · [Устройство Node](CPT.md)
+[Исходник](../../Mod/CPB.cp) · [Архитектура](Compiler-Architecture.md) · [Устройство Node](CPT.md)
 
 ## Контракт
 

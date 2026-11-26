@@ -180,9 +180,11 @@ Do not use spaces for indentation. Put an empty line before each new source bloc
 ### Build and Run
 
 ```sh
-tools/build64.sh                  # all subsystems, console + GUI
+tools/build64.sh                  # all subsystems, console + GUI + help .odc
 tools/build64.sh --clean          # erase .ocf/.osf in the installation
 tools/build64.sh --console-only   # console only
+tools/build64.sh --no-help        # skip Docu/*.md -> .odc conversion
+tools/gui-world.sh                # .odc help alone, after a build
 echo 'Команда' | tools/run64.sh
 tools/go64.sh System_devBasic         # amd64 CompileThis
 tools/go32.sh DevCPE                  # i386 CompileThis -> .work/i386
@@ -196,7 +198,9 @@ tools/worktree.sh ../active_bb-x x    # parallel worktree: links, bootstrap, bui
 
 `tools/build64.sh` compiles `Mod64` when present, writes `Code`/`Sym` to the installation, then
 compiles `Taskarch` and `Tasks`. It links `blackbox-console` and, unless `--console-only` is given,
-`blackbox`.
+`blackbox`. When `Obx` is built and `--no-help` is not given, it calls `tools/gui-world.sh` to turn
+`Docu/*.md` and `Mod/*.cp` into `.odc` with markup and links, and checks `Sys-Map.odc` through
+`Views.OldView`.
 
 `tools/env.sh:clean_host_temp` removes `odc` names with 5 or 9 digits from `/tmp` before starting
 `dev0Linux`.
@@ -236,7 +240,8 @@ subsystems: they are not in `CompileSubs`. Tests are built on demand by `tools/u
   `PAGE_NOACCESS` in `WinKernel`).
 - `Tasks.Object` is a monitor object: `Do` passes `Tasks.Ctx` and a `Tasks.Op` request to the
   method `Exclusive-`; `Await`/`AwaitCond` wait for flags or a condition object. A `Tasks.Job`
-  runs its body once, a `Tasks.Task` can be started again.
+  supplies the pass and calls `Body-`; a `Tasks.Task` writes its own `Run`. Both can be started
+  again after they finish.
 - A finished task returns its stack to the `Tasks` pool (`TakeStack`/`GiveStack`); `TrimPool`
   frees stacks above `poolMax`, at most `trimStep` per scheduler step. `Kernel.AllocStack`
   returns FALSE for a size above `maxStackScan`.

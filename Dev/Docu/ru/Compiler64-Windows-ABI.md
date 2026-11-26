@@ -1,7 +1,7 @@
 # Windows callbacks и unwind в DevCompiler64
 
 Реализовано и проверено под Wine 2026-11-09. Windows callbacks и unwind-метаданные
-используются в [WinKernel](../../../Win/Docu/ru/Kernel-x64.md).
+используются в [WinKernel](../../../Win/Docu/Kernel-x64.md).
 
 ## Использование
 
@@ -133,7 +133,7 @@ WinKernel уже использует CP `[ms64]` VEH callback и прямые �
 описаны в документации runtime. Сама unwind-таблица описывает восстановление
 стека, но не заменяет обработчик исключений и не выполняет cleanup чужих кадров.
 
-Для динамических OCF [StdLoader AMD64](../../../Std/Docu/ru/Loader-x64.md)
+Для динамических OCF [StdLoader AMD64](../../../Std/Docu/Loader.md)
 читает UW64 и вызывает Kernel.RegisterCode. WinKernel регистрирует постоянную
 таблицу RUNTIME_FUNCTION через RtlAddFunctionTable и удаляет её через
 RtlDeleteFunctionTable перед освобождением кода и таблицы. Для статических PE
