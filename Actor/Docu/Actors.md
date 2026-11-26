@@ -653,6 +653,27 @@ supervision after a failure, `byNodeLoss` — the node was lost (`TestReasonLoca
 `TestReasonRemoteStop`, `TestReasonRemoteFailure`, `TestReasonNodeLoss`). Code that does not read the
 field need not parse it.
 
+**Processes.** A node may live in a process of its own: several `blackbox-console` processes, each an
+`ActorNetTcp` node, exchange the same frames as nodes of one process. The address of a node is a
+`host:port` string; the addresses of all nodes lie in the file `nodes` of the run directory, one line
+`name address`, and a node receives its own role and the directory in external variables. A capability
+written by `Export` reaches a peer as a file too (`<role>.cap`), so a node learns the addresses of the
+others before it sends the first frame. The script `tools/test-cluster.sh` runs this arrangement on
+loopback; the same files and fixed ports serve two machines.
+
+A process restart is a new incarnation of the node. `ActorNet.New` always numbers it 1, while the
+repeat window of a peer remembers the frame numbers of the old incarnation; frames of the new process
+would be dropped as duplicates. Therefore a node that lives in a process keeps its launch counter in
+a file and calls `ActorNet.SetIncarnation` with the next number before the first frame. The secret of
+the node stays the same, so the capabilities handed out before the restart remain valid. A killed
+process is noticed by the peer as a broken connection: the reader of `ActorNetTcp` reports
+`ActorNet.Lost`, and the watchers receive `Terminated` with `byNodeLoss`.
+
+The scenario also runs the saga of `ObxActor7` and the virtual actors of `ObxActor8` in three
+processes. The sagas and the virtual actors use the same messages and journals as the examples; the
+virtual actors take the shared journal from `RaftJournal`, so the state of a key follows it to the
+node that takes the key over after the owner is killed.
+
 **Saga.** A money transfer between accounts on nodes A and B is led by a coordinator on node C, a
 persistent actor. The steps: withdraw from A, deposit to B, and if the deposit is refused, refund to
 A. The coordinator first records each step as an event and then sends the command; on a tick it
@@ -1486,6 +1507,7 @@ DEFINITION ActorNet;
 	PROCEDURE New (IN name: ARRAY OF CHAR; t: Transport; secret: LONGINT): Node;
 	PROCEDURE Down (n: Node);
 	PROCEDURE Up (n: Node);
+	PROCEDURE SetIncarnation (n: Node; inc: LONGINT);
 	PROCEDURE Export (n: Node; r: ActorCore.Ref; OUT cap: ARRAY OF CHAR);
 	PROCEDURE Import (n: Node; IN cap: ARRAY OF CHAR): ActorCore.Ref;
 	PROCEDURE WriteRef (VAR wr: Stores.Writer; r: ActorCore.Ref);
@@ -1523,6 +1545,14 @@ its root actor is stopped. Journals in storage are not touched.
 **PROCEDURE Up (n: Node)**
 Pre: the node is down and its root actor stopped — trap 20.
 Post: the node is up with a new incarnation; the user creates the root actor again.
+
+**PROCEDURE SetIncarnation (n: Node; inc: LONGINT)**
+For a node restarted in a new process. The peer's repeat window remembers the frame numbers of the
+old incarnation, so the frames of a process that starts again at number 1 would be dropped as
+duplicates; the owner stores the counter itself and raises it on every start of the process.
+Pre: `n # NIL` — trap 20; `inc >= n.incarnation` — 21.
+Post: `n.incarnation = inc` and the frame counter `n.seq = 0`; the marks of the addresses do not
+change, because they depend on the secret only.
 
 **PROCEDURE Export (n: Node; r: ActorCore.Ref; OUT cap: ARRAY OF CHAR)**
 Pre: `r` is a local address — trap 20.

@@ -531,6 +531,19 @@ MODULE ActorNet;
 		n.up := TRUE; INC(n.incarnation); n.seq := 0
 	END Up;
 
+	PROCEDURE SetIncarnation* (n: Node; inc: LONGINT);
+	(** Для узла, перезапущенного в новом процессе: номер воплощения
+		New всегда 1, а окно повторов у соседей помнит прежние номера
+		кадров — кадры нового процесса были бы отброшены как дубли.
+		Владелец хранит счётчик сам и поднимает его при каждом запуске
+		процесса.
+		Пред: n # NIL — 20; inc >= n.incarnation — 21.
+		Пост: n.incarnation = inc, счётчик кадров n.seq = 0. *)
+	BEGIN
+		ASSERT(n # NIL, 20); ASSERT(inc >= n.incarnation, 21);
+		n.incarnation := inc; n.seq := 0
+	END SetIncarnation;
+
 	PROCEDURE Export* (n: Node; r: ActorCore.Ref; OUT cap: ARRAY OF CHAR);
 	(** Пропуск к локальному адресу r для передачи другому узлу вне писем.
 		Пред: r — локальный — 20. Пост: cap — "узел|имя|метка". *)
