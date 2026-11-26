@@ -27,6 +27,8 @@ MODULE System_devTasks;
 		Bad = POINTER TO RECORD (Tasks.Task) END;
 		DeepHalt = POINTER TO RECORD (Tasks.Task) END;
 		Waker = POINTER TO RECORD (Tasks.Task) END;
+		SelfState = POINTER TO RECORD (Tasks.Task) ok: BOOLEAN END;
+		TwoPark = POINTER TO RECORD (Tasks.Task) marks: INTEGER END;
 		Parent = POINTER TO RECORD (Tasks.Task) END;
 		ParentTrap = POINTER TO RECORD (Tasks.Task) END;
 		Once = POINTER TO RECORD (Tasks.Task) END;
@@ -128,6 +130,27 @@ MODULE System_devTasks;
 		Tasks.Unpark(me);	(* до Park *)
 		Tasks.Park;		(* не должен уснуть *)
 		INC(counter)
+	END Run;
+
+	PROCEDURE (t: SelfState) Run;
+	(* Задача видит себя исполняющейся: на первом запуске из планировщика,
+	   после возврата через планировщик и после прямой уступки (второй
+	   Yield уже идёт прямым переключением на себя). *)
+	BEGIN
+		t.ok := Tasks.State(Tasks.Current()) = Tasks.Running;
+		Tasks.Yield;
+		t.ok := t.ok & (Tasks.State(Tasks.Current()) = Tasks.Running);
+		Tasks.Yield;
+		t.ok := t.ok & (Tasks.State(Tasks.Current()) = Tasks.Running)
+	END Run;
+
+	PROCEDURE (t: TwoPark) Run;
+	(* Одно пробуждение будит один Park, а не оба подряд. *)
+	BEGIN
+		Tasks.Park;
+		INC(t.marks);
+		Tasks.Park;
+		INC(t.marks)
 	END Run;
 
 	PROCEDURE (t: Once) Run;
@@ -375,6 +398,33 @@ MODULE System_devTasks;
 		UnitAssert.EqualInt(1, counter, "Unpark before Park is not lost")
 	END TestProcNoLostWake;
 
+	PROCEDURE TestProcSelfState*;
+	(** Исполняющаяся задача видит своё состояние Running — и на первом
+		запуске из планировщика, и после прямой уступки. *)
+		VAR t: SelfState;
+	BEGIN
+		NEW(t); t.ok := FALSE; Tasks.Start(t);
+		UnitAssert.True(Pump(2000), "task finished");
+		UnitAssert.True(t.ok, "a running task observes the Running state")
+	END TestProcSelfState;
+
+	PROCEDURE TestProcParkWakeConsumed*;
+	(** Unpark будит ровно один Park: вернувшись из первого, задача во втором
+		Park снова спит, а не проскакивает его на том же флаге wake. *)
+		VAR t: TwoPark;
+	BEGIN
+		NEW(t); t.marks := 0; Tasks.Start(t);
+		Tasks.Step;
+		UnitAssert.EqualInt(0, t.marks, "sleeps in the first Park");
+		UnitAssert.EqualInt(Tasks.Parked, Tasks.State(t), "parked");
+		Tasks.Unpark(t); Tasks.Step;
+		UnitAssert.EqualInt(1, t.marks, "the wake returned from the first Park");
+		UnitAssert.EqualInt(Tasks.Parked, Tasks.State(t), "the second Park sleeps");
+		Tasks.Unpark(t);
+		UnitAssert.True(Pump(2000), "task finished");
+		UnitAssert.EqualInt(2, t.marks, "both Parks returned")
+	END TestProcParkWakeConsumed;
+
 	(* --- группа задач ----------------------------------------------------- *)
 
 	PROCEDURE TestProcGroup*;
@@ -505,6 +555,19 @@ MODULE System_devTasks;
 		UnitAssert.True(Pump(5000), "cancelled sleepers finished")
 	END TestProcNextDeadlineCheap;
 
+	PROCEDURE TestProcNextDeadlineSkipsStale*;
+	(** Разбуженная раньше срока задача уже не спит: её устаревшая запись в
+		куче не должна попадать в публичный NextDeadline. *)
+		VAR t: LongSleeper;
+	BEGIN
+		NEW(t); t.ms := 1000; Tasks.Start(t);
+		Tasks.Step;
+		UnitAssert.True(Tasks.NextDeadline() > 0, "the sleeper has a deadline");
+		Tasks.Unpark(t);
+		UnitAssert.EqualInt(-1, SHORT(Tasks.NextDeadline()), "a stale deadline is not reported");
+		UnitAssert.True(Pump(2000), "task finished")
+	END TestProcNextDeadlineSkipsStale;
+
 	PROCEDURE TestProcResleepAfterUnpark*;
 	(** Задачу будят раньше срока и она засыпает снова: устаревший срок не
 		будит её второй раз, последний сон заканчивается по своему сроку. *)
@@ -582,6 +645,8 @@ MODULE System_devTasks;
 		Tasks.Step;
 		UnitAssert.True(Tasks.Deadlocked(), "plain Park with nobody to wake is a deadlock");
 		Tasks.Unpark(p);
+		(* Пробуждение снимает признак тупика сразу: готовый есть ещё до шага. *)
+		UnitAssert.True(~Tasks.Deadlocked(), "a wake-up clears the deadlock flag without a step");
 		UnitAssert.True(Pump(1000), "tasks finished")
 	END TestProcParkExternalIsNotDeadlock;
 
