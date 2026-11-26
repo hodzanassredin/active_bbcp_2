@@ -33,6 +33,10 @@ MODULE System_devTasksSim;
 	Await и AwaitCond, отмена, Spawn, JoinAll, повторный Start, оба вида
 	трапа, вложенный Do, FIFO, трап на отпускании, остановка после
 	передачи, Await после вложенного Do) проверяется в конце теста.
+	Две пробы не входят в случайные планы и проверяются отдельно: готовый
+	ждущий получает монитор раньше входящего из очереди входа, а ожидание
+	без срока завершается отменой за ограниченное число шагов, а не
+	следующим событием.
 
 	Часы: подменяемых в ядре нет, сроки идут по Kernel.Time(). Сама
 	программа от зерна не зависит от времени, но чередование задач и
@@ -62,6 +66,10 @@ MODULE System_devTasksSim;
 		aInc = 0; aPut = 1; aGet = 2; aWait = 3; aCond = 4; aFlag = 5;
 		aYield = 6; aSleep = 7; aCancel = 8; aSpawn = 9; aJoin = 10;
 		aRestart = 11; aTrap = 12; aTrapRel = 13; aNestAwait = 14;
+		(* Пробы приоритета: aGateYield ставит затвор и уступает, не отпуская
+		   монитор; aTouch входит и метит порядок; aWaitPrio ждёт затвор без
+		   срока и метит пробуждение; aWaitForever ждёт без срока условие {3}. *)
+		aGateYield = 15; aTouch = 16; aWaitPrio = 17; aWaitForever = 18;
 
 		(* вид очереди в зеркале ждущих *)
 		wFlag = 1; wCond = 2;
@@ -178,6 +186,12 @@ MODULE System_devTasksSim;
 			woke: BOOLEAN
 		END;
 
+		(* Проба приоритета: вошедшая задача ставит метку порядка. *)
+		TouchOp = RECORD (Tasks.Op) mark: INTEGER END;
+
+		(* Проба приоритета: поставить затвор, не отпуская монитор, и уступить. *)
+		GateOp = RECORD (Tasks.Op) END;
+
 		CtxPtr = POINTER TO Tasks.Ctx;
 
 	VAR
@@ -209,6 +223,10 @@ MODULE System_devTasksSim;
 		covAwaitT, covAwaitF, covCondT, covCondF, covCancel, covSpawn,
 		covJoin, covRestart, covCaught, covUncaught, covNested,
 		covTrapRel, covHandedStop, covNestAwait: INTEGER;
+		(* порядок проб приоритета: 1 — проснулся готовый ждущий,
+		   2 — вошёл входящий, 9 — ждущего разбудили без условия *)
+		prioLog: ARRAY 8 OF INTEGER;
+		prioN: INTEGER;
 
 	PROCEDURE^ PlanChild (c: SimTask; sd: LONGINT; parentId, actIdx, id: INTEGER);
 	PROCEDURE^ KidAt (slot: INTEGER): SimTask;
@@ -229,6 +247,16 @@ MODULE System_devTasksSim;
 	BEGIN
 		Strings.IntToString(n, d); App(s, d)
 	END AppNum;
+
+	PROCEDURE Prio (x: INTEGER);
+	BEGIN
+		IF prioN < LEN(prioLog) THEN prioLog[prioN] := x; INC(prioN) END
+	END Prio;
+
+	PROCEDURE ResetPrio;
+	BEGIN
+		prioN := 0
+	END ResetPrio;
 
 	PROCEDURE ResetCov;
 	BEGIN
@@ -692,6 +720,13 @@ MODULE System_devTasksSim;
 			END
 		| op: FlagOp DO
 			o.flag2 := op.val
+		| op: GateOp DO
+			(* Затвор ставится под монитором; уступка оставляет монитор
+			   у задачи, поэтому входящий встаёт в очередь входа. *)
+			o.flag2 := TRUE;
+			Tasks.Yield
+		| op: TouchOp DO
+			IF op.mark > 0 THEN Prio(op.mark) END
 		| op: TrapCaughtOp DO
 			trapY := op.y; trapCtx := S.ADR(ctx); trapHit := FALSE;
 			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(SimTrapHandler)), trapCtx, 0, 0);
@@ -774,7 +809,8 @@ MODULE System_devTasksSim;
 	PROCEDURE (t: SimTask) Body- (VAR ctx: Tasks.Ctx);
 		VAR i, a, m, r, target, held: INTEGER; hold: ARRAY 2 OF Payload;
 			opI: IncOp; opP: PutOp; opG: GetOp; opW: WaitOp; opC: CondWaitOp;
-			opF: FlagOp; opT: TrapCaughtOp; opN: NestAwaitOp; child, gw: SimTask;
+			opF: FlagOp; opT: TrapCaughtOp; opN: NestAwaitOp;
+			opGate: GateOp; opTouch: TouchOp; child, gw: SimTask;
 			g: Tasks.Group; pushed: BOOLEAN;
 	BEGIN
 		INC(t.runs); INC(t.gen);
@@ -914,6 +950,21 @@ MODULE System_devTasksSim;
 				   этой задаче. *)
 				opN.dms := t.p3[i]; opN.nOuter := 0; opN.nInner := 0; opN.woke := FALSE;
 				mons[m].Do(ctx, opN);	(* модель обновляет сам Exclusive *)
+			| aGateYield:
+				(* Затвор под монитором и уступка: входящий встаёт в очередь
+				   входа, монитор остаётся у задачи. *)
+				mons[m].Do(ctx, opGate)
+			| aTouch:
+				opTouch.mark := 2; mons[m].Do(ctx, opTouch)
+			| aWaitPrio:
+				(* Ждущий затвора без срока; метка — порядок пробуждения. *)
+				opW.need := {2}; opW.dms := 0; opW.ok := FALSE;
+				mons[m].Do(ctx, opW);
+				IF opW.ok THEN Prio(1) ELSE Prio(9) END
+			| aWaitForever:
+				(* Условие {3} не ставит никто: разбудить может только отмена. *)
+				opW.need := {3}; opW.dms := 0; opW.ok := FALSE;
+				mons[m].Do(ctx, opW)
 			ELSE
 				HALT(20)
 			END;
@@ -1066,21 +1117,25 @@ MODULE System_devTasksSim;
 
 	(* -------------------- прогон ------------------------------------------ *)
 
+	PROCEDURE InitMon (m: Mon; idx: INTEGER; transfer: BOOLEAN);
+	BEGIN
+		m.idx := idx; m.transfer := transfer;
+		m.counter := 0; m.flag2 := FALSE;
+		m.head := 0; m.tail := 0; m.count := 0;
+		m.putSeq := 0; m.lastGot := 0;
+		m.puts := 0; m.gets := 0; m.nw := 0;
+		m.inside := 0; m.insideTask := NIL; m.insideGen := 0;
+		m.arm := -1; m.releaseTrapped := FALSE;
+		NEW(m.cond[0]); m.cond[0].idx := 0;
+		NEW(m.cond[1]); m.cond[1].idx := 1
+	END InitMon;
+
 	PROCEDURE MakeMons;
 		VAR m: INTEGER;
 	BEGIN
 		FOR m := 0 TO nMon - 1 DO
 			NEW(mons[m]);
-			mons[m].idx := m;
-			mons[m].transfer := (m + SHORT(seedN)) MOD 2 = 0;
-			mons[m].counter := 0; mons[m].flag2 := FALSE;
-			mons[m].head := 0; mons[m].tail := 0; mons[m].count := 0;
-			mons[m].putSeq := 0; mons[m].lastGot := 0;
-			mons[m].puts := 0; mons[m].gets := 0; mons[m].nw := 0;
-			mons[m].inside := 0; mons[m].insideTask := NIL; mons[m].insideGen := 0;
-			mons[m].arm := -1; mons[m].releaseTrapped := FALSE;
-			NEW(mons[m].cond[0]); mons[m].cond[0].idx := 0;
-			NEW(mons[m].cond[1]); mons[m].cond[1].idx := 1
+			InitMon(mons[m], m, (m + SHORT(seedN)) MOD 2 = 0)
 		END
 	END MakeMons;
 
@@ -1517,6 +1572,129 @@ MODULE System_devTasksSim;
 		App(s, " (a held monitor must have depth >= 1)");
 		UnitAssert.True(abandonSeen & abandonHeld & (abandonDepth >= 1), s)
 	END TestProcAbandonedHandoffDepth;
+
+	PROCEDURE TaskDone (t: Tasks.Task): BOOLEAN;
+	(* Задача не идёт и не ждёт: завершена, отменена или ещё не запускалась. *)
+	BEGIN
+		RETURN (t = NIL) OR (Tasks.State(t) IN {Tasks.New, Tasks.Finished, Tasks.Cancelled})
+	END TaskDone;
+
+	PROCEDURE MakeProbe (t: SimTask; id, kind, p2, p3: INTEGER);
+	(* Одна проба на монитор mons[0]; план не зависит от зерна. *)
+	BEGIN
+		t.id := id; t.nacts := 1; t.acts[0] := kind; t.p1[0] := 0;
+		t.p2[0] := p2; t.p3[0] := p3; t.prologueDone := TRUE
+	END MakeProbe;
+
+	PROCEDURE CaseHandoffPriority (transfer: BOOLEAN; OUT ok: BOOLEAN;
+		OUT order: UnitAssert.Message);
+	(* Готовый ждущий (затвор {2} без срока) против входящего в очереди
+	   входа. Порядок меток: 1 — проснулся ждущий, 2 — вошёл входящий.
+	   Задачи успевают пробежать внутри шага планировщика, поэтому
+	   проверяется порядок, а не состояние после шага. *)
+		VAR m, saved: Mon; w, h, e: SimTask; i, steps: INTEGER; t0: LONGINT;
+	BEGIN
+		ok := FALSE; order := ""; gcMode := FALSE;
+		NEW(m); InitMon(m, 0, transfer);
+		saved := mons[0]; mons[0] := m;
+		NEW(w); MakeProbe(w, 1, aWaitPrio, 0, 0); Tasks.SetStackSize(w, kidStack);
+		NEW(h); MakeProbe(h, 2, aGateYield, 0, 0); Tasks.SetStackSize(h, kidStack);
+		NEW(e); MakeProbe(e, 3, aTouch, 0, 0); Tasks.SetStackSize(e, kidStack);
+		ResetPrio;
+		Tasks.Start(w);
+		steps := 0;
+		WHILE (Tasks.State(w) # Tasks.Parked) & ~TaskDone(w) & (steps < 100) DO
+			Tasks.Step; INC(steps)
+		END;
+		IF Tasks.State(w) # Tasks.Parked THEN
+			App(order, "the gate waiter did not park, state ");
+			AppNum(order, Tasks.State(w))
+		ELSE
+			Tasks.Start(h); Tasks.Start(e);
+			steps := 0; t0 := Kernel.Time();
+			WHILE (prioN < 2) & ~(TaskDone(w) & TaskDone(h) & TaskDone(e))
+					& (steps < 100) & (Kernel.Time() - t0 < 1000) DO
+				Tasks.Step; INC(steps)
+			END;
+			ok := (prioN >= 2) & (prioLog[0] = 1) & (prioLog[1] = 2);
+			App(order, "order");
+			FOR i := 0 TO prioN - 1 DO
+				App(order, " "); AppNum(order, prioLog[i])
+			END;
+			IF ~(prioN >= 1) OR (prioLog[0] # 1) THEN
+				App(order, "; the gate waiter did not wake first")
+			END
+		END;
+		(* Пробы не должны пережить сценарий: доработать или отменить. *)
+		steps := 0; t0 := Kernel.Time();
+		WHILE ~(TaskDone(w) & TaskDone(h) & TaskDone(e))
+				& (steps < 200) & (Kernel.Time() - t0 < 1000) DO
+			Tasks.Step; INC(steps)
+		END;
+		IF ~TaskDone(w) THEN Tasks.Cancel(w) END;
+		IF ~TaskDone(h) THEN Tasks.Cancel(h) END;
+		IF ~TaskDone(e) THEN Tasks.Cancel(e) END;
+		steps := 0;
+		WHILE ~(TaskDone(w) & TaskDone(h) & TaskDone(e)) & (steps < 200) DO
+			Tasks.Step; INC(steps)
+		END;
+		mons[0] := saved
+	END CaseHandoffPriority;
+
+	PROCEDURE TestProcHandoffPriority*;
+	(** Приоритет на отпускании монитора: готовый ждущий получает его
+		раньше входящего из очереди входа. Проверяются оба способа —
+		передача из рук в руки и пробуждение без передачи. *)
+		VAR okT, okF: BOOLEAN; ordT, ordF, s: UnitAssert.Message;
+	BEGIN
+		CaseHandoffPriority(TRUE, okT, ordT);
+		CaseHandoffPriority(FALSE, okF, ordF);
+		s := "handoff priority with transfer: "; App(s, ordT);
+		UnitAssert.True(okT, s);
+		s := "handoff priority without transfer: "; App(s, ordF);
+		UnitAssert.True(okF, s)
+	END TestProcHandoffPriority;
+
+	PROCEDURE TestProcCancelNoDeadline*;
+	(** Ожидание без срока: разбудить задачу может только отмена. После
+		Cancel задача обязана сняться с очереди и завершиться за ограниченное
+		число шагов планировщика, а не ждать следующего события. *)
+		VAR m, saved: Mon; c: SimTask; steps: INTEGER; ok: BOOLEAN;
+			s: UnitAssert.Message;
+	BEGIN
+		ok := FALSE; gcMode := FALSE;
+		NEW(m); InitMon(m, 0, FALSE);
+		saved := mons[0]; mons[0] := m;
+		NEW(c); MakeProbe(c, 1, aWaitForever, 0, 0); Tasks.SetStackSize(c, kidStack);
+		Tasks.Start(c); Tasks.Step;
+		IF Tasks.State(c) # Tasks.Parked THEN
+			s := "cancel without deadline: the waiter did not park, state ";
+			AppNum(s, Tasks.State(c))
+		ELSE
+			Tasks.Cancel(c);
+			steps := 0;
+			WHILE (Tasks.State(c) # Tasks.Cancelled) & (steps < 8) DO
+				Tasks.Step; INC(steps)
+			END;
+			ok := (Tasks.State(c) = Tasks.Cancelled) & (steps <= 4)
+				& (Tasks.Queued(m) = 0);
+			s := "cancel without deadline: state "; AppNum(s, Tasks.State(c));
+			App(s, ", steps "); AppNum(s, steps);
+			App(s, ", queued "); AppNum(s, Tasks.Queued(m))
+		END;
+		IF Tasks.State(c) # Tasks.Cancelled THEN
+			Tasks.Cancel(c);
+			IF Tasks.State(c) IN {Tasks.Sleeping, Tasks.Waiting, Tasks.Parked} THEN
+				Tasks.Unpark(c)
+			END;
+			steps := 0;
+			WHILE (Tasks.State(c) # Tasks.Cancelled) & (steps < 200) DO
+				Tasks.Step; INC(steps)
+			END
+		END;
+		mons[0] := saved;
+		UnitAssert.True(ok, s)
+	END TestProcCancelNoDeadline;
 
 	PROCEDURE TestSeeds*;
 	(** Зёрна 1..80 без сборщика. *)
