@@ -134,7 +134,7 @@ and execution starts from a different working directory.
 
 Expected output contains `BlackBox x64 framework OK` for each executable and
 `all framework checks passed`, with exit code zero. See also
-[StdLoader AMD64](../../Std/Docu/Loader-x64.md) and [WinKernel AMD64](Kernel-x64.md).
+[StdLoader AMD64](../../Std/Docu/Loader.md) and [WinKernel AMD64](Kernel-x64.md).
 
 ## Form resources
 

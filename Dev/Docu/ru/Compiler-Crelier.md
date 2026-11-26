@@ -1,6 +1,6 @@
 # Книга Крелиера и реализация Dev
 
-Источник: Régis Bernard Joseph Crelier, *Separate Compilation and Module Extension*, ETH dissertation No. 10650, 1994, [локальный PDF](../../Sciences_Crelier_1994.pdf).
+Источник: Régis Bernard Joseph Crelier, *Separate Compilation and Module Extension*, ETH dissertation No. 10650, 1994, [локальный PDF](../../../Sciences_Crelier_1994.pdf).
 Здесь важны две темы: архитектура OP2 и проверка совместимости независимо компилируемых модулей. Книга не является спецификацией текущего Component Pascal или бинарных файлов bbcb2.
 
 ## Маршрут чтения

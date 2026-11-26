@@ -66,7 +66,7 @@ DevCompiler.MakeList Obx Text System
 
 [Архитектура и порядок стадий](Compiler-Architecture.md) · [DevCPT](CPT.md) · [Сопоставление с Crelier](Compiler-Crelier.md) · [Карта Dev](Sys-Map.md)
 
-Исходник: [Compiler.cp](../Mod/Compiler.cp). Помимо команд выше текущий модуль экспортирует программный вход `CompileText(text, beg, OUT error)` и `CompileOpt(opt)` для текста в фокусе. CompileText проверяет границы beg и запускает обычный проход с defopt.
+Исходник: [Compiler.cp](../../Mod/Compiler.cp). Помимо команд выше текущий модуль экспортирует программный вход `CompileText(text, beg, OUT error)` и `CompileOpt(opt)` для текста в фокусе. CompileText проверяет границы beg и запускает обычный проход с defopt.
 
 CompileOpt разбирает строку опций: повторные `-` последовательно отключают srcpos, allref, ref и выпуск object file; `!` сначала отключает assert, затем checks; `+` включает allchecks, `?` — hint, `@` — errorTrap, `$` — режим Oberon. Это описание текущего тела CompileOpt, а не опций OP2 из книги.
 

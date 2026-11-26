@@ -113,7 +113,7 @@ sorted `.pdata`/`.xdata`. Native Windows execution remains unverified.
 
 The runtime remains single-threaded. This is not general SEH cleanup across
 arbitrary native frames. Dynamic OCF loading and unwind registration are supported
-by [StdLoader AMD64](../../Std/Docu/Loader-x64.md) and [WinFiles AMD64](Files-x64.md) with shared snapshots, disk writes and
+by [StdLoader AMD64](../../Std/Docu/Loader.md) and [WinFiles AMD64](Files-x64.md) with shared snapshots, disk writes and
 buffered temporary files with lazy disk backing. The [standard BlackBox workspace](BlackBox-x64.md)
 now starts through dynamically loaded WinInit. COM guarded procedures, Ctrl+Break,
 TLS and the remaining WinApi/WinOle integration are separate from this runtime.

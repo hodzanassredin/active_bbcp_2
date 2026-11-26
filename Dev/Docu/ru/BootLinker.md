@@ -1,6 +1,6 @@
 # DevBootLinker: образ с готовым загрузчиком
 
-[Исходник](../Mod/BootLinker.cp) · [Архитектура](Compiler-Architecture.md)
+[Исходник](../../Mod/BootLinker.cp) · [Архитектура](Compiler-Architecture.md)
 
 Модуль упаковывает существующие `.ocf` после готового boot loader. В отличие от [Linker1](Linker1.md), здесь не строится обычный ELF из отдельных секций кода и данных. Заголовочный комментарий исходника содержит описание boot image.
 

@@ -1,6 +1,6 @@
 # DevLnkWritePe: исполняемый PE и DLL
 
-[Исходник](../Mod/LnkWritePe.cp) · [Драйвер](Linker1.md) · [Данные](LnkBase.md)
+[Исходник](../../Mod/LnkWritePe.cp) · [Драйвер](Linker1.md) · [Данные](LnkBase.md)
 
 Writer PE для семейства DevLinker1. Получает подготовленные code/data/vars, импорты, экспорты и relocation из DevLnkBase. Он не занимается разбором Component Pascal или вычислением CPT fingerprints.
 
