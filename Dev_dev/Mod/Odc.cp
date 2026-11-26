@@ -887,6 +887,13 @@ MODULE Dev_devOdc;
 		VAR subs, langs: Files.LocInfo; n: ARRAY 16 OF CHAR;
 	BEGIN
 		Done := 0; Failed := 0;
+		(* Корневые Docu и Docu/<язык>: на них ссылаются карты подсистем. *)
+		Documents("Docu", "md");
+		langs := Files.dir.LocList(Files.dir.This("Docu"));
+		WHILE langs # NIL DO
+			Documents("Docu/" + langs.name, "md");
+			langs := langs.next
+		END;
 		subs := Files.dir.LocList(Files.dir.This(""));
 		WHILE subs # NIL DO
 			IF Strings.IsUpper(subs.name[0]) THEN
