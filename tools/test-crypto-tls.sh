@@ -46,16 +46,72 @@ if [ ! -x "$INTERP" ]; then
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/crypto-tls.XXXXXX") || exit 2
-spid=""; fpid=""
+# Таймауты: наш процесс и openssl не должны жить дольше случая. Зависший
+# случай — это FAIL с его именем, а не ожидание до утра (порча
+# SuiteCompatible раньше вешала server-auto-suite на 1,5 часа).
+BB_TIMEOUT="${CRYPTO_TLS_BB_TIMEOUT:-45}"
+OPENSSL_TIMEOUT="${CRYPTO_TLS_OPENSSL_TIMEOUT:-30}"
+# Все фоновые процессы прогона запускаются в своей сессии (setsid) и
+# запоминаются здесь; cleanup гасит всю группу, поэтому после прогона и
+# после Ctrl-C/kill не остаётся ни blackbox-console, ни openssl.
+BG_PIDS=""
+# Встроенный kill в dash не понимает отрицательный pid (группу), внешний
+# /bin/kill понимает: kill -TERM -- -PGID.
+KILL=/bin/kill
+[ -x "$KILL" ] || KILL=/usr/bin/kill
+[ -x "$KILL" ] || { echo "test-crypto-tls: нет внешнего kill" >&2; exit 2; }
+
+# spawn LOG CMD... — запустить CMD в новой сессии, вывод в LOG.
+spawn() {
+	log=$1; shift
+	setsid "$@" >"$log" 2>&1 &
+	BG_PIDS="$BG_PIDS $!"
+	BGPID=$!
+}
+
+# stop_group PID — погасить всю группу процессов PID (TERM, затем KILL).
+stop_group() {
+	pid=$1
+	[ -n "$pid" ] || return 0
+	"$KILL" -TERM -- "-$pid" 2>/dev/null
+	i=0
+	while "$KILL" -0 -- "-$pid" 2>/dev/null && [ $i -lt 30 ]; do
+		sleep 0.1; i=$((i + 1))
+	done
+	if "$KILL" -0 -- "-$pid" 2>/dev/null; then
+		"$KILL" -KILL -- "-$pid" 2>/dev/null
+	fi
+	wait "$pid" 2>/dev/null
+}
+
 cleanup() {
-	[ -n "$spid" ] && kill "$spid" 2>/dev/null
-	[ -n "$spid" ] && pkill -P "$spid" 2>/dev/null
-	[ -n "$fpid" ] && kill "$fpid" 2>/dev/null
-	[ -n "$spid" ] && wait "$spid" 2>/dev/null
-	[ -n "$fpid" ] && wait "$fpid" 2>/dev/null
+	for p in $BG_PIDS; do
+		stop_group "$p"
+	done
+	BG_PIDS=""
+	[ -n "${spid:-}" ] && stop_group "$spid"
+	[ -n "${fpid:-}" ] && stop_group "$fpid"
+	# Гонка: TERM мог прийти между setsid и записью PID в BG_PIDS, тогда
+	# группа не попала в список. У всех процессов прогона в аргументах
+	# есть путь $TMP (сертификаты, ключи, логи), поэтому добиваем их по
+	# нему, повторяя короткое время на случай, если процесс ещё не успел
+	# выполнить exec.
+	if command -v pgrep >/dev/null 2>&1; then
+		i=0
+		while [ $i -lt 20 ]; do
+			pids=$(pgrep -f -- "$TMP" 2>/dev/null)
+			[ -z "$pids" ] && break
+			for p in $pids; do "$KILL" -TERM "$p" 2>/dev/null; done
+			sleep 0.1; i=$((i + 1))
+		done
+		pids=$(pgrep -f -- "$TMP" 2>/dev/null)
+		for p in $pids; do "$KILL" -KILL "$p" 2>/dev/null; done
+	fi
 	rm -rf "$TMP"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM HUP
 
 fail() {
 	echo "test-crypto-tls: FAIL: $*" >&2
@@ -212,8 +268,10 @@ client_case() {
 	(
 		cd "$INSTALL" &&
 		printf 'UnitRunner.Run Crypto_devTLS proc quit\n' |
-			LD_LIBRARY_PATH="$INSTALL" exec "$INTERP" $args
+			LD_LIBRARY_PATH="$INSTALL" timeout -s TERM -k 5 "$BB_TIMEOUT" "$INTERP" $args
 	) >"$log" 2>&1
+	rc=$?
+	[ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && fail "клиент ($desc): таймаут $BB_TIMEOUT с"
 	no_trap "$log" "клиенте ($desc)"
 	# Итоговая строка «failed 0» печатается и для нуля исполненных
 	# тестов (например, модуль не загрузился), поэтому нужен именно PASS.
@@ -234,9 +292,9 @@ client_vs_openssl() {
 	gopt=""
 	[ "$verify" = "1" ] && extra="-Verify 1 -CAfile $TMP/ca.pem"
 	[ -n "$group" ] && gopt="-groups $group"
-	(sleep 60 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -cert "$cert" -key "$key" \
-		-tls1_2 -cipher "$cipher" $gopt -rev $extra $server_extra >"$TMP/server-$desc.log" 2>&1) &
-	spid=$!
+	spawn "$TMP/server-$desc.log" sh -c \
+		"sleep $BB_TIMEOUT | '$OPENSSL' s_server -accept 127.0.0.1:$port -cert '$cert' -key '$key' -tls1_2 -cipher '$cipher' $gopt -rev $extra $server_extra"
+	spid=$BGPID
 	i=0; ready=0
 	while [ $i -lt 100 ]; do
 		if python3 -I -c "import socket,sys
@@ -248,7 +306,7 @@ s.close()" 2>/dev/null; then ready=1; break; fi
 	done
 	[ $ready -eq 1 ] || fail "s_server ($desc) не поднялся"
 	client_case "$desc" "$port" "$ca" "$ccert" "$ckey" "$expectFail"
-	kill "$spid" 2>/dev/null; pkill -P "$spid" 2>/dev/null; wait "$spid" 2>/dev/null; spid=""
+	stop_group "$spid"; spid=""
 }
 
 # Наш сервер против openssl s_client.
@@ -261,12 +319,8 @@ server_vs_openssl() {
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$srv_cert --CRYPTO_TLS_KEY=$srv_key"
 	args="$args --CRYPTO_TLS_REQUIRE_CLIENT=$require --CRYPTO_TLS_EXPECT_REJECT=$expectReject"
 	[ -n "$ca" ] && args="$args --CRYPTO_TLS_CA=$ca"
-	(
-		cd "$INSTALL" &&
-		printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' |
-			LD_LIBRARY_PATH="$INSTALL" exec "$INTERP" $args
-	) >"$log" 2>&1 &
-	spid=$!
+	spawn "$log" sh -c "cd '$INSTALL' && printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' | LD_LIBRARY_PATH='$INSTALL' timeout -s TERM -k 5 $BB_TIMEOUT '$INTERP' $args"
+	spid=$BGPID
 	sleep 1
 	client_extra=""
 	gopt=""
@@ -274,10 +328,11 @@ server_vs_openssl() {
 	[ -n "$ccert" ] && client_extra="-cert $ccert -key $ckey"
 	[ -n "$group" ] && [ "$group" != "-" ] && gopt="-groups $group"
 	[ "$cipher" != "-" ] && copt="-cipher $cipher"
-	printf 'hello\n' | timeout 25 "$OPENSSL" s_client -connect "127.0.0.1:$port" \
+	printf 'hello\n' | timeout -s TERM -k 5 "$OPENSSL_TIMEOUT" "$OPENSSL" s_client -connect "127.0.0.1:$port" \
 		-tls1_2 $copt $gopt -CAfile "$TMP/ca.pem" -verify_return_error \
 		$client_extra -quiet >"$TMP/sclient-$desc.out" 2>"$TMP/sclient-$desc.err"
-	wait "$spid" 2>/dev/null; spid=""
+	wait "$spid" 2>/dev/null; rc=$?; spid=""
+	[ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && fail "сервер ($desc): таймаут $BB_TIMEOUT с"
 	no_trap "$log" "сервере ($desc)"
 	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
 		cat "$log" >&2; fail "сервер ($desc): тест не исполнился"
@@ -294,9 +349,9 @@ server_vs_openssl() {
 fake_case() {	mode=$1; expect=${2:-1}; badapp=${3:-0}
 	fcert=${4:-$TMP/srv.pem}; fkey=${5:-$TMP/srv.key}
 	port=$(free_port)
-	python3 -I "$BB/tools/crypto_tls_fake.py" "$mode" "$port" "$fcert" "$fkey" \
-		>"$TMP/fake-$mode.log" 2>&1 &
-	fpid=$!
+	spawn "$TMP/fake-$mode.log" timeout -s TERM -k 5 "$BB_TIMEOUT" \
+		python3 -I "$BB/tools/crypto_tls_fake.py" "$mode" "$port" "$fcert" "$fkey"
+	fpid=$BGPID
 	i=0
 	while [ $i -lt 100 ]; do
 		grep -q ready "$TMP/fake-$mode.log" 2>/dev/null && break
@@ -321,16 +376,13 @@ evil_server_case() {
 	log="$TMP/tlsserver-$desc.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
 	args="$args --CRYPTO_TLS_REQUIRE_CLIENT=0 --CRYPTO_TLS_EXPECT_REJECT=1"
-	(
-		cd "$INSTALL" &&
-		printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' |
-			LD_LIBRARY_PATH="$INSTALL" exec "$INTERP" $args
-	) >"$log" 2>&1 &
-	spid=$!
+	spawn "$log" sh -c "cd '$INSTALL' && printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' | LD_LIBRARY_PATH='$INSTALL' timeout -s TERM -k 5 $BB_TIMEOUT '$INTERP' $args"
+	spid=$BGPID
 	sleep 1
-	python3 -I "$BB/tools/tls_evil_client.py" "$mode" 127.0.0.1 "$port" \
+	timeout -s TERM -k 5 "$OPENSSL_TIMEOUT" python3 -I "$BB/tools/tls_evil_client.py" "$mode" 127.0.0.1 "$port" \
 		>"$TMP/evil-$desc.out" 2>&1 || true
-	wait "$spid" 2>/dev/null; spid=""
+	wait "$spid" 2>/dev/null; rc=$?; spid=""
+	[ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && fail "сервер ($desc): таймаут $BB_TIMEOUT с"
 	no_trap "$log" "сервере ($desc)"
 	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
 		cat "$log" >&2; fail "сервер ($desc): тест не исполнился"
@@ -346,17 +398,14 @@ python_client_case() {
 	log="$TMP/tlsserver-$desc.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
 	args="$args --CRYPTO_TLS_REQUIRE_CLIENT=1 --CRYPTO_TLS_EXPECT_REJECT=$expectReject --CRYPTO_TLS_CA=$TMP/ca.pem"
-	(
-		cd "$INSTALL" &&
-		printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' |
-			LD_LIBRARY_PATH="$INSTALL" exec "$INTERP" $args
-	) >"$log" 2>&1 &
-	spid=$!
+	spawn "$log" sh -c "cd '$INSTALL' && printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' | LD_LIBRARY_PATH='$INSTALL' timeout -s TERM -k 5 $BB_TIMEOUT '$INTERP' $args"
+	spid=$BGPID
 	sleep 1
-	python3 -I "$BB/tools/crypto_tls_client.py" "$mode" 127.0.0.1 "$port" \
+	timeout -s TERM -k 5 "$OPENSSL_TIMEOUT" python3 -I "$BB/tools/crypto_tls_client.py" "$mode" 127.0.0.1 "$port" \
 		"$TMP/cl.pem" "$TMP/cl.key" >"$TMP/pyclient-$desc.log" 2>&1
 	pyrc=$?
-	wait "$spid" 2>/dev/null; spid=""
+	wait "$spid" 2>/dev/null; rc=$?; spid=""
+	[ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && fail "сервер ($desc): таймаут $BB_TIMEOUT с"
 	no_trap "$log" "сервере ($desc)"
 	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
 		cat "$log" >&2; cat "$TMP/pyclient-$desc.log" >&2
