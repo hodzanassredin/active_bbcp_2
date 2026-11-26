@@ -346,6 +346,7 @@ MODULE CryptoSHA1;
 
 	BEGIN
 		SELF.SetNameAndSize("sha1", HashSize);
+		SELF.blockSize := BlockSize;
 		SELF.initialized := FALSE
 	END Init;
 

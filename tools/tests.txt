@@ -73,8 +73,11 @@ Async_devBench|proc slow|900|AsyncSelect AsyncChan System_devCRaw System_devCloc
 # Примеры Demo: задачи, мониторы-объекты, каналы, муравьи (amd64).
 Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool
 # Криптография Crypto: хеши, HMAC, шифры, GCM, большие числа, DH, RSA, X25519.
-Crypto_devHashes||180|CryptoHashes CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoUtils CryptoAosCompat
-Crypto_devHMAC||180|CryptoHMAC CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoUtils CryptoAosCompat
+Crypto_devHashes||180|CryptoHashes CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoUtils CryptoAosCompat
+Crypto_devSHA512||180|CryptoHashes CryptoSHA512 CryptoSHA384 CryptoUtils CryptoAosCompat
+Crypto_devHMAC||180|CryptoHMAC CryptoHashes CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoUtils CryptoAosCompat
+# HKDF (RFC 5869) на SHA-256/384/512.
+Crypto_devHKDF||180|CryptoHashes CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoHMAC CryptoHKDF CryptoAosCompat
 Crypto_devCiphers||180|CryptoCiphers CryptoAES CryptoDES CryptoDES3 CryptoARC4 CryptoCAST CryptoIDEA CryptoUtils CryptoAosCompat
 Crypto_devGcm||180|CryptoGcm CryptoCiphers CryptoAES CryptoUtils CryptoAosCompat CryptoAosBIT
 Crypto_devBigNumbers||180|CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoAosCompat

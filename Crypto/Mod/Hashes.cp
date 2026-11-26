@@ -6,6 +6,7 @@ MODULE CryptoHashes;(** AUTHOR "G.F."; PURPOSE "Empty Hash"; *)
 		Hash* = POINTER TO EXTENSIBLE RECORD
 			name* : ARRAY 64 OF SHORTCHAR;
 			size* : AO.SIGNED32;
+			blockSize* : AO.SIGNED32;
 			initialized* : BOOLEAN
 		END;
 		HashFactory = PROCEDURE(): Hash;
@@ -15,6 +16,7 @@ MODULE CryptoHashes;(** AUTHOR "G.F."; PURPOSE "Empty Hash"; *)
 (SELF: Hash) Init* , NEW, EXTENSIBLE;
 
 	BEGIN
+		SELF.blockSize := 64;
 		SELF.initialized := FALSE
 	END Init;
 

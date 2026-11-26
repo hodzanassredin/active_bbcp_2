@@ -20,7 +20,7 @@
 | Совместимость с A2 | `CryptoAosCompat`, `CryptoAosBIT`, `CryptoAosBigNumbers`, `CryptoAosRandom`, `CryptoAosStreams`, `CryptoAosStrings`, `CryptoAosRealConversions` |
 | Поддержка хоста | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
 | Примитивы | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
-| Хеши и MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoBase64` |
+| Хеши и MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
 | Открытый ключ | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoASN1`, `CryptoX509` |
 | Случайные числа | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
@@ -30,6 +30,19 @@
 Шифр создаётся по имени модуля, получает ключ через `InitKey`, вектор инициализации через `SetIV`,
 когда он нужен режиму, и затем используется через `Encrypt` и `Decrypt`. Хеш создаётся через
 `CryptoHashes.NewHash("CryptoMD5")`, наполняется через `Update` и читается через `GetHash`.
+Семейство SHA-2 включает SHA-256, SHA-384 и SHA-512; имя хеша задаёт длину результата.
+
+Вывод ключа выполняет `CryptoHKDF`. `Extract` превращает исходный ключевой материал и соль в
+псевдослучайный ключ, `Expand` растягивает его до нужной длины со строкой контекста, `HKDF`
+делает оба шага:
+
+```componentpascal
+CryptoHKDF.Extract("CryptoSHA256", salt, saltLen, ikm, ikmLen, prk);
+ok := CryptoHKDF.Expand("CryptoSHA256", prk, 32, info, infoLen, okm, okmLen)
+```
+
+`CryptoHMAC` использует размер блока лежащего в основе хеша: ключ длиннее блока хешируется один
+раз, а внутренние и внешние дополнения имеют размер блока хеша.
 
 TLS доступен через интерфейс потоков так, как описано для протокола TCP в документации
 `CommStreams`. Вместо имени `CommTCP` в `CommStreams.NewStream` передаётся имя `CryptoTLSStream`.
@@ -86,7 +99,9 @@ srv.Accept(client, res);                       (* завершает рукоп�
   GCM закрывают соединение: `ReceiveFinished` возвращает результат, и состояние
   рукопожатия не переводится в `Established`.
 - Секреты сравниваются через `CryptoUtils.EqualBytesCT`: MAC записи, тег GCM, `Finished` и
-  PKCS#1-блок не сравниваются с ранним выходом.
+  PKCS#1-блок не сравниваются с ранним выходом. `CryptoHKDF` строится на `CryptoHMAC`, поэтому
+  HMAC-SHA-256, HMAC-SHA-384 и HMAC-SHA-512 используют блок 128 байт у SHA-384 и SHA-512 и блок
+  64 байта у SHA-256.
 - Ключи и nonce берутся из `CryptoOsRandom` (`/dev/urandom`); генератор Fortuna подмешивает
   свежую энтропию ОС на каждый запрос. PKCS#1-дополнение и TLS pre-master при недоступном
   источнике завершаются ошибкой, а не предсказуемыми байтами. Генерация простых чисел
@@ -126,11 +141,12 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 ## Тесты
 
-Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devHMAC`, `Crypto_devCiphers`,
-`Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`, `Crypto_devRSA`, `Crypto_devX25519`,
-`Crypto_devX509`, `Crypto_devPKCS1`, `Crypto_devPRF`. Их запускает `tools/test.sh` по списку
-`tools/tests.txt`. Эталонные значения также лежат файлами с указанием источника и лицензии в
-`Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их независимой реализацией на Python.
+Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
+`Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`,
+`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devX509`, `Crypto_devPKCS1`, `Crypto_devPRF`. Их
+запускает `tools/test.sh` по списку `tools/tests.txt`. Эталонные значения также лежат файлами с
+указанием источника и лицензии в `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их
+независимой реализацией на Python.
 
 Рукопожатию TLS нужен второй процесс, поэтому у него отдельный сценарий:
 `tools/test-crypto-tls.sh` создаёт во временном каталоге CA, промежуточный CA, издателя с

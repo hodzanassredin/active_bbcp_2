@@ -781,9 +781,43 @@ TYPE
 		lpy := SYSTEM.VAL(LONGINT_PARTS, y);
 		lp_res[0] := ORD(BITS(lpx[0]) * BITS(lpy[0]));
 		lp_res[1] := ORD(BITS(lpx[1]) * BITS(lpy[1]));
-		
+
 		RETURN SYSTEM.VAL(UNSIGNED64, lp_res);
 	END UBitwiseAnd64;
+
+	PROCEDURE UBitXor64*(x,y:UNSIGNED64): UNSIGNED64;
+		VAR lpx, lpy, lp_res : LONGINT_PARTS;
+	BEGIN
+		lpx := SYSTEM.VAL(LONGINT_PARTS, x);
+		lpy := SYSTEM.VAL(LONGINT_PARTS, y);
+		lp_res[0] := ORD(BITS(lpx[0]) / BITS(lpy[0]));
+		lp_res[1] := ORD(BITS(lpx[1]) / BITS(lpy[1]));
+
+		RETURN SYSTEM.VAL(UNSIGNED64, lp_res);
+	END UBitXor64;
+
+	PROCEDURE UBitOr64*(x,y:UNSIGNED64): UNSIGNED64;
+		VAR lpx, lpy, lp_res : LONGINT_PARTS;
+	BEGIN
+		lpx := SYSTEM.VAL(LONGINT_PARTS, x);
+		lpy := SYSTEM.VAL(LONGINT_PARTS, y);
+		lp_res[0] := ORD(BITS(lpx[0]) + BITS(lpy[0]));
+		lp_res[1] := ORD(BITS(lpx[1]) + BITS(lpy[1]));
+
+		RETURN SYSTEM.VAL(UNSIGNED64, lp_res);
+	END UBitOr64;
+
+	(* Циклический сдвиг 64-битного значения вправо. *)
+	PROCEDURE URotR64*(x:UNSIGNED64; n:INTEGER): UNSIGNED64;
+		VAR k : INTEGER;
+	BEGIN
+		k := n MOD 64;
+		IF k < 0 THEN INC(k, 64) END;
+		IF k = 0 THEN
+			RETURN x
+		END;
+		RETURN ULSH64(x, -k) + ULSH64(x, 64 - k)
+	END URotR64;
 	
 	PROCEDURE LONG32*(x:UNSIGNED32): UNSIGNED64;
 	BEGIN

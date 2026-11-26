@@ -60,6 +60,27 @@ for name, key, data, want in rows("hmac.txt"):
     if got != want.upper():
         fail(f"hmac {name}: {got} != {want}")
 
+# hkdf (RFC 5869)
+def hkdf(alg, ikm, salt, info, length):
+    prk = hmac.new(salt, ikm, alg).digest()
+    t, out, i = b"", b"", 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes([i]), alg).digest()
+        out += t
+        i += 1
+    return prk, out[:length]
+
+
+for alg, ikm, salt, info, length, prk_want, okm_want in rows("hkdf.txt"):
+    data = unhex(ikm)
+    s = b"" if salt == '""' else unhex(salt)
+    inf = b"" if info == '""' else unhex(info)
+    prk, okm = hkdf(alg, data, s, inf, int(length))
+    if prk.hex().upper() != prk_want.upper():
+        fail(f"hkdf {alg} prk: {prk.hex()} != {prk_want}")
+    if okm.hex().upper() != okm_want.upper():
+        fail(f"hkdf {alg} okm: {okm.hex()} != {okm_want}")
+
 # PRF (RFC 5246, P_SHA256)
 kv = {}
 for line in open(f"{BASE}/prf.txt", encoding="utf-8"):

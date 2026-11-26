@@ -10,8 +10,9 @@ Component Pascal. Те же значения зашиты в модулях `Cry
 |---|---|---|
 | `aes.txt` | FIPS 197, NIST SP 800-38A | public domain (US Government work) |
 | `gcm.txt` | NIST SP 800-38D, тестовые векторы GCM | public domain (US Government work) |
-| `sha.txt` | FIPS 180-4 (SHA-1, SHA-256), FIPS 202 (SHA3-256) | public domain (US Government work) |
-| `hmac.txt` | RFC 2104, RFC 4231 | IETF Trust, BSD-подобная лицензия RFC |
+| `sha.txt` | FIPS 180-4 (SHA-1, SHA-256, SHA-384, SHA-512), FIPS 202 (SHA3-256) | public domain (US Government work) |
+| `hmac.txt` | RFC 2104, RFC 4231 (MD5, SHA-1, SHA-256, SHA-384, SHA-512) | IETF Trust, BSD-подобная лицензия RFC |
+| `hkdf.txt` | RFC 5869, случаи 1–3; SHA-512 — независимый расчёт по RFC 5869 | IETF Trust |
 | `x25519.txt` | RFC 7748, раздел 6.1 | IETF Trust |
 | `prf.txt` | RFC 5246, P_SHA256; значения посчитаны независимо на Python/hmac | IETF Trust |
 | `x509/` | сертификаты сгенерированы для этого репозитория (CA, лист, просроченный); ключи удалены | CC0 / public domain |

@@ -181,6 +181,7 @@ MODULE CryptoSHA256;
 	PROCEDURE (SELF: Hash) Init* ;
 	BEGIN
 		SELF.SetNameAndSize("sha2-256", HashSize);
+		SELF.blockSize := BlockSize;
 		SELF.initialized := FALSE
 	END Init;
 

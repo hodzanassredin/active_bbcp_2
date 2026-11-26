@@ -22,6 +22,7 @@
 | 7. Постоянное время | частично, с пометкой | `262ba455` | `TestConstantTime`, `EqualBytesCT` |
 | 8. TLS: результат `Finished` и состояние | исправлено | `crypto-fix` | `fake-badfinished`, `fake-badccs`, `fake-badtag`, `badcertverify`, `goodcertverify` |
 | 9. X.509: ограничения пути и расширения | исправлено | `f4ae77de`, `8b9d6d8c` | `Crypto_devX509` (`TestNoCA`, `TestPathLen`, `TestKeyUsage`, `TestCriticalExtension`, `TestCycle`, `TestAlgMismatch`) |
+| SHA-384/512, HMAC-SHA-384/512, HKDF | сделано | `crypto-fix` | `Crypto_devSHA512`, `Crypto_devHMAC`, `Crypto_devHKDF`, `Vectors/check.py` |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
 
@@ -313,6 +314,9 @@ X.509 и `tools/test-crypto-tls.sh` для TLS. Исходник возвращ�
 | GCM-тег | `gcm-tag-ignored`, `gcm-tag-always-fail`, `gcm-tag-one-byte` | `Crypto_devGcm.TestTampered`, `TestVector2` |
 | TLS SKE и сертификаты | `tls-ske-skip`, `tls-ske-wrong-data`, `tls-client-cert-skip`, `tls-server-cert-skip` | `tools/test-crypto-tls.sh` (`fake-badsig`, `client-serverhello`, `untrusted`, `server-foreign-client`) |
 | Состояния и границы TLS | `tls-noske-assert`, `tls-v2-unchecked` | `tools/test-crypto-tls.sh` (`fake-noske`, `v2hello` — `TRAP`) |
+| SHA-384/512 | `sha512-rotr`, `sha512-iv`, `sha512-len`, `sha512-schedule`, `sha384-size` | `Crypto_devSHA512` (все пять красные) |
+| HMAC-SHA-384/512 | `hmac-block`, `hmac-ipad`, `hmac-trunc` | `Crypto_devHMAC` (все три красные) |
+| HKDF | `hkdf-counter`, `hkdf-prk`, `hkdf-salt` | `Crypto_devHKDF` (все три красные) |
 
 Порча `uls-signed-compare` (возврат сравнения через XOR старшего бита) тест не
 краснит: на этом компиляторе эта форма эквивалентна явным ветвям, поэтому замена

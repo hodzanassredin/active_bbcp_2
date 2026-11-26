@@ -20,7 +20,7 @@ The support modules keep the names of the A2 sources:
 | A2 compatibility | `CryptoAosCompat`, `CryptoAosBIT`, `CryptoAosBigNumbers`, `CryptoAosRandom`, `CryptoAosStreams`, `CryptoAosStrings`, `CryptoAosRealConversions` |
 | Host support | `CryptoAosClock`, `CryptoAosDates`, `CryptoAosFileStreams`, `CryptoAosPipes`, `CryptoAosIP`, `CryptoAosCommStreams`, `CryptoAosTCP`, `CryptoTCPServices` |
 | Primitives | `CryptoUtils`, `CryptoCiphers`, `CryptoAES`, `CryptoDES`, `CryptoDES3`, `CryptoARC4`, `CryptoBlowfish`, `CryptoCAST`, `CryptoIDEA`, `CryptoGcm` |
-| Hashes and MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoBase64` |
+| Hashes and MAC | `CryptoHashes`, `CryptoMD5`, `CryptoSHA1`, `CryptoSHA256`, `CryptoSHA384`, `CryptoSHA512`, `CryptoKeccakF1600`, `CryptoKeccakSponge`, `CryptoSHA3`, `CryptoHMAC`, `CryptoHKDF`, `CryptoBase64` |
 | Public key | `CryptoAosBigNumbers`, `CryptoPrimes`, `CryptoRSA`, `CryptoPKCS1`, `CryptoDiffieHellman`, `CryptoFieldElement`, `CryptoX25519`, `CryptoASN1`, `CryptoX509` |
 | Random | `CryptoOsRandom`, `CryptoFortuna`, `CryptoFortunaRng` |
 | TLS | `CryptoTLS`, `CryptoTLSStream` |
@@ -29,7 +29,20 @@ The support modules keep the names of the A2 sources:
 
 A cipher is created by its module name, keyed with `InitKey`, given an IV with `SetIV` when the mode
 needs one, and then used with `Encrypt` and `Decrypt`. A hash is created with
-`CryptoHashes.NewHash("CryptoMD5")`, fed with `Update` and read with `GetHash`.
+`CryptoHashes.NewHash("CryptoMD5")`, fed with `Update` and read with `GetHash`. The SHA-2 family
+covers SHA-256, SHA-384 and SHA-512; the name of the hash selects the output length.
+
+Key derivation uses `CryptoHKDF`. `Extract` turns input key material and a salt into a
+pseudorandom key, `Expand` stretches it to the requested length with an info string, and `HKDF`
+does both:
+
+```componentpascal
+CryptoHKDF.Extract("CryptoSHA256", salt, saltLen, ikm, ikmLen, prk);
+ok := CryptoHKDF.Expand("CryptoSHA256", prk, 32, info, infoLen, okm, okmLen)
+```
+
+`CryptoHMAC` uses the block size of the underlying hash, so a key longer than the block is hashed
+once and the inner and outer pads have the size of the hash block.
 
 TLS is reached through the stream interface, as described for the TCP protocol in the
 `CommStreams` documentation. Instead of the name `CommTCP`, pass the name `CryptoTLSStream` to
@@ -86,7 +99,9 @@ srv.Accept(client, res);                       (* completes the handshake *)
   close the connection; `ReceiveFinished` returns the result and the handshake state is not
   advanced to `Established`.
 - Secret comparisons use `CryptoUtils.EqualBytesCT`: the record MAC, the GCM tag, `Finished` and
-  the PKCS#1 encoded message are not compared with an early exit.
+  the PKCS#1 encoded message are not compared with an early exit. `CryptoHKDF` builds on
+  `CryptoHMAC`, so HMAC-SHA-256, HMAC-SHA-384 and HMAC-SHA-512 use the 128-byte block of SHA-384
+  and SHA-512 and the 64-byte block of SHA-256.
 - Keys and nonces come from `CryptoOsRandom`, which reads `/dev/urandom`; the Fortuna generator
   mixes fresh OS entropy on every request. PKCS#1 padding and the TLS pre-master secret abort if
   the source is unavailable instead of using predictable bytes. Prime generation
@@ -126,12 +141,12 @@ from `tools/build32.sh` and `tools/test32.sh`.
 
 ## Tests
 
-Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devHMAC`, `Crypto_devCiphers`,
-`Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`, `Crypto_devRSA`, `Crypto_devX25519`,
-`Crypto_devX509`, `Crypto_devPKCS1` and `Crypto_devPRF`. `tools/test.sh` runs them from
-`tools/tests.txt`. The reference values are also stored as files with their sources and licences in
-`Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies them with an independent Python
-implementation.
+Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
+`Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devBigNumbers`, `Crypto_devDH`,
+`Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devX509`, `Crypto_devPKCS1` and `Crypto_devPRF`.
+`tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files
+with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies
+them with an independent Python implementation.
 
 The TLS handshake needs a peer process, so it has a separate scenario:
 `tools/test-crypto-tls.sh` creates a CA, an intermediate CA, a `CA:FALSE` issuer, server,
