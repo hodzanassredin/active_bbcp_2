@@ -53,8 +53,13 @@ for spec in "Obx/Docu Sys-Map.odc" "Obx/Docu/ru Sys-Map.odc" "Dev/Docu/ru Sys-Ma
 	printf '%s\n' "$out" | grep -q 'empty 0$' || {
 		echo "gui-world: пустые ссылки в $1/$2" >&2; exit 1
 	}
-	printf '%s\n' "$out" | grep -q 'check links [1-9]' || {
-		echo "gui-world: в $1/$2 нет ссылок" >&2; exit 1
-	}
+	# Карта-образец бывает без разметки: исходный Sys-Map BlackBox — сплошной
+	# текст. Требовать ссылки стоит только там, где они есть в исходнике.
+	src="$BB/$1/${2%.odc}.md"
+	if [ -f "$src" ] && grep -q '](' "$src"; then
+		printf '%s\n' "$out" | grep -q 'check links [1-9]' || {
+			echo "gui-world: в $1/$2 нет ссылок" >&2; exit 1
+		}
+	fi
 done
 echo "gui-world: готово"
