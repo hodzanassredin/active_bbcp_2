@@ -547,7 +547,6 @@ The cost of a synchronization is the cost of `Select` plus a walk of the tree; t
 separate measurement for events. `AsyncSelect` is not modified by events, and section 2.5 describes
 its measurements.
 
-
 ## 6. Dialogue Protocol
 
 A client and a server talk over a channel: the client says hello, sends data, says goodbye. If the
