@@ -2032,6 +2032,7 @@ DEFINITION AsyncEvent;
 	PROCEDURE Wrap (e: Event; a: Action): Event;
 	PROCEDURE Guard (b: Builder): Event;
 	PROCEDURE WithNack (e: Event; OUT nack: Event): Event;
+	PROCEDURE NackWaiters (e: Event): INTEGER;
 	PROCEDURE Sync (e: Event): AsyncSelect.Msg;
 	PROCEDURE SyncCtx (VAR ctx: Tasks.Ctx; e: Event; OUT x: AsyncSelect.Msg): BOOLEAN;
 
@@ -2093,6 +2094,12 @@ Pre: `e # NIL` — 20.
 Post: the event `e`; `nack` is a notification that fires when the branch of `e` loses the choice or
 the synchronization is stopped by cancellation or a deadline, or aborted by a trap. The notification
 has no memory and can be synchronized like any event.
+
+**PROCEDURE NackWaiters (e: Event): INTEGER**
+Diagnostics: how many tasks are waiting for the notification `e` at this moment. `-1` means `e` is
+not a notification or the list of waiters cannot be walked to the end, which indicates corruption. An
+ordinary program does not need the procedure: a notification has no memory, so waiting for it makes
+sense only at the moment it fires.
 
 **PROCEDURE Sync (e: Event): AsyncSelect.Msg**
 Performs one branch of the event and returns its result.

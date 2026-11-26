@@ -319,6 +319,23 @@ MODULE AsyncEvent;
 		END
 	END Disarm;
 
+	PROCEDURE NackWaiters* (e: Event): INTEGER;
+	(** Диагностика: длина списка ждущих события-уведомления e. −1 — e не
+		уведомление или список не удалось пройти до конца (порча списка). *)
+		CONST maxProbe = 4096;
+		VAR n: INTEGER; sig: NackSignal;
+	BEGIN
+		IF e = NIL THEN RETURN -1 END;
+		WITH e: NackEvent DO
+			n := 0; sig := e.waiters;
+			WHILE (sig # NIL) & (n <= maxProbe) DO INC(n); sig := sig.next END;
+			IF sig # NIL THEN RETURN -1 END;
+			RETURN n
+		ELSE
+			RETURN -1
+		END
+	END NackWaiters;
+
 	PROCEDURE (e: NackEvent) Fire, NEW;
 	(* Зажечь уведомление: разбудить всех, кто ждёт его сейчас. Список
 	   ожидающих очищается: событие без памяти. *)

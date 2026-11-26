@@ -2008,6 +2008,7 @@ DEFINITION AsyncEvent;
 	PROCEDURE Wrap (e: Event; a: Action): Event;
 	PROCEDURE Guard (b: Builder): Event;
 	PROCEDURE WithNack (e: Event; OUT nack: Event): Event;
+	PROCEDURE NackWaiters (e: Event): INTEGER;
 	PROCEDURE Sync (e: Event): AsyncSelect.Msg;
 	PROCEDURE SyncCtx (VAR ctx: Tasks.Ctx; e: Event; OUT x: AsyncSelect.Msg): BOOLEAN;
 
@@ -2070,6 +2071,11 @@ NEW, ABSTRACT
 Пост: событие `e`; `nack` — уведомление, которое срабатывает, когда ветвь `e` проигрывает выбор,
 когда синхронизацию останавливает отмена или срок и когда её прерывает трап. Памяти у уведомления
 нет; его синхронизируют, как любое событие.
+
+**PROCEDURE NackWaiters (e: Event): INTEGER**
+Диагностика: сколько задач ждут уведомление `e` прямо сейчас. `−1` — `e` не событие-уведомление
+или список ждущих не удалось пройти до конца, что означает порчу. В обычной программе процедура не
+нужна: уведомление не имеет памяти, и ждать его имеет смысл только в момент, когда его зажигают.
 
 **PROCEDURE Sync (e: Event): AsyncSelect.Msg**
 Исполняет одну ветвь события и возвращает её результат.

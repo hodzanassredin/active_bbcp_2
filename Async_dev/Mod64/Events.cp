@@ -7,6 +7,7 @@ MODULE Async_devEvents;
 	CONST
 		nSeeds = 100;
 		maxNodes = 96;
+		maxWatches = 2 * maxNodes;
 
 	TYPE
 		NumMsg = POINTER TO RECORD (AsyncSelect.Msg) n: INTEGER END;
@@ -28,6 +29,12 @@ MODULE Async_devEvents;
 			fired, done: BOOLEAN
 		END;
 
+		(* Много синхронизаций одного и того же события: записи шагов,
+		   токенов и сигналов обязаны возвращаться в свободные списки. *)
+		ReuseJob = POINTER TO RECORD (Tasks.Job)
+			e: AsyncEvent.Event; n: INTEGER; allocs: LONGINT; done: BOOLEAN
+		END;
+
 		TagAction = POINTER TO RECORD (AsyncEvent.Action)
 			msg: AsyncSelect.Msg
 		END;
@@ -38,6 +45,12 @@ MODULE Async_devEvents;
 		CountAction = POINTER TO RECORD (AsyncEvent.Action) count: INTEGER END;
 
 		TrapAction = POINTER TO RECORD (AsyncEvent.Action) END;
+
+		(* Действие заводит задачу, которая забирает отметку из свободного
+		   списка и ждёт, а затем трапает. *)
+		HoldAction = POINTER TO RECORD (AsyncEvent.Action)
+			e: AsyncEvent.Event; j: CtxSyncJob
+		END;
 
 		NestedAction = POINTER TO RECORD (AsyncEvent.Action)
 			c: AsyncChan.Mailbox
@@ -85,6 +98,10 @@ MODULE Async_devEvents;
 		watches: ARRAY maxNodes OF NackWatch;
 		watchNode: ARRAY maxNodes OF Node;
 		nWatches: INTEGER;
+
+		(* то же для повторных синхронизаций: до двух наблюдателей на nack *)
+		watches2: ARRAY maxWatches OF NackWatch;
+		watchNode2: ARRAY maxWatches OF Node;
 
 		(* покрытие случайных деревьев *)
 		statNackFired, statNackSilent: INTEGER;
@@ -156,6 +173,19 @@ MODULE Async_devEvents;
 	PROCEDURE (w: NackWatch) Body- (VAR ctx: Tasks.Ctx);
 	BEGIN
 		w.fired := AsyncEvent.SyncCtx(ctx, w.nack, w.got); w.done := TRUE
+	END Body;
+
+	PROCEDURE (j: ReuseJob) Body- (VAR ctx: Tasks.Ctx);
+		VAR i: INTEGER; c0: LONGINT; m: AsyncSelect.Msg;
+	BEGIN
+		c0 := 0;
+		FOR i := 1 TO j.n DO
+			(* Первая половина прогревает свободные списки, вторая
+			   измеряется: после прогрева выделений быть не должно. *)
+			IF i = j.n DIV 2 THEN c0 := Kernel.AllocCount() END;
+			m := AsyncEvent.Sync(j.e); ASSERT(m = NIL, 100)
+		END;
+		j.allocs := Kernel.AllocCount() - c0; j.done := TRUE
 	END Body;
 
 	(* --- действия и построители ------------------------------------------- *)
@@ -238,6 +268,13 @@ MODULE Async_devEvents;
 		NEW(j); j.e := e; j.got := NIL; j.deadline := 0;
 		j.ok := FALSE; j.done := FALSE; Tasks.Start(j)
 	END StartCtxSync;
+
+	PROCEDURE (a: HoldAction) Do (x: AsyncSelect.Msg; OUT y: AsyncSelect.Msg);
+	BEGIN
+		StartCtxSync(a.e, a.j);
+		Tasks.Yield;	(* дать вложенной задаче забрать отметку и уснуть *)
+		HALT(60)
+	END Do;
 
 	PROCEDURE StartWatch (OUT w: NackWatch; nack: AsyncEvent.Event);
 	BEGIN
@@ -501,6 +538,233 @@ MODULE Async_devEvents;
 		Tasks.Step; Tasks.Step;
 		UnitAssert.True(w1.fired & w2.fired, "both waiters woken")
 	END TestNackTwoWaiters;
+
+	PROCEDURE TestNackSignalReuseAcrossNacks*;
+		(* Снятый сигнал уведомления возвращается в свободный список и
+		   вооружается уже другим уведомлением. Если Disarm не вынул его из
+		   старого списка, Fire старого уведомления разбудит чужого ждущего. *)
+		VAR na, nb, fa, fb: AsyncEvent.Event; j: SyncJob; w: NackWatch;
+			evs: ARRAY 2 OF AsyncEvent.Event;
+	BEGIN
+		fa := AsyncEvent.WithNack(AsyncEvent.Never(), na);
+		fb := AsyncEvent.WithNack(AsyncEvent.Never(), nb);
+
+		(* 1. Вооружить na и проиграть Always: сигнал уходит в свободный
+		   список, но при порче остаётся в списке ждущих na. *)
+		evs[0] := na; evs[1] := AsyncEvent.Always();
+		StartSync(AsyncEvent.Choose(evs), j);
+		UnitAssert.True(WaitJob(j, 1000), "arm-and-lose sync finishes");
+		UnitAssert.True(~Tasks.Failed(j), "no trap");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(na), "disarmed signal left the waiters list");
+
+		(* 2. Тот же сигнал из свободного списка ждёт уже nb. *)
+		StartWatch(w, nb);
+		UnitAssert.True(StepUntil(w, Tasks.Parked, 1000), "waiter on nb waits");
+		UnitAssert.EqualInt(1, AsyncEvent.NackWaiters(nb), "one waiter on nb");
+
+		(* 3. Зажечь na: ждущий nb спать остаётся. *)
+		evs[0] := fa; evs[1] := AsyncEvent.Always();
+		StartSync(AsyncEvent.Choose(evs), j);
+		UnitAssert.True(WaitJob(j, 1000), "fire-na sync finishes");
+		Tasks.Step; Tasks.Step;
+		UnitAssert.True(~w.fired, "na does not wake the waiter of nb");
+		UnitAssert.True(Tasks.State(w) = Tasks.Parked, "waiter of nb is still parked");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(na), "na has no waiters after fire");
+
+		(* 4. Зажечь nb: ровно это уведомление будит ждущего. *)
+		evs[0] := fb; evs[1] := AsyncEvent.Always();
+		StartSync(AsyncEvent.Choose(evs), j);
+		UnitAssert.True(WaitJob(j, 1000), "fire-nb sync finishes");
+		UnitAssert.True(WaitJob(w, 1000), "waiter of nb wakes");
+		UnitAssert.True(w.fired, "waiter of nb fired");
+		UnitAssert.True(~Tasks.Failed(w), "no trap in waiter");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(nb), "nb has no waiters after fire")
+	END TestNackSignalReuseAcrossNacks;
+
+	PROCEDURE TestNackDisarmNonHead*;
+		(* Отмена более раннего ждущего (хвоста списка) снимает ровно один
+		   узел: более поздний ждущий остаётся и получает уведомление. *)
+		VAR nack, fire: AsyncEvent.Event; j: SyncJob; j1, j2: CtxSyncJob;
+			evs: ARRAY 2 OF AsyncEvent.Event;
+	BEGIN
+		fire := AsyncEvent.WithNack(AsyncEvent.Never(), nack);
+		StartCtxSync(nack, j1);
+		UnitAssert.True(StepUntil(j1, Tasks.Parked, 1000), "first waiter parks");
+		StartCtxSync(nack, j2);
+		UnitAssert.True(StepUntil(j2, Tasks.Parked, 1000), "second waiter parks");
+		UnitAssert.EqualInt(2, AsyncEvent.NackWaiters(nack), "two waiters on the notification");
+		(* j1 вооружён раньше, значит он в хвосте списка *)
+		Tasks.Cancel(j1);
+		UnitAssert.True(StepUntil(j1, Tasks.Cancelled, 1000), "cancelled waiter finishes");
+		UnitAssert.EqualInt(1, AsyncEvent.NackWaiters(nack), "cancelling the tail removes exactly one node");
+		UnitAssert.True(~j2.done, "the other waiter is still waiting");
+		evs[0] := fire; evs[1] := AsyncEvent.Always();
+		StartSync(AsyncEvent.Choose(evs), j);
+		UnitAssert.True(WaitJob(j, 1000), "fire sync finishes");
+		UnitAssert.True(WaitJob(j2, 1000), "remaining waiter wakes");
+		UnitAssert.True(j2.ok, "remaining waiter received the notification");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(nack), "notification list is empty")
+	END TestNackDisarmNonHead;
+
+	PROCEDURE TestNackCleanupOnTrap*;
+		(* Отмена Sync (без пропуска) трапает Select до WithdrawAll: сигнал
+		   ждущего снимает Cleanup, иначе он останется в списке чужого
+		   уведомления. *)
+		VAR nack, fire: AsyncEvent.Event; j: SyncJob; w: NackWatch;
+			evs: ARRAY 2 OF AsyncEvent.Event;
+	BEGIN
+		fire := AsyncEvent.WithNack(AsyncEvent.Never(), nack);
+		evs[0] := nack; evs[1] := AsyncEvent.Never();
+		StartSync(AsyncEvent.Choose(evs), j);
+		UnitAssert.True(StepUntil(j, Tasks.Parked, 1000), "waiter parks");
+		UnitAssert.EqualInt(1, AsyncEvent.NackWaiters(nack), "one waiter before cancellation");
+		Tasks.Cancel(j);
+		UnitAssert.True(Pump(1000), "cancelled task ends");
+		UnitAssert.True(Tasks.State(j) = Tasks.Cancelled, "cancel ends the task as cancelled");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(nack), "trap cleanup unlinked the waiter");
+		(* сигнал вернулся в свободный список и снова работает *)
+		StartWatch(w, nack);
+		UnitAssert.True(StepUntil(w, Tasks.Parked, 1000), "new waiter parks");
+		evs[0] := fire; evs[1] := AsyncEvent.Always();
+		StartSync(AsyncEvent.Choose(evs), j);
+		UnitAssert.True(WaitJob(j, 1000), "fire sync finishes");
+		UnitAssert.True(WaitJob(w, 1000), "new waiter wakes");
+		UnitAssert.True(w.fired, "new waiter received the notification");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(nack), "notification list is empty")
+	END TestNackCleanupOnTrap;
+
+	PROCEDURE TestTokenNotFiredTwiceOnTrap*;
+		(* Трап в действии Wrap после того, как вложенная задача забрала
+		   отметку из свободного списка: повторное зажигание отметок в
+		   траповой ветви не должно задеть чужую отметку. *)
+		VAR nOuter, nX, eNested, eOuter: AsyncEvent.Event; hold: HoldAction;
+			w: NackWatch; j: SyncJob;
+	BEGIN
+		eNested := AsyncEvent.WithNack(AsyncEvent.Never(), nX);
+		NEW(hold); hold.e := eNested; hold.j := NIL;
+		eOuter := AsyncEvent.WithNack(
+			AsyncEvent.Wrap(AsyncEvent.Always(), hold), nOuter);
+		StartWatch(w, nX);
+		StartSync(eOuter, j);
+		UnitAssert.True(WaitJob(j, 2000), "trapping sync ends");
+		Tasks.Step; Tasks.Step;
+		UnitAssert.True(Tasks.Failed(j), "wrap trap reached the task");
+		UnitAssert.True(~w.fired, "trapped sync does not fire the nested task's token");
+		IF hold.j # NIL THEN Tasks.Cancel(hold.j) END;
+		IF Pump(1000) THEN END;
+		StopWatch(w); IF Pump(500) THEN END
+	END TestTokenNotFiredTwiceOnTrap;
+
+	PROCEDURE TestNackAtLaterAlternative*;
+		(* Arm запоминает индекс альтернативы: уведомление во второй ветви
+		   выбирает её действие Wrap, а не нулевую ветвь. *)
+		VAR nack, fire: AsyncEvent.Event; w: NackWatch; j: SyncJob;
+			watch, fireEvs: ARRAY 2 OF AsyncEvent.Event;
+	BEGIN
+		fire := AsyncEvent.WithNack(AsyncEvent.Never(), nack);
+		watch[0] := AsyncEvent.Never();
+		watch[1] := AsyncEvent.Wrap(nack, NewTagAction(77));
+		StartWatch(w, AsyncEvent.Choose(watch));
+		UnitAssert.True(StepUntil(w, Tasks.Parked, 1000), "waiter on later branch parks");
+		fireEvs[0] := fire; fireEvs[1] := AsyncEvent.Always();
+		StartSync(AsyncEvent.Choose(fireEvs), j);
+		UnitAssert.True(WaitJob(j, 1000), "fire sync finishes");
+		UnitAssert.True(WaitJob(w, 1000), "waiter wakes");
+		UnitAssert.True(w.fired, "notification fired");
+		UnitAssert.EqualInt(77, NumOf(w.got), "woken branch is the notification, not branch 0")
+	END TestNackAtLaterAlternative;
+
+	PROCEDURE TestNackNestedWinnerSilent*;
+		(* Вложенные WithNack на пути победителя: MarkCommits помечает все
+		   отметки пути, поэтому оба уведомления молчат. *)
+		VAR a: AsyncChan.Mailbox; n1, n2: AsyncEvent.Event; w1, w2: NackWatch;
+			j: SyncJob; e: AsyncEvent.Event;
+	BEGIN
+		a := AsyncChan.NewMailbox(); a.Send(Tag(5));
+		e := AsyncEvent.WithNack(AsyncEvent.WithNack(AsyncEvent.Recv(a), n1), n2);
+		StartWatch(w1, n1); StartWatch(w2, n2);
+		StartSync(e, j);
+		UnitAssert.True(WaitJob(j, 1000), "nested winner sync finishes");
+		Tasks.Step;
+		UnitAssert.EqualInt(5, NumOf(j.got), "receive won");
+		UnitAssert.True(~w1.fired, "inner winner nack silent");
+		UnitAssert.True(~w2.fired, "outer winner nack silent");
+		StopWatch(w1); StopWatch(w2); IF Pump(500) THEN END
+	END TestNackNestedWinnerSilent;
+
+	PROCEDURE TestConcurrentWrapSteps*;
+		(* Две задачи одновременно держат записи шагов Wrap: свободный
+		   список обязан выдать каждой свою запись. *)
+		VAR b1, b2: AsyncChan.Mailbox; j, j1, j2: SyncJob;
+	BEGIN
+		(* прогреться: вернуть хотя бы одну запись шага в свободный список *)
+		StartSync(AsyncEvent.Wrap(AsyncEvent.Always(), NewTagAction(0)), j);
+		UnitAssert.True(WaitJob(j, 1000), "warm-up step returned");
+		b1 := AsyncChan.NewMailbox(); b2 := AsyncChan.NewMailbox();
+		StartSync(AsyncEvent.Wrap(AsyncEvent.Recv(b1), NewTagAction(11)), j1);
+		UnitAssert.True(StepUntil(j1, Tasks.Parked, 1000), "first wrap waits");
+		StartSync(AsyncEvent.Wrap(AsyncEvent.Recv(b2), NewTagAction(22)), j2);
+		UnitAssert.True(StepUntil(j2, Tasks.Parked, 1000), "second wrap waits");
+		b1.Send(Tag(1));
+		UnitAssert.True(WaitJob(j1, 1000), "first wrap completes");
+		UnitAssert.EqualInt(11, NumOf(j1.got), "first task runs its own action");
+		b2.Send(Tag(2));
+		UnitAssert.True(WaitJob(j2, 1000), "second wrap completes");
+		UnitAssert.EqualInt(22, NumOf(j2.got), "second task runs its own action")
+	END TestConcurrentWrapSteps;
+
+	PROCEDURE TestConcurrentNackTokens*;
+		(* Две задачи одновременно держат отметки WithNack: отмена каждой
+		   зажигает своё уведомление, отметки не смешиваются. *)
+		VAR n1, n2, warm, e1, e2: AsyncEvent.Event; w1, w2: NackWatch;
+			wj: SyncJob; j1, j2: CtxSyncJob;
+	BEGIN
+		e1 := AsyncEvent.WithNack(AsyncEvent.Never(), n1);
+		e2 := AsyncEvent.WithNack(AsyncEvent.Never(), n2);
+		(* прогреться: вернуть хотя бы одну отметку в свободный список *)
+		StartSync(AsyncEvent.WithNack(AsyncEvent.Always(), warm), wj);
+		UnitAssert.True(WaitJob(wj, 1000), "warm-up token returned");
+		StartWatch(w1, n1); StartWatch(w2, n2);
+		StartCtxSync(e1, j1);
+		UnitAssert.True(StepUntil(j1, Tasks.Parked, 1000), "first token waits");
+		StartCtxSync(e2, j2);
+		UnitAssert.True(StepUntil(j2, Tasks.Parked, 1000), "second token waits");
+		Tasks.Cancel(j1); Tasks.Cancel(j2);
+		UnitAssert.True(Pump(1000), "cancelled tasks and watchers finish");
+		UnitAssert.True(w1.fired, "nack of the first cancelled branch fired");
+		UnitAssert.True(w2.fired, "nack of the second cancelled branch fired")
+	END TestConcurrentNackTokens;
+
+	PROCEDURE TestReuseNoAlloc*;
+		(* Событие синхронизируется много раз: после прогрева шаги, токены и
+		   сигналы берутся из свободных списков, выделений нет. Одной
+		   синхронизации нужны сразу две записи сигнала и две отметки, поэтому
+		   она же проверяет, что свободные списки не теряют узлы. *)
+		VAR waitA, waitB, fireA, fireB: AsyncEvent.Event; a, b: CountAction;
+			j: ReuseJob; evs: ARRAY 5 OF AsyncEvent.Event;
+	BEGIN
+		IF AsyncEvent.WithNack(AsyncEvent.Never(), waitA) = NIL THEN END;
+		IF AsyncEvent.WithNack(AsyncEvent.Never(), waitB) = NIL THEN END;
+		NEW(a); a.count := 0; NEW(b); b.count := 0;
+		evs[0] := AsyncEvent.Wrap(waitA, a);
+		evs[1] := waitB;
+		evs[2] := AsyncEvent.WithNack(AsyncEvent.Never(), fireA);
+		evs[3] := AsyncEvent.WithNack(AsyncEvent.Never(), fireB);
+		evs[4] := AsyncEvent.Wrap(AsyncEvent.Always(), b);
+		NEW(j); j.e := AsyncEvent.Choose(evs); j.n := 200;
+		j.allocs := -1; j.done := FALSE;
+		Tasks.Start(j);
+		UnitAssert.True(WaitJob(j, 5000), "reuse syncs finish");
+		UnitAssert.True(~Tasks.Failed(j), "no trap");
+		UnitAssert.True(j.done, "reuse job returned");
+		UnitAssert.EqualInt(0, SHORT(j.allocs), "steps, tokens and signals come from free lists");
+		UnitAssert.EqualInt(0, a.count, "loser wrap did not run");
+		UnitAssert.EqualInt(200, b.count, "winner wrap ran every time");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(waitA), "first waited notification has no waiters");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(waitB), "second waited notification has no waiters");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(fireA), "first fired notification has no waiters");
+		UnitAssert.EqualInt(0, AsyncEvent.NackWaiters(fireB), "second fired notification has no waiters")
+	END TestReuseNoAlloc;
 
 	(* -------------------- отмена и трап ---------------------------------- *)
 
@@ -852,6 +1116,102 @@ MODULE Async_devEvents;
 		IF Pump(500) THEN END;
 		RETURN ~fail
 	END RunSeed;
+
+	PROCEDURE ResetMarks;
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO nNodes - 1 DO nodes[i].applied := 0; nodes[i].built := 0 END
+	END ResetMarks;
+
+	PROCEDURE RunSeedReuse (seed: LONGINT; rounds: INTEGER): BOOLEAN;
+		(* Одно дерево синхронизируется несколько раз подряд. Победившую
+		   ветвь снова делают готовой, значения событий (в том числе одни и
+		   те же nack) не пересоздаются. Модель та же, что у RunSeed, плюс:
+		   после раунда список ждущих каждого nack пуст. *)
+		VAR root: Node; i, r, wi, cnt, nw, k: INTEGER;
+			path: ARRAY maxNodes OF BOOLEAN;
+			j: SyncJob; m: NumMsg;
+			ok, fail: BOOLEAN;
+	BEGIN
+		fail := FALSE; nWatches := 0;
+		nodeSeq := 0; nNodes := 0; nLeaves := 0;
+		root := Gen(seed, 0);
+		IF ~HasReady(root) THEN ForceReady(root) END;
+		Build(root);
+		FOR i := 0 TO maxNodes - 1 DO path[i] := FALSE END;
+		cnt := 0; Flatten(root, path, cnt); nLeaves := cnt;
+		wi := ModelWinner();
+		IF wi < 0 THEN RETURN FALSE END;
+		FOR r := 1 TO rounds DO
+			(* Наблюдатели за всеми уведомлениями; в чётных раундах по два
+			   на одно уведомление. *)
+			nw := 0;
+			FOR i := 0 TO nNodes - 1 DO
+				IF nodes[i].kind = 7 THEN
+					StartWatch(watches2[nw], nodes[i].nack);
+					watchNode2[nw] := nodes[i]; INC(nw);
+					IF (r MOD 2 = 0) & (nw < maxWatches) THEN
+						StartWatch(watches2[nw], nodes[i].nack);
+						watchNode2[nw] := nodes[i]; INC(nw)
+					END
+				END
+			END;
+			ResetMarks;
+			StartSync(root.ev, j);
+			ok := WaitJob(j, 2000);
+			Tasks.Step; Tasks.Step;
+			IF ~ok THEN fail := TRUE END;
+			IF Tasks.Failed(j) OR ~j.done THEN fail := TRUE END;
+			IF leaves[wi].kind = 0 THEN
+				IF NumOf(j.got) # leaves[wi].id THEN fail := TRUE END
+			ELSIF j.got # NIL THEN fail := TRUE
+			END;
+			FOR i := 0 TO nNodes - 1 DO
+				IF nodes[i].kind = 5 THEN
+					IF OnPath(nodes[i], wi) THEN
+						IF nodes[i].applied # 1 THEN fail := TRUE END
+					ELSIF nodes[i].applied # 0 THEN fail := TRUE
+					END
+				ELSIF nodes[i].kind = 6 THEN
+					IF nodes[i].built # 1 THEN fail := TRUE END
+				END
+			END;
+			FOR k := 0 TO nw - 1 DO
+				IF OnPath(watchNode2[k], wi) THEN
+					IF watches2[k].fired THEN fail := TRUE END
+				ELSIF ~watches2[k].fired THEN fail := TRUE
+				END;
+				StopWatch(watches2[k])
+			END;
+			IF Pump(500) THEN END;
+			FOR i := 0 TO nNodes - 1 DO
+				IF nodes[i].kind = 7 THEN
+					IF AsyncEvent.NackWaiters(nodes[i].nack) # 0 THEN fail := TRUE END
+				END
+			END;
+			(* Снова сделать победившую ветвь готовой: дерево и его
+			   уведомления остаются теми же. *)
+			IF leaves[wi].kind = 0 THEN
+				NEW(m); m.n := leaves[wi].id; leaves[wi].box.Send(m)
+			END;
+			IF Pump(500) THEN END
+		END;
+		RETURN ~fail
+	END RunSeedReuse;
+
+	PROCEDURE TestRandomTreesReuse*;
+		(* Случайные деревья, синхронизируемые многократно: повторное
+		   использование событий и одних и тех же nack между синхронизациями,
+		   по одному и по два ждущих, с победами и проигрышами вперемешку. *)
+		VAR seed: LONGINT; i, rounds: INTEGER; ok: BOOLEAN;
+	BEGIN
+		seed := 5; rounds := 4;
+		FOR i := 1 TO 40 DO
+			ok := RunSeedReuse(seed, rounds);
+			UnitAssert.True(ok, "reused random tree matches the model");
+			seed := seed * 31 + 7
+		END
+	END TestRandomTreesReuse;
 
 	PROCEDURE TestRandomTrees*;
 	(* Случайное дерево по зерну; модель: первый готовый лист в порядке
