@@ -198,8 +198,9 @@ kind, seed, strategy)` creates `n` children with the factory and keeps their add
 pool the router is the parent, so a trap in a child becomes a failure of the router and its
 `Props.strategy` decides the fate of the child. A restart keeps the address of the child, so the
 route does not change. A stopped route — by a `Stop` directive or by `StopActor` — is removed from
-the set when the router receives `Terminated`; a pool with no routes drops letters as dead. The
-command `ActorRouter.SetGroup(router, refs)` replaces the set, `SetCount(router, n)` grows or
+the set when the router receives `Terminated`; a router with no routes drops the letter: it is
+processed by the router and does not become a dead letter. The command
+`ActorRouter.SetGroup(router, refs)` replaces the set, `SetCount(router, n)` grows or
 shrinks a pool, and `SetKind(router, kind)` changes the rule; all three are ordinary letters and
 take effect in mailbox order.
 
@@ -946,22 +947,81 @@ while a scan of the list cost 1.1–1.5 ms at 100000 (`docs/measurements.md`, se
 - Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per batch; a batch is
   formed only from tasks writing at the same time (section 8).
 - Nodes: frames are neither signed nor encrypted, and the "from" field is not authenticated: the
-  holder of one valid capability can send under another name and move that name's repeat window;
-  channel protection (TLS, signing frames with a secret of the node pair) is not implemented.
-  At-most-once delivery; the TCP transport is Linux only;
-  there is no consensus (Raft): when the network splits, two activations of a key are possible and
-  only one can write (section 11). The host finds an activation by scanning a list, so a call grows
-  more expensive with the number of active keys.
-- One strategy, `OneForOne`; "all for one" is not implemented.
+  holder of one valid capability can send under another name and move that name's repeat window.
+  Channel protection with mutual authentication is stage 5 of the cluster plan
+  (`docs/cluster-plan.md`) and is not implemented; the open keys in the membership record are not
+  checked. Delivery is at most once; the TCP transport is Linux only. `ActorGrain` itself does not
+  coordinate: on a network split two activations of a key are possible, and without a consensus
+  journal both can write. With `RaftJournal` the second cannot write and catches up before reading
+  (section 11, the `Raft` guide). Liveness of a node is known only by the break of its TCP
+  connection; the lease of the membership service is separate and lives in `Raft`.
+- A router is an actor of one process; its routes are the addresses it was given, and a pool
+  creates local children. A pool has at most `maxRoutes` (64) routes; a route
+  stopped by supervision or by `StopActor` leaves the set and is not created again, `SetCount` is
+  needed. `random` is deterministic from the seed and is not a source of entropy. Only a letter
+  that extends `ActorRouter.Keyed` carries a key; a letter without it goes by the empty key.
+- A router is not meant to be restarted by supervision: `NewPool` and `NewGroup` build its
+  configuration into the instance, and the factory repeats only what the module globals still hold
+  at the call. Restarting the router actor would produce an empty set and stop its pool children;
+  keep the router as a root or supervise it with `Resume`.
+- A stream is an actor of one process. It neither stores nor replays: a subscriber that was
+  stopped misses the events published while it was absent, and a restart loses the subscription.
+  One stream is the receiver of dead letters; the hook is global. `Publish` does not wait for
+  delivery.
+- `BecomeStacked` allocates one node per push; a handler that pushes on every letter grows the
+  stack until a restart.
+- The window of `AllForOne` and `RestForOne` belongs to the strategy object. If one strategy
+  instance is given to several supervisors, their failures are counted in one window.
 - While the pool is alive, the scheduler reports no deadlock of other tasks (section 3).
 - `Ask` to itself from the handler traps with code 23.
 
-## 14. Interface
+## 14. Parity with proto-actor
+
+The work compared the actor framework with proto-actor by capabilities, not by signatures: the
+proto-actor sources are not part of this repository, so a name in the table means the same idea,
+not the same interface. The table lists the capabilities that were compared, their state in this
+subsystem and where they are described.
+
+| Capability | State | Where or why |
+|---|---|---|
+| Address, `Tell`, `Ask`, mailbox limit, `Urgent` | present | section 4 |
+| `Watch`, `Terminated`, loss of a node | present | sections 4, 10 |
+| Supervision `OneForOne` | present | section 6 |
+| Supervision `AllForOne` | present | section 6 |
+| Supervision `RestForOne` | present | section 6 |
+| Escalation to the parent | present | section 6 |
+| Restart window and limit | present | section 6 |
+| `Stash` and `Unstash` | present | section 5 |
+| Idle timeout `ReceiveTimeout` | present | section 5 |
+| Own task of an actor (`Props.dedicated`) | present | section 3 |
+| Executor pool | present | section 3 |
+| `Become`, stacked `BecomeStacked` and `Unbecome` | present | section 5 |
+| Router over a pool of children | present | section 4 |
+| Router over a given group | present | section 4 |
+| `RoundRobin`, `Random`, `Broadcast` | present | section 4 |
+| `ConsistentHash` with the rendezvous of `ActorGrain` | present | section 4, `ActorHash` |
+| Change of the route set by a letter | present | section 4 |
+| Supervision of a failed route in a pool | present | section 4 |
+| Event stream: subscribe, unsubscribe, publish | present | section 4 |
+| Subscription filter | present | section 4 |
+| Dead letter as an event | present | section 4, `DeadHook` |
+| A stopped subscriber leaves the stream | present | section 4 |
+| Virtual actors, activation and passivation | present | section 11 |
+| Placement of keys by rendezvous hash | present | sections 4, 11 |
+| Journal, snapshots, replay | present | section 8 |
+| Virtual actors on a consensus journal | present | the `Raft` guide |
+| Membership service with leases | present | the `Raft` guide |
+| Actors in different processes over TCP | present | section 10, `tools/test-cluster.sh` |
+| Protected channel of nodes: TLS, mutual authentication, check of member keys | absent | stage 5 of the cluster plan; the frames are plaintext and "from" is not authenticated (section 13) |
+| Exactly once delivery | absent | delivery is at most once; the journal of a persistent actor removes repeated operations by their numbers (section 8) |
+| Durable event stream and replay for a returning subscriber | absent | the stream is a mailbox fan-out, not a journal |
+
+## 15. Interface
 
 Trap numbers: 20–26 — violated precondition (the number is given at the procedure), 100 — violated
 module invariant, 127 — the task was cancelled.
 
-### 14.1. ActorCore
+### 15.1. ActorCore
 
 ```
 DEFINITION ActorCore;
@@ -1279,7 +1339,7 @@ Post: `dispatcher = d`; the methods of `Dispatcher` other than `Schedule` work o
 Pre: `d # NIL` — trap 20.
 Post: `dir = d`; the first installed directory stays in `stdDir`.
 
-### 14.2. ActorSup
+### 15.2. ActorSup
 
 ```
 DEFINITION ActorSup;
@@ -1310,7 +1370,7 @@ Pre: as `NewOneForOne` — traps 20, 21, 22.
 Post: as `NewAllForOne`, but the group is the failed child and the children started after it;
 `RestartRest` and `StopRest` name its directives.
 
-### 14.3. ActorRun
+### 15.3. ActorRun
 
 ```
 DEFINITION ActorRun;
@@ -1344,7 +1404,7 @@ parents); the pool tasks ended by themselves, without cancellation; the own task
 together with the actors; `n = 0`. An actor that has not stopped within 5 s remains, and the pool
 tasks are then cancelled.
 
-### 14.4. ActorJournal
+### 15.4. ActorJournal
 
 ```
 DEFINITION ActorJournal;
@@ -1454,7 +1514,7 @@ module is loaded, `dir` is a memory journal.
 **PROCEDURE Now (): LONGINT**
 Post: the current UTC time as `YYYYMMDDhhmmss`.
 
-### 14.5. ActorCodec
+### 15.5. ActorCodec
 
 ```
 DEFINITION ActorCodec;
@@ -1493,7 +1553,7 @@ version is out of range, `s = NIL`.
 **PROCEDURE SetDir (c: Codec)**
 Pre: `c # NIL`, trap 20. Post: `dir = c`; the first codec installed stays in `stdDir`.
 
-### 14.6. ActorPersist
+### 15.6. ActorPersist
 
 ```
 DEFINITION ActorPersist;
@@ -1605,7 +1665,7 @@ Post: the events numbered `>= from` are parsed and given to `v.Visit` in order; 
 is the number of the last one given (`from - 1` if there are no new ones); otherwise `res` is a
 journal error or `corrupt` (a frame cannot be read), and `last` is the number of the last good one.
 
-### 14.7. ActorFileJournal
+### 15.7. ActorFileJournal
 
 ```
 DEFINITION ActorFileJournal;
@@ -1634,7 +1694,7 @@ Limits: `Flush` without `fsync`; one process per file; the stream index in memor
 event); opening reads the whole file; the checksum catches a tear and accidental damage, not a
 deliberate change.
 
-### 14.8. ActorKvJournal
+### 15.8. ActorKvJournal
 
 ```
 DEFINITION ActorKvJournal;
@@ -1656,7 +1716,7 @@ committed to the medium; on `conflict` nothing is written. Base errors: `KvDb.co
 Pre: `db # NIL`, trap 20.
 Post: a journal in the open base `db`; `Close` of the journal closes the base.
 
-### 14.9. ActorNet
+### 15.9. ActorNet
 
 ```
 DEFINITION ActorNet;
@@ -1761,7 +1821,7 @@ the letter is in the target's mailbox.
 For a transport. Post: every watcher of an address on `node` received `Terminated`; watches requested
 by `node` are removed.
 
-### 14.10. ActorNetMem
+### 15.10. ActorNetMem
 
 ```
 DEFINITION ActorNetMem;
@@ -1813,7 +1873,7 @@ seed.
 **PROCEDURE Crash (net: Net; IN name: ARRAY OF CHAR)** — Pre: the node is in the network — trap 20.
 Post: `ActorNet.Down` of the node, frames to it are lost, the other nodes received `Lost(name)`.
 
-### 14.11. ActorSim
+### 15.11. ActorSim
 
 ```
 DEFINITION ActorSim;
@@ -1840,7 +1900,7 @@ was no work; `TRUE` — the first mailbox processed all system letters and at mo
 Post: `TRUE` — no work left.
 **PROCEDURE Idle (): BOOLEAN** — Post: no mailbox has work.
 
-### 14.12. ActorNetTcp
+### 15.12. ActorNetTcp
 
 ```
 DEFINITION ActorNetTcp;
@@ -1878,7 +1938,7 @@ frames go to node `n` (created on `net`).
 **PROCEDURE Close (net: Net)** — Post: the listener and connections are closed, the tasks end; other
 nodes see the break.
 
-### 14.13. ActorGrain
+### 15.13. ActorGrain
 
 ```
 DEFINITION ActorGrain;
@@ -1976,7 +2036,7 @@ owner node among the live members, in `cl`'s view.
 **PROCEDURE Tick (cl: Cluster)** — Post: activations of the node without letters for `idle` ticks in
 a row are passivated.
 
-### 14.14. ActorRouter
+### 15.14. ActorRouter
 
 ```
 DEFINITION ActorRouter;
@@ -2024,7 +2084,7 @@ router ignores it.
 Pre: `r # NIL` — trap 20. Post: the router receives a letter that changes the rule; an invalid rule
 changes nothing.
 
-### 14.15. ActorHash
+### 15.15. ActorHash
 
 ```
 DEFINITION ActorHash;
@@ -2038,7 +2098,7 @@ END ActorHash.
 `member` for the key `key` of kind `kind`; the same input gives the same weight. The owner is the
 live place with the greatest weight; on equal weights the lesser name wins.
 
-### 14.16. ActorEvent
+### 15.16. ActorEvent
 
 ```
 DEFINITION ActorEvent;
