@@ -1,12 +1,13 @@
 #!/bin/bash
-# Кластер этапа 1: узлы ActorNet и Raft в отдельных процессах blackbox-console.
+# Кластер: узлы ActorNet и Raft в отдельных процессах blackbox-console.
 #
 #   tools/test-cluster.sh                 # 20 прогонов всего сценария
 #   tools/test-cluster.sh --runs 3        # три прогона
 #   tools/test-cluster.sh --quick         # один короткий прогон
 #   tools/test-cluster.sh --veth          # две «машины»: два netns с veth
 #   tools/test-cluster.sh --keep          # не удалять каталог прогона
-#   tools/test-cluster.sh --only raft     # один сценарий: ask, raft, saga, grain, membership, bench
+#   tools/test-cluster.sh --only raft     # один сценарий: ask, raft, saga, grain, membership, obxcluster, bench
+#   tools/test-cluster.sh --obx-ops 16    # переводов в сценарии obxcluster
 #
 # Прогон: ask — Ask и Watch между процессами, kill -9 → byNodeLoss;
 # raft3/raft5 — выборы, запись, kill -9 лидера, перевыборы, перезапуск
@@ -17,6 +18,12 @@
 # вступление S3 и S4, выход S4; участники G0..G2 (четвёртый G3 вступает
 # позже) берут состав из службы и пишут через RaftJournal; kill -9
 # владельца ключа и лидера службы, аренда истекшего участника.
+# obxcluster — пример ObxCluster в пяти процессах: восемь счетов на
+# виртуальных акторах ActorGrain поверх RaftJournal, переводы сагой,
+# служба состава из пяти узлов; узел P3 на время останавливается (фейк
+# разрыва сети), два узла-лидера убиваются, затем поднимаются снова;
+# проверяются сохранение суммы, отсутствие повторных применений и учёт
+# отклонённых переводов.
 # bench — запись в секунду по TCP на хранилище в памяти.
 #
 # Все процессы живут в своём сетевом пространстве (unshare -rmn),
@@ -37,6 +44,8 @@ ONLY=all
 OPS=60
 KILLAT=5
 BENCH_OPS=400
+OBX_OPS="${OBX_OPS:-24}"
+OBX_SUM=8000	# ObxCluster: accounts (8) * initial (1000)
 TICK=20
 
 while [ $# -gt 0 ]; do
@@ -49,7 +58,8 @@ while [ $# -gt 0 ]; do
 		--ops) OPS="${2:-30}"; shift 2;;
 		--kill-at) KILLAT="${2:-5}"; shift 2;;
 		--bench-ops) BENCH_OPS="${2:-400}"; shift 2;;
-		-h|--help) sed -n '2,24p' "$0"; exit 0;;
+		--obx-ops) OBX_OPS="${2:-24}"; shift 2;;
+		-h|--help) sed -n '2,35p' "$0"; exit 0;;
 		--inner) shift; INNER=1; break;;
 		*) echo "test-cluster: неизвестный ключ $1" >&2; exit 2;;
 	esac
@@ -59,6 +69,7 @@ done
 
 if [ "${INNER:-0}" = 1 ]; then
 	WORK="$1"; INSTALL="$2"; RUNS="$3"; VETH="$4"; OPS="$5"; KILLAT="$6"; BENCH_OPS="$7"; TICK="$8"; KEEP="$9"; ONLY="${10}"
+	OBX_OPS="${OBX_OPS:-24}"
 	declare -A PORT_OF HOST_OF HOLDERS PIDS
 	# Ниже диапазона временных портов ядра (обычно 32768..60999):
 	# иначе исходящее соединение может занять номер, который мы хотим слушать.
@@ -451,6 +462,132 @@ if [ "${INNER:-0}" = 1 ]; then
 		return 0
 	}
 
+	# --- obxcluster ----------------------------------------------------------------
+
+	leader_of() {
+		# Пост: номер процесса с лидером узлов <префикс><i>; пусто — нет.
+		local dir=$1 prefix=$2 i
+		for ((i = 0; i < 5; i++)); do
+			if [ -f "$dir/$prefix$i.status" ] && grep -q 'role=2' "$dir/$prefix$i.status" 2>/dev/null; then
+				echo "$i"; return
+			fi
+		done
+		echo ""
+	}
+
+	wait_members() {
+		# Ждать, пока служба состава покажет want участников.
+		local dir=$1 want=$2 ms=$3 t i v
+		t=0
+		while [ "$t" -lt "$ms" ]; do
+			for ((i = 0; i < 5; i++)); do
+				v=$(sed -n 's/.*members=\([0-9]*\).*/\1/p' "$dir/P$i.status" 2>/dev/null)
+				[ "${v:-0}" -ge "$want" ] && return 0
+			done
+			sleep 0.02; t=$((t + 20))
+		done
+		return 1
+	}
+
+	wait_progress() {
+		# Ждать, пока хоть один процесс насчитает want законченных переводов.
+		local dir=$1 want=$2 ms=$3 t i v
+		t=0
+		while [ "$t" -lt "$ms" ]; do
+			for ((i = 0; i < 5; i++)); do
+				v=$(cat "$dir/P$i.progress" 2>/dev/null)
+				case "$v" in
+					''|*[!0-9]*) ;;
+					*) [ "$v" -ge "$want" ] && return 0;;
+				esac
+			done
+			sleep 0.02; t=$((t + 20))
+		done
+		return 1
+	}
+
+	run_obxcluster() {
+		local dir=$1 i v1 v2 c sum dups total applied expect done failed refunded
+		mkdir -p "$dir"
+		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
+		PIDS=()
+		for ((i = 0; i < 5; i++)); do
+			alloc_role "G$i" "$((i % 2 + 1))"
+			alloc_role "J$i" "$((i % 2 + 1))"
+			alloc_role "M$i" "$((i % 2 + 1))"
+			HOST_OF[P$i]="$((i % 2 + 1))"	# процесс живёт там же, где его узлы
+		done
+		: > "$dir/nodes"
+		for ((i = 0; i < 5; i++)); do
+			echo "G$i $(addr_of "G$i")" >> "$dir/nodes"
+			echo "J$i $(addr_of "J$i")" >> "$dir/nodes"
+			echo "M$i $(addr_of "M$i")" >> "$dir/nodes"
+		done
+		for ((i = 0; i < 5; i++)); do
+			launch_role "$dir" "P$i" --SCENARIO=obxcluster --IDX="$i" --N=5 --TICK="$TICK" --OPS="$OBX_OPS"
+			PIDS[P$i]=$LASTPID
+		done
+		for ((i = 0; i < 5; i++)); do
+			waitfile "$dir/P$i.ready" 3000 || { bad "$dir" "obxcluster: P$i не готов"; return 1; }
+		done
+		wait_members "$dir" 5 60000 || { bad "$dir" "obxcluster: не все вступили"; return 1; }
+		# разрыв сети: P3 заморожен до начала работы
+		kill -STOP "${PIDS[P3]}" 2>/dev/null
+		touch "$dir/start"
+		say "obxcluster: нагрузка пошла, жду три перевода"
+		wait_progress "$dir" 3 30000 || { kill -CONT "${PIDS[P3]}" 2>/dev/null; bad "$dir" "obxcluster: работа не началась"; return 1; }
+		# жертвы — процессы лидеров журнала и службы состава, кроме P3
+		v1=$(leader_of "$dir" J); v2=$(leader_of "$dir" M)
+		[ -n "$v1" ] || v1=0
+		[ -n "$v2" ] || v2=1
+		[ "$v1" = 3 ] && v1=0
+		[ "$v2" = 3 ] && v2=2
+		if [ "$v2" = "$v1" ]; then
+			for c in 0 1 2 4; do
+				if [ "$c" != "$v1" ]; then v2=$c; break; fi
+			done
+		fi
+		say "obxcluster: убиваю P$v1 и P$v2, P3 в разрыве"
+		for c in "$v1" "$v2"; do
+			killpid "${PIDS[P$c]}"; unset "PIDS[P$c]"
+			rm -f "$dir/P$c.ready" "$dir/P$c.result" "$dir/P$c.progress"
+		done
+		sleep 2
+		say "obxcluster: возвращаю P3 из разрыва"
+		kill -CONT "${PIDS[P3]}" 2>/dev/null
+		# перезапуск убитых узлов с тем же хранилищем
+		say "obxcluster: поднимаю P$v1 и P$v2"
+		for c in "$v1" "$v2"; do
+			launch_role "$dir" "P$c" --SCENARIO=obxcluster --IDX="$c" --N=5 --TICK="$TICK" --OPS="$OBX_OPS"
+			PIDS[P$c]=$LASTPID
+		done
+		for ((i = 0; i < 5; i++)); do
+			waitfile "$dir/P$i.result" 6000 || { bad "$dir" "obxcluster: нет итога P$i"; return 1; }
+		done
+		for ((i = 0; i < 5; i++)); do
+			grep -q 'good=1' "$dir/P$i.result" || { bad "$dir" "obxcluster: P$i $(cat "$dir/P$i.result" 2>/dev/null)"; return 1; }
+			sum=$(field "$dir/P$i.result" sum); dups=$(field "$dir/P$i.result" dups)
+			total=$(field "$dir/P$i.result" total); applied=$(field "$dir/P$i.result" applied)
+			expect=$(field "$dir/P$i.result" expect)
+			done=$(field "$dir/P$i.result" done); failed=$(field "$dir/P$i.result" failed)
+			refunded=$(field "$dir/P$i.result" refunded)
+			[ "$sum" = "$OBX_SUM" ] \
+				|| { bad "$dir" "obxcluster: P$i сумма $sum"; return 1; }
+			[ "$dups" = 0 ] || { bad "$dir" "obxcluster: P$i повторов $dups"; return 1; }
+			[ "$total" = "$OBX_OPS" ] || { bad "$dir" "obxcluster: P$i переводов $total"; return 1; }
+			[ "$applied" = "$expect" ] \
+				|| { bad "$dir" "obxcluster: P$i событий $applied, ожидалось $expect"; return 1; }
+			[ "$((done + failed + refunded))" = "$total" ] \
+				|| { bad "$dir" "obxcluster: P$i учтено $done+$failed+$refunded из $total"; return 1; }
+			[ "${refunded:-0}" -ge 1 ] \
+				|| { bad "$dir" "obxcluster: P$i нет возвратов — сага не проверила откат"; return 1; }
+			MEAS="$MEAS obxcluster-P$i done=$done failed=$failed refunded=$refunded"
+		done
+		check_no_traps "$dir" || { bad "$dir" "obxcluster: трап"; return 1; }
+		stop_all "$dir"
+		return 0
+	}
+
 	# --- измерение -----------------------------------------------------------------
 
 	run_bench() {
@@ -526,6 +663,7 @@ if [ "${INNER:-0}" = 1 ]; then
 		if want saga; then run_saga "$d/saga" || break; fi
 		if want grain; then run_grain "$d/grain" || break; fi
 		if want membership; then run_membership "$d/membership" || break; fi
+		if want obxcluster; then run_obxcluster "$d/obxcluster" || break; fi
 		if want bench; then run_bench "$d/bench" || break; fi
 		if [ "$KEEP" = 0 ]; then rm -rf "$d"; fi
 		say "прогон $run: ок"
@@ -567,7 +705,7 @@ fi
 clean() { [ "$KEEP" = 1 ] && echo "cluster: каталог прогона $work" >&2 || rm -rf "$work"; }
 trap clean EXIT INT TERM
 
-mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash CasStore ActorNet ActorNetTcp AsyncIO AsyncSelect AsyncChan LinNative LinThreads RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb RaftNode RaftJournal ActorGrain ActorFileJournal RaftMembership RaftGrainMembership Actor_devCluster"
+mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash CasStore ActorNet ActorNetTcp AsyncIO AsyncSelect AsyncChan LinNative LinThreads RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb RaftNode RaftJournal ActorGrain ActorFileJournal RaftMembership RaftGrainMembership ObxCluster Actor_devCluster"
 pass=0
 while [ "$pass" -lt 3 ]; do
 	pass=$((pass + 1))
@@ -579,6 +717,7 @@ while [ "$pass" -lt 3 ]; do
 done
 
 echo "cluster: прогонов $RUNS, mark=quick:$QUICK veth:$VETH"
+export OBX_OPS
 unshare -rmn bash "$0" --inner "$work" "$INSTALL" "$RUNS" "$VETH" "$OPS" "$KILLAT" "$BENCH_OPS" "$TICK" "$KEEP" "$ONLY"
 rc=$?
 if [ -f "$work/measurements.txt" ]; then

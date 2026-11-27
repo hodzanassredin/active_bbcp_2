@@ -124,6 +124,7 @@ Events
 [ObxActor11](Actor11.md)  [docu](Actor11.md)/[sources](../Mod64/Actor11.cp)		event stream: subscriptions, a filter, dead letters
 [ObxRaft0](Raft0.md)  [docu](Raft0.md)/[sources](../Mod64/Raft0.cp)		Raft: three in-memory nodes, elections, write, read, leader failure
 [ObxRaft1](Raft1.md)  [docu](Raft1.md)/[sources](../Mod64/Raft1.cp)		a durable counter on the Raft journal survives its node's failure
+[ObxCluster](Cluster.md)  [docu](Cluster.md)/[sources](../Mod64/Cluster.cp)		accounts in a cluster: virtual actors, a transfer saga, a lost node
 [ObxBank0](Bank0.md)  [docu](Bank0.md)/[sources](../Mod64/Bank0.cp)		tutorial: an action and a task do one job
 [ObxBank1](Bank1.md)  [docu](Bank1.md)/[sources](../Mod64/Bank1.cp)		tutorial: cashiers, Join, Sleep, cancellation, group
 [ObxBank2](Bank2.md)  [docu](Bank2.md)/[sources](../Mod64/Bank2.cp)		tutorial: waiting for money without a monitor and with a monitor object
