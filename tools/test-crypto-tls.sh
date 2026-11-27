@@ -752,36 +752,45 @@ echo "test-crypto-tls: TLS 1.3 — схема CertificateVerify, CCS и запи
 # rsa_pkcs1_sha256 предложена клиентом, rsa_pkcs1_sha384 — нет.
 fake13_case badpkcs1 1
 fake13_case badpkcs1sha384 1
-
-# Python-клиент TLS 1.3: положительный контроль, схема и подпись.
-python_client13_case good13 good 0
-python_client13_case badcv13pkcs1 badpkcs1 1
-python_client13_case badsig13 badsig13 1
-
-# RFC 8446 §5.4: пустой TLSInnerPlaintext, одни нули, законные пустая
-# запись и нулевое дополнение; испорченный тег и чужой внутренний тип.
-fake13_case emptyrec 0 1
-fake13_case zeropad 0 1
-fake13_case emptyapp 0
-fake13_case paddedapp 0
-fake13_case badtag13 0 1
-fake13_case badinnertype 0 1
-
-python_client13_case emptyrec13 emptyrec 0 1
-python_client13_case zeropad13 zeropad 0 1
-
 # RFC 8446 §5: CCS до Finished — ровно {0x01}; иное — отказ, после
 # Finished — отказ.
 fake13_case ccsok 0
 fake13_case ccsbad 1
 fake13_case ccslong 1
 fake13_case ccsafter 0 1
+# RFC 8446 §5.4: пустой TLSInnerPlaintext, одни нули, законные пустая
+# запись и нулевое дополнение.
+fake13_case emptyrec 0 1
+fake13_case zeropad 0 1
+fake13_case emptyapp 0
+fake13_case paddedapp 0
+# Остальные проверки записи и полей 1.3.
+fake13_case badtag13 0 1
+fake13_case badinnertype 0 1
+fake13_case badkeyupdate 0 1
+fake13_case shversion 1
+fake13_case badee 1
+fake13_case badcert13 1
+fake13_case shortfinished 1
+fake13_case zeroshare 1
+fake13_case shcomp 1
+fake13_case badext13 1
+fake13_case hrrsv 1
+fake13_case hrrks 1
 
+# То же на стороне нашего сервера — Python-клиент TLS 1.3.
+python_client13_case good13 good 0
 python_client13_case good13ccs goodccs 0
+python_client13_case badcv13pkcs1 badpkcs1 1
 python_client13_case ccs13bad ccsbad 1
 python_client13_case ccs13long ccslong 1
 python_client13_case ccs13after ccsafter 0 1
-
+python_client13_case emptyrec13 emptyrec 0 1
+python_client13_case zeropad13 zeropad 0 1
+python_client13_case bigshare13 bigshare 1
+python_client13_case badextch13 badextch 1
+python_client13_case zeroshare13 zeroshare 1
+python_client13_case badsig13 badsig13 1
 # CCS до первого ClientHello — unexpected_message (RFC 8446 §5).
 evil_server_case ccsfirst ccsfirst
 evil_server_case ccsfirstbad ccsfirstbad
