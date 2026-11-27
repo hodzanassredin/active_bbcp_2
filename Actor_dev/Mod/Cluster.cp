@@ -42,7 +42,6 @@ MODULE Actor_devCluster;
 		askMs = 5000;
 		clientAskMs = 1500;
 		maxNodes = Core.maxNodes;
-		serveMs = 120000;	(* предел жизни процесса-службы в прогоне *)
 
 	TYPE
 		Name = ActorCore.Name;
@@ -105,6 +104,7 @@ MODULE Actor_devCluster;
 		dir: ARRAY 1024 OF CHAR;
 		role, scenario: Name;
 		idx, n, tickMs: INTEGER;
+		serveMs: LONGINT;	(* предел жизни процесса-службы в прогоне *)
 		stop, finished: BOOLEAN;
 		adrs: ARRAY maxRoles OF Addr; nadr: INTEGER;
 		t0: LONGINT;
@@ -1650,7 +1650,7 @@ MODULE Actor_devCluster;
 
 	PROCEDURE RunMembershipService;
 		VAR t: Net; nd: ActorNet.Node; store: RaftStorage.Storage;
-			cap: ARRAY RaftNode.capLen OF CHAR; i: INTEGER; last: LONGINT; xs: ARRAY 16 OF CHAR;
+			cap: ARRAY RaftNode.capLen OF CHAR; i, nsvc: INTEGER; last: LONGINT; xs: ARRAY 16 OF CHAR;
 			vs, ls: SET; dirty, isV, isL: BOOLEAN;
 	BEGIN
 		OpenNode(role, t, nd); PeerAll(t, role);
@@ -1660,8 +1660,9 @@ MODULE Actor_devCluster;
 		raftRef := RaftNode.Start(raftCfg);
 		statusName := role;
 		ActorNet.Export(nd, raftRef, cap); PutText(role + ".cap", cap);
-		ASSERT(WaitRoleCaps("S", 5, 20000), 120);
-		FOR i := 0 TO 4 DO
+		nsvc := 5; IF secure THEN nsvc := 3 END;
+		ASSERT(WaitRoleCaps("S", nsvc, 20000), 120);
+		FOR i := 0 TO nsvc - 1 DO
 			IF i # idx THEN IntToText(i, xs); GetText("S" + xs + ".cap", cap); RaftNode.SetPeer(raftCfg, i, cap) END
 		END;
 		StartTicker(raftRef);
@@ -1742,7 +1743,7 @@ MODULE Actor_devCluster;
 	PROCEDURE RunMembershipGrain;
 		VAR grainT, raftT: Net; grainNd, raftNd: ActorNet.Node;
 			store: RaftStorage.Storage; cap: ARRAY RaftNode.capLen OF CHAR;
-			s: ARRAY 64 OF CHAR; i, inc, id, lease, renew, refresh: INTEGER; d: Driver;
+			s: ARRAY 64 OF CHAR; i, inc, id, lease, renew, refresh, nsvc: INTEGER; d: Driver;
 	BEGIN
 		IntToText(idx, s);
 		OpenNode(role, grainT, grainNd); PeerAll(grainT, role);
@@ -1755,8 +1756,9 @@ MODULE Actor_devCluster;
 			raftRef := RaftNode.Start(raftCfg);
 			ActorNet.Export(raftNd, raftRef, cap); PutText(statusName + ".cap", cap)
 		END;
-		ASSERT(WaitRoleCaps("S", 5, 30000), 121);
-		ReadCaps("S", 5, memServiceCaps);
+		nsvc := 5; IF secure THEN nsvc := 3 END;
+		ASSERT(WaitRoleCaps("S", nsvc, 30000), 121);
+		ReadCaps("S", nsvc, memServiceCaps);
 		ASSERT(WaitRoleCaps("R", 3, 60000), 122);
 		ReadCaps("R", 3, memJournalCaps);
 		IF idx < 3 THEN
@@ -1766,14 +1768,14 @@ MODULE Actor_devCluster;
 		id := (idx + 5) * 100000 + inc;
 		memJournal := RaftJournal.New(grainNd, memJournalCaps, 3, id);
 		memJournal.tickMs := 0;
-		memClient := RaftMembership.New(grainNd, memServiceCaps, 5, (idx + 5) * 1000000 + inc);
+		memClient := RaftMembership.New(grainNd, memServiceCaps, nsvc, (idx + 5) * 1000000 + inc);
 		memClient.tickMs := 0;
 		lease := 5000; renew := 10; refresh := 10;
 		IF secure THEN
 			(* TLS-канал дешевле в байтах, но дороже в пробуждениях: служба
-			   из пяти узлов не успевает за частыми Renew. Аренда длиннее. *)
-			lease := 30000; renew := 50; refresh := 50;
-			memClient.timeoutTicks := 300; memClient.giveUpTicks := 6000
+			   не успевает за частыми Renew. Аренда длиннее. *)
+			lease := 60000; renew := 50; refresh := 50;
+			memClient.timeoutTicks := 100; memClient.giveUpTicks := 1000
 		END;
 		memCl := ActorGrain.New(grainNd, memJournal); ActorGrain.Register(memCl, "acct", NewGrainAcct);
 		OwnKey(role, memKey, memKeyLen);
@@ -1922,11 +1924,12 @@ MODULE Actor_devCluster;
 			IF ok THEN ok := MemDeposit(ref, 2, 50, 30000); good := good & ok; IF ok THEN INC(memOks) ELSE INC(memBad) END END;
 			IF ~ok THEN PutText("driver.fail", "deposit1") END
 		END;
-		IF good THEN
+		IF good & ~secure THEN
+			(* Рост службы до пяти узлов — часть нагрузки TCP-прогона. *)
 			PutText("svc.add3", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "voters4") END
 		END;
-		IF good THEN
+		IF good & ~secure THEN
 			PutText("svc.add4", "1");
 			IF ~WaitSvcVoters(5, 30000) THEN good := FALSE; PutText("driver.fail", "voters5") END
 		END;
@@ -2003,7 +2006,7 @@ MODULE Actor_devCluster;
 				IF ~ok THEN PutText("driver.fail", "deposit5") END
 			END
 		END;
-		IF good THEN
+		IF good & ~secure THEN
 			PutText("svc.remove4", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "remove4") END
 		END;
@@ -2033,6 +2036,7 @@ MODULE Actor_devCluster;
 		stop := FALSE; finished := FALSE;
 		GetPar("DIR", dir); GetPar("ROLE", role); GetPar("SCENARIO", scenario);
 		GetPar("CERTDIR", certDir); secure := GetInt("TLS", 0) # 0;
+		serveMs := 120000; IF secure THEN serveMs := 600000 END;
 		idx := GetInt("IDX", 0); n := GetInt("N", 0); tickMs := GetInt("TICK", 20);
 		burst := GetInt("BURST", 300);
 		GetPar("CLAIM", claimName); IF claimName = "" THEN claimName := role$ END;

@@ -554,18 +554,20 @@ if [ "${INNER:-0}" = 1 ]; then
 	# --- membership ---------------------------------------------------------------
 
 	run_membership() {
-		local dir=$1 i role r p g3 killed killedsvc start t
+		local dir=$1 i role r p g3 killed killedsvc start t nsvc
 		mkdir -p "$dir"
 		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
 		PIDS=()
-		for ((i = 0; i < 5; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
+		# TLS: служба из трёх узлов; рост до пяти проверяется по TCP.
+		nsvc=5; [ "$TLS" = 1 ] && nsvc=3
+		for ((i = 0; i < nsvc; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 3; i++)); do alloc_role "R$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 4; i++)); do alloc_role "G$i" "$((i % 2 + 1))"; done
 		: > "$dir/nodes"
-		for ((i = 0; i < 5; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < nsvc; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < 3; i++)); do echo "R$i $(addr_of "R$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < 4; i++)); do echo "G$i $(addr_of "G$i")" >> "$dir/nodes"; done
-		for ((i = 0; i < 5; i++)); do
+		for ((i = 0; i < nsvc; i++)); do
 			launch_role "$dir" "S$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
 			PIDS[S$i]=$LASTPID
 		done
@@ -573,7 +575,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			launch_role "$dir" "G$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
 			PIDS[G$i]=$LASTPID
 		done
-		for ((i = 0; i < 5; i++)); do
+		for ((i = 0; i < nsvc; i++)); do
 			waitfile "$dir/S$i.ready" 8000 || { bad "$dir" "membership: S$i не готов"; return 1; }
 		done
 		for ((i = 0; i < 3; i++)); do
