@@ -287,26 +287,42 @@ MODULE ActorNetTls;
 		END
 	END CloseLink;
 
+	PROCEDURE (net: Net) AllowedBefore (IN old: ARRAY OF Member; nold: INTEGER;
+		IN name: ARRAY OF CHAR): BOOLEAN, NEW;
+		VAR i: INTEGER;
+	BEGIN
+		i := 0; WHILE (i < nold) & (old[i].name # name) DO INC(i) END;
+		RETURN i < nold
+	END AllowedBefore;
+
 	PROCEDURE (net: Net) SetMembers* (IN m: ARRAY OF Member; n: INTEGER), NEW;
 	(** Пост: список участников заменён. Исходящие связи с узлами, которых
 		в списке нет, закрыты сразу; входящее соединение выбывшего узла
 		закрывает его читатель при первом же кадре — кадр не доставляется,
-		в журнал пишется строка, наблюдатель получает Terminated. *)
+		в журнал пишется строка, наблюдатель получает Terminated. Отзывом
+		считается только уход узла, который был в прежнем списке: запись
+		того же состава не поднимает счётчик. *)
 		VAR i: INTEGER; p: Link; r: Reader; known: ARRAY maxMembers OF Name;
-			nk: INTEGER; name: Name; found, drop: BOOLEAN;
+			nk: INTEGER; old: ARRAY maxMembers OF Member; nold: INTEGER;
+			drop: BOOLEAN;
 	BEGIN
 		ASSERT((n >= 0) & (n <= maxMembers), 20);
+		nold := net.nmembers;
+		FOR i := 0 TO nold - 1 DO old[i] := net.members[i] END;
 		net.nmembers := n;
 		FOR i := 0 TO n - 1 DO net.members[i] := m[i] END;
-		(* исходящие связи выбывших закрываем сразу *)
+		(* исходящие связи выбывших закрываем сразу; вернувшемуся в
+		   список узлу связь снова разрешена (иначе закрытая когда-то
+		   связь не открылась бы никогда) *)
 		nk := 0;
 		p := net.peers;
 		WHILE p # NIL DO
 			IF ~net.AllowedName(p.name) THEN
-				drop := TRUE; i := 0;
+				drop := net.AllowedBefore(old, nold, p.name); i := 0;
 				WHILE i < nk DO IF known[i] = p.name THEN drop := FALSE END; INC(i) END;
 				IF drop THEN known[nk] := p.name$; INC(nk) END;
 				net.CloseLink(p.name)
+			ELSE p.allowed := TRUE
 			END;
 			p := p.next
 		END;
@@ -314,7 +330,7 @@ MODULE ActorNetTls;
 		r := net.readers;
 		WHILE r # NIL DO
 			IF ~net.AllowedName(r.name) THEN
-				drop := TRUE; i := 0;
+				drop := net.AllowedBefore(old, nold, r.name); i := 0;
 				WHILE i < nk DO IF known[i] = r.name THEN drop := FALSE END; INC(i) END;
 				IF drop THEN known[nk] := r.name$; INC(nk) END
 			END;
@@ -365,6 +381,12 @@ MODULE ActorNetTls;
 		NEW(net); net.listen := listen$; net.nmembers := 0; res := CommStreams.done
 	END New;
 
+	PROCEDURE Rejected (net: Net; IN name: ARRAY OF CHAR);
+		VAR t: ARRAY 96 OF CHAR;
+	BEGIN
+		IF audit # NIL THEN t := "rejected: " + name; audit(t) END
+	END Rejected;
+
 	PROCEDURE (net: Net) VerifyPeer (cert: CryptoX509.Certificate; IN expected: ARRAY OF CHAR;
 		OUT fp: Fingerprint; OUT ok: BOOLEAN), NEW;
 	BEGIN
@@ -373,8 +395,11 @@ MODULE ActorNetTls;
 		IF ~CertHasName(cert, expected) THEN
 			Log("certificate name does not match node", expected, ""); RETURN
 		END;
-		IF ~net.Allowed(expected, fp) THEN
+		IF net.FindMember(expected) < 0 THEN
 			Log("node is not a member", expected, ""); RETURN
+		END;
+		IF ~net.Allowed(expected, fp) THEN
+			Log("node fingerprint differs", expected, ""); RETURN
 		END;
 		ok := TRUE
 	END VerifyPeer;
@@ -461,7 +486,8 @@ MODULE ActorNetTls;
 			cert := w.tls.PeerCertificate();
 			w.net.VerifyPeer(cert, w.peer.name, fp, ok);
 			IF ~ok THEN
-				INC(w.net.rejected); INC(w.net.hsFail); Log("server certificate rejected", w.peer.name, "")
+				INC(w.net.rejected); INC(w.net.hsFail); Log("server certificate rejected", w.peer.name, "");
+				Rejected(w.net, w.peer.name)
 			ELSE INC(w.net.hsOk)
 			END
 		ELSE
@@ -557,6 +583,7 @@ MODULE ActorNetTls;
 					Tasks.SetStackSize(r, tlsStack); Tasks.Start(r)
 				ELSE
 					INC(a.net.rejected); INC(a.net.hsFail); INC(a.net.acceptFails);
+					Rejected(a.net, name);
 					IF tls # NIL THEN tls.SafeClose END
 				END
 			ELSE
@@ -625,6 +652,12 @@ MODULE ActorNetTls;
 		hsStarted := net.hsStarted; accTicks := net.accTicks;
 		hsFail := hsFail + net.badState
 	END Detail;
+
+	PROCEDURE MemberCount* (net: Net): INTEGER;
+	(** Диагностика: сколько узлов в списке допущенных. *)
+	BEGIN
+		RETURN net.nmembers
+	END MemberCount;
 
 	PROCEDURE Counts* (net: Net; OUT links, readers: INTEGER);
 	(** Сколько исходящих и принятых соединений сейчас в сети. *)

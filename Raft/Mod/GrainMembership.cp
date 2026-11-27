@@ -9,13 +9,20 @@ MODULE RaftGrainMembership;
 	Размещение ключей считается по живым членам, поэтому смена состава
 	сразу меняет владельцев.
 
-	Ключ только хранится и передаётся в ActorGrain; проверка подписи и
-	сертификаты — этап 5.
+	Тот же список ведёт допуск узлов защищённого канала: если участнику
+	дан транспорт ActorNetTls (SetTransport), каждый применённый состав
+	отдаётся транспорту вызовом SetMembers. Живой участник даёт пару
+	«имя из пропуска, отпечаток сертификата» (ключ вступления), вышедший
+	или с истёкшей арендой — не даёт. Так выход и истечение аренды
+	убирают отпечаток: действующие связи рвутся, новые рукопожатия
+	отвергаются. Отпечаток сверяет транспорт, поэтому ключ вступления
+	обязан быть отпечатком сертификата узла — его так и выдаёт владелец.
 
 	Часы: tickMs > 0 — свои (Services), tickMs = 0 — тики шлёт владелец
 	(RaftGrainMembership.Tick), так идут детерминированные прогоны. *)
 
-	IMPORT SYSTEM, Kernel, Services, ActorCore, ActorGrain, RaftMembership, Core := RaftCore;
+	IMPORT SYSTEM, Kernel, Services, ActorCore, ActorGrain, ActorNetTls, RaftMembership,
+		Core := RaftCore;
 
 	CONST
 		joinTag = 1; renewTag = 2; listTag = 3; leaveTag = 4;	(* метки запросов (Result.kind) *)
@@ -52,6 +59,7 @@ MODULE RaftGrainMembership;
 			lease*: INTEGER;	(** длина аренды в тиках *)
 			renewEvery*, refreshEvery*: INTEGER;	(** тиков между Renew и List *)
 			tickMs*: INTEGER;	(** > 0 — свои часы; 0 — тики шлёт владелец *)
+			tls-: ActorNetTls.Net;	(** канал узла: состав ведёт список допущенных; NIL — не TLS *)
 			actor-: Node
 		END;
 
@@ -135,6 +143,53 @@ MODULE RaftGrainMembership;
 		IF ~applyDone THEN INC(a.errors) END
 	END Apply;
 
+	PROCEDURE CapNode (IN cap: ARRAY OF CHAR; OUT name: ActorCore.Name);
+	(* Имя узла из пропуска "узел|имя|метка". *)
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(cap)) & (cap[i] # 0X) & (cap[i] # "|") & (i < LEN(name) - 1) DO
+			name[i] := cap[i]; INC(i)
+		END;
+		name[i] := 0X
+	END CapNode;
+
+	PROCEDURE MembersFrom* (IN list: ARRAY OF ActorGrain.MemberInfo; n: INTEGER;
+		OUT m: ARRAY OF ActorNetTls.Member): INTEGER;
+	(** Пост: список допущенных узлов транспорта по записям состава.
+		Живой участник (аренда не истекла, из состава не вышел) с ключом
+		длиной с отпечаток сертификата даёт пару «имя из пропуска,
+		отпечаток»; мёртвый, без ключа или с ключом другой длины — нет.
+		Возвращает число пар, не больше LEN(m). *)
+		VAR i, k, j, flen: INTEGER; fp: ActorNetTls.Fingerprint; name: ActorCore.Name;
+	BEGIN
+		k := 0; flen := LEN(fp);
+		FOR i := 0 TO n - 1 DO
+			IF (i < LEN(list)) & list[i].alive & (list[i].key # NIL)
+					& (LEN(list[i].key^) = flen) & (k < LEN(m)) THEN
+				CapNode(list[i].cap, name);
+				IF name # "" THEN
+					m[k].name := name$;
+					FOR j := 0 TO flen - 1 DO m[k].fp[j] := list[i].key[j] END;
+					INC(k)
+				END
+			END
+		END;
+		RETURN k
+	END MembersFrom;
+
+	PROCEDURE ApplyToNet (t: ActorNetTls.Net; IN list: ARRAY OF ActorGrain.MemberInfo; n: INTEGER);
+	(* Допуск узлов канала — по составу: вышедшие и с истёкшей арендой
+	   отзываются (SetMembers закрывает их связи и отвергает рукопожатия). *)
+		VAR m: ARRAY RaftMembership.maxMembers OF ActorNetTls.Member; k, i: INTEGER;
+			s, x: ARRAY 256 OF CHAR;
+	BEGIN
+		IF t = NIL THEN RETURN END;
+		k := MembersFrom(list, n, m);
+
+		t.SetMembers(m, k)
+	END ApplyToNet;
+
 	PROCEDURE (a: Node) DoApply (list: RaftMembership.Members), NEW;
 		VAR i: INTEGER; infos: ARRAY RaftMembership.maxMembers OF ActorGrain.MemberInfo;
 	BEGIN
@@ -144,6 +199,7 @@ MODULE RaftGrainMembership;
 			infos[i].key := list.m[i].key; infos[i].alive := list.m[i].alive OR (mutAllAlive IN mutations)
 		END;
 		ActorGrain.ApplyMembers(a.cfg.cl, infos, list.n);
+		ApplyToNet(a.cfg.tls, infos, list.n);
 		a.members := list.n; a.applied := list.n; a.last := list; INC(a.lists)
 	END DoApply;
 
@@ -207,6 +263,17 @@ MODULE RaftGrainMembership;
 		cfg.lease := lease; cfg.renewEvery := renewEvery; cfg.refreshEvery := refreshEvery; cfg.tickMs := tickMs;
 		RETURN cfg
 	END NewConfig;
+
+	PROCEDURE SetTransport* (cfg: Config; t: ActorNetTls.Net);
+	(** Пост: каждое применение списка состава отдаёт t набор допущенных
+		узлов (ActorNetTls.SetMembers). Живой участник входит в набор парой
+		«имя из пропуска, отпечаток»; вышедший или с истёкшей арендой
+		отзывается. Пред: cfg # NIL — 20; t — канал этого узла. NIL — не
+		защищённый канал: набор не ведётся. *)
+	BEGIN
+		ASSERT(cfg # NIL, 20);
+		cfg.tls := t
+	END SetTransport;
 
 	PROCEDURE Start* (cfg: Config): ActorCore.Ref;
 	(** Участник службы — актор-ребёнок хозяина cfg.cl. Пред: cfg # NIL — 20.

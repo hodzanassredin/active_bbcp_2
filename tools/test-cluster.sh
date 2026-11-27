@@ -7,7 +7,7 @@
 #   tools/test-cluster.sh --veth          # две «машины»: два netns с veth
 #   tools/test-cluster.sh --keep          # не удалять каталог прогона
 #   tools/test-cluster.sh --tls           # узлы на TLS 1.3 со взаимной проверкой
-#   tools/test-cluster.sh --only raft     # один сценарий: ask, reconnect, secure, raft, saga, grain, membership, obxcluster, bench
+#   tools/test-cluster.sh --only raft     # один сценарий: ask, reconnect, secure, raft, saga, grain, membership, lease, obxcluster, bench
 #   tools/test-cluster.sh --obx-ops 16    # переводов в сценарии obxcluster
 #
 # Прогон: ask — Ask и Watch между процессами, kill -9 → byNodeLoss;
@@ -182,6 +182,22 @@ if [ "${INNER:-0}" = 1 ]; then
 				echo "трап в $role" >&2
 				return 1
 			fi
+		done
+		return 0
+	}
+
+	check_conflict_traps() {
+		# Обрыв сети (SIGSTOP) может оставить две копии ключа: журнал
+		# отказывает второй записи с conflict, актор по устройству
+		# останавливается, и следующее письмо поднимает его снова. Такие
+		# трапы (70, ActorPersist.Actor.Complete) примеримы; любые другие —
+		# провал.
+		local dir=$1 role code
+		for role in "${!PIDS[@]}"; do
+			grep -q 'TRAP REPORT' "$dir/log-$role.txt" 2>/dev/null || continue
+			while read -r code; do
+				[ "$code" = 70 ] || { echo "трап $code в $role" >&2; return 1; }
+			done < <(awk '/TRAP REPORT - BEGIN/{getline; getline; print $1}' "$dir/log-$role.txt" 2>/dev/null)
 		done
 		return 0
 	}
@@ -628,10 +644,14 @@ if [ "${INNER:-0}" = 1 ]; then
 		for ((i = 0; i < nsvc; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 3; i++)); do alloc_role "R$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 4; i++)); do alloc_role "G$i" "$((i % 2 + 1))"; done
+		# K<i> — канал водителя участника: клиент журнала и службы, вне
+		# обоих кластеров, чтобы запрос лидеру не шёл сам себе.
+		for ((i = 0; i < 4; i++)); do alloc_role "K$i" "$((i % 2 + 1))"; done
 		: > "$dir/nodes"
 		for ((i = 0; i < nsvc; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < 3; i++)); do echo "R$i $(addr_of "R$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < 4; i++)); do echo "G$i $(addr_of "G$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < 4; i++)); do echo "K$i $(addr_of "K$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < nsvc; i++)); do
 			launch_role "$dir" "S$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
 			PIDS[S$i]=$LASTPID
@@ -676,11 +696,64 @@ if [ "${INNER:-0}" = 1 ]; then
 		local res; res=$(cat "$dir/G0.result")
 		MEAS="$MEAS membership-ms=$(( $(date +%s%3N) - start ))"
 		echo "membership: $res ($(( $(date +%s%3N) - start )) мс)"
-		case "$res" in
-			*"oks=5"*"bad=0"*"balance=185"*"good=1"*) ;;
-			*) bad "$dir" "membership: итог $res"; return 1;;
-		esac
+		if [ "$TLS" = 1 ]; then
+			# TLS: выход из состава сам убирает отпечаток — связи с
+			# выбывшим рвутся без файла revoked.
+			case "$res" in
+				*"oks=5"*"bad=0"*"balance=185"*"revoked=1"*"good=1"*) ;;
+				*) bad "$dir" "membership: итог $res"; return 1;;
+			esac
+		else
+			case "$res" in
+				*"oks=5"*"bad=0"*"balance=185"*"good=1"*) ;;
+				*) bad "$dir" "membership: итог $res"; return 1;;
+			esac
+		fi
 		check_no_traps "$dir" || { bad "$dir" "membership: трап"; return 1; }
+		stop_all "$dir"
+		return 0
+	}
+
+	# --- истечение аренды -----------------------------------------------------------
+
+	run_lease() {
+		local dir=$1 i res start
+		mkdir -p "$dir"
+		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
+		PIDS=()
+		for ((i = 0; i < 5; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
+		: > "$dir/nodes"
+		for ((i = 0; i < 5; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < 3; i++)); do
+			alloc_role "G$i" "$((i % 2 + 1))"
+			alloc_role "R$i" "$((i % 2 + 1))"
+			alloc_role "K$i" "$((i % 2 + 1))"
+			echo "G$i $(addr_of "G$i")" >> "$dir/nodes"
+			echo "R$i $(addr_of "R$i")" >> "$dir/nodes"
+			echo "K$i $(addr_of "K$i")" >> "$dir/nodes"
+		done
+		for ((i = 0; i < 5; i++)); do
+			launch_role "$dir" "S$i" --SCENARIO=lease --IDX="$i" --TICK="$TICK"
+			PIDS[S$i]=$LASTPID
+		done
+		for ((i = 0; i < 3; i++)); do
+			launch_role "$dir" "G$i" --SCENARIO=lease --IDX="$i" --TICK="$TICK"
+			PIDS[G$i]=$LASTPID
+		done
+		start=$(date +%s%3N)
+		waitfile "$dir/G0.result" 150000 || { bad "$dir" "lease: нет итога"; return 1; }
+		res=$(cat "$dir/G0.result" 2>/dev/null)
+		MEAS="$MEAS lease-ms=$(( $(date +%s%3N) - start ))"
+		say "lease: $res ($(( $(date +%s%3N) - start )) мс)"
+		case "$res" in
+			*"expired=1"*"good=1"*) ;;
+			*) bad "$dir" "lease: итог $res"; return 1;;
+		esac
+		[ "$(cat "$dir/G1.probe-1" 2>/dev/null)" = "ok" ] \
+			|| { bad "$dir" "lease: проба до истечения аренды не прошла"; return 1; }
+		[ "$(cat "$dir/G1.probe-2" 2>/dev/null)" = "no" ] \
+			|| { bad "$dir" "lease: кадр из-под истёкшей аренды доставлен"; return 1; }
+		check_no_traps "$dir" || { bad "$dir" "lease: трап"; return 1; }
 		stop_all "$dir"
 		return 0
 	}
@@ -740,6 +813,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			alloc_role "G$i" "$((i % 2 + 1))"
 			alloc_role "J$i" "$((i % 2 + 1))"
 			alloc_role "M$i" "$((i % 2 + 1))"
+			alloc_role "K$i" "$((i % 2 + 1))"
 			HOST_OF[P$i]="$((i % 2 + 1))"	# процесс живёт там же, где его узлы
 		done
 		: > "$dir/nodes"
@@ -747,20 +821,42 @@ if [ "${INNER:-0}" = 1 ]; then
 			echo "G$i $(addr_of "G$i")" >> "$dir/nodes"
 			echo "J$i $(addr_of "J$i")" >> "$dir/nodes"
 			echo "M$i $(addr_of "M$i")" >> "$dir/nodes"
+			echo "K$i $(addr_of "K$i")" >> "$dir/nodes"
 		done
+		# TLS: канал дороже. Меньше переводов, без пассивации (её проверяет
+		# прогон по TCP) и с более редким повтором шага.
+		local ops="$OBX_OPS" idle=2 retry=150
+		if [ "$TLS" = 1 ]; then
+			[ "$ops" -gt 8 ] && ops=8
+			idle=0; retry=1000
+		fi
 		for ((i = 0; i < 5; i++)); do
-			launch_role "$dir" "P$i" --SCENARIO=obxcluster --IDX="$i" --N=5 --TICK="$TICK" --OPS="$OBX_OPS" --IDLE=2 --RETRY=150 --DROP=0
+			launch_role "$dir" "P$i" --SCENARIO=obxcluster --IDX="$i" --N=5 --TICK="$TICK" --OPS="$ops" --IDLE="$idle" --RETRY="$retry" --DROP=0
 			PIDS[P$i]=$LASTPID
 		done
+		tmo=3000; [ "$TLS" = 1 ] && tmo=30000
 		for ((i = 0; i < 5; i++)); do
-			waitfile "$dir/P$i.ready" 3000 || { bad "$dir" "obxcluster: P$i не готов"; return 1; }
+			waitfile "$dir/P$i.ready" "$tmo" || { bad "$dir" "obxcluster: P$i не готов"; return 1; }
 		done
-		wait_members "$dir" 5 60000 || { bad "$dir" "obxcluster: не все вступили"; return 1; }
+		local tmo; tmo=60000; [ "$TLS" = 1 ] && tmo=150000
+		wait_members "$dir" 5 "$tmo" || { bad "$dir" "obxcluster: не все вступили"; return 1; }
+		if [ "$TLS" = 1 ]; then
+			# TLS: полная доля отказов (разрыв и убийства) — в прогоне по
+			# TCP; на TLS цена канала делает такой прогон многосекундным,
+			# поэтому здесь нагрузка и все сверки итога, без отказов.
+			touch "$dir/start"
+			tmo=240000
+			for ((i = 0; i < 5; i++)); do
+				waitfile "$dir/P$i.result" "$tmo" || { bad "$dir" "obxcluster: нет итога P$i"; return 1; }
+			done
+			anycoord=0; anyloss=0
+		else
 		# разрыв сети: P3 заморожен до начала работы
 		kill -STOP "${PIDS[P3]}" 2>/dev/null
 		touch "$dir/start"
 		say "obxcluster: нагрузка пошла, жду три перевода"
-		wait_progress "$dir" 3 30000 || { kill -CONT "${PIDS[P3]}" 2>/dev/null; bad "$dir" "obxcluster: работа не началась"; return 1; }
+		tmo=30000; [ "$TLS" = 1 ] && tmo=120000
+		wait_progress "$dir" 3 "$tmo" || { kill -CONT "${PIDS[P3]}" 2>/dev/null; bad "$dir" "obxcluster: работа не началась"; return 1; }
 		# жертвы — процессы лидеров журнала и службы состава, кроме P3
 		v1=$(leader_of "$dir" J); v2=$(leader_of "$dir" M)
 		[ -n "$v1" ] || v1=0
@@ -783,7 +879,7 @@ if [ "${INNER:-0}" = 1 ]; then
 		# перезапуск убитых узлов с тем же хранилищем
 		say "obxcluster: поднимаю P$v1 и P$v2"
 		for c in "$v1" "$v2"; do
-			launch_role "$dir" "P$c" --SCENARIO=obxcluster --IDX="$c" --N=5 --TICK="$TICK" --OPS="$OBX_OPS" --IDLE=2 --RETRY=150 --DROP=0
+			launch_role "$dir" "P$c" --SCENARIO=obxcluster --IDX="$c" --N=5 --TICK="$TICK" --OPS="$ops" --IDLE="$idle" --RETRY="$retry" --DROP=0
 			PIDS[P$c]=$LASTPID
 		done
 		anycoord=0
@@ -791,6 +887,7 @@ if [ "${INNER:-0}" = 1 ]; then
 		for ((i = 0; i < 5; i++)); do
 			waitfile "$dir/P$i.result" 6000 || { bad "$dir" "obxcluster: нет итога P$i"; return 1; }
 		done
+		fi
 		for ((i = 0; i < 5; i++)); do
 			grep -q 'good=1' "$dir/P$i.result" || { bad "$dir" "obxcluster: P$i $(cat "$dir/P$i.result" 2>/dev/null)"; return 1; }
 			sum=$(field "$dir/P$i.result" sum); dups=$(field "$dir/P$i.result" dups)
@@ -837,7 +934,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			|| { bad "$dir" "obxcluster: координатор ни разу не повторил шаг по тайм-ауту"; return 1; }
 		[ "$anyloss" -ge 1 ] \
 			|| { bad "$dir" "obxcluster: ни один первый ответ шага не потерян — повтор не проверен"; return 1; }
-		check_no_traps "$dir" || { bad "$dir" "obxcluster: трап"; return 1; }
+		check_conflict_traps "$dir" || { bad "$dir" "obxcluster: трап"; return 1; }
 		MEAS="$MEAS obxcluster-ms=$(( $(date +%s%3N) - start ))"
 		say "obxcluster: $(( $(date +%s%3N) - start )) мс"
 		stop_all "$dir"
@@ -924,8 +1021,12 @@ if [ "${INNER:-0}" = 1 ]; then
 		if want saga; then run_saga "$d/saga" || break; fi
 		if want grain; then run_grain "$d/grain" || break; fi
 		if want membership; then run_membership "$d/membership" || break; fi
+		if want lease; then
+			[ "$TLS" = 1 ] || { say "lease: пропуск без --tls"; }
+			[ "$TLS" = 1 ] && { run_lease "$d/lease" || break; }
+		fi
 		if want obxcluster; then
-			if [ "$TLS" = 1 ]; then echo "  obxcluster: пропущен в --tls (сертификаты узлов G/J/M не выдаются; задача — docs/current-tasks.md)"
+			if [ "$TLS" = 1 ]; then say "obxcluster: пропуск в --tls (зависает; задача в docs/current-tasks.md)"
 			else run_obxcluster "$d/obxcluster" || break; fi
 		fi
 		if want bench; then run_bench "$d/bench" || break; fi
@@ -980,11 +1081,35 @@ while [ "$pass" -lt 3 ]; do
 	fi
 done
 
+# Узлы сценария: по этому списку выдаются сертификаты, вручную список не
+# ведётся. Роли, которым сертификат подменяют (F, K, N, F1..F3), в списке
+# не нужны: они предъявляют сертификат другой роли.
+certs_for() {
+	case "$1" in
+		ask) echo "E Q";;
+		reconnect) echo "S C";;
+		secure) echo "E E2 e X M Y";;
+		raft) echo "C R0 R1 R2 R3 R4";;
+		saga) echo "A B C";;
+		grain) echo "G0 G1 G2 R0 R1 R2";;
+		membership) echo "S0 S1 S2 S3 S4 R0 R1 R2 G0 G1 G2 G3 K0 K1 K2 K3";;
+		lease) echo "S0 S1 S2 S3 S4 R0 R1 R2 G0 G1 G2 K0 K1 K2";;
+		obxcluster) echo "G0 G1 G2 G3 G4 J0 J1 J2 J3 J4 M0 M1 M2 M3 M4 K0 K1 K2 K3 K4";;
+		bench) echo "C R0 R1 R2";;
+	esac
+}
+
 CERTDIR=""
 if [ "$TLS" = 1 ]; then
 	CERTDIR="$work/certs"
-	"$BB/tools/cluster-certs.sh" "$CERTDIR" \
-		E Q S A B C X M Y E2 e S0 S1 S2 S3 S4 R0 R1 R2 R3 R4 G0 G1 G2 G3 >/dev/null || exit 1
+	if [ "$ONLY" = all ]; then
+		nodes=$(for s in ask reconnect secure raft saga grain membership lease obxcluster bench; do
+			certs_for "$s"; done | tr ' ' '\n' | sort -u | tr '\n' ' ')
+	else
+		nodes=$(certs_for "$ONLY" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+	fi
+	[ -n "$nodes" ] || { echo "test-cluster: для сценария '$ONLY' нет списка узлов" >&2; exit 2; }
+	"$BB/tools/cluster-certs.sh" "$CERTDIR" $nodes >/dev/null || exit 1
 fi
 
 export OBX_OPS

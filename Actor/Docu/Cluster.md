@@ -188,8 +188,10 @@ repeated step after passivation, and a balance that follows the outcomes on ever
 - The default node channel is `ActorNetTcp`, plaintext. The protected channel is `ActorNetTls`
   (TLS 1.3, mutual certificate check, the "from" field checked against the certificate, a node
   outside the membership refused; guide [Actors.md](Actors.md), section 10;
-  `tools/test-cluster.sh --tls`). The `obxcluster` scenario is not yet run over TLS. There are no
-  revocation lists: revocation is removal from the membership.
+  `tools/test-cluster.sh --tls`). The `obxcluster` scenario is not yet run over TLS. The admitted
+  nodes come from the membership service (`RaftGrainMembership.SetTransport`): leaving and lease
+  expiry remove the certificate fingerprint and cut the node's links (scenario `lease`). There are
+  no revocation lists (CRL/OCSP).
 - Delivery is at most once. The transport does not repeat a lost frame; the application does: the
   client sends `Tick`, the coordinator sends the step again, the account recognises the operation
   number. An application that makes no repeats simply loses a letter when a frame is lost.

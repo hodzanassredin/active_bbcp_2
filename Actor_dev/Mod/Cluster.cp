@@ -39,7 +39,7 @@ MODULE Actor_devCluster;
 		RaftMembership, RaftGrainMembership;
 
 	CONST
-		maxRoles = 16;
+		maxRoles = 32;
 		maxNets = 8;
 		maxText = 4096;
 		maxMembers = 64;
@@ -162,6 +162,8 @@ MODULE Actor_devCluster;
 		memOps, memOks, memBad: INTEGER;
 		memBalance, memExpect: INTEGER;	(* сумма по всем счетам и ожидаемый баланс текущего *)
 		memDone, memRevoked: BOOLEAN;
+		probeNd: ActorNet.Node; probeTag: Name;
+		leaseMode: BOOLEAN; memLease: LONGINT;	(* сценарий аренды: пауза продления *)
 		(* --- сценарий obxcluster --- *)
 		obxCl: ActorGrain.Cluster;
 		obxJournal: RaftJournal.Client;
@@ -701,6 +703,16 @@ MODULE Actor_devCluster;
 			IF adrs[i].name # self THEN NetPeer(t, adrs[i].name, adrs[i].adr) END
 		END
 	END PeerAll;
+
+	PROCEDURE PeerOneGroup (t: Net; IN self: ARRAY OF CHAR; c: CHAR);
+	(* Только узлы группы c: канал узла гранул носит лишь кадры гранул, и
+	   чужие имена ему не нужны — список участников их не трогает. *)
+		VAR i: INTEGER;
+	BEGIN
+		FOR i := 0 TO nadr - 1 DO
+			IF (adrs[i].name # self) & (adrs[i].name[0] = c) THEN NetPeer(t, adrs[i].name, adrs[i].adr) END
+		END
+	END PeerOneGroup;
 
 	(* --- роль ask: узел E ------------------------------------------------------ *)
 
@@ -1715,7 +1727,11 @@ MODULE Actor_devCluster;
 		VAR joined: BOOLEAN; now, members, lists: INTEGER; s, x: ARRAY 256 OF CHAR;
 	BEGIN
 		RaftGrainMembership.Status(memCfg, joined, now, members, lists);
-		s := "role=" + role; IntToText(ActorGrain.AliveCount(memCl), x); s := s + " alive=" + x;
+		IF secure & (nnets > 0) THEN
+			IntToText(ActorNetTls.MemberCount(nets[0].tls), x); s := "tls=" + x + " "
+		ELSE s := ""
+		END;
+		s := s + "role=" + role; IntToText(ActorGrain.AliveCount(memCl), x); s := s + " alive=" + x;
 		IntToText(ActorGrain.Members(memCl), x); s := s + " members=" + x;
 		IF joined THEN s := s + " joined=1" ELSE s := s + " joined=0" END;
 		IntToText(RaftGrainMembership.Errors(memCfg), x); s := s + " errors=" + x;
@@ -1723,19 +1739,58 @@ MODULE Actor_devCluster;
 		PutText(role + ".status", s)
 	END WriteGrainStatus;
 
+	PROCEDURE Probe;
+	(* Проба из-под истёкшей аренды: письмо узлу-эху другого участника.
+	   Кадр уходит транспортом; принявший его обязан отказать. *)
+		VAR cap: ARRAY 256 OF CHAR; r: ActorCore.Ref; m: Ping; rep: ActorCore.Msg;
+			s: ARRAY 128 OF CHAR;
+	BEGIN
+		GetText("echo.cap", cap);
+		s := "";
+		IF (cap = "") OR (probeNd = NIL) THEN s := "no-cap"
+		ELSE
+			r := ActorNet.Import(probeNd, cap);
+			IF r = NIL THEN s := "no-ref"
+			ELSE
+				NEW(m); m.n := 1;
+				IF ActorCore.Ask(r, m, 3000, rep) = ActorCore.ok THEN s := "ok" ELSE s := "no" END
+			END
+		END;
+		PutText(role + ".probe-" + probeTag, s)
+	END Probe;
+
+	PROCEDURE ProbeBody;
+	BEGIN
+		Probe
+	END ProbeBody;
+
 	PROCEDURE MembershipGrainLoop;
 		VAR last, lastR, leftAt: LONGINT; t: RaftNode.Tick; s: ARRAY 128 OF CHAR;
+			d: Driver;
 			sent, read, refused, forged, rejected, revoked: LONGINT;
-			rl, term, leader, la, lt, commit, applied, tickNo: INTEGER; broken: BOOLEAN;
+			rl, term, leader, la, lt, commit, applied, tickNo: INTEGER;
+			writtenRev: LONGINT; broken, paused: BOOLEAN;
 	BEGIN
-		last := 0; lastR := 0; leftAt := -1; tickNo := 0;
+		last := 0; lastR := 0; leftAt := -1; tickNo := 0; writtenRev := -1;
+		paused := FALSE;
 		WHILE ~stop & (Services.Ticks() - t0 < serveMs) DO
 			Pump; CheckStop;
 			IF Services.Ticks() - last >= tickMs THEN
 				last := Services.Ticks();
 				INC(tickNo);
 				RaftGrainMembership.time := Services.Ticks();
-				RaftGrainMembership.Tick(memCfg);
+				(* Пауза продления аренды: узел на связи, но служба
+				   перестаёт видеть его живым — так проверяется истечение
+				   аренды, а не обрыв сокета. *)
+				IF Exists("pause-" + role) THEN paused := TRUE END;
+				IF ~paused THEN RaftGrainMembership.Tick(memCfg) END;
+				IF leaseMode & Exists("probe-" + role) THEN
+					GetText("probe-" + role, s);
+					IF s # probeTag THEN
+						(* Письмо ждёт ответа: оно идёт задачей, а не из главного цикла. *)
+						probeTag := s$; NEW(d); d.body := ProbeBody; Tasks.Start(d)
+					END
+				END;
 				(* TLS: журнал шлёт сердцебиения реже, иначе канал занимает
 				   процесс и служба состава не успевает ответить. *)
 				IF ~secure OR (tickNo MOD 2 = 0) THEN
@@ -1746,9 +1801,13 @@ MODULE Actor_devCluster;
 					GetText("leave", s);
 					IF s = role THEN RaftGrainMembership.Leave(memCfg); leftAt := Services.Ticks() END
 				END;
-				IF secure & Exists("revoked") & (nnets > 0) THEN
+				IF secure & (nnets > 0) THEN
+					(* Отзывы канала гранул: число, чтобы водитель отличал
+					   отзыв по составу от прежних. *)
 					ActorNetTls.Stats(nets[0].tls, sent, read, refused, forged, rejected, revoked);
-					IF revoked > 0 THEN PutText(role + ".revoked", "1") END
+					IF revoked # writtenRev THEN
+						writtenRev := revoked; IntToText(revoked, s); PutText(role + ".revoked", s$)
+					END
 				END;
 				IF (idx < 3) & (Services.Ticks() - lastR >= 200) THEN
 					lastR := Services.Ticks();
@@ -1761,14 +1820,15 @@ MODULE Actor_devCluster;
 	END MembershipGrainLoop;
 
 	PROCEDURE^ MembershipDriver;
+	PROCEDURE^ LeaseDriver;
 
 	PROCEDURE RunMembershipGrain;
-		VAR grainT, raftT: Net; grainNd, raftNd: ActorNet.Node;
-			store: RaftStorage.Storage; cap: ARRAY RaftNode.capLen OF CHAR;
+		VAR grainT, raftT, cliT: Net; grainNd, raftNd, cliNd: ActorNet.Node;
+			kName: Name; store: RaftStorage.Storage; cap: ARRAY RaftNode.capLen OF CHAR;
 			s: ARRAY 64 OF CHAR; i, inc, id, lease, renew, refresh, nsvc: INTEGER; d: Driver;
 	BEGIN
 		IntToText(idx, s);
-		OpenNode(role, grainT, grainNd); PeerAll(grainT, role);
+		OpenNode(role, grainT, grainNd); PeerOneGroup(grainT, role, "G");
 		IF idx < 3 THEN
 			statusName := "R" + s;
 			OpenNode(statusName, raftT, raftNd); PeerAll(raftT, statusName);
@@ -1778,6 +1838,11 @@ MODULE Actor_devCluster;
 			raftRef := RaftNode.Start(raftCfg);
 			ActorNet.Export(raftNd, raftRef, cap); PutText(statusName + ".cap", cap)
 		END;
+		(* Свой канал водителя вне обоих кластеров: клиент журнала и службы
+		   не должен оказаться на узле, к которому сам же шлёт, — кадр
+		   узлу-себе транспорт не несёт. *)
+		kName := "K" + s;
+		OpenNode(kName, cliT, cliNd); PeerAll(cliT, kName);
 		nsvc := 5;
 		ASSERT(WaitRoleCaps("S", nsvc, 30000), 121);
 		ReadCaps("S", nsvc, memServiceCaps);
@@ -1788,31 +1853,47 @@ MODULE Actor_devCluster;
 		END;
 		inc := SHORT(FileInt(role + ".inc")); IF inc < 1 THEN inc := 1 END;
 		id := (idx + 5) * 100000 + inc;
-		memJournal := RaftJournal.New(grainNd, memJournalCaps, 3, id);
+		probeNd := grainNd;
+		IF leaseMode & (idx = 0) THEN
+			(* Узел-эхо для пробы из-под истёкшей аренды. *)
+			ActorNet.Export(grainNd, ActorCore.Spawn(NIL, ActorCore.NewProps(NewEcho), "echo"), cap);
+			PutText("echo.cap", cap)
+		END;
+		memJournal := RaftJournal.New(cliNd, memJournalCaps, 3, id);
 		memJournal.tickMs := 0;
-		memClient := RaftMembership.New(grainNd, memServiceCaps, nsvc, (idx + 5) * 1000000 + inc);
+		memClient := RaftMembership.New(cliNd, memServiceCaps, nsvc, (idx + 5) * 1000000 + inc);
 		memClient.tickMs := 0;
-		lease := 5000; renew := 10; refresh := 10;
 		IF secure THEN
 			(* TLS-канал дешевле в байтах, но дороже в пробуждениях: служба
-			   не успевает за частыми Renew. Аренда длиннее. *)
-			lease := 60000; renew := 50; refresh := 50;
+			   не успевает за частыми Renew. В сценарии аренды она короче:
+			   её истечение должен успеть показать прогон. *)
+			IF leaseMode THEN lease := 15000; renew := 50; refresh := 25
+			ELSE lease := 60000; renew := 50; refresh := 50
+			END;
 			memClient.timeoutTicks := 100; memClient.giveUpTicks := 1000
+		ELSE
+			lease := 5000; renew := 10; refresh := 10
 		END;
+		memLease := lease;
 		memCl := ActorGrain.New(grainNd, memJournal); ActorGrain.Register(memCl, "acct", NewGrainAcct);
 		OwnKey(role, memKey, memKeyLen);
 		memCfg := RaftGrainMembership.NewConfig(idx, memCl, memClient, memKey, memKeyLen, lease, renew, refresh, 0);
+		IF secure THEN RaftGrainMembership.SetTransport(memCfg, grainT.tls) END;
 		(* Первый Join уходит из Start; время аренды должно быть настоящим,
 		   иначе запись получает leaseUntil = lease и сразу истекшую аренду. *)
 		RaftGrainMembership.time := Services.Ticks();
 		ASSERT(RaftGrainMembership.Start(memCfg) # NIL, 123);
 		PutText(role + ".ready", "1");
-		IF idx = 0 THEN NEW(d); d.body := MembershipDriver; Tasks.Start(d) END;
+		IF idx = 0 THEN
+			NEW(d);
+			IF leaseMode THEN d.body := LeaseDriver ELSE d.body := MembershipDriver END;
+			Tasks.Start(d)
+		END;
 		MembershipGrainLoop;
 		IF clock # NIL THEN clock.dead := TRUE END;
 		memJournal.Close; RaftMembership.Close(memClient);
 		ActorRun.Shutdown;
-		NetClose(grainT);
+		NetClose(grainT); NetClose(cliT);
 		IF idx < 3 THEN NetClose(raftT) END
 	END RunMembershipGrain;
 
@@ -1914,24 +1995,32 @@ MODULE Actor_devCluster;
 		END
 	END CheckMemberKeys;
 
-	PROCEDURE WaitAnyRevoked (ms: LONGINT): BOOLEAN;
-	(* Любой живой участник, закрывший соединение с выбывшим G1, пишет
-	   <роль>.revoked; сам G1 связи с собой не имеет. *)
-		VAR t: LONGINT; i: INTEGER; s: ARRAY 16 OF CHAR; ok: BOOLEAN;
+	PROCEDURE RevokedSum (): INTEGER;
+	(* Сумма отзывов канала гранул: <роль>.revoked — число отзывов
+	   ActorNetTls на узле гранул этой роли. *)
+		VAR i, v, sum: INTEGER; s: ARRAY 16 OF CHAR;
 	BEGIN
-		t := Services.Ticks(); ok := FALSE;
-		WHILE ~ok & ~stop & (Services.Ticks() - t < ms) DO
-			i := 0;
-			WHILE (i < 4) & ~ok DO
-				IntToText(i, s); ok := Exists("G" + s + ".revoked"); INC(i)
-			END;
-			IF ~ok THEN Tasks.Sleep(20); CheckStop END
+		sum := 0;
+		FOR i := 0 TO 3 DO
+			IntToText(i, s); v := SHORT(FileInt("G" + s + ".revoked"));
+			IF v > 0 THEN INC(sum, v) END
 		END;
-		RETURN ok
-	END WaitAnyRevoked;
+		RETURN sum
+	END RevokedSum;
+
+	PROCEDURE WaitRevokedAbove (base: INTEGER; ms: LONGINT): BOOLEAN;
+	(* Ждать отзыва сверх base: отпечаток убран из состава, связь закрыта. *)
+		VAR t: LONGINT;
+	BEGIN
+		t := Services.Ticks();
+		WHILE (RevokedSum() <= base) & ~stop & (Services.Ticks() - t < ms) DO
+			Tasks.Sleep(20); CheckStop
+		END;
+		RETURN RevokedSum() > base
+	END WaitRevokedAbove;
 
 	PROCEDURE MembershipDriver;
-		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; i, aliveMs: INTEGER;
+		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; i, aliveMs, revBase: INTEGER;
 			ok, good, keysOk: BOOLEAN;
 			s: ARRAY 512 OF CHAR; n16: ARRAY 16 OF CHAR; skipKill: SET;
 	BEGIN
@@ -1966,8 +2055,15 @@ MODULE Actor_devCluster;
 			END
 		END;
 		IF good THEN
+			revBase := RevokedSum();
 			PutText("leave", "G1");
-			IF ~WaitGrainAlive(3, {1}, aliveMs) THEN good := FALSE; PutText("driver.fail", "leave") END
+			IF ~WaitGrainAlive(3, {1}, aliveMs) THEN good := FALSE; PutText("driver.fail", "leave")
+			ELSIF secure & ~WaitRevokedAbove(revBase, 10000) THEN
+				(* Выход из состава сам убирает отпечаток: связи с G1
+				   рвутся без файла revoked. *)
+				good := FALSE; PutText("driver.fail", "leave-revoke")
+			ELSE IF secure THEN memRevoked := TRUE END
+			END
 		END;
 		IF good THEN
 			ActorGrain.Owner(memCl, "acct", key, owner);
@@ -2032,15 +2128,6 @@ MODULE Actor_devCluster;
 			PutText("svc.remove4", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "remove4") END
 		END;
-		IF good & secure THEN
-			(* Выход = отзыв. Список участников перестаёт пускать G1: его
-			   соединения рвутся. Отзыв идёт последним, иначе выбывший узел
-			   унёс бы с собой и свой узел журнала (R1 в процессе G1). *)
-			PutText("revoked", "G1");
-			IF ~WaitAnyRevoked(10000) THEN good := FALSE; PutText("driver.fail", "revoke")
-			ELSE memRevoked := TRUE; PutText("G0.revoked", "ok")
-			END
-		END;
 		s := "oks="; IntToText(memOks, n16); s := s + n16$;
 		IntToText(memBad, n16); s := s + " bad=" + n16$;
 		IntToText(memBalance, n16); s := s + " balance=" + n16$;
@@ -2050,6 +2137,56 @@ MODULE Actor_devCluster;
 		PutText("G0.result", s);
 		memDone := TRUE; finished := TRUE
 	END MembershipDriver;
+
+	PROCEDURE LeaseDriver;
+	(* Истечение аренды: G1 на связи, но перестаёт её продлевать. Служба
+	   считает его мёртвым, состав убирает отпечаток: связи рвутся, новый
+	   кадр из-под истёкшей аренды не принимается. *)
+		VAR good: BOOLEAN; t: LONGINT; n: INTEGER;
+			s, x: ARRAY 256 OF CHAR;
+	BEGIN
+		good := TRUE;
+		IF ~WaitGrainAlive(3, {}, 60000) THEN good := FALSE; PutText("driver.fail", "grains3") END;
+		IF good THEN
+			(* До истечения аренды письмо узлу-эху доходит. *)
+			PutText("probe-G1", "1");
+			t := Services.Ticks();
+			WHILE ~Exists("G1.probe-1") & ~stop & (Services.Ticks() - t < 20000) DO
+				Tasks.Sleep(20); CheckStop
+			END;
+			GetText("G1.probe-1", s);
+			IF s # "ok" THEN good := FALSE; PutText("driver.fail", "probe-before") END
+		END;
+		IF good THEN
+			PutText("pause-G1", "1");
+			t := Services.Ticks();
+			WHILE (ActorGrain.Alive(memCl, "G1") OR (ActorNetTls.MemberCount(nets[0].tls) >= 3)) & ~stop
+					& (Services.Ticks() - t < memLease + 20000) DO
+				Tasks.Sleep(20); CheckStop
+			END;
+			n := ActorNetTls.MemberCount(nets[0].tls);
+			IF ActorGrain.Alive(memCl, "G1") OR (n >= 3) THEN
+				good := FALSE; PutText("driver.fail", "expire");
+				s := "tls="; IntToText(n, x); s := s + x;
+				IF ActorGrain.Alive(memCl, "G1") THEN s := s + " alive=1" ELSE s := s + " alive=0" END;
+				PutText("lease.trace", s)
+			END
+		END;
+		IF good THEN
+			(* Кадр из-под истёкшей аренды: G1 шлёт вклад в ключ G0. *)
+			PutText("probe-G1", "2");
+			t := Services.Ticks();
+			WHILE ~Exists("G1.probe-2") & ~stop & (Services.Ticks() - t < 20000) DO
+				Tasks.Sleep(20); CheckStop
+			END;
+			GetText("G1.probe-2", s);
+			IF s # "no" THEN good := FALSE; PutText("driver.fail", "probe-delivered") END
+		END;
+		s := "expired=1";
+		IF good THEN s := s + " good=1" ELSE s := s + " good=0" END;
+		PutText("G0.result", s);
+		memDone := TRUE; finished := TRUE
+	END LeaseDriver;
 
 	(* --- obxcluster: счета и переводы в пяти процессах ------------------------ *)
 
@@ -2113,29 +2250,36 @@ MODULE Actor_devCluster;
 	(** Процесс-узел кластера счетов: узел гранул G<idx>, узел службы
 		состава M<idx> и узел журнала J<idx>, журнал RaftJournal, состав из
 		RaftMembership. Клиент начинает работу по файлу start. *)
-		VAR grainT, jT, mT: Net; grainNd, jNd, mNd: ActorNet.Node;
+		VAR grainT, jT, mT, cliT: Net; grainNd, jNd, mNd, cliNd: ActorNet.Node;
 			jStore, mStore: RaftStorage.Storage; jcaps, mcaps: RaftNode.Caps;
-			cap: ARRAY RaftNode.capLen OF CHAR; gName, jName, mName: Name;
-			key: ARRAY 2 OF BYTE; s, x: ARRAY 256 OF CHAR; i, inc, id, p, ticks: INTEGER;
+			cap: ARRAY RaftNode.capLen OF CHAR; gName, jName, mName, kName: Name;
+			key: ARRAY 32 OF BYTE; keyLen, lease, renew, refresh: INTEGER;
+			s, x: ARRAY 256 OF CHAR; i, inc, id, p, ticks: INTEGER;
 			last: LONGINT;
 			joined: BOOLEAN; now, members, lists: INTEGER; sink, client: ActorCore.Ref;
 			drive: ObxCluster.Drive;
 	BEGIN
 		IntToText(idx, s);
-		gName := "G" + s$; jName := "J" + s$; mName := "M" + s$;
-		OpenNode(gName, grainT, grainNd); PeerAll(grainT, gName);
+		gName := "G" + s$; jName := "J" + s$; mName := "M" + s$; kName := "K" + s$;
+		OpenNode(gName, grainT, grainNd); PeerOneGroup(grainT, gName, "G");
 		OpenNode(jName, jT, jNd); PeerAll(jT, jName);
 		OpenNode(mName, mT, mNd); PeerAll(mT, mName);
+		(* Клиенты журнала и службы — на своём узле вне обоих кластеров:
+		   иначе запрос лидеру, оказавшемуся своим же узлом, не ушёл бы. *)
+		OpenNode(kName, cliT, cliNd); PeerAll(cliT, kName);
 
 		OpenRaftStorage(jName, jStore);
 		obxJCfg := RaftNode.NewConfig(idx, 5, jNd, jStore, RaftJournal.NewMachine);
 		obxJCfg.electionTicks := 10; obxJCfg.seed := 9000 + idx * 37; obxJCfg.tickMs := tickMs;
+		(* TLS: сердцебиения реже, иначе канал занимает процесс. *)
+		IF secure THEN obxJCfg.tickMs := 2 * tickMs END;
 		ASSERT(RaftNode.Start(obxJCfg) # NIL, 125);
 		ActorNet.Export(jNd, obxJCfg.ref, cap); PutText(jName + ".cap", cap);
 
 		OpenRaftStorage(mName, mStore);
 		obxMCfg := RaftNode.NewConfig(idx, 5, mNd, mStore, RaftMembership.NewMachine);
 		obxMCfg.electionTicks := 10; obxMCfg.seed := 11000 + idx * 37; obxMCfg.tickMs := tickMs;
+		IF secure THEN obxMCfg.tickMs := 2 * tickMs END;
 		ASSERT(RaftNode.Start(obxMCfg) # NIL, 126);
 		ActorNet.Export(mNd, obxMCfg.ref, cap); PutText(mName + ".cap", cap);
 
@@ -2152,9 +2296,9 @@ MODULE Actor_devCluster;
 
 		inc := SHORT(FileInt(gName + ".inc")); IF inc < 1 THEN inc := 1 END;
 		id := (idx + 1) * 100000 + inc;
-		obxJournal := RaftJournal.New(grainNd, jcaps, 5, id);
+		obxJournal := RaftJournal.New(cliNd, jcaps, 5, id);
 		id := (idx + 10) * 100000 + inc;
-		obxMem := RaftMembership.New(grainNd, mcaps, 5, id);
+		obxMem := RaftMembership.New(cliNd, mcaps, 5, id);
 		obxCl := ActorGrain.New(grainNd, obxJournal);
 		ActorGrain.Register(obxCl, "acct", ObxCluster.NewAccount);
 		ActorGrain.Register(obxCl, "xfer", ObxCluster.NewCoord);
@@ -2162,9 +2306,17 @@ MODULE Actor_devCluster;
 		obxCl.idle := GetInt("IDLE", 2);	(* счета засыпают между шагами *)
 		ObxCluster.SetRetry(GetInt("RETRY", 150));	(* тайм-аут ответа до повтора *)
 		ObxCluster.SetDropStep(GetInt("DROP", 0));	(* первый ответ шага теряется *)
-		key[0] := SHORT(SHORT(idx + 1)); key[1] := 11;
-		obxCfg := RaftGrainMembership.NewConfig(idx, obxCl, obxMem, key, 2,
-			GetInt("LEASE", 4000), GetInt("RENEW", 10), GetInt("REFRESH", 10), 0);
+		(* Ключ вступления в --tls — отпечаток сертификата узла: по нему
+		   транспорт пускает узел в состав службы. *)
+		OwnKey(gName, key, keyLen);
+		IF secure THEN
+			(* TLS: служба состава отвечает медленнее; аренда длиннее. *)
+			lease := GetInt("LEASE", 30000); renew := GetInt("RENEW", 50); refresh := GetInt("REFRESH", 50)
+		ELSE
+			lease := GetInt("LEASE", 4000); renew := GetInt("RENEW", 10); refresh := GetInt("REFRESH", 10)
+		END;
+		obxCfg := RaftGrainMembership.NewConfig(idx, obxCl, obxMem, key, keyLen, lease, renew, refresh, 0);
+		IF secure THEN RaftGrainMembership.SetTransport(obxCfg, grainT.tls) END;
 		ASSERT(RaftGrainMembership.Start(obxCfg) # NIL, 123);
 
 		obxTransfers := GetInt("OPS", 24);
@@ -2188,7 +2340,10 @@ MODULE Actor_devCluster;
 					WriteObxGrain(role + ".status")
 				END;
 				RaftGrainMembership.Status(obxCfg, joined, now, members, lists);
-				IF (members >= 5) & Exists("start") & (ticks MOD 5 = 0) THEN
+				(* Работа начинается, когда этот узел видит живыми всех пятерых:
+				   иначе размещение ключей у соседей ещё разное и две копии
+				   ключа пишут одновременно (конфликт журнала). *)
+				IF (members >= 5) & (ActorGrain.AliveCount(obxCl) >= 5) & Exists("start") & (ticks MOD 5 = 0) THEN
 					NEW(drive); ActorCore.Tell(obxClient, drive)
 				END;
 				p := ObxCluster.Progress();
@@ -2199,7 +2354,7 @@ MODULE Actor_devCluster;
 		END;
 		obxJournal.Close; RaftMembership.Close(obxMem);
 		ActorRun.Shutdown;
-		NetClose(grainT); NetClose(jT); NetClose(mT)
+		NetClose(grainT); NetClose(jT); NetClose(mT); NetClose(cliT)
 	END RunObxCluster;
 
 	(* --- диспетчер ------------------------------------------------------------- *)
@@ -2211,6 +2366,7 @@ MODULE Actor_devCluster;
 		GetPar("CERTDIR", certDir); secure := GetInt("TLS", 0) # 0;
 		serveMs := 120000; IF secure THEN serveMs := 600000 END;
 		idx := GetInt("IDX", 0); n := GetInt("N", 0); tickMs := GetInt("TICK", 20);
+		leaseMode := scenario = "lease";
 		burst := GetInt("BURST", 300);
 		GetPar("CLAIM", claimName); IF claimName = "" THEN claimName := role$ END;
 		GetPar("CERT", certOverride); GetPar("KEY", keyOverride);
@@ -2248,6 +2404,9 @@ MODULE Actor_devCluster;
 			nodes := n; idx := GetInt("IDX", 0);
 			RunGrain
 		ELSIF scenario = "membership" THEN
+			idx := GetInt("IDX", 0);
+			IF role[0] = "S" THEN RunMembershipService ELSE RunMembershipGrain END
+		ELSIF scenario = "lease" THEN
 			idx := GetInt("IDX", 0);
 			IF role[0] = "S" THEN RunMembershipService ELSE RunMembershipGrain END
 		ELSIF scenario = "obxcluster" THEN
