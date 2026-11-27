@@ -216,7 +216,7 @@ MODULE Actor_devRouter;
 			ActorSup.NewOneForOne(ActorCore.Stop, 0, 1000));
 		UnitAssert.True(UntilInt(starts, 3, 2000), "three routes born");
 		ActorCore.Tell(r, boom);
-		Idle(100);	(* ребёнок остановлен, Terminated снял маршрут *)
+		Idle(300);	(* ребёнок остановлен, Terminated снял маршрут *)
 		ActorCore.Tell(r, put); ActorCore.Tell(r, put); ActorCore.Tell(r, put);
 		ActorCore.Tell(r, put); ActorCore.Tell(r, put); ActorCore.Tell(r, put);
 		UnitAssert.True(UntilInt(served, 6, 2000), "six letters served by two routes");

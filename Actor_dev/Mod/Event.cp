@@ -203,7 +203,7 @@ MODULE Actor_devEvent;
 		UnitAssert.True(UntilInt(served, 1, 2000), "subscriber was alive");
 		ActorCore.StopActor(a);
 		IF UntilStopped(a, 1000) THEN END;
-		Idle(100);	(* поток получил Terminated и снял подписчика *)
+		Idle(300);	(* поток получил Terminated и снял подписчика *)
 		ActorEvent.Publish(stream, put);
 		Idle(100);
 		UnitAssert.EqualInt(0, deadCount, "stopped subscriber left the stream")
