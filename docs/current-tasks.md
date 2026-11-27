@@ -424,3 +424,4 @@
   расхождений (122 прогона); ссылки 0; test-cluster `--world 32` 3/3, `--world 32 --tls` 2/2,
   amd64 `--runs 1` и `--tls --runs 1` — ок; test-crypto-tls 64 и `--world 32` — PASS (по 175
   случаев); test-robust 64 и `--world 32` — 1, 4, 16 процессов.
+- 27.11: i386 влит (Crypto/Async/Actor/Raft/кластер/TLS на 32 битах), приёмка мной: порча MontCore (потерян верхний перенос) — красные Crypto_devEC; чисто: test32 без провалов, test 77/77, tls --world 32 PASS, cluster --world 32 --tls и amd64 ок. Хвосты: System_devUnload на i386, GcMany/Stacks не компилируются, odc* в /tmp от Computons.
