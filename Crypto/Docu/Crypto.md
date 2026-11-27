@@ -139,9 +139,11 @@ ECDHE-ECDSA suites.
 - In TLS 1.3 `CertificateVerify` signs 64 spaces, `TLS 1.3, server CertificateVerify` (or
   `client`), a zero byte and the transcript hash without the `CertificateVerify` itself.
   `rsa_pss_rsae_sha256/384`, `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384` and `ed25519`
-  are accepted; Ed25519 is verified but not signed. `Finished` is HMAC with the `finished` key
-  over the transcript hash; the client `Finished` covers the transcript including the server
-  `Finished`, and the application secrets do too.
+  are accepted; Ed25519 is verified but not signed. RSA PKCS#1 v1.5 is refused even when
+  `rsa_pkcs1_sha256` is named in `signature_algorithms`, because RFC 8446 §4.4.3 defines it for
+  certificate signatures only. A scheme that the peer did not offer is refused as well.
+  `Finished` is HMAC with the `finished` key over the transcript hash; the client `Finished`
+  covers the transcript including the server `Finished`, and the application secrets do too.
 - `HelloRetryRequest` is recognised by the `SHA-256("HelloRetryRequest")` random. Following
   RFC 8446 §4.4.1, the transcript replaces ClientHello1 with the synthetic `message_hash`
   message. The client repeats the `ClientHello` with the same random and session id but a

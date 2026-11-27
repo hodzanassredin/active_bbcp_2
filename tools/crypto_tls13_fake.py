@@ -7,13 +7,37 @@
   good        — полное рукопожатие, затем перевёрнутая строка (контроль);
   keyupdate   — после рукопожатия KeyUpdate(request_update=1), затем обмен;
   badcv       — CertificateVerify подписан с контекстом client вместо server;
+  badpkcs1    — CertificateVerify подписан rsa_pkcs1_sha256 (схема
+                предложена клиентом, но в 1.3 запрещена, RFC 8446 §4.4.3);
+  badpkcs1sha384 — то же с rsa_pkcs1_sha384 (клиент её не предлагал);
   badfinished — испорчен server Finished;
   badkeys     — ключи handshake выведены из испорченного транскрипта;
   hrr         — HelloRetryRequest с другой группой, затем полное рукопожатие;
-  hrrtwice    — два HelloRetryRequest подряд (клиент обязан отказаться).
+  hrrtwice    — два HelloRetryRequest подряд (клиент обязан отказаться);
+  hrrsv       — HRR без supported_versions (отказ);
+  hrrks       — HRR с ключом в key_share вместо одной группы (отказ);
+  ccsok       — законный CCS {0x01} до Finished (обмен продолжается);
+  ccsbad      — CCS с байтом 0x02 до Finished (отказ);
+  ccslong     — CCS длиной 2 до Finished (отказ);
+  ccsafter    — CCS после Finished (отказ в обмене);
+  emptyrec    — запись с пустым TLSInnerPlaintext (нет байта типа);
+  zeropad     — запись из одних нулей (типа нет);
+  emptyapp    — законная пустая запись application_data (обмен идёт);
+  paddedapp   — законная пустая запись с нулевым дополнением (обмен идёт);
+  shversion   — ServerHello с legacy_version 0304 (отказ);
+  shcomp      — ServerHello с legacy_compression_method 1 (отказ);
+  badext13    — длина блока расширений ServerHello больше записи (отказ);
+  badee       — EncryptedExtensions с невозможной длиной (отказ);
+  badcert13   — Certificate с невозможной длиной списка (отказ);
+  shortfinished — Finished короче хеша набора (отказ);
+  zeroshare   — key_share сервера из одних нулей (отказ);
+  badtag13    — испорченный тег AEAD записи 1.3;
+  badinnertype — внутренний тип вне 20..23;
+  badkeyupdate — KeyUpdate с кодом 2.
 
-Клиент обязан либо завершить обмен (good/keyupdate/hrr), либо отказаться
-без трапа (остальные). Запускается из tools/test-crypto-tls.sh.
+Клиент обязан либо завершить обмен (good/keyupdate/hrr/ccsok/emptyapp/
+paddedapp), либо отказаться без трапа (остальные). Запускается из
+tools/test-crypto-tls.sh.
 """
 import hashlib
 import hmac
@@ -207,17 +231,25 @@ def make_aead(suite):
     return name, key_len, kind
 
 
-def seal(suite, key, iv, seq, inner_type, payload):
+def seal_raw(suite, key, iv, seq, plaintext):
+    """Записать произвольный открытый текст (без добавления типа).
+
+    Нужен отрицательным случаям: пустой TLSInnerPlaintext и запись из
+    одних нулей заполнения, а также законное дополнение нулями.
+    """
     name, _, kind = make_aead(suite)
-    data = payload + bytes([inner_type])
-    total = len(data) + 16
+    total = len(plaintext) + 16
     aad = b"\x17\x03\x03" + total.to_bytes(2, "big")
     nonce = bytes(a ^ b for a, b in zip(iv, seq.to_bytes(12, "big")))
     if kind == "aes":
-        ct = AESGCM(key).encrypt(nonce, data, aad)
+        ct = AESGCM(key).encrypt(nonce, plaintext, aad)
     else:
-        ct = ChaCha20Poly1305(key).encrypt(nonce, data, aad)
+        ct = ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad)
     return b"\x17\x03\x03" + len(ct).to_bytes(2, "big") + ct
+
+
+def seal(suite, key, iv, seq, inner_type, payload):
+    return seal_raw(suite, key, iv, seq, payload + bytes([inner_type]))
 
 
 def open_record(suite, key, iv, seq, body):
@@ -245,8 +277,12 @@ def cert_verify_scheme(priv, suite_name):
     return 0x0804, hashes.SHA256()
 
 
+def cert_verify_content(digest, context):
+    return b" " * 64 + context + b"\x00" + digest
+
+
 def sign_cert_verify(priv, scheme, digest, context):
-    content = b" " * 64 + context + b"\x00" + digest
+    content = cert_verify_content(digest, context)
     if isinstance(priv, ec.EllipticCurvePrivateKey):
         return priv.sign(content, ec.ECDSA(hashes.SHA256() if scheme == 0x0403
                                          else hashes.SHA384()))
@@ -256,26 +292,56 @@ def sign_cert_verify(priv, scheme, digest, context):
                      hash_alg)
 
 
+def sign_cert_verify_pkcs1(priv, scheme, digest, context):
+    """RFC 8446, 4.4.3: rsa_pkcs1_* не годится для CertificateVerify 1.3.
+
+    Подпись корректна по PKCS#1 v1.5 и проверяема, поэтому без явной
+    проверки схемы рукопожатие прошло бы.
+    """
+    content = cert_verify_content(digest, context)
+    hash_alg = hashes.SHA256() if scheme == 0x0401 else hashes.SHA384()
+    return priv.sign(content, padding.PKCS1v15(), hash_alg)
+
+
 def certificate_message(der):
     entry = len(der).to_bytes(3, "big") + der + b"\x00\x00"
     return hs(11, b"\x00" + len(entry).to_bytes(3, "big") + entry)
 
 
-def server_hello(session_id, suite, group, pub, random=None):
+def server_hello(session_id, suite, group, pub, random=None, version=b"\x03\x03",
+                 compression=0):
     if random is None:
         random = os.urandom(32)
     exts = b"\x00\x2b\x00\x02\x03\x04"
     exts += b"\x00\x33" + (4 + len(pub)).to_bytes(2, "big")
     exts += group.to_bytes(2, "big") + len(pub).to_bytes(2, "big") + pub
-    body = (b"\x03\x03" + random + bytes([len(session_id)]) + session_id
-            + suite.to_bytes(2, "big") + b"\x00"
+    body = (version + random + bytes([len(session_id)]) + session_id
+            + suite.to_bytes(2, "big") + bytes([compression])
             + len(exts).to_bytes(2, "big") + exts)
     return hs(2, body)
 
 
-def hello_retry_request(session_id, suite, group):
+def bad_extensions_hello(session_id, suite, group, pub):
+    """ServerHello, где длина блока расширений больше тела записи."""
     exts = b"\x00\x2b\x00\x02\x03\x04"
-    exts += b"\x00\x33\x00\x02" + group.to_bytes(2, "big")
+    exts += b"\x00\x33" + (4 + len(pub)).to_bytes(2, "big")
+    exts += group.to_bytes(2, "big") + len(pub).to_bytes(2, "big") + pub
+    body = (b"\x03\x03" + os.urandom(32) + bytes([len(session_id)]) + session_id
+            + suite.to_bytes(2, "big") + b"\x00"
+            + b"\xff\xff" + exts)
+    return hs(2, body)
+
+
+def hello_retry_request(session_id, suite, group, with_sv=True, with_key=False):
+    exts = b""
+    if with_sv:
+        exts += b"\x00\x2b\x00\x02\x03\x04"
+    if with_key:
+        # В HRR key_share несёт только группу; здесь намеренно добавлен
+        # ключ, чтобы проверить, что клиент это отвергает.
+        exts += b"\x00\x33\x00\x04" + group.to_bytes(2, "big") + b"\x00\x20"
+    else:
+        exts += b"\x00\x33\x00\x02" + group.to_bytes(2, "big")
     body = (b"\x03\x03" + HRR_RANDOM + bytes([len(session_id)]) + session_id
             + suite.to_bytes(2, "big") + b"\x00"
             + len(exts).to_bytes(2, "big") + exts)
@@ -335,12 +401,14 @@ def serve(mode, port, cert_path, key_path):
 
         # HelloRetryRequest: клиент прислал x25519, просим P-256.
         retried = False
-        if mode in ("hrr", "hrrtwice"):
+        if mode in ("hrr", "hrrtwice", "hrrsv", "hrrks"):
             group = GROUP_P256
             suite = choose_suite(ch, [0x1301, 0x1302, 0x1303])
             if suite is None:
                 return 0
-            hrr = hello_retry_request(ch["session_id"], suite, group)
+            hrr = hello_retry_request(ch["session_id"], suite, group,
+                                      with_sv=(mode != "hrrsv"),
+                                      with_key=(mode == "hrrks"))
             name0, _, _ = SUITES[suite]
             h1 = hash_name(name0)(ch_msg).digest()
             transcript = b"\xfe" + len(h1).to_bytes(3, "big") + h1 + hrr
@@ -371,13 +439,35 @@ def serve(mode, port, cert_path, key_path):
         if group is None or group not in ch["shares"]:
             return 0
 
-        srv_priv, srv_pub = make_key(group)
-        shared = shared_secret(srv_priv, group, ch["shares"][group])
+        if mode == "zeroshare":
+            # Точка X25519 из одних нулей: Shared обязан её отвергнуть.
+            srv_pub = bytes(32)
+            shared = bytes(32)
+        else:
+            srv_priv, srv_pub = make_key(group)
+            shared = shared_secret(srv_priv, group, ch["shares"][group])
 
-        sh = server_hello(ch["session_id"], suite, group, srv_pub)
+        # legacy_version в ServerHello 1.3 обязан быть 0303, а
+        # legacy_compression_method — 0.
+        sh_version = b"\x03\x04" if mode == "shversion" else b"\x03\x03"
+        if mode == "badext13":
+            sh = bad_extensions_hello(ch["session_id"], suite, group, srv_pub)
+        else:
+            sh = server_hello(ch["session_id"], suite, group, srv_pub,
+                              version=sh_version,
+                              compression=1 if mode == "shcomp" else 0)
         transcript += sh
         log("SH")
         conn.sendall(plain_record(22, sh))
+        if mode in ("ccsok", "ccsbad", "ccslong"):
+            # CCS до Finished: законный — ровно {0x01}, иначе отказ
+            # (RFC 8446, 5). Эти записи не шифруются.
+            if mode == "ccsbad":
+                conn.sendall(plain_record(20, b"\x02"))
+            elif mode == "ccslong":
+                conn.sendall(plain_record(20, b"\x01\x01"))
+            else:
+                conn.sendall(plain_record(20, b"\x01"))
 
         zeros = bytes(hash_len(name))
         empty_hash = hash_name(name)(b"").digest()
@@ -397,14 +487,26 @@ def serve(mode, port, cert_path, key_path):
         s_key = expand_label(name, s_hs, b"key", b"", key_len)
         s_iv = expand_label(name, s_hs, b"iv", b"", 12)
 
-        ee = hs(8, b"\x00\x00")
-        cert = certificate_message(der)
+        # EncryptedExtensions: длина расширений заведомо больше тела.
+        ee = hs(8, b"\x00\x05") if mode == "badee" else hs(8, b"\x00\x00")
+        if mode == "badcert13":
+            cert = hs(11, b"\x00\x00\x00\x0a")
+        else:
+            cert = certificate_message(der)
         transcript += ee + cert
         digest = hash_name(name)(transcript).digest()
         scheme, _ = cert_verify_scheme(priv, name)
+        if mode in ("badpkcs1", "badpkcs1sha384"):
+            # Схема есть в signature_algorithms (badpkcs1) или нет
+            # (badpkcs1sha384), но для CertificateVerify 1.3 обе
+            # запрещены: RSA-подпись обязана быть PSS.
+            scheme = 0x0401 if mode == "badpkcs1" else 0x0501
         context = (b"TLS 1.3, client CertificateVerify" if mode == "badcv"
                    else b"TLS 1.3, server CertificateVerify")
-        sig = sign_cert_verify(priv, scheme, digest, context)
+        if mode in ("badpkcs1", "badpkcs1sha384"):
+            sig = sign_cert_verify_pkcs1(priv, scheme, digest, context)
+        else:
+            sig = sign_cert_verify(priv, scheme, digest, context)
         cv = hs(15, scheme.to_bytes(2, "big") + len(sig).to_bytes(2, "big") + sig)
         transcript += cv
 
@@ -416,6 +518,10 @@ def serve(mode, port, cert_path, key_path):
         if mode == "badfinished":
             verify = bytes([verify[0] ^ 1]) + verify[1:]
             fin = hs(20, verify)
+        elif mode == "shortfinished":
+            # Длина verify_data меньше хеша набора: без проверки длины
+            # сравнение первых len байт сойдётся.
+            fin = hs(20, verify[:-1])
         transcript += fin
 
         log("flight")
@@ -453,16 +559,53 @@ def serve(mode, port, cert_path, key_path):
         if plain[-1] != 22:
             return 0
         transcript += plain[:-1]
-        if mode not in ("good", "keyupdate", "hrr"):
+        if mode not in ("good", "keyupdate", "hrr", "ccsok",
+                        "ccsafter", "emptyrec", "zeropad",
+                        "emptyapp", "paddedapp", "badkeyupdate",
+                        "badtag13", "badinnertype"):
             # Клиент должен был отказаться; если он всё же прислал Finished,
             # считаем, что проверка не сработала.
             return 0
+
+        # Записи после Finished — уже под application-ключами сервера.
+        # После плохой записи сервер всё равно отвечает: если клиент её
+        # пропустил, он получит ответ, и badApp-проверка покраснеет.
+        if mode == "ccsafter":
+            # CCS после Finished: RFC 8446, 5 требует unexpected_message.
+            conn.sendall(plain_record(20, b"\x01"))
+        elif mode in ("emptyrec", "zeropad", "emptyapp", "paddedapp"):
+            if mode == "emptyrec":
+                bad = b""
+            elif mode == "zeropad":
+                bad = bytes(32)
+            elif mode == "emptyapp":
+                bad = b"\x17"
+            else:
+                bad = b"\x17" + bytes(16)
+            conn.sendall(seal_raw(suite, s_app_key, s_app_iv, 0, bad))
+        elif mode == "badinnertype":
+            # Внутренний тип вне 20..23: CASE ELSE обязан отвергнуть.
+            conn.sendall(seal(suite, s_app_key, s_app_iv, 0, 0x99, b""))
+        elif mode == "badtag13":
+            # Открытый текст верный, тег AEAD испорчен.
+            bad = bytearray(seal(suite, s_app_key, s_app_iv, 0, 23, b"olleh\n"))
+            bad[-1] ^= 1
+            conn.sendall(bytes(bad))
+        elif mode == "badkeyupdate":
+            # KeyUpdate с кодом 2: проверка обязана отвергнуть; без неё
+            # клиент обновит ключи чтения и примет ответ под новыми.
+            conn.sendall(seal(suite, s_app_key, s_app_iv, 0, 22, hs(24, b"\x02")))
+            s_app = expand_label(name, s_app, b"traffic upd", b"", hash_len(name))
+            s_app_key = expand_label(name, s_app, b"key", b"", key_len)
+            s_app_iv = expand_label(name, s_app, b"iv", b"", 12)
 
         # Данные приложения. При keyupdate сервер сначала шлёт KeyUpdate
         # и переключает ключи записи; клиент может прислать данные под
         # старыми ключами (до чтения) или сначала ответный KeyUpdate.
         cseq = 0
-        sseq = 0
+        sseq = 0 if mode in ("ccsafter", "badkeyupdate") else (
+            1 if mode in ("emptyrec", "zeropad", "emptyapp", "paddedapp",
+                          "badinnertype", "badtag13") else 0)
         data = None
         got_keyupdate = False
         if mode == "keyupdate":
@@ -520,6 +663,12 @@ def serve(mode, port, cert_path, key_path):
             reply = data[:-1][::-1] + b"\n"
         log("reply")
         conn.sendall(seal(suite, s_app_key, s_app_iv, sseq, 23, reply))
+        # Не закрывать раньше клиента: его close_notify (или алерт после
+        # плохой записи) иначе попадёт в сброшенное соединение и трапует
+        # запись в CryptoAosCommStreams. Дочитываем до EOF.
+        log("drain")
+        while read_record(conn) is not None:
+            pass
     except (BrokenPipeError, ConnectionResetError, socket.timeout):
         pass
     finally:

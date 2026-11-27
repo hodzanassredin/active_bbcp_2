@@ -1031,6 +1031,23 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		RETURN b >= 0
 	END ClientSchemeSupported;
 
+	(* RFC 8446, 4.4.3: в CertificateVerify TLS 1.3 RSA-подпись обязана
+	   быть RSASSA-PSS, даже если rsa_pkcs1_* есть в signature_algorithms;
+	   схема обязана быть предложена второй стороной. И клиент в
+	   signature_algorithms, и сервер в CertificateRequest называют один
+	   и тот же набор из пяти схем (PKCS#1-256 они тоже называют, но для
+	   CertificateVerify 1.3 он не годится). *)
+	PROCEDURE CertificateVerifyScheme13 (scheme : AO.SIGNED32): BOOLEAN;
+	BEGIN
+		CASE scheme OF
+			SigEcdsaP256Sha256, SigEcdsaP384Sha384,
+			SigRsaPssRsaeSha256, SigRsaPssRsaeSha384,
+			SigEd25519 : RETURN TRUE
+		ELSE
+			RETURN FALSE
+		END
+	END CertificateVerifyScheme13;
+
 	PROCEDURE ServerHasEc (ctx : Context): BOOLEAN;
 	BEGIN
 		RETURN (ctx # NIL) & (ctx.certChain # NIL) & (ctx.certChain.keyType = X509.KeyEc)
@@ -3315,7 +3332,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.SendError(BadCertificate);
 			RETURN FALSE
 		END;
-		IF ~ClientSchemeSupported(scheme) THEN
+		IF ~CertificateVerifyScheme13(scheme) THEN
 			SELF.SendError(IllegalParameter);
 			RETURN FALSE
 		END;
@@ -4789,7 +4806,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.SendError(BadCertificate);
 			RETURN (-1)
 		END;
-		IF ~ClientSchemeSupported(scheme) THEN
+		IF ~CertificateVerifyScheme13(scheme) THEN
 			SELF.SendError(IllegalParameter);
 			RETURN (-1)
 		END;

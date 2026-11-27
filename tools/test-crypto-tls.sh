@@ -31,6 +31,13 @@
 # И отрицательные для сервера: клиент без сертификата отвергается, чужой
 # клиентский сертификат отвергается, SSLv2 ClientHello и неизвестный тип
 # рукопожатия отвергаются без трапа.
+# Для TLS 1.3 к этому добавлены: rsa_pkcs1_* и не предложенная схема в
+# CertificateVerify, CCS с неверным значением или длиной, CCS после
+# Finished и до первого ClientHello, пустой TLSInnerPlaintext и запись из
+# одних нулей, законные пустая запись и нулевое дополнение, испорченный
+# тег и внутренний тип записи, укороченный Finished, недопустимый
+# KeyUpdate, неверные legacy_version/compression, чужая группа и
+# расширения ServerHello, нулевая и чрезмерная доля X25519 key_share.
 #
 # Запускать через tools/iso.sh, как остальные сборки.
 set -u
@@ -110,6 +117,11 @@ cleanup() {
 		pids=$(pgrep -f -- "$TMP" 2>/dev/null)
 		for p in $pids; do "$KILL" -KILL "$p" 2>/dev/null; done
 	fi
+	# CRYPTO_TLS_KEEP_TMP=1 оставляет журналы и сертификаты разбора порчи.
+	if [ "${CRYPTO_TLS_KEEP_TMP:-0}" = 1 ]; then
+		echo "test-crypto-tls: TMP сохранён: $TMP" >&2
+		return 0
+	fi
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -119,6 +131,19 @@ trap 'cleanup; exit 143' TERM HUP
 fail() {
 	echo "test-crypto-tls: FAIL: $*" >&2
 	exit 1
+}
+
+# CRYPTO_TLS_ONLY — регулярное выражение (grep -E) по имени случая:
+# неподходящие случаи пропускаются. Нужно для перебора порч: полный
+# прогон идёт без переменной, то есть проверяет всё.
+ONLY="${CRYPTO_TLS_ONLY:-}"
+selected() {
+	[ -z "$ONLY" ] && return 0
+	if printf '%s\n' "$1" | grep -Eq -- "$ONLY"; then
+		return 0
+	fi
+	echo "  skip: $1"
+	return 1
 }
 
 free_port() {
@@ -272,6 +297,7 @@ no_trap() {
 # Наш клиент. ca/cert/key могут быть пустыми.
 client_case() {
 	desc=$1; port=$2; ca=$3; cert=$4; key=$5; expectFail=$6; badapp=${7:-0}
+	selected "$desc" || return 0
 	log="$TMP/client-$desc.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_EXPECT_FAIL=$expectFail --CRYPTO_TLS_EXPECT_BAD_APP=$badapp"
 	[ -n "$ca" ] && args="$args --CRYPTO_TLS_CA=$ca"
@@ -297,6 +323,7 @@ client_case() {
 # Наш клиент против openssl s_server.
 client_vs_openssl() {
 	desc=$1; cert=$2; key=$3; ca=$4; ccert=$5; ckey=$6; expectFail=$7; verify=$8
+	selected "$desc" || return 0
 	server_extra=${9:-}
 	cipher=${10:-$CIPHER}; group=${11:-}
 	port=$(free_port)
@@ -324,6 +351,7 @@ s.close()" 2>/dev/null; then ready=1; break; fi
 # Наш сервер против openssl s_client.
 server_vs_openssl() {
 	desc=$1; ca=$2; require=$3; expectReject=$4; ccert=$5; ckey=$6; want=$7
+	selected "$desc" || return 0
 	cipher=${8:-$CIPHER}; group=${9:-}
 	srv_cert=${10:-$TMP/srv.pem}; srv_key=${11:-$TMP/srv.key}
 	port=$(free_port)
@@ -361,6 +389,7 @@ server_vs_openssl() {
 client_vs_openssl13() {
 	desc=$1; cert=$2; key=$3; ca=$4; ccert=$5; ckey=$6
 	expectFail=$7; cipher=$8; group=$9; verify=${10:-0}
+	selected "$desc" || return 0
 	port=$(free_port)
 	extra=""
 	[ "$verify" = "1" ] && extra="-Verify 1 -CAfile $TMP/ca.pem"
@@ -385,6 +414,7 @@ s.close()" 2>/dev/null; then ready=1; break; fi
 server_vs_openssl13() {
 	desc=$1; ca=$2; cipher=$3; group=$4; srv_cert=$5; srv_key=$6
 	require=${7:-0}; ccert=${8:-}; ckey=${9:-}
+	selected "$desc" || return 0
 	port=$(free_port)
 	log="$TMP/tlsserver13-$desc.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$srv_cert --CRYPTO_TLS_KEY=$srv_key"
@@ -415,6 +445,7 @@ server_vs_openssl13() {
 # Сервер, умеющий 1.3, но согласовавший 1.2 с клиентом без 1.3, обязан
 # поставить DOWNGRD\x01 в последние 8 байт ServerHello.random.
 server_sentinel_case() {
+	selected sentinel || return 0
 	port=$(free_port)
 	log="$TMP/tlsserver-sentinel.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem"
@@ -453,7 +484,8 @@ PY
 
 # Поддельный TLS 1.3 сервер (Crypto/tools/crypto_tls13_fake.py).
 fake13_case() {
-	mode=$1; expect=${2:-0}
+	mode=$1; expect=${2:-0}; badapp=${3:-0}
+	selected "fake13-$mode" || return 0
 	port=$(free_port)
 	spawn "$TMP/fake13-$mode.log" timeout -s TERM -k 5 "$BB_TIMEOUT" \
 		python3 -I "$BB/tools/crypto_tls13_fake.py" "$mode" "$port" "$TMP/srv.pem" "$TMP/srv.key"
@@ -463,12 +495,14 @@ fake13_case() {
 		grep -q ready "$TMP/fake13-$mode.log" 2>/dev/null && break
 		sleep 0.05; i=$((i + 1))
 	done
-	client_case "fake13-$mode" "$port" "$TMP/ca.pem" "" "" "$expect"
+	client_case "fake13-$mode" "$port" "$TMP/ca.pem" "" "" "$expect" "$badapp"
 	wait "$fpid" 2>/dev/null; fpid=""
 }
 
 # Поддельный сервер для отрицательных проверок клиента.
-fake_case() {	mode=$1; expect=${2:-1}; badapp=${3:-0}
+fake_case() {
+	mode=$1; expect=${2:-1}; badapp=${3:-0}
+	selected "fake-$mode" || return 0
 	fcert=${4:-$TMP/srv.pem}; fkey=${5:-$TMP/srv.key}
 	port=$(free_port)
 	spawn "$TMP/fake-$mode.log" timeout -s TERM -k 5 "$BB_TIMEOUT" \
@@ -494,6 +528,7 @@ fake_case() {	mode=$1; expect=${2:-1}; badapp=${3:-0}
 # Некорректный клиент против нашего сервера: отказ без трапа.
 evil_server_case() {
 	desc=$1; mode=$2
+	selected "$desc" || return 0
 	port=$(free_port)
 	log="$TMP/tlsserver-$desc.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
@@ -516,6 +551,7 @@ evil_server_case() {
 # Наш сервер против Python-клиента: проверка CertificateVerify.
 python_client_case() {
 	desc=$1; mode=$2; expectReject=$3
+	selected "$desc" || return 0
 	port=$(free_port)
 	log="$TMP/tlsserver-$desc.log"
 	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
@@ -536,6 +572,36 @@ python_client_case() {
 	grep -q 'failed 0,' "$log" || { cat "$log" >&2; fail "сервер ($desc)"; }
 	[ "$pyrc" -eq 0 ] || { cat "$TMP/pyclient-$desc.log" >&2; fail "python-клиент ($desc)"; }
 	echo "  ok: server $desc"
+}
+
+# Наш сервер против Python-клиента TLS 1.3 (crypto_tls13_client.py).
+python_client13_case() {
+	desc=$1; mode=$2; expectReject=$3
+	badapp=${4:-0}
+	selected "$desc" || return 0
+	port=$(free_port)
+	log="$TMP/tlsserver-$desc.log"
+	args="--CRYPTO_TLS_ADDR=127.0.0.1:$port --CRYPTO_TLS_CERT=$TMP/srv.pem --CRYPTO_TLS_KEY=$TMP/srv.key"
+	args="$args --CRYPTO_TLS_REQUIRE_CLIENT=1 --CRYPTO_TLS_EXPECT_REJECT=$expectReject"
+	args="$args --CRYPTO_TLS_EXPECT_BAD_APP=$badapp --CRYPTO_TLS_CA=$TMP/ca.pem"
+	spawn "$log" sh -c "cd '$INSTALL' && printf 'UnitRunner.Run Crypto_devTLSServer proc quit\n' | LD_LIBRARY_PATH='$INSTALL' timeout -s TERM -k 5 $BB_TIMEOUT '$INTERP' $args"
+	spid=$BGPID
+	sleep 1
+	timeout -s TERM -k 5 "$OPENSSL_TIMEOUT" python3 -I "$BB/tools/crypto_tls13_client.py" "$mode" 127.0.0.1 "$port" \
+		"$TMP/cl.pem" "$TMP/cl.key" >"$TMP/pyclient13-$desc.log" 2>&1
+	pyrc=$?
+	wait "$spid" 2>/dev/null; rc=$?; spid=""
+	[ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && fail "сервер ($desc): таймаут $BB_TIMEOUT с"
+	no_trap "$log" "сервере ($desc)"
+	if ! grep -q '^PASS Crypto_devTLSServer.TestProcServer' "$log"; then
+		cat "$log" >&2; cat "$TMP/pyclient13-$desc.log" >&2
+		fail "сервер 1.3 ($desc): тест не исполнился"
+	fi
+	grep -q 'failed 0,' "$log" || { cat "$log" >&2; fail "сервер 1.3 ($desc)"; }
+	if [ "$expectReject" != "1" ] && [ "$badapp" != "1" ]; then
+		[ "$pyrc" -eq 0 ] || { cat "$TMP/pyclient13-$desc.log" >&2; fail "python-клиент 1.3 ($desc)"; }
+	fi
+	echo "  ok: server13-python $desc"
 }
 
 echo "test-crypto-tls: положительные случаи"
@@ -680,6 +746,17 @@ python_client_case oldversion oldversion 1
 evil_server_case v2hello v2hello
 evil_server_case v2record v2record
 evil_server_case hstype hstype
+
+echo "test-crypto-tls: TLS 1.3 — схема CertificateVerify"
+# RFC 8446 §4.4.3: в CertificateVerify 1.3 RSA только PSS; схема
+# rsa_pkcs1_sha256 предложена клиентом, rsa_pkcs1_sha384 — нет.
+fake13_case badpkcs1 1
+fake13_case badpkcs1sha384 1
+
+# Python-клиент TLS 1.3: положительный контроль, схема и подпись.
+python_client13_case good13 good 0
+python_client13_case badcv13pkcs1 badpkcs1 1
+python_client13_case badsig13 badsig13 1
 
 echo "test-crypto-tls: PASS (TLS 1.3 и 1.2 в обе стороны, взаимные сертификаты, отказы)"
 exit 0
