@@ -162,6 +162,10 @@ srv.Accept(client, res);                       (* завершает рукоп�
   запись из одних нулей типа не содержит и отвергается. Запись короче тега AEAD плюс байт
   типа — ошибка декодирования; пустая запись приложения законна и не несёт байтов. Тег GCM
   и ChaCha20-Poly1305 сравнивается постоянного времени.
+- `ChangeCipherSpec` в TLS 1.3 отбрасывается, только если это ровно один байт `0x01` и
+  рукопожатие ещё не завершено. Другое значение, другая длина, CCS в защищённой записи, а
+  также CCS после `Finished` или до первого `ClientHello` прерывают соединение с
+  `unexpected_message` (RFC 8446 §5).
 - 0-RTT и PSK не реализованы: `pre_shared_key` и `early_data` не отправляются, сервер их не
   принимает, `NewSessionTicket` игнорируется (сессия не возобновляется).
 - Клиент и сервер TLS 1.2 используют ECDHE на X25519, secp256r1 или secp384r1 и AEAD-записи.
@@ -313,11 +317,17 @@ ECDSA-сертификатом сервера и требует отказа (б
 невозможной длины расширений, отсутствующего `ServerKeyExchange`, нулевого открытого ключа
 X25519, SSLv2 `ClientHello` и неизвестного типа рукопожатия. Для TLS 1.3 к этому добавлены
 `KeyUpdate`, `HelloRetryRequest` (и повторный HRR), `CertificateVerify` с чужим контекстом,
-испорченный `Finished`, ключи из испорченного транскрипта и метка понижения `DOWNGRD` в
-ответе 1.2. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py`, `crypto_tls13_fake.py` и
-`crypto_tls_client.py` — Python-партнёры для случаев, где нужен корректный транскрипт
-рукопожатия: плохой `Finished`, плохой `ChangeCipherSpec`, испорченный тег записи, нулевая
-точка X25519, плохая или хорошая подпись `CertificateVerify`, `KeyUpdate` и HRR.
+испорченный `Finished`, ключи из испорченного транскрипта, метка понижения `DOWNGRD` в
+ответе 1.2, `rsa_pkcs1_*` и не предложенная схема в `CertificateVerify`, испорченный тег и
+внутренний тип записи 1.3, пустой TLSInnerPlaintext и запись из одних нулей, законная пустая
+запись приложения с нулевым дополнением, CCS с неверным значением или длиной, CCS после
+`Finished`, CCS до первого `ClientHello`, неверный `legacy_version` в ServerHello, испорченные
+EncryptedExtensions и Certificate, укороченный `Finished`, недопустимый `KeyUpdate`, нулевая и
+чрезмерная доля X25519 `key_share`. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py`,
+`crypto_tls13_fake.py`, `crypto_tls13_client.py` и `crypto_tls_client.py` — Python-партнёры
+для случаев, где нужен корректный транскрипт рукопожатия: плохой `Finished`, плохой
+`ChangeCipherSpec`, испорченный тег записи, нулевая точка X25519, плохая или хорошая подпись
+`CertificateVerify`, `KeyUpdate` и HRR.
 Модулей `Crypto_devTLS` и `Crypto_devTLSServer` нет в `tools/tests.txt`, потому что без
 второго процесса они не проходят.
 

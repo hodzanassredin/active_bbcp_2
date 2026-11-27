@@ -163,6 +163,10 @@ ECDHE-ECDSA suites.
   a record of nothing but zeros has no type and is refused. A record shorter than the AEAD tag
   plus the type byte is a decode error; an empty application-data record is legal and carries
   no bytes. GCM and ChaCha20-Poly1305 tags are compared in constant time.
+- A `ChangeCipherSpec` in TLS 1.3 is dropped only as the single byte `0x01` and only before the
+  peer's `Finished`. Any other value, a different length, a second CCS in a protected record,
+  and a CCS after `Finished` or before the first `ClientHello` abort with
+  `unexpected_message` (RFC 8446 §5).
 - 0-RTT and PSK are not implemented: `pre_shared_key` and `early_data` are not sent or accepted,
   and `NewSessionTicket` is ignored (the session is not resumed).
 - The TLS 1.2 client and server use ECDHE on X25519, secp256r1 or secp384r1 and AEAD records.
@@ -315,12 +319,18 @@ offer, a secp256r1 point outside the curve, an oversized signature length, a bad
 length, an impossible extension length, a missing `ServerKeyExchange`, a zero X25519 public key,
 an SSLv2 `ClientHello` and an unknown handshake type. For TLS 1.3 it also covers `KeyUpdate`,
 `HelloRetryRequest` (including a repeated HRR), a `CertificateVerify` with the wrong context, a
-corrupted `Finished`, keys derived from a corrupted transcript, and the `DOWNGRD` marker in a 1.2
-answer. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py`, `crypto_tls13_fake.py` and
-`crypto_tls_client.py` are the Python peers used for the cases that need a correct handshake
-transcript: bad `Finished`, bad `ChangeCipherSpec`, corrupted record tag, zero X25519 point, a
-bad or good `CertificateVerify`, `KeyUpdate` and HRR. `Crypto_devTLS` and `Crypto_devTLSServer`
-are not in `tools/tests.txt`, because without a peer they cannot run.
+corrupted `Finished`, keys derived from a corrupted transcript, the `DOWNGRD` marker in a 1.2
+answer, `rsa_pkcs1_*` and an unoffered scheme in `CertificateVerify`, a bad 1.3 record tag and
+inner type, an empty TLSInnerPlaintext and an all-zero one, a legal empty application-data record
+with zero padding, a CCS with a wrong value or length, a CCS after `Finished`, a CCS before the
+first `ClientHello`, a wrong ServerHello `legacy_version`, a malformed EncryptedExtensions or
+Certificate, a truncated `Finished`, an invalid `KeyUpdate`, and a zero or oversized X25519
+`key_share`. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py`, `crypto_tls13_fake.py`,
+`crypto_tls13_client.py` and `crypto_tls_client.py` are the Python peers used for the cases that
+need a correct handshake transcript: bad `Finished`, bad `ChangeCipherSpec`, corrupted record
+tag, zero X25519 point, a bad or good `CertificateVerify`, `KeyUpdate` and HRR.
+`Crypto_devTLS` and `Crypto_devTLSServer` are not in `tools/tests.txt`, because without a
+peer they cannot run.
 
 
 ### Public hosts (manual, network)

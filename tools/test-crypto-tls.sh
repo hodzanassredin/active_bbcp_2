@@ -747,7 +747,7 @@ evil_server_case v2hello v2hello
 evil_server_case v2record v2record
 evil_server_case hstype hstype
 
-echo "test-crypto-tls: TLS 1.3 — схема CertificateVerify и записи"
+echo "test-crypto-tls: TLS 1.3 — схема CertificateVerify, CCS и записи"
 # RFC 8446 §4.4.3: в CertificateVerify 1.3 RSA только PSS; схема
 # rsa_pkcs1_sha256 предложена клиентом, rsa_pkcs1_sha384 — нет.
 fake13_case badpkcs1 1
@@ -769,6 +769,23 @@ fake13_case badinnertype 0 1
 
 python_client13_case emptyrec13 emptyrec 0 1
 python_client13_case zeropad13 zeropad 0 1
+
+# RFC 8446 §5: CCS до Finished — ровно {0x01}; иное — отказ, после
+# Finished — отказ.
+fake13_case ccsok 0
+fake13_case ccsbad 1
+fake13_case ccslong 1
+fake13_case ccsafter 0 1
+
+python_client13_case good13ccs goodccs 0
+python_client13_case ccs13bad ccsbad 1
+python_client13_case ccs13long ccslong 1
+python_client13_case ccs13after ccsafter 0 1
+
+# CCS до первого ClientHello — unexpected_message (RFC 8446 §5).
+evil_server_case ccsfirst ccsfirst
+evil_server_case ccsfirstbad ccsfirstbad
+evil_server_case ccsfirstlong ccsfirstlong
 
 echo "test-crypto-tls: PASS (TLS 1.3 и 1.2 в обе стороны, взаимные сертификаты, отказы)"
 exit 0

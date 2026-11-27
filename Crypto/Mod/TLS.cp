@@ -5522,8 +5522,14 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		VAR seq, tag : ARRAY 16 OF SHORTCHAR; i, innerType, plainLen : AO.SIZE;
 	BEGIN
 		IF type = ChangeCipherSpec THEN
-			(* Совместимость: CCS между ClientHello и Finished
-			   игнорируется (RFC 8446, 5). *)
+			(* RFC 8446, 5: незашифрованный CCS принимается, только пока
+			   рукопожатие не завершено, и только как ровно один байт
+			   0x01; после Finished — unexpected_message. *)
+			IF (SELF.State() = TCP.Established) OR (len # 1)
+				OR (ORD(SELF.inbuf[0]) # 1) THEN
+				SELF.SendError(UnexpectedMessage);
+				RETURN
+			END;
 			RETURN
 		END;
 		IF type # ApplicationData THEN
@@ -5624,9 +5630,12 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.Close;
 			RETURN
 		END;
-		(* CCS между HRR и ServerHello (и вообще вне 1.2-рукопожатия
-		   в 1.3) отбрасывается без обработки: RFC 8446, 5. *)
+		(* CCS в 1.3 разбирает ReceiveRecord13: он проверяет RFC 8446, 5.
+		   До первого ClientHello tls13 ещё не выставлен, и CCS проходит
+		   обычный путь 1.2, где состояние AwaitClientHello отвергает его
+		   как unexpected_message. *)
 		IF (type = ChangeCipherSpec) & (SELF.tls13 OR SELF.hrrSeen) THEN
+			SELF.ReceiveRecord13(type, len);
 			RETURN
 		END;
 		IF (type < 20) OR (type > 23) THEN
