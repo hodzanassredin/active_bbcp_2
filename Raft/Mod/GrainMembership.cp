@@ -35,6 +35,7 @@ MODULE RaftGrainMembership;
 		Node* = POINTER TO RECORD (ActorCore.Actor)
 			cfg-: Config;
 			now, lists, applied, members, errors: INTEGER;
+			last: RaftMembership.Members;	(* последний применённый список *)
 			joined, left: BOOLEAN;
 			joinPending, renewPending, listPending: BOOLEAN;
 			clock: Clock
@@ -143,7 +144,7 @@ MODULE RaftGrainMembership;
 			infos[i].key := list.m[i].key; infos[i].alive := list.m[i].alive OR (mutAllAlive IN mutations)
 		END;
 		ActorGrain.ApplyMembers(a.cfg.cl, infos, list.n);
-		a.members := list.n; a.applied := list.n; INC(a.lists)
+		a.members := list.n; a.applied := list.n; a.last := list; INC(a.lists)
 	END DoApply;
 
 	PROCEDURE (a: Node) OnResult (c: ActorCore.Context; r: RaftMembership.Result), NEW;
@@ -246,6 +247,14 @@ MODULE RaftGrainMembership;
 	BEGIN
 		IF cfg.actor = NIL THEN RETURN 0 ELSE RETURN cfg.actor.errors END
 	END Errors;
+
+	PROCEDURE List* (cfg: Config): RaftMembership.Members;
+	(** Пост: последний применённый список участников (NIL — ещё не было).
+		Запись службы состава: адрес, открытый ключ, живость. *)
+	BEGIN
+		ASSERT(cfg # NIL, 20);
+		IF cfg.actor = NIL THEN RETURN NIL ELSE RETURN cfg.actor.last END
+	END List;
 
 	PROCEDURE Status* (cfg: Config; OUT joined: BOOLEAN; OUT now, members, lists: INTEGER);
 	(** Наблюдение: вступил ли узел, его тик, размер последнего списка и
