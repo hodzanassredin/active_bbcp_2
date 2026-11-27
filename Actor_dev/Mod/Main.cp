@@ -24,8 +24,13 @@ MODULE Actor_devMain;
 		SetRt = POINTER TO RECORD (Msg) ms: INTEGER END;
 		Mark = POINTER TO RECORD (Msg) END;
 		AskMe = POINTER TO RECORD (Msg) END;
+		PushA = POINTER TO RECORD (Msg) END;
+		PushB = POINTER TO RECORD (Msg) END;
+		Pop = POINTER TO RECORD (Msg) END;
 
 		Probe = POINTER TO RECORD (ActorCore.Actor) id, n, last: INTEGER END;
+		BehA = POINTER TO RECORD (ActorCore.Behavior) END;
+		BehB = POINTER TO RECORD (ActorCore.Behavior) END;
 		Sup = POINTER TO RECORD (ActorCore.Actor) END;
 		Top = POINTER TO RECORD (ActorCore.Actor) END;
 		Watcher = POINTER TO RECORD (ActorCore.Actor) END;
@@ -58,6 +63,9 @@ MODULE Actor_devMain;
 		terms: INTEGER;	(* сколько Terminated получил наблюдатель *)
 		napTask: Tasks.Task;	(* задача, исполнявшая последний Nap *)
 		midProps: ActorCore.Props;
+		behA: BehA; behB: BehB;
+		pushA: PushA; pushB: PushB; pop: Pop;
+		stackRes: ARRAY 8 OF INTEGER;
 
 	(* --- обвязка ---------------------------------------------------------- *)
 
@@ -155,6 +163,30 @@ MODULE Actor_devMain;
 
 	PROCEDURE^ NewProbe (): ActorCore.Actor;
 
+	PROCEDURE (b: BehA) Receive (a: ActorCore.Actor; c: ActorCore.Context; m: Msg);
+		VAR r: Num;
+	BEGIN
+		WITH m: Get DO NEW(r); r.n := 10; c.Respond(r)
+		| m: PushA DO c.BecomeStacked(behA)
+		| m: PushB DO c.BecomeStacked(behB)
+		| m: Pop DO c.Unbecome()
+		| m: Boom DO HALT(42)
+		ELSE
+		END
+	END Receive;
+
+	PROCEDURE (b: BehB) Receive (a: ActorCore.Actor; c: ActorCore.Context; m: Msg);
+		VAR r: Num;
+	BEGIN
+		WITH m: Get DO NEW(r); r.n := 20; c.Respond(r)
+		| m: PushA DO c.BecomeStacked(behA)
+		| m: PushB DO c.BecomeStacked(behB)
+		| m: Pop DO c.Unbecome()
+		| m: Boom DO HALT(42)
+		ELSE
+		END
+	END Receive;
+
 	PROCEDURE (p: Probe) Receive (c: ActorCore.Context; m: Msg);
 		VAR r: Num; neg: Negate;
 	BEGIN
@@ -183,6 +215,9 @@ MODULE Actor_devMain;
 			Tasks.Sleep(m.ms DIV 2); Tasks.Sleep(m.ms - m.ms DIV 2);	(* две точки переключения *)
 			DEC(inside); INC(naps); napEnd := Kernel.Time()
 		| m: Swap DO NEW(neg); c.Become(neg)
+		| m: PushA DO c.BecomeStacked(behA)
+		| m: PushB DO c.BecomeStacked(behB)
+		| m: Pop DO c.Unbecome()
 		ELSE
 		END
 	END Receive;
@@ -314,6 +349,8 @@ MODULE Actor_devMain;
 		grand := FALSE; napStopping := 0; factoryNap := 0; factoryTrap := FALSE;
 		watchTwice := FALSE; unwatch := FALSE; terms := 0; napTask := NIL;
 		NEW(get); NEW(boom); NEW(swap); NEW(boom2); NEW(mark);
+		NEW(pushA); NEW(pushB); NEW(pop);
+		NEW(behA); NEW(behB);
 		ActorRun.Start(4)
 	END Setup;
 
@@ -543,6 +580,40 @@ MODULE Actor_devMain;
 		UnitAssert.EqualInt(-2, askRes, "new behavior answers");
 		UnitAssert.EqualInt(2, askVal, "Become(NIL) restores Receive")
 	END TestBecomeSwitchesHandler;
+
+	PROCEDURE StackBody;
+	BEGIN
+		ActorCore.Tell(target, pushA); AskInt(target, 1000); stackRes[0] := askVal;
+		ActorCore.Tell(target, pushB); AskInt(target, 1000); stackRes[1] := askVal;
+		ActorCore.Tell(target, pop); AskInt(target, 1000); stackRes[2] := askVal;
+		ActorCore.Tell(target, pop); AskInt(target, 1000); stackRes[3] := askVal
+	END StackBody;
+
+	PROCEDURE TestBecomeStackedUnbecomeRestores*;
+	BEGIN
+		target := ActorCore.Spawn(NIL, ActorCore.NewProps(NewProbe), "");
+		UnitAssert.True(Drive(StackBody, 3000), "driver finished");
+		UnitAssert.EqualInt(10, stackRes[0], "first stacked behavior answers");
+		UnitAssert.EqualInt(20, stackRes[1], "second stacked behavior answers");
+		UnitAssert.EqualInt(10, stackRes[2], "Unbecome restored the first");
+		UnitAssert.EqualInt(0, stackRes[3], "empty stack restores Receive")
+	END TestBecomeStackedUnbecomeRestores;
+
+	PROCEDURE StackRestartBody;
+	BEGIN
+		ActorCore.Tell(target, pushA); ActorCore.Tell(target, pushB);
+		ActorCore.Tell(target, boom);
+		ActorCore.Tell(target, pop);	(* стек прошлого экземпляра не должен всплыть *)
+		AskInt(target, 2000)
+	END StackRestartBody;
+
+	PROCEDURE TestRestartDropsBehStack*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewOneForOne(ActorCore.Restart, 5, 10000), 1) = NIL THEN END;
+		target := kids[0];
+		UnitAssert.True(Drive(StackRestartBody, 3000), "driver finished");
+		UnitAssert.EqualInt(0, askVal, "new instance answers with Receive")
+	END TestRestartDropsBehStack;
 
 	PROCEDURE TestCancelledExecutorIsNotFailure*;
 	BEGIN

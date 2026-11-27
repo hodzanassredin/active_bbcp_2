@@ -133,6 +133,7 @@ MODULE ActorCore;
 
 		Watcher = POINTER TO WatcherDesc;
 		Timer = POINTER TO TimerDesc;
+		BehNode = POINTER TO RECORD b: Behavior; next: BehNode END;
 
 		(** Ящик актора и контекст его обработчика; он же локальный адрес. *)
 		Context* = POINTER TO LIMITED RECORD (Ref)
@@ -141,6 +142,7 @@ MODULE ActorCore;
 			props: Props;
 			actor: Actor;
 			beh: Behavior;
+			behStack: BehNode;
 			parent, first, sibPrev, sibNext: Context;
 			nChildren: INTEGER;
 			watchers: Watcher;	(* кто ждёт Terminated от этого актора *)
@@ -593,7 +595,7 @@ MODULE ActorCore;
 	BEGIN
 		ASSERT((c.state = stopping) & (c.nChildren = 0), 100);
 		Lifecycle(c, stoppedM);
-		c.state := stopped; c.actor := NIL; c.beh := NIL; DEC(live);
+		c.state := stopped; c.actor := NIL; c.beh := NIL; c.behStack := NIL; DEC(live);
 		WHILE c.stash.count > 0 DO Pop(c.stash, m, s); Dead(m, s, c) END;
 		WHILE c.user.count > 0 DO Pop(c.user, m, s); Dead(m, s, c) END;
 		WHILE c.sys.count > 0 DO
@@ -628,7 +630,7 @@ MODULE ActorCore;
 	   остаётся в restarting, повтор фабрики первым в очереди. *)
 		VAR r: INTEGER;
 	BEGIN
-		c.actor := NIL; c.beh := NIL; Merge(c);
+		c.actor := NIL; c.beh := NIL; c.behStack := NIL; Merge(c);
 		r := Invoke(c, callNew, NIL);
 		IF r = cancelTrap THEN c.actor := NIL; PushFront(c.sys, newS, NIL); RETURN END;
 		c.state := alive; c.suspended := FALSE;
@@ -967,11 +969,35 @@ MODULE ActorCore;
 	PROCEDURE (c: Context) Become* (b: Behavior), NEW;
 	(** Пред: вызов из обработчика c (трап 20).
 		Пост: следующие сообщения обрабатывает b.Receive; b = NIL —
-		снова Actor.Receive. Перезапуск возвращает Actor.Receive. *)
+		снова Actor.Receive. Перезапуск возвращает Actor.Receive.
+		Стек, набранный BecomeStacked, не меняется. *)
 	BEGIN
 		ASSERT(InHandler(c), 20);
 		c.beh := b
 	END Become;
+
+	PROCEDURE (c: Context) BecomeStacked* (b: Behavior), NEW;
+	(** Пред: вызов из обработчика c (трап 20).
+		Пост: текущее поведение отложено в стек; следующие сообщения
+		обрабатывает b.Receive; b = NIL — снова Actor.Receive. Unbecome
+		восстанавливает отложенное. Перезапуск и остановка очищают стек. *)
+		VAR n: BehNode;
+	BEGIN
+		ASSERT(InHandler(c), 20);
+		NEW(n); n.b := c.beh; n.next := c.behStack; c.behStack := n;
+		c.beh := b
+	END BecomeStacked;
+
+	PROCEDURE (c: Context) Unbecome*, NEW;
+	(** Пред: вызов из обработчика c (трап 20).
+		Пост: текущее поведение отброшено, восстановлено последнее
+		отложенное BecomeStacked; стек пуст — снова Actor.Receive. *)
+		VAR n: BehNode;
+	BEGIN
+		ASSERT(InHandler(c), 20);
+		n := c.behStack;
+		IF n # NIL THEN c.beh := n.b; c.behStack := n.next ELSE c.beh := NIL END
+	END Unbecome;
 
 	PROCEDURE (c: Context) Stash*, NEW;
 	(** Отложить письмо в обработке: обработчик сейчас не может его принять.

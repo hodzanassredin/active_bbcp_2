@@ -302,6 +302,19 @@ handled, so only its handler calls them; a call from anywhere else traps with co
 (`TestHandlerOnlyCallsTrapOutside`). A restart removes the timeout too
 (`TestRestartDropsReceiveTimeout`).
 
+A handler that returns to its previous behaviour uses a stack. `c.BecomeStacked(b)` puts the
+current behavior aside and installs `b`; `c.Unbecome` drops the current behavior and restores the
+last put-aside one. With an empty stack `Unbecome` returns `Actor.Receive`, as does `Become(NIL)`.
+`Become` replaces the current behavior and leaves the stack alone; a restart and a stop clear both
+(`TestRestartDropsBehStack`). The stack belongs to one instance and is not shared. A push allocates
+one node, so a handler that calls `BecomeStacked` on every letter grows the stack; a plain
+replacement uses `Become`. `TestBecomeStackedUnbecomeRestores` pushes two behaviours and pops them
+back to `Actor.Receive`.
+
+New behaviours are full handlers: a letter that the current behaviour does not handle is lost, not
+passed to the behaviour below it. The behaviours in the test handle the push and pop letters
+themselves for this reason.
+
 ## 6. Supervision
 
 Every actor created by `Spawn(c, ...)` is a child of actor `c`; one created by `Spawn(NIL, ...)` is a
@@ -1042,6 +1055,8 @@ DEFINITION ActorCore;
 			(c: Context) Unwatch (r: Ref), NEW;
 			(c: Context) SetReceiveTimeout (ms: LONGINT), NEW;
 			(c: Context) Become (b: Behavior), NEW;
+			(c: Context) BecomeStacked (b: Behavior), NEW;
+			(c: Context) Unbecome, NEW;
 			(c: Context) Stash, NEW;
 			(c: Context) Unstash, NEW
 		END;
@@ -1192,6 +1207,16 @@ again after `Resume`; `ms <= 0` — no timeout. A restart removes the timeout.
 **PROCEDURE (c: Context) Become (b: Behavior)**
 Pre: called from the handler of `c` — trap 20.
 Post: the following letters are handled by `b.Receive`; `b = NIL` and a restart return
+`Actor.Receive`.
+
+**PROCEDURE (c: Context) BecomeStacked (b: Behavior)**
+Pre: called from the handler of `c` — trap 20.
+Post: the current behavior is put aside; the following letters are handled by `b.Receive`; a
+restart and a stop clear the stack.
+
+**PROCEDURE (c: Context) Unbecome**
+Pre: called from the handler of `c` — trap 20.
+Post: the current behavior is dropped, the last put-aside one is restored; an empty stack returns
 `Actor.Receive`.
 
 **PROCEDURE (c: Context) Stash**
