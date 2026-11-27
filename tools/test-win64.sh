@@ -74,8 +74,9 @@ if int.from_bytes(d[off:off+2], 'little') != 3:
 	open(p, 'wb').write(d)
 PY
 
-# 4. Префикс wine и прогоны.
-timeout 180 wineboot -u >"$OUT/wineboot.log" 2>&1 || {
+# 4. Префикс wine и прогоны. После обновления wine первый wineboot перестраивает префикс
+#    минуты (27.11.2026: 3,5 мин) — отсюда запас 600 с.
+timeout 600 wineboot -u >"$OUT/wineboot.log" 2>&1 || {
 	echo "test-win64: wineboot не удался:" >&2; tail -10 "$OUT/wineboot.log" >&2; exit 1; }
 
 run() {
