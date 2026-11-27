@@ -322,6 +322,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			client, trapped : BOOLEAN;
 			asyncWriter : AsyncWriter;
 			serverName : ARRAY 256 OF SHORTCHAR;
+			serverNameSet : BOOLEAN;	(* имя задано SetServerName: не брать из адреса *)
 			group : Group;
 			sharedSecret : ARRAY MaxSharedSecret OF SHORTCHAR;
 			sharedLen : AO.SIZE;
@@ -2422,6 +2423,53 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		SELF.currentReadState := SELF.pendingReadState;
 		NEW(SELF.pendingReadState);SELF.pendingReadState.Init();
 	END ChangeReadState;
+
+	PROCEDURE (SELF: Connection) SetServerName* (IN name : ARRAY OF SHORTCHAR), NEW;
+	(** Ожидаемое имя сервера для проверки сертификата (SAN/CN) в
+		клиентском Open. Без вызова имя берётся из remoteAdr до ":".
+		Транспорту узлов нужно имя узла, а не IP-адрес. *)
+		VAR i : AO.SIZE;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(SELF.serverName) - 1) & (i < LEN(name)) & (name[i] # 0X) DO
+			SELF.serverName[i] := name[i]; INC(i)
+		END;
+		SELF.serverName[i] := 0X;
+		SELF.serverNameSet := TRUE
+	END SetServerName;
+
+	PROCEDURE (SELF: Connection) HandshakeState* (): AO.SIGNED32, NEW;
+	(** Шаг рукопожатия (для диагностики транспорта). *)
+	BEGIN
+		RETURN SELF.handshakeState
+	END HandshakeState;
+
+	PROCEDURE (SELF: Connection) ConnAlive* (): BOOLEAN, NEW;
+	(** Состояние нижнего TCP-соединения без разыменования NIL. *)
+	BEGIN
+		RETURN (SELF.conn # NIL) & SELF.conn.Alive()
+	END ConnAlive;
+
+	PROCEDURE (SELF: Connection) SafeClose*, NEW;
+	(** Закрыть, не посылая close_notify в уже оборванное соединение:
+		Close в этом случае обращается к отсутствующему потоку. *)
+	BEGIN
+		IF SELF.conn = NIL THEN SELF.SetState(TCP.Closed); RETURN END;
+		IF SELF.conn.Alive() THEN SELF.Close
+		ELSE
+			SELF.conn.Close;
+			IF SELF.applicationDataPipe # NIL THEN SELF.applicationDataPipe.Close END;
+			IF SELF.ownsContext & (SELF.context # NIL) THEN SELF.context.Dispose END;
+			SELF.SetState(TCP.Closed)
+		END
+	END SafeClose;
+
+	PROCEDURE (SELF: Connection) PeerCertificate* (): X509.Certificate, NEW;
+	(** Пост: сертификат второй стороны после рукопожатия (клиент —
+		серверный, сервер — клиентский); NIL до проверки. *)
+	BEGIN
+		IF SELF.client THEN RETURN SELF.serverCert ELSE RETURN SELF.clientCert END
+	END PeerCertificate;
 
 	PROCEDURE (SELF: Connection) SetContext* (ctx : Context), NEW;
 
@@ -5872,7 +5920,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			newTLSConn.ReceiveRecord
 		UNTIL (newTLSConn.State() = TCP.Established) OR (newTLSConn.State() = TCP.Closed);
 		IF newTLSConn.State() # TCP.Established THEN
-			res := (-1);
+			res := (-2);	(* TCP-клиент был, рукопожатие не удалось *)
 			RETURN
 		END;
 		client := newTLSConn;
@@ -5897,12 +5945,14 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		END;
 				SELF.remoteAdr := SELF.conn.remoteAdr;
 				
-				i := 0;
-				WHILE (i < LEN(remoteAdr)) & (remoteAdr[i] # ':') DO
-					SELF.serverName[i] := SHORT(remoteAdr[i]);
-					INC(i)
+				IF ~SELF.serverNameSet THEN
+					i := 0;
+					WHILE (i < LEN(remoteAdr)) & (remoteAdr[i] # ':') DO
+						SELF.serverName[i] := SHORT(remoteAdr[i]);
+						INC(i)
+					END;
+					SELF.serverName[i] := 0X
 				END;
-				SELF.serverName[i] := 0X;
 				StdLog.String("Server name:");StdLog.String(LONG(SELF.serverName));
 				StdLog.Ln;
 				

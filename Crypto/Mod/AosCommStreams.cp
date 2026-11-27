@@ -30,6 +30,12 @@ MODULE CryptoAosCommStreams;
 		END;
 		WriterSender = POINTER TO RECORD(Streams.Sender) writer: Writer END;
 
+	VAR
+		(** Вызывается, когда сокет не дал ни байта. Транспорт задач
+			ставит сюда Tasks.Sleep: ожидание становится кооперативным,
+			а не занятым циклом. Вне задач остаётся занятый цикл. *)
+		onWait*: PROCEDURE;
+
 	PROCEDURE (SELF: Reader) Receive (VAR buf: ARRAY OF SHORTCHAR; ofs, size, min: AO.SIZE; VAR len: AO.SIZE; VAR res: INTEGER), NEW;
 		VAR time: LONGINT;
 	BEGIN
@@ -37,6 +43,7 @@ MODULE CryptoAosCommStreams;
 		len := 0;
 		WHILE SELF.s.IsConnected() & (len = 0) & ((Services.Ticks() - time) < (Services.resolution * SELF.readTimeoutSeconds)) DO
 			SELF.s.ReadBytes(SYSTEM.VAL(Bytes, buf), ofs, size, len);
+			IF (len = 0) & (onWait # NIL) THEN onWait END
 		END;
 		IF len >= min THEN res := Streams.Ok ELSE res := Streams.EOF (* end of file *) END
 	END Receive;
@@ -81,6 +88,7 @@ MODULE CryptoAosCommStreams;
 
 		WHILE SELF.s.IsConnected() & (len > 0) DO
 			SELF.s.WriteBytes(SYSTEM.VAL(Bytes, buf), ofs, len, lenWriten);
+			IF (lenWriten = 0) & (onWait # NIL) THEN onWait END;
 			INC(ofs, lenWriten); DEC(len, lenWriten);
 		END;
 
