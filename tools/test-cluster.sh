@@ -417,6 +417,16 @@ if [ "${INNER:-0}" = 1 ]; then
 		# запись в журнал о подделке (файл tls-audit ведёт транспорт)
 		grep -q 'forged-frame' "$dir/tls-audit" 2>/dev/null \
 			|| { bad "$dir" "secure: нет записи о подделке в журнале"; return 1; }
+
+		# простой узел не крутит главный цикл на закрытом stdin: за секунду
+		# меньше 50 тиков процессорного времени (занятый цикл даёт ~100)
+		u0=$(awk '{print $14 + $15}' "/proc/${PIDS[E]}/stat" 2>/dev/null)
+		[ -n "$u0" ] || u0=0
+		sleep 1
+		u1=$(awk '{print $14 + $15}' "/proc/${PIDS[E]}/stat" 2>/dev/null)
+		[ -n "$u1" ] || u1=0
+		[ $((u1 - u0)) -lt 50 ] \
+			|| { bad "$dir" "secure: простой узел занимает процессор ($((u1 - u0)) тиков/с)"; return 1; }
 		touch "$dir/stop"
 		waitfile "$dir/E.exited" 2000 || true
 		sleep 0.2
