@@ -34,8 +34,14 @@ MODULE ActorCore;
 	IMPORT S := SYSTEM, Kernel, Services, Console, Strings, Stores, Tasks, AsyncSelect, AsyncChan;
 
 	CONST
-		(** директивы супервизора **)
+		(** директивы супервизора: первые четыре решают судьбу отказавшего
+			ребёнка, остальные — группы детей (стратегии AllForOne и
+			RestForOne) **)
 		Resume* = 0; Restart* = 1; Stop* = 2; Escalate* = 3;
+		RestartAll* = 4;	(** перезапустить всех детей родителя *)
+		StopAll* = 5;	(** остановить всех детей родителя *)
+		RestartRest* = 6;	(** перезапустить отказавшего и рождённых после него *)
+		StopRest* = 7;	(** остановить отказавшего и рождённых после него *)
 		(** результат Ask **)
 		ok* = 0; timedOut* = 1; dead* = 2;
 		(** причина в Terminated **)
@@ -428,6 +434,21 @@ MODULE ActorCore;
 		END
 	END Fail;
 
+	PROCEDURE Group (p: Context; ch: Context; all, stop: BOOLEAN);
+	(* Пост: каждому ребёнку p послан Stop (stop) или Restart; all = FALSE —
+	   только ch и рождённым после него (дети в списке p.first идут от
+	   младшего к старшему, поэтому обход идёт от first до ch). *)
+		VAR x: Context;
+	BEGIN
+		x := p.first;
+		LOOP
+			IF x = NIL THEN EXIT END;
+			IF stop THEN PostSys(x, stopS) ELSE PostSys(x, restartS) END;
+			IF ~all & (x = ch) THEN EXIT END;
+			x := x.sibNext
+		END
+	END Group;
+
 	PROCEDURE Supervise (p: Context; f: FailureMsg);
 	(* Пост: к ребёнку f.child применена директива стратегии p; без
 	   стратегии — Stop; Resume ребёнку без экземпляра — Stop. Пока p
@@ -453,6 +474,10 @@ MODULE ActorCore;
 		CASE d OF
 		| Resume: PostSys(ch, resumeS)
 		| Restart: PostSys(ch, restartS)
+		| RestartAll: Group(p, ch, TRUE, FALSE)
+		| StopAll: ch.failed := TRUE; Group(p, ch, TRUE, TRUE)
+		| RestartRest: Group(p, ch, FALSE, FALSE)
+		| StopRest: ch.failed := TRUE; Group(p, ch, FALSE, TRUE)
 		| Escalate: Fail(p, f.reason)	(* ребёнок ждёт судьбы родителя *)
 		ELSE ch.failed := TRUE; PostSys(ch, stopS)
 		END

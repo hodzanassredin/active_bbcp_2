@@ -46,6 +46,7 @@
 [ObxActor6](Actor6.md)  [docu](Actor6.md)/[sources](../../Mod64/Actor6.cp)		два узла: Ask через узел, поддельный адрес, потеря узла
 [ObxActor7](Actor7.md)  [docu](Actor7.md)/[sources](../../Mod64/Actor7.cp)		сага: перевод между узлами переживает падение координатора
 [ObxActor8](Actor8.md)  [docu](Actor8.md)/[sources](../../Mod64/Actor8.cp)		виртуальный счёт: по номеру, переезд при падении узла
+[ObxActor9](Actor9.md)  [docu](Actor9.md)/[sources](../../Mod64/Actor9.cp)		групповые стратегии: все за одного и остальные за одного
 [ObxRaft0](Raft0.md)  [docu](Raft0.md)/[sources](../../Mod64/Raft0.cp)		Raft: три узла в памяти, выборы, запись, чтение, гибель лидера
 [ObxRaft1](Raft1.md)  [docu](Raft1.md)/[sources](../../Mod64/Raft1.cp)		стойкий счётчик на журнале Raft переживает гибель своего узла
 [ObxBank0](Bank0.md)  [docu](Bank0.md)/[sources](../../Mod64/Bank0.cp)		учебник: действие и задача делают одну работу

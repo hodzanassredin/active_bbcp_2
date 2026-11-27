@@ -920,4 +920,72 @@ MODULE Actor_devMain;
 		UnitAssert.Same(NIL, ActorCore.dir.Lookup(ActorCore.node, name), "cancelled Ask leaves no reply address")
 	END TestCancelledAskLeavesNoReplyAddress;
 
+	(* --- группы детей: AllForOne и RestForOne ------------------------------ *)
+
+	PROCEDURE TestAllForOneRestartsAllChildren*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewAllForOne(ActorCore.Restart, 5, 10000), 3) = NIL THEN END;
+		ActorCore.Tell(kids[1], boom);
+		UnitAssert.True(UntilInt(starts, 6, 2000), "all three children started again");
+		UnitAssert.True(At(1, evRestarting) >= 0, "child 1 restarted");
+		UnitAssert.True(At(2, evRestarting) >= 0, "failed child restarted");
+		UnitAssert.True(At(3, evRestarting) >= 0, "child 3 restarted");
+		UnitAssert.True(~Stopped(kids[0]), "parent did not stop the child")
+	END TestAllForOneRestartsAllChildren;
+
+	PROCEDURE TestAllForOneTooManyStopsAll*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewAllForOne(ActorCore.Restart, 1, 10000), 3) = NIL THEN END;
+		ActorCore.Tell(kids[0], boom);
+		UnitAssert.True(UntilInt(starts, 6, 2000), "first failure restarts all");
+		ActorCore.Tell(kids[1], boom);
+		UnitAssert.True(UntilStopped(kids[0], 2000), "second failure stops all");
+		UnitAssert.True(Stopped(kids[1]), "failed child stopped");
+		UnitAssert.True(Stopped(kids[2]), "third child stopped");
+		UnitAssert.EqualInt(6, starts, "no restart after the limit")
+	END TestAllForOneTooManyStopsAll;
+
+	PROCEDURE TestAllForOneWindowResets*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewAllForOne(ActorCore.Restart, 1, 100), 2) = NIL THEN END;
+		ActorCore.Tell(kids[0], boom);
+		UnitAssert.True(UntilInt(starts, 4, 2000), "first failure restarts all");
+		Idle(200);
+		ActorCore.Tell(kids[0], boom);
+		UnitAssert.True(UntilInt(starts, 6, 2000), "failure after the window restarts again");
+		UnitAssert.True(~Stopped(kids[0]), "children not stopped")
+	END TestAllForOneWindowResets;
+
+	PROCEDURE TestRestForOneRestartsRestOnly*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewRestForOne(ActorCore.Restart, 5, 10000), 3) = NIL THEN END;
+		ActorCore.Tell(kids[1], boom);
+		UnitAssert.True(UntilInt(starts, 5, 2000), "failed child and the one born after it restarted");
+		UnitAssert.EqualInt(-1, At(1, evRestarting), "older child was not restarted");
+		UnitAssert.True(At(2, evRestarting) >= 0, "failed child restarted");
+		UnitAssert.True(At(3, evRestarting) >= 0, "younger child restarted");
+		UnitAssert.True(~Stopped(kids[0]), "older child keeps working")
+	END TestRestForOneRestartsRestOnly;
+
+	PROCEDURE TestRestForOneTooManyStopsRest*;
+	BEGIN
+		IF SpawnSup(ActorSup.NewRestForOne(ActorCore.Restart, 0, 10000), 3) = NIL THEN END;
+		ActorCore.Tell(kids[1], boom);
+		UnitAssert.True(UntilStopped(kids[2], 2000), "failed child and the one born after it stopped");
+		UnitAssert.True(Stopped(kids[1]), "failed child stopped");
+		UnitAssert.True(~Stopped(kids[0]), "older child keeps working");
+		UnitAssert.EqualInt(3, starts, "no restart after the limit")
+	END TestRestForOneTooManyStopsRest;
+
+	PROCEDURE TestAllForOneEscalates*;
+		VAR top: ActorCore.Ref;
+	BEGIN
+		top := SpawnSup(ActorSup.NewAllForOne(ActorCore.Escalate, 0, 1000), 1);
+		WatchIt(top);
+		ActorCore.Tell(kids[0], boom);
+		UnitAssert.True(Until(terminated, 2000), "root stopped the top actor");
+		UnitAssert.True(At(1, evStopped) >= 0, "child stopped with its parent");
+		UnitAssert.EqualInt(1, starts, "nobody restarted")
+	END TestAllForOneEscalates;
+
 END Actor_devMain.

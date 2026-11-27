@@ -341,6 +341,27 @@ and only then creates the new instance (`TestRestartStopsGrandchildrenFirst`: `S
 grandchild is recorded before `Started` of the new instance). The `OneForOne` restart window moves:
 a failure after the end of the window gives `Restart` again, not `Stop` (`TestRestartWindowResets`).
 
+A supervisor sometimes keeps children that depend on one another: a reader and a writer of one
+buffer, an account and its transfer log. Restarting only the failed child leaves the others with a
+state that no longer matches. `ActorSup.NewAllForOne` restarts every child of the supervisor after
+a failure, and `ActorSup.NewRestForOne` restarts the failed child and those started after it, while
+the children started earlier keep working. The strategy counts the failures of all children in one
+window, not the failures of each child separately: the first failure opens the window and the
+failure numbered `max + 1` stops the group. The directives are the same as for `OneForOne`; for
+`Restart` the strategy answers `RestartAll` or `RestartRest`, and after the limit `StopAll` or
+`StopRest`. A `Stop` directive stops the group at once, `Resume` resumes only the failed child, and
+`Escalate` passes the failure upward as before. The test `TestAllForOneRestartsAllChildren` fails
+one of three children and sees `Started` six times; `TestRestForOneRestartsRestOnly` fails the
+middle child and sees `Restarting` only on it and on the child started after it
+(`TestAllForOneTooManyStopsAll`, `TestRestForOneTooManyStopsRest`, `TestAllForOneWindowResets`).
+
+The order of children matters for `RestForOne`. The list of children keeps the newest first: a
+child spawned later stands closer to the head. "Started after" therefore means the children from
+the head up to and including the failed one; the older children stand farther and are not touched.
+`ActorCore` performs the group directive by sending `Restart` or `Stop` to each child in that
+range, so each child goes through its usual life cycle and reports `Restarting` or `Stopping` to
+its own handler.
+
 The example `ObxActor2` shows why the accounts use `Resume`. The bank supervises accounts and
 transfers; every hundredth transfer carries a zero amount, and the account traps on its
 precondition. With `Resume` the account balance is kept, the transfer gets no answer and is counted
@@ -871,6 +892,7 @@ DEFINITION ActorCore;
 
 	CONST
 		Resume = 0; Restart = 1; Stop = 2; Escalate = 3;
+		RestartAll = 4; StopAll = 5; RestartRest = 6; StopRest = 7;
 		ok = 0; timedOut = 1; dead = 2;
 		byStop = 0; byFailure = 1; byNodeLoss = 2;
 		nameLen = 128;
@@ -1015,9 +1037,10 @@ The same as `Actor.Receive`, after `c.Become(b)`; `a` is the actor instance.
 
 **PROCEDURE (s: Strategy) Decide (child: Ref; reason: INTEGER; VAR st: Stats): INTEGER**
 Pre: child `child` failed with trap `reason`; `st` is its failure count.
-Post: a directive; a value outside `Resume..Escalate` is executed as `Stop`, and so is `Resume` for a
-child without an instance; a trap is a failure of the parent, the decision is put aside until the
-parent is resumed.
+Post: a directive; a value outside `Resume..StopRest` is executed as `Stop`, and so is `Resume` for a
+child without an instance; `RestartAll` and `StopAll` apply to every child of the parent,
+`RestartRest` and `StopRest` to the failed child and those started after it; a trap is a failure of
+the parent, the decision is put aside until the parent is resumed.
 
 **PROCEDURE (d: Dispatcher) Schedule (c: Context)**
 Pre: `c` has work, `c` is not at an executor.
@@ -1161,6 +1184,8 @@ DEFINITION ActorSup;
 	IMPORT ActorCore;
 
 	PROCEDURE NewOneForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy;
+	PROCEDURE NewAllForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy;
+	PROCEDURE NewRestForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy;
 
 END ActorSup.
 ```
@@ -1170,6 +1195,17 @@ Pre: `directive` is `Resume`, `Restart`, `Stop` or `Escalate` — trap 20; `max 
 `withinMs > 0` — trap 22.
 Post: the strategy answers a child's failure with directive `directive`; for `Restart` it answers
 `Stop` if this is failure number `max + 1` within `withinMs` ms from the first failure of the window.
+
+**PROCEDURE NewAllForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy**
+Pre: as `NewOneForOne` — traps 20, 21, 22.
+Post: for `Restart` it answers `RestartAll` while the failures of all children fit into `max` in a
+window of `withinMs` ms, otherwise `StopAll`; for `Stop` it answers `StopAll`; `Resume` and
+`Escalate` are answered unchanged. The window counts the failures of all children together.
+
+**PROCEDURE NewRestForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy**
+Pre: as `NewOneForOne` — traps 20, 21, 22.
+Post: as `NewAllForOne`, but the group is the failed child and the children started after it;
+`RestartRest` and `StopRest` name its directives.
 
 ### 14.3. ActorRun
 

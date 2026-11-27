@@ -333,6 +333,26 @@ END ObxActor1.
 `Started` нового экземпляра). Окно перезапусков `OneForOne` сдвигается: отказ после конца окна
 снова даёт `Restart`, а не `Stop` (`TestRestartWindowResets`).
 
+Иногда дети супервизора зависят друг от друга: читатель и писатель одного буфера, счёт и журнал
+его переводов. Перезапуск только отказавшего ребёнка оставляет у остальных состояние, которое с
+ним больше не сходится. `ActorSup.NewAllForOne` после отказа перезапускает всех детей
+супервизора, а `ActorSup.NewRestForOne` — отказавшего и рождённых после него; дети, рождённые
+раньше, продолжают работу. Стратегия считает отказы всех детей в одном окне, а не у каждого
+ребёнка отдельно: окно открывает первый отказ, а отказ с номером `max + 1` останавливает группу.
+Директивы те же, что у `OneForOne`; на `Restart` стратегия отвечает `RestartAll` или
+`RestartRest`, после предела — `StopAll` или `StopRest`. Директива `Stop` сразу останавливает
+группу, `Resume` возобновляет только отказавшего, `Escalate` передаёт отказ вверх как раньше.
+Тест `TestAllForOneRestartsAllChildren` отказывает одного из трёх детей и видит `Started` шесть
+раз; `TestRestForOneRestartsRestOnly` отказывает среднего и видит `Restarting` только у него и у
+рождённого после него (`TestAllForOneTooManyStopsAll`, `TestRestForOneTooManyStopsRest`,
+`TestAllForOneWindowResets`).
+
+Порядок детей важен для `RestForOne`. Список детей хранит младшего первым: рождённый позже стоит
+ближе к голове. «Рождённые после» — это дети от головы до отказавшего включительно; старшие стоят
+дальше и их директива не трогает. `ActorCore` исполняет групповую директиву, посылая `Restart`
+или `Stop` каждому ребёнку этого отрезка, поэтому каждый ребёнок проходит обычный жизненный цикл
+и сообщает `Restarting` или `Stopping` своему обработчику.
+
 Пример `ObxActor2` показывает, почему для счетов выбран `Resume`. Банк — супервизор счетов и
 переводов; каждый сотый перевод несёт нулевую сумму, и счёт трапует на предусловии. При `Resume`
 остаток счёта сохраняется, перевод не получает ответа и по `ReceiveTimeout` считается отказанным, а
@@ -839,6 +859,7 @@ DEFINITION ActorCore;
 
 	CONST
 		Resume = 0; Restart = 1; Stop = 2; Escalate = 3;
+		RestartAll = 4; StopAll = 5; RestartRest = 6; StopRest = 7;
 		ok = 0; timedOut = 1; dead = 2;
 		byStop = 0; byFailure = 1; byNodeLoss = 2;
 		nameLen = 128;
@@ -982,8 +1003,10 @@ END ActorCore.
 
 **PROCEDURE (s: Strategy) Decide (child: Ref; reason: INTEGER; VAR st: Stats): INTEGER**
 Пред: ребёнок `child` отказал с трапом `reason`; `st` — его счёт отказов.
-Пост: директива; значение вне `Resume..Escalate` исполняется как `Stop`, `Resume` ребёнку без
-экземпляра — тоже; трап — отказ родителя, решение отложено до его возобновления.
+Пост: директива; значение вне `Resume..StopRest` исполняется как `Stop`, `Resume` ребёнку без
+экземпляра — тоже; `RestartAll` и `StopAll` действуют на всех детей родителя, `RestartRest` и
+`StopRest` — на отказавшего и рождённых после него; трап — отказ родителя, решение отложено до его
+возобновления.
 
 **PROCEDURE (d: Dispatcher) Schedule (c: Context)**
 Пред: у `c` есть работа, `c` не стоит у исполнителя.
@@ -1126,6 +1149,8 @@ DEFINITION ActorSup;
 	IMPORT ActorCore;
 
 	PROCEDURE NewOneForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy;
+	PROCEDURE NewAllForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy;
+	PROCEDURE NewRestForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy;
 
 END ActorSup.
 ```
@@ -1135,6 +1160,17 @@ END ActorSup.
 `withinMs > 0` — трап 22.
 Пост: стратегия отвечает на отказ ребёнка директивой `directive`; для `Restart` — `Stop`, если
 это отказ с номером `max + 1` за `withinMs` мс от первого отказа окна.
+
+**PROCEDURE NewAllForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy**
+Пред: как у `NewOneForOne` — трапы 20, 21, 22.
+Пост: для `Restart` — `RestartAll`, пока отказы всех детей укладываются в `max` за окно
+`withinMs` мс, иначе `StopAll`; для `Stop` — `StopAll`; `Resume` и `Escalate` — без изменений.
+Окно считает отказы всех детей вместе.
+
+**PROCEDURE NewRestForOne (directive, max: INTEGER; withinMs: LONGINT): ActorCore.Strategy**
+Пред: как у `NewOneForOne` — трапы 20, 21, 22.
+Пост: как у `NewAllForOne`, но группа — отказавший ребёнок и рождённые после него; её директивы —
+`RestartRest` и `StopRest`.
 
 ### 14.3. ActorRun
 
