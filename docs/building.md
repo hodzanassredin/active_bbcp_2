@@ -264,9 +264,11 @@ tools/bench-gc.sh System_devGcBench.Do        # с 50 млн
 tools/iso.sh tools/test-cluster.sh                  # 20 прогонов подряд
 tools/iso.sh tools/test-cluster.sh --quick          # один короткий прогон
 tools/iso.sh tools/test-cluster.sh --runs 3
-tools/iso.sh tools/test-cluster.sh --only raft      # ask, raft, saga, grain, membership, bench
+tools/iso.sh tools/test-cluster.sh --only raft      # ask, reconnect, secure, raft, saga, grain, membership, bench
 tools/iso.sh tools/test-cluster.sh --bench-ops 2000
 tools/iso.sh tools/test-cluster.sh --veth           # две «машины»: два netns с veth
+tools/iso.sh tools/test-cluster.sh --tls            # то же на TLS 1.3
+tools/iso.sh tools/test-cluster.sh --tls --only secure
 ```
 
 Нужна собранная установка: `tools/build64.sh --no-help`. Сценарий компилирует
@@ -287,8 +289,20 @@ tools/iso.sh tools/test-cluster.sh --veth           # две «машины»: �
 на трёх процессах с журналом `RaftJournal`, владелец ключа убит, ключ переезжает; `membership` —
 служба состава из пяти процессов: три избирателя, вступление S3 и S4, выход S4, участники G0..G2 и
 позже G3 берут состав из службы и пишут через `RaftJournal`, убиты владелец ключа и лидер службы;
-`bench` — запись в секунду по TCP. Каталог удачного прогона удаляется, `--keep` оставляет его в
-`.work/cluster-keep` (и при запуске через `tools/iso.sh`).
+`bench` — запись в секунду по TCP; `reconnect` — узел-сервер убит и поднят снова, второй `Ask`
+клиента должен пройти через заново открытое соединение. Каталог удачного прогона удаляется,
+`--keep` оставляет его в `.work/cluster-keep` (и при запуске через `tools/iso.sh`).
+
+Режим `--tls` выдаёт в каталоге прогона корень кластера и сертификаты узлов
+(`tools/cluster-certs.sh`, ECDSA P-256, имя узла в SAN) и передаёт каждому процессу `--TLS=1`,
+`--CERTDIR` и файл `roster` — строки «узел, SHA-256 сертификата». В этом режиме идут те же
+сценарии: узел слушает TLS 1.3, требует клиентский сертификат и сверяет «от кого» кадра с SAN
+соединения. `secure` (только с `--tls`) проверяет отрицательные случаи: сертификат чужого корня,
+верный сертификат с подделанным «от кого» и узел, удалённый из `roster`, не принимаются, а
+действующее соединение с удалённым рвётся; запись о подделке лежит в `tls-audit`. В сценарии
+`ask` при `--tls` между клиентом и сервером стоит прозрачный прокси
+(`tools/tls-proxy.py`), он пишет `capture.bin`; сценарий проверяет, что в захвате нет известной
+строки письма.
 
 Запуск на двух машинах. В файле `nodes` адреса записываются с адресами машин, например
 `R0 10.0.0.1:20001` и `R2 10.0.0.2:20003`; каждый процесс запускается на своей машине с тем же
