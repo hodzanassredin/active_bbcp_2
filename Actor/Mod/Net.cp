@@ -422,6 +422,19 @@ MODULE ActorNet;
 		END
 	END Unwatch;
 
+	PROCEDURE FrameFrom* (IN frame: ARRAY OF BYTE; len: INTEGER; OUT name: Name): BOOLEAN;
+	(** Пост: TRUE и name — поле «от кого» кадра (вид и имя отправителя
+		прочитаны); FALSE — кадр короче заголовка или имя не читается.
+		Транспорту с проверкой подлинности: сравнить name с именем из
+		сертификата соединения до Deliver. *)
+		VAR pos: INTEGER; ok: BOOLEAN;
+	BEGIN
+		pos := 0; ok := TRUE;
+		IF Get(frame, pos, len, 1, ok) < 0 THEN ok := FALSE END;
+		GetName(frame, pos, len, ok, name);
+		RETURN ok
+	END FrameFrom;
+
 	PROCEDURE Deliver* (n: Node; IN frame: ARRAY OF BYTE; len: INTEGER);
 	(** Для транспорта: кадр пришёл узлу n. Повтор, чужая метка и битый
 		кадр отбрасываются и считаются; иначе письмо в ящике адресата. *)

@@ -31,6 +31,10 @@ MODULE CryptoEC;
 			x, y, z : BigInt
 		END;
 
+		(* Две 32-битные половины 64-битного промежуточного значения:
+		   младшая — индекс 0 (x86, little-endian), как в CryptoAosCompat. *)
+		Words = ARRAY 2 OF INTEGER;
+
 		Curve* = POINTER TO RECORD
 			n*, nbits* : INTEGER;
 			aIsZero : BOOLEAN;
@@ -132,22 +136,26 @@ MODULE CryptoEC;
 	PROCEDURE ModAdd (IN m : Modulus; IN a, b : BigInt; VAR r : BigInt);
 		VAR
 			s, d : BigInt;
-			i : INTEGER;
-			acc : AO.SIGNED64;
-			carry, borrow, bm, hm, nm, mask : INTEGER;
+			w : Words;
+			i, carry, borrow, bm, hm, nm, mask : INTEGER;
+			acc : LONGINT;
 	BEGIN
 		carry := 0;
 		FOR i := 0 TO m.n - 1 DO
-			acc := AO.UAdd64(AO.UAdd64(AO.LONG32(a[i]), AO.LONG32(b[i])), AO.LONG32(carry));
-			s[i] := AO.SHORT64(acc);
-			carry := AO.SHORTHIGH64(acc)
+			w[0] := a[i]; w[1] := 0; acc := SYSTEM.VAL(LONGINT, w);
+			w[0] := b[i]; w[1] := 0; acc := acc + SYSTEM.VAL(LONGINT, w) + LONG(carry);
+			w := SYSTEM.VAL(Words, acc);
+			s[i] := w[0];
+			carry := w[1]
 		END;
 		(* s - p; borrow после последнего разряда *)
 		borrow := 0;
 		FOR i := 0 TO m.n - 1 DO
-			acc := AO.LONG32(s[i]) - AO.LONG32(m.p[i]) - AO.LONG32(borrow);
-			d[i] := AO.SHORT64(acc);
-			bm := ASH(AO.SHORTHIGH64Raw(acc), -31);
+			w[0] := s[i]; w[1] := 0; acc := SYSTEM.VAL(LONGINT, w);
+			w[0] := m.p[i]; w[1] := 0; acc := acc - SYSTEM.VAL(LONGINT, w) - LONG(borrow);
+			w := SYSTEM.VAL(Words, acc);
+			d[i] := w[0];
+			bm := ASH(w[1], -31);
 			borrow := -bm
 		END;
 		hm := -carry;
@@ -165,24 +173,28 @@ MODULE CryptoEC;
 	PROCEDURE ModSub (IN m : Modulus; IN a, b : BigInt; VAR r : BigInt);
 		VAR
 			d : BigInt;
-			i : INTEGER;
-			acc : AO.SIGNED64;
-			borrow, bm, mask, carry : INTEGER;
+			w : Words;
+			i, borrow, bm, mask, carry : INTEGER;
+			acc : LONGINT;
 	BEGIN
 		borrow := 0;
 		FOR i := 0 TO m.n - 1 DO
-			acc := AO.LONG32(a[i]) - AO.LONG32(b[i]) - AO.LONG32(borrow);
-			d[i] := AO.SHORT64(acc);
-			bm := ASH(AO.SHORTHIGH64Raw(acc), -31);
+			w[0] := a[i]; w[1] := 0; acc := SYSTEM.VAL(LONGINT, w);
+			w[0] := b[i]; w[1] := 0; acc := acc - SYSTEM.VAL(LONGINT, w) - LONG(borrow);
+			w := SYSTEM.VAL(Words, acc);
+			d[i] := w[0];
+			bm := ASH(w[1], -31);
 			borrow := -bm
 		END;
 		mask := -borrow;
 		carry := 0;
 		FOR i := 0 TO m.n - 1 DO
-			acc := AO.UAdd64(AO.UAdd64(AO.LONG32(d[i]),
-				AO.LONG32(ORD(BITS(m.p[i]) * BITS(mask)))), AO.LONG32(carry));
-			r[i] := AO.SHORT64(acc);
-			carry := AO.SHORTHIGH64(acc)
+			w[0] := d[i]; w[1] := 0; acc := SYSTEM.VAL(LONGINT, w);
+			w[0] := ORD(BITS(m.p[i]) * BITS(mask)); w[1] := 0;
+			acc := acc + SYSTEM.VAL(LONGINT, w) + LONG(carry);
+			w := SYSTEM.VAL(Words, acc);
+			r[i] := w[0];
+			carry := w[1]
 		END;
 		FOR i := m.n TO MaxLimbs - 1 DO
 			r[i] := 0
@@ -191,62 +203,85 @@ MODULE CryptoEC;
 
 	(* Умножение Монтгомери: r = a*b/R mod m. *)
 	PROCEDURE MontMul (IN m : Modulus; IN a, b : BigInt; VAR r : BigInt);
+		(* Горячий цикл. Половинки 64-битных значений берутся через
+		   SYSTEM.VAL, а не вызовами CryptoAosCompat: на одно умножение
+		   приходится O(n^2) таких операций, и вызовы стоили больше
+		   самой арифметики. *)
 		VAR
-			t : ARRAY 2 * MaxLimbs + 1 OF INTEGER;
+			t : ARRAY 2 * MaxLimbs + 1 OF LONGINT;
+			az, bz, pz : ARRAY MaxLimbs OF LONGINT;
+			tl : ARRAY MaxLimbs OF INTEGER;
 			d : BigInt;
-			i, j, k : INTEGER;
-			acc : AO.SIGNED64;
-			carry, u, borrow, bm, hm, nm, mask : INTEGER;
+			w : Words;
+			i, j, k, lo, hi, u, borrow, bm, hm, nm, mask : INTEGER;
+			acc, carry, uz : LONGINT;
 	BEGIN
 		FOR i := 0 TO 2 * m.n DO
 			t[i] := 0
+		END;
+		(* Разряды — беззнаковые 32-битные в 64-битных словах. *)
+		FOR i := 0 TO m.n - 1 DO
+			w[0] := a[i]; w[1] := 0; az[i] := SYSTEM.VAL(LONGINT, w);
+			w[0] := b[i]; w[1] := 0; bz[i] := SYSTEM.VAL(LONGINT, w);
+			w[0] := m.p[i]; w[1] := 0; pz[i] := SYSTEM.VAL(LONGINT, w)
 		END;
 		(* Школьное умножение a*b в t. *)
 		FOR i := 0 TO m.n - 1 DO
 			carry := 0;
 			FOR j := 0 TO m.n - 1 DO
-				acc := AO.UAdd64(AO.UAdd64(AO.UMul64(AO.LONG32(a[i]), AO.LONG32(b[j])),
-					AO.LONG32(t[i + j])), AO.LONG32(carry));
-				t[i + j] := AO.SHORT64(acc);
-				carry := AO.SHORTHIGH64(acc)
+				acc := az[i] * bz[j] + t[i + j] + carry;
+				w := SYSTEM.VAL(Words, acc);
+				lo := w[0]; hi := w[1];
+				w[0] := lo; w[1] := 0; t[i + j] := SYSTEM.VAL(LONGINT, w);
+				w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w)
 			END;
-			t[i + m.n] := AO.UAdd32(t[i + m.n], carry)
+			t[i + m.n] := carry
 		END;
 		(* Редукция Монтгомери; t переполняется в старшую сторону. *)
 		FOR i := 0 TO m.n - 1 DO
-			u := AO.UMul32(t[i], m.n0);
+			w := SYSTEM.VAL(Words, t[i]);
+			u := w[0] * m.n0;
+			w[0] := u; w[1] := 0; uz := SYSTEM.VAL(LONGINT, w);
 			carry := 0;
 			FOR j := 0 TO m.n - 1 DO
-				acc := AO.UAdd64(AO.UAdd64(AO.UMul64(AO.LONG32(u), AO.LONG32(m.p[j])),
-					AO.LONG32(t[i + j])), AO.LONG32(carry));
-				t[i + j] := AO.SHORT64(acc);
-				carry := AO.SHORTHIGH64(acc)
+				acc := uz * pz[j] + t[i + j] + carry;
+				w := SYSTEM.VAL(Words, acc);
+				lo := w[0]; hi := w[1];
+				w[0] := lo; w[1] := 0; t[i + j] := SYSTEM.VAL(LONGINT, w);
+				w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w)
 			END;
 			k := i + m.n;
-			acc := AO.UAdd64(AO.LONG32(t[k]), AO.LONG32(carry));
-			t[k] := AO.SHORT64(acc);
-			carry := AO.SHORTHIGH64(acc);
+			acc := t[k] + carry;
+			w := SYSTEM.VAL(Words, acc);
+			lo := w[0]; hi := w[1];
+			w[0] := lo; w[1] := 0; t[k] := SYSTEM.VAL(LONGINT, w);
+			w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w);
 			INC(k);
 			WHILE k <= 2 * m.n DO
-				acc := AO.UAdd64(AO.LONG32(t[k]), AO.LONG32(carry));
-				t[k] := AO.SHORT64(acc);
-				carry := AO.SHORTHIGH64(acc);
+				acc := t[k] + carry;
+				w := SYSTEM.VAL(Words, acc);
+				lo := w[0]; hi := w[1];
+				w[0] := lo; w[1] := 0; t[k] := SYSTEM.VAL(LONGINT, w);
+				w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w);
 				INC(k)
 			END
 		END;
 		(* Результат в t[n..2n-1], возможный старший разряд — t[2n]. *)
 		borrow := 0;
 		FOR i := 0 TO m.n - 1 DO
-			acc := AO.LONG32(t[m.n + i]) - AO.LONG32(m.p[i]) - AO.LONG32(borrow);
-			d[i] := AO.SHORT64(acc);
-			bm := ASH(AO.SHORTHIGH64Raw(acc), -31);
+			w := SYSTEM.VAL(Words, t[m.n + i]);
+			tl[i] := w[0];
+			acc := t[m.n + i] - pz[i] - LONG(borrow);
+			w := SYSTEM.VAL(Words, acc);
+			d[i] := w[0];
+			bm := ASH(w[1], -31);
 			borrow := -bm
 		END;
-		hm := -t[2 * m.n];
+		hm := -SHORT(t[2 * m.n]);
 		nm := -borrow;
 		mask := ORD(BITS(hm) + BITS(-1 - nm));
 		FOR i := 0 TO m.n - 1 DO
-			r[i] := Sel(t[m.n + i], d[i], mask)
+			r[i] := Sel(tl[i], d[i], mask)
 		END;
 		FOR i := m.n TO MaxLimbs - 1 DO
 			r[i] := 0

@@ -7,7 +7,7 @@ MODULE LinConsole;
 		Change iconv to Strings UTF-8
 	*)
 
-	IMPORT S := SYSTEM, Console, Utf, Poller, Libc := LinLibc;
+	IMPORT S := SYSTEM, Console, Utf, Poller, Libc := LinLibc, Ioctl := LinIoctl;
 
 	CONST
 		maxWaiters = 4096;
@@ -32,6 +32,10 @@ MODULE LinConsole;
 		entries: ARRAY maxWaiters OF Entry;
 		fds: ARRAY maxWaiters + 1 OF Libc.pollfd;
 		stdinFd: INTEGER;
+		(* Конец ввода уже объявлен: stdin больше не участвует в poll.
+		   Иначе закрытый stdin (файл команд кончился) всегда «готов»,
+		   poll возвращается сразу, и главный цикл крутится вхолостую. *)
+		stdinEof: BOOLEAN;
 
 	(* --- хук Poller ------------------------------------------------------- *)
 
@@ -74,11 +78,11 @@ MODULE LinConsole;
 	PROCEDURE (h: PollHook) Wait (timeout: LONGINT; console: BOOLEAN): BOOLEAN;
 		(* Снять готовые записи до вызова Ready: он может зарегистрироваться
 		   снова и переписать таблицу. *)
-		VAR i, n, res, nidx: INTEGER; stdinReady: BOOLEAN;
+		VAR i, n, res, nidx, avail: INTEGER; stdinReady: BOOLEAN;
 			idx: ARRAY maxWaiters OF INTEGER; ev: ARRAY maxWaiters OF SET;
 	BEGIN
 		n := 0; stdinReady := FALSE;
-		IF console THEN
+		IF console & ~stdinEof THEN
 			fds[0].fd := stdinFd; fds[0].events := SHORT(pollIn); fds[0].revents := 0;
 			n := 1
 		END;
@@ -96,8 +100,17 @@ MODULE LinConsole;
 		END;
 		res := Libc.poll(S.ADR(fds[0]), n, SHORT(timeout));
 		IF res > 0 THEN
-			(* прежнее поведение: любой событие stdin (в т.ч. HUP) — это ввод *)
-			IF console & (fds[0].revents # 0) THEN stdinReady := TRUE END;
+			(* Прежнее поведение: любое событие stdin (в т.ч. HUP) — это
+			   ввод. Но конец файла объявляем ровно один раз: по нему
+			   интерпретатор дочитывает пустую строку и выходит, а
+			   главный цикл перестаёт крутиться на «вечно готовом» stdin. *)
+			IF console & ~stdinEof & (fds[0].revents # 0) THEN
+				stdinReady := TRUE;
+				avail := 0;
+				IF (Ioctl.ioctl1(stdinFd, Ioctl.FIONREAD, avail) # 0) OR (avail = 0) THEN
+					stdinEof := TRUE
+				END
+			END;
 			FOR i := 0 TO nidx - 1 DO
 				ev[i] := MapEvents(fds[i + n - nidx].revents)
 			END;

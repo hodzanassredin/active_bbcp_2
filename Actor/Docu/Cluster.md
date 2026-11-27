@@ -185,10 +185,11 @@ repeated step after passivation, and a balance that follows the outcomes on ever
 
 ## 6. What is not there
 
-- The channel of the nodes is neither encrypted nor authenticating the sender: the frames are
-  plaintext, and the "from" field is protected only by the capability mark. Channel protection is
-  section 5 of the plan [docs/cluster-plan.md](../../docs/cluster-plan.md); the open keys of the
-  participants are stored in the membership record but are not checked.
+- The default node channel is `ActorNetTcp`, plaintext. The protected channel is `ActorNetTls`
+  (TLS 1.3, mutual certificate check, the "from" field checked against the certificate, a node
+  outside the membership refused; guide [Actors.md](Actors.md), section 10;
+  `tools/test-cluster.sh --tls`). The `obxcluster` scenario is not yet run over TLS. There are no
+  revocation lists: revocation is removal from the membership.
 - Delivery is at most once. The transport does not repeat a lost frame; the application does: the
   client sends `Tick`, the coordinator sends the step again, the account recognises the operation
   number. An application that makes no repeats simply loses a letter when a frame is lost.

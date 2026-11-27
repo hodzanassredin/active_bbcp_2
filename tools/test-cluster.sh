@@ -6,7 +6,8 @@
 #   tools/test-cluster.sh --quick         # один короткий прогон
 #   tools/test-cluster.sh --veth          # две «машины»: два netns с veth
 #   tools/test-cluster.sh --keep          # не удалять каталог прогона
-#   tools/test-cluster.sh --only raft     # один сценарий: ask, raft, saga, grain, membership, obxcluster, bench
+#   tools/test-cluster.sh --tls           # узлы на TLS 1.3 со взаимной проверкой
+#   tools/test-cluster.sh --only raft     # один сценарий: ask, reconnect, secure, raft, saga, grain, membership, obxcluster, bench
 #   tools/test-cluster.sh --obx-ops 16    # переводов в сценарии obxcluster
 #
 # Прогон: ask — Ask и Watch между процессами, kill -9 → byNodeLoss;
@@ -25,6 +26,10 @@
 # проверяются сохранение суммы, отсутствие повторных применений и учёт
 # отклонённых переводов.
 # bench — запись в секунду по TCP на хранилище в памяти.
+# reconnect — перезапуск узла и повторный Ask через заново открытое
+# соединение. secure (только с --tls) — отрицательные случаи: чужой
+# корень, подделанное «от кого», узел, удалённый из состава; в ask
+# при --tls трафик идёт через прокси и в захвате ищется известная строка.
 #
 # Все процессы живут в своём сетевом пространстве (unshare -rmn),
 # поэтому порты не сталкиваются с чужими программами. В режиме --veth
@@ -40,6 +45,7 @@ RUNS=20
 QUICK=0
 VETH=0
 KEEP=0
+TLS=0
 ONLY=all
 OPS=60
 KILLAT=5
@@ -53,13 +59,14 @@ while [ $# -gt 0 ]; do
 		--runs) RUNS="${2:-20}"; shift 2;;
 		--quick) QUICK=1; RUNS=1; OPS=20; KILLAT=3; BENCH_OPS=100; shift;;
 		--veth) VETH=1; RUNS=1; shift;;
+		--tls) TLS=1; shift;;
 		--keep) KEEP=1; shift;;
 		--only) ONLY="${2:-all}"; shift 2;;
 		--ops) OPS="${2:-30}"; shift 2;;
 		--kill-at) KILLAT="${2:-5}"; shift 2;;
 		--bench-ops) BENCH_OPS="${2:-400}"; shift 2;;
 		--obx-ops) OBX_OPS="${2:-24}"; shift 2;;
-		-h|--help) sed -n '2,35p' "$0"; exit 0;;
+		-h|--help) sed -n '2,36p' "$0"; exit 0;;
 		--inner) shift; INNER=1; break;;
 		*) echo "test-cluster: неизвестный ключ $1" >&2; exit 2;;
 	esac
@@ -68,7 +75,7 @@ done
 # --- внутренняя часть: всё это исполняется в сетевом пространстве -----------------
 
 if [ "${INNER:-0}" = 1 ]; then
-	WORK="$1"; INSTALL="$2"; RUNS="$3"; VETH="$4"; OPS="$5"; KILLAT="$6"; BENCH_OPS="$7"; TICK="$8"; KEEP="$9"; ONLY="${10}"
+	WORK="$1"; INSTALL="$2"; RUNS="$3"; VETH="$4"; OPS="$5"; KILLAT="$6"; BENCH_OPS="$7"; TICK="$8"; KEEP="$9"; ONLY="${10}"; TLS="${11:-0}"; CERTDIR="${12:-}"
 	OBX_OPS="${OBX_OPS:-24}"
 	declare -A PORT_OF HOST_OF HOLDERS PIDS
 	# Ниже диапазона временных портов ядра (обычно 32768..60999):
@@ -90,19 +97,31 @@ if [ "${INNER:-0}" = 1 ]; then
 	alloc_role() { role=$1; host=${2:-1}; nextport; PORT_OF[$role]=$NEXT_PORT; HOST_OF[$role]=$host; }
 	addr_of() { echo "$(hostaddr "${HOST_OF[$1]:-1}"):${PORT_OF[$1]}"; }
 
+	TLSARGS=""
+	if [ "$TLS" = 1 ]; then
+		TLSARGS="--TLS=1 --CERTDIR=$CERTDIR"
+	fi
+
+	seed_dir() {
+		local dir=$1
+		[ "$TLS" = 1 ] || return 0
+		[ -f "$dir/roster" ] || cp "$CERTDIR/roster" "$dir/roster"
+	}
+
 	LASTPID=0
 	launch_role() {
 		local dir=$1 role=$2 h holder
 		shift 2
+		seed_dir "$dir"
 		h=${HOST_OF[$role]:-1}
 		if [ "$VETH" = 1 ]; then
 			holder=${HOLDERS[$h]}
 			( cd "$INSTALL" && exec env LD_LIBRARY_PATH="$INSTALL" \
-				nsenter -F -t "$holder" -n ./blackbox-console --DIR="$dir" --ROLE="$role" "$@" \
+				nsenter -F -t "$holder" -n ./blackbox-console --DIR="$dir" --ROLE="$role" $TLSARGS "$@" \
 				< "$dir/cmd" >> "$dir/log-$role.txt" 2>&1 ) &
 		else
 			( cd "$INSTALL" && exec env LD_LIBRARY_PATH="$INSTALL" \
-				./blackbox-console --DIR="$dir" --ROLE="$role" "$@" \
+				./blackbox-console --DIR="$dir" --ROLE="$role" $TLSARGS "$@" \
 				< "$dir/cmd" >> "$dir/log-$role.txt" 2>&1 ) &
 		fi
 		LASTPID=$!
@@ -201,16 +220,27 @@ if [ "${INNER:-0}" = 1 ]; then
 	# --- ask -----------------------------------------------------------------------
 
 	run_ask() {
-		local dir=$1 pE pQ ok
+		local dir=$1 pE pQ ok proxyargs
 		mkdir -p "$dir"
 		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
 		alloc_role E 1; alloc_role Q 2
 		printf 'E %s\nQ %s\n' "$(addr_of E)" "$(addr_of Q)" > "$dir/nodes"
+		proxyargs=""
 		PIDS=()
-		launch_role "$dir" Q --SCENARIO=ask --BURST=300; pQ=$LASTPID; PIDS[Q]=$pQ
 		launch_role "$dir" E --SCENARIO=ask --BURST=300; pE=$LASTPID; PIDS[E]=$pE
+		waitfile "$dir/E.cap" 2000 || { bad "$dir" "ask: E не готов"; return 1; }
+		if [ "$TLS" = 1 ] && [ "${CLUSTER_NO_CAPTURE:-0}" != 1 ]; then
+			# Прослушка: прозрачный прокси перед E. TLS кончается на узлах,
+			# поэтому в захвате должен быть только шифртекст.
+			alloc_role P 3
+			python3 "$BB/tools/tls-proxy.py" "$(addr_of P)" "$(addr_of E)" "$dir/capture.bin" &
+			PIDS[P]=$!
+			sleep 0.2
+			proxyargs="--PROXY=E,$(addr_of P)"
+		fi
+		launch_role "$dir" Q --SCENARIO=ask --BURST=300 $proxyargs; pQ=$LASTPID; PIDS[Q]=$pQ
 		waitfile "$dir/Q.ready" 1000 || { bad "$dir" "ask: Q не готов"; return 1; }
-		waitfile "$dir/E.cap" 1000 || { bad "$dir" "ask: E не готов"; return 1; }
+		waitfile "$dir/E.ready" 2000 || { bad "$dir" "ask: E не готов"; return 1; }
 		waitfile "$dir/E.burstSent" 2000 || { bad "$dir" "ask: E не послал пачку"; return 1; }
 		waitfile "$dir/Q.burst" 3000 || { bad "$dir" "ask: Q не принял пачку"; return 1; }
 		waitfile "$dir/Q.watching" 2000 || { bad "$dir" "ask: Q не наблюдает"; return 1; }
@@ -223,7 +253,196 @@ if [ "${INNER:-0}" = 1 ]; then
 		launch_role "$dir" E --SCENARIO=ask --BURST=300; PIDS[E]=$LASTPID
 		waitfile "$dir/E.afterSent" 2000 || { bad "$dir" "ask: E не поднялся"; return 1; }
 		waitfile "$dir/Q.after" 3000 || { bad "$dir" "ask: кадр нового воплощения не дошёл"; return 1; }
+		MEAS="$MEAS ask-rtt20ms=$(cat "$dir/Q.rtt20" 2>/dev/null)"
+		if [ "$TLS" = 1 ] && [ "${CLUSTER_NO_CAPTURE:-0}" != 1 ]; then
+			[ -s "$dir/capture.bin" ] || { bad "$dir" "ask: прокси не записал трафик"; return 1; }
+			if grep -aq 'BB-CLUSTER-PLAINTEXT-MARKER-42' "$dir/capture.bin"; then
+				bad "$dir" "ask: в захвате открытый текст письма"; return 1
+			fi
+		fi
 		check_no_traps "$dir" || { bad "$dir" "ask: трап"; return 1; }
+		stop_all "$dir"
+		return 0
+	}
+
+	# --- переподключение после перезапуска -----------------------------------------
+
+	run_reconnect() {
+		local dir=$1 pS
+		mkdir -p "$dir"
+		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
+		PIDS=()
+		alloc_role S 1; alloc_role C 2
+		printf 'S %s\nC %s\n' "$(addr_of S)" "$(addr_of C)" > "$dir/nodes"
+		launch_role "$dir" S --SCENARIO=reconnect; pS=$LASTPID; PIDS[S]=$pS
+		launch_role "$dir" C --SCENARIO=reconnect; PIDS[C]=$LASTPID
+		waitfile "$dir/C.first" 5000 || { bad "$dir" "reconnect: первый Ask не прошёл"; return 1; }
+		[ "$(cat "$dir/C.first" 2>/dev/null)" = "ok 42" ] || { bad "$dir" "reconnect: первый ответ $(cat "$dir/C.first" 2>/dev/null)"; return 1; }
+		kill -9 "$pS"; wait "$pS" 2>/dev/null; unset "PIDS[S]"
+		rm -f "$dir/S.ready" "$dir/S.cap"
+		launch_role "$dir" S --SCENARIO=reconnect; PIDS[S]=$LASTPID
+		waitfile "$dir/S.ready" 5000 || { bad "$dir" "reconnect: S не поднялся"; return 1; }
+		touch "$dir/go2"
+		waitfile "$dir/C.second" 5000 || { bad "$dir" "reconnect: повторный Ask не прошёл"; return 1; }
+		[ "$(cat "$dir/C.second" 2>/dev/null)" = "ok 43" ] || { bad "$dir" "reconnect: второй ответ $(cat "$dir/C.second" 2>/dev/null)"; return 1; }
+		check_no_traps "$dir" || { bad "$dir" "reconnect: трап"; return 1; }
+		stop_all "$dir"
+		return 0
+	}
+
+	# --- отрицательные случаи защищённого канала ---------------------------------
+
+	field_at_least() {
+		local f=$1 k=$2 want=$3 v
+		v=$(field "$f" "$k")
+		[ -n "$v" ] && [ "$v" -ge "$want" ]
+	}
+
+	run_secure() {
+		local dir=$1 foreign_fp
+		mkdir -p "$dir"
+		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
+		PIDS=()
+		alloc_role E 1; alloc_role E2 1
+		printf 'E %s\nE2 %s\n' "$(addr_of E)" "$(addr_of E2)" > "$dir/nodes"
+		seed_dir "$dir"
+		# чужой корень: сертификат foreign кладём в список, чтобы
+		# решала именно проверка цепочки, а не отсутствие записи
+		foreign_fp=$(cat "$CERTDIR/foreign.fp" 2>/dev/null || \
+			"${OPENSSL:-openssl}" x509 -in "$CERTDIR/foreign.pem" -outform DER | \
+			"${OPENSSL:-openssl}" dgst -sha256 -hex | awk '{print $NF}')
+		printf 'foreign %s\n' "$foreign_fp" >> "$dir/roster"
+		# Y — верный сертификат корня, но узла нет в составе.
+		awk '!/^Y /' "$dir/roster" > "$dir/roster.new" && mv "$dir/roster.new" "$dir/roster"
+
+		launch_role "$dir" E --SCENARIO=secure; PIDS[E]=$LASTPID
+		waitfile "$dir/E.ready" 5000 || { bad "$dir" "secure: E не готов"; return 1; }
+		# E2 — второй действующий узел с тем же префиксом имени, что E.
+		launch_role "$dir" E2 --SCENARIO=secure; PIDS[E2]=$LASTPID
+		waitfile "$dir/E2.ready" 5000 || { bad "$dir" "secure: E2 не готов"; return 1; }
+
+		# 1. сертификат чужого корня не принимается
+		launch_role "$dir" F --SCENARIO=secure --CLAIM=F --SEND=1 \
+			--CERT="$CERTDIR/foreign.pem" --KEY="$CERTDIR/foreign.key"
+		PIDS[F]=$LASTPID
+		waitfile "$dir/F.status" 5000 || { bad "$dir" "secure: F не закончил"; return 1; }
+		sleep 0.3
+		field_at_least "$dir/E.status" accf 1 || { bad "$dir" "secure: чужой корень принят"; return 1; }
+		[ "$(field "$dir/E.status" cerr)" != 0 ] || { bad "$dir" "secure: причина отказа не сертификат"; return 1; }
+
+		# 2. верный сертификат корня, но узла нет в составе
+		launch_role "$dir" Y --SCENARIO=secure --CLAIM=Y --SEND=1 \
+			--CERT="$CERTDIR/Y.pem" --KEY="$CERTDIR/Y.key"
+		PIDS[Y]=$LASTPID
+		waitfile "$dir/Y.status" 5000 || { bad "$dir" "secure: Y не закончил"; return 1; }
+		sleep 0.3
+		rej0=$(field "$dir/E.status" rej); [ -n "$rej0" ] || rej0=0
+		[ "$rej0" -ge 1 ] || { bad "$dir" "secure: узел вне состава принят"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо узла вне состава доставлено"; return 1; }
+
+		# 3. верное имя, но чужой ключ: отпечаток не тот
+		launch_role "$dir" K --SCENARIO=secure --CLAIM=M --SEND=1 \
+			--CERT="$CERTDIR/M2.pem" --KEY="$CERTDIR/M2.key"
+		PIDS[K]=$LASTPID
+		waitfile "$dir/K.status" 5000 || { bad "$dir" "secure: K не закончил"; return 1; }
+		sleep 0.3
+		rej1=$(field "$dir/E.status" rej); [ -n "$rej1" ] || rej1=0
+		[ "$rej1" -gt "$rej0" ] || { bad "$dir" "secure: ключ участника не проверен"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо с чужим ключом доставлено"; return 1; }
+
+		# 4. клиент без сертификата: сервер обязан отвергнуть рукопожатие
+		accf0=$(field "$dir/E.status" accf); [ -n "$accf0" ] || accf0=0
+		launch_role "$dir" N --SCENARIO=secure --CLAIM=N --SEND=1 --NOCLIENT=1 \
+			--CERT="$CERTDIR/Y.pem" --KEY="$CERTDIR/Y.key"
+		PIDS[N]=$LASTPID
+		waitfile "$dir/N.status" 5000 || { bad "$dir" "secure: N не закончил"; return 1; }
+		sleep 0.3
+		accf1=$(field "$dir/E.status" accf); [ -n "$accf1" ] || accf1=0
+		[ "$accf1" -gt "$accf0" ] || { bad "$dir" "secure: сервер принял клиента без сертификата"; return 1; }
+
+		# 4. верный сертификат, но подделанное «от кого»
+		launch_role "$dir" X --SCENARIO=secure --CLAIM=E --SEND=2 \
+			--CERT="$CERTDIR/X.pem" --KEY="$CERTDIR/X.key"
+		PIDS[X]=$LASTPID
+		waitfile "$dir/X.status" 5000 || { bad "$dir" "secure: X не закончил"; return 1; }
+		sleep 0.3
+		field_at_least "$dir/E.status" forged 1 || { bad "$dir" "secure: подделка «от кого» принята"; return 1; }
+		field_at_least "$dir/X.status" hso 1 || { bad "$dir" "secure: X не прошёл рукопожатие"; return 1; }
+
+		# Тот же первый символ: сертификат E2, заявленное имя E.
+		# E2 — действующий узел, имя E — префикс E2.
+		f0=$(field "$dir/E.status" forged); [ -n "$f0" ] || f0=0
+		launch_role "$dir" F1 --SCENARIO=secure --CLAIM=E --SEND=1 \
+			--CERT="$CERTDIR/E2.pem" --KEY="$CERTDIR/E2.key"
+		PIDS[F1]=$LASTPID
+		waitfile "$dir/F1.status" 5000 || { bad "$dir" "secure: F1 не закончил"; return 1; }
+		sleep 0.3
+		f1=$(field "$dir/E.status" forged); [ -n "$f1" ] || f1=0
+		[ "$f1" -gt "$f0" ] || { bad "$dir" "secure: подделка E2→E (тот же префикс) принята"; return 1; }
+		field_at_least "$dir/F1.status" hso 1 || { bad "$dir" "secure: F1 не прошёл рукопожатие"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо E2→E доставлено"; return 1; }
+
+		# Заявленное имя длиннее сертификата: сертификат E, заявлено E2.
+		f1=$(field "$dir/E.status" forged); [ -n "$f1" ] || f1=0
+		launch_role "$dir" F2 --SCENARIO=secure --CLAIM=E2 --SEND=1 \
+			--CERT="$CERTDIR/E.pem" --KEY="$CERTDIR/E.key"
+		PIDS[F2]=$LASTPID
+		waitfile "$dir/F2.status" 5000 || { bad "$dir" "secure: F2 не закончил"; return 1; }
+		sleep 0.3
+		f2=$(field "$dir/E.status" forged); [ -n "$f2" ] || f2=0
+		[ "$f2" -gt "$f1" ] || { bad "$dir" "secure: подделка E→E2 (длиннее) принята"; return 1; }
+		field_at_least "$dir/F2.status" hso 1 || { bad "$dir" "secure: F2 не прошёл рукопожатие"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо E→E2 доставлено"; return 1; }
+
+		# Регистр: сертификат e, заявленное имя E.
+		f2=$(field "$dir/E.status" forged); [ -n "$f2" ] || f2=0
+		launch_role "$dir" F3 --SCENARIO=secure --CLAIM=E --SEND=1 \
+			--CERT="$CERTDIR/e.pem" --KEY="$CERTDIR/e.key"
+		PIDS[F3]=$LASTPID
+		waitfile "$dir/F3.status" 5000 || { bad "$dir" "secure: F3 не закончил"; return 1; }
+		sleep 0.3
+		f3=$(field "$dir/E.status" forged); [ -n "$f3" ] || f3=0
+		[ "$f3" -gt "$f2" ] || { bad "$dir" "secure: подделка e→E (регистр) принята"; return 1; }
+		field_at_least "$dir/F3.status" hso 1 || { bad "$dir" "secure: F3 не прошёл рукопожатие"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо e→E доставлено"; return 1; }
+
+		# 3. узел, удалённый из состава: первое письмо доходит, после
+		#    отзыва — нет, действующее соединение рвётся
+		launch_role "$dir" M --SCENARIO=secure --CLAIM=M --SEND=1 --WAIT2=1 \
+			--CERT="$CERTDIR/M.pem" --KEY="$CERTDIR/M.key"
+		PIDS[M]=$LASTPID
+		waitfile "$dir/M.status" 5000 || { bad "$dir" "secure: M не отправил"; return 1; }
+		sleep 0.2
+		[ "$(cat "$dir/E.pings" 2>/dev/null)" = "1" ] || { bad "$dir" "secure: M не дошёл до отзыва ($(cat "$dir/E.pings" 2>/dev/null))"; return 1; }
+		awk '!/^M /' "$dir/roster" > "$dir/roster.new" && mv "$dir/roster.new" "$dir/roster"
+		sleep 0.5
+		touch "$dir/go2"
+		waitfile "$dir/M.status2" 8000 || { bad "$dir" "secure: M не закончил"; return 1; }
+		[ "$(cat "$dir/E.pings" 2>/dev/null)" = "1" ] || { bad "$dir" "secure: отозванный M принят"; return 1; }
+		field_at_least "$dir/E.status" rev 1 || { bad "$dir" "secure: соединение с M не разорвано"; return 1; }
+		[ "$(field "$dir/E.status" readers)" = "0" ] || { bad "$dir" "secure: читатель отозванного M не закрыт"; return 1; }
+		# отозванный кадр отвергнут читателем, а не только сменой списка
+		grep -q 'revoked-frame' "$dir/tls-audit" 2>/dev/null \
+			|| { bad "$dir" "secure: нет записи об отозванном кадре в журнале"; return 1; }
+
+		# запись в журнал о подделке (файл tls-audit ведёт транспорт)
+		grep -q 'forged-frame' "$dir/tls-audit" 2>/dev/null \
+			|| { bad "$dir" "secure: нет записи о подделке в журнале"; return 1; }
+
+		# простой узел не крутит главный цикл на закрытом stdin: за секунду
+		# меньше 50 тиков процессорного времени (занятый цикл даёт ~100)
+		u0=$(awk '{print $14 + $15}' "/proc/${PIDS[E]}/stat" 2>/dev/null)
+		[ -n "$u0" ] || u0=0
+		sleep 1
+		u1=$(awk '{print $14 + $15}' "/proc/${PIDS[E]}/stat" 2>/dev/null)
+		[ -n "$u1" ] || u1=0
+		[ $((u1 - u0)) -lt 50 ] \
+			|| { bad "$dir" "secure: простой узел занимает процессор ($((u1 - u0)) тиков/с)"; return 1; }
+		touch "$dir/stop"
+		waitfile "$dir/E.exited" 2000 || true
+		sleep 0.2
+
+		check_no_traps "$dir" || { bad "$dir" "secure: трап"; return 1; }
 		stop_all "$dir"
 		return 0
 	}
@@ -400,18 +619,20 @@ if [ "${INNER:-0}" = 1 ]; then
 	# --- membership ---------------------------------------------------------------
 
 	run_membership() {
-		local dir=$1 i role r p g3 killed killedsvc start t
+		local dir=$1 i role r p g3 killed killedsvc start t nsvc
 		mkdir -p "$dir"
 		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
 		PIDS=()
-		for ((i = 0; i < 5; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
+		# Служба состава из пяти узлов; рост до пяти проверяется и на TLS.
+		nsvc=5
+		for ((i = 0; i < nsvc; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 3; i++)); do alloc_role "R$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 4; i++)); do alloc_role "G$i" "$((i % 2 + 1))"; done
 		: > "$dir/nodes"
-		for ((i = 0; i < 5; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
+		for ((i = 0; i < nsvc; i++)); do echo "S$i $(addr_of "S$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < 3; i++)); do echo "R$i $(addr_of "R$i")" >> "$dir/nodes"; done
 		for ((i = 0; i < 4; i++)); do echo "G$i $(addr_of "G$i")" >> "$dir/nodes"; done
-		for ((i = 0; i < 5; i++)); do
+		for ((i = 0; i < nsvc; i++)); do
 			launch_role "$dir" "S$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
 			PIDS[S$i]=$LASTPID
 		done
@@ -419,7 +640,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			launch_role "$dir" "G$i" --SCENARIO=membership --IDX="$i" --TICK="$TICK"
 			PIDS[G$i]=$LASTPID
 		done
-		for ((i = 0; i < 5; i++)); do
+		for ((i = 0; i < nsvc; i++)); do
 			waitfile "$dir/S$i.ready" 8000 || { bad "$dir" "membership: S$i не готов"; return 1; }
 		done
 		for ((i = 0; i < 3; i++)); do
@@ -445,8 +666,10 @@ if [ "${INNER:-0}" = 1 ]; then
 				fi
 				touch "$dir/killed-svc"; killedsvc=1
 			fi
-			if [ $(( $(date +%s%3N) - start )) -gt 120000 ]; then
-				bad "$dir" "membership: нет итога за 120 с"; return 1
+			local limit=120000
+			[ "$TLS" = 1 ] && limit=600000
+			if [ $(( $(date +%s%3N) - start )) -gt "$limit" ]; then
+				bad "$dir" "membership: нет итога за $limit мс"; return 1
 			fi
 			sleep 0.05
 		done
@@ -689,6 +912,11 @@ if [ "${INNER:-0}" = 1 ]; then
 		say "прогон $run из $RUNS"
 		want() { [ "$ONLY" = all ] || [ "$ONLY" = "$1" ]; }
 		if want ask; then run_ask "$d/ask" || break; fi
+		if want reconnect; then run_reconnect "$d/reconnect" || break; fi
+		if want secure; then
+			[ "$TLS" = 1 ] || { say "secure: пропуск без --tls"; }
+			[ "$TLS" = 1 ] && { run_secure "$d/secure" || break; }
+		fi
 		if want raft; then
 			run_raft "$d/raft3" 3 "$OPS" 0 1 "$KILLAT" || break
 			run_raft "$d/raft5" 5 "$OPS" 0 1 "$KILLAT" || break
@@ -696,7 +924,10 @@ if [ "${INNER:-0}" = 1 ]; then
 		if want saga; then run_saga "$d/saga" || break; fi
 		if want grain; then run_grain "$d/grain" || break; fi
 		if want membership; then run_membership "$d/membership" || break; fi
-		if want obxcluster; then run_obxcluster "$d/obxcluster" || break; fi
+		if want obxcluster; then
+			if [ "$TLS" = 1 ]; then echo "  obxcluster: пропущен в --tls (сертификаты узлов G/J/M не выдаются; задача — docs/current-tasks.md)"
+			else run_obxcluster "$d/obxcluster" || break; fi
+		fi
 		if want bench; then run_bench "$d/bench" || break; fi
 		if [ "$KEEP" = 0 ]; then rm -rf "$d"; fi
 		say "прогон $run: ок"
@@ -738,7 +969,7 @@ fi
 clean() { [ "$KEEP" = 1 ] && echo "cluster: каталог прогона $work" >&2 || rm -rf "$work"; }
 trap clean EXIT INT TERM
 
-mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash CasStore ActorNet ActorNetTcp AsyncIO AsyncSelect AsyncChan LinNative LinThreads RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb RaftNode RaftJournal ActorGrain ActorFileJournal RaftMembership RaftGrainMembership ObxCluster Actor_devCluster"
+mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash CasStore ActorNet ActorNetTcp ActorNetTls CryptoAosCommStreams CryptoTLS AsyncIO AsyncSelect AsyncChan LinNative LinThreads RaftCore RaftSm RaftStorage RaftKvStorage KvPages KvStore KvFault KvLin KvTree KvDb RaftNode RaftJournal ActorGrain ActorFileJournal RaftMembership RaftGrainMembership ObxCluster Actor_devCluster"
 pass=0
 while [ "$pass" -lt 3 ]; do
 	pass=$((pass + 1))
@@ -749,9 +980,16 @@ while [ "$pass" -lt 3 ]; do
 	fi
 done
 
-echo "cluster: прогонов $RUNS, mark=quick:$QUICK veth:$VETH"
+CERTDIR=""
+if [ "$TLS" = 1 ]; then
+	CERTDIR="$work/certs"
+	"$BB/tools/cluster-certs.sh" "$CERTDIR" \
+		E Q S A B C X M Y E2 e S0 S1 S2 S3 S4 R0 R1 R2 R3 R4 G0 G1 G2 G3 >/dev/null || exit 1
+fi
+
 export OBX_OPS
-unshare -rmn bash "$0" --inner "$work" "$INSTALL" "$RUNS" "$VETH" "$OPS" "$KILLAT" "$BENCH_OPS" "$TICK" "$KEEP" "$ONLY"
+echo "cluster: прогонов $RUNS, mark=quick:$QUICK veth:$VETH tls:$TLS"
+unshare -rmn bash "$0" --inner "$work" "$INSTALL" "$RUNS" "$VETH" "$OPS" "$KILLAT" "$BENCH_OPS" "$TICK" "$KEEP" "$ONLY" "$TLS" "$CERTDIR"
 rc=$?
 if [ -f "$work/measurements.txt" ]; then
 	echo "cluster: замеры:"

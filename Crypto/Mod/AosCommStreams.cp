@@ -30,6 +30,14 @@ MODULE CryptoAosCommStreams;
 		END;
 		WriterSender = POINTER TO RECORD(Streams.Sender) writer: Writer END;
 
+	VAR
+		(** Вызывается, когда сокет не дал ни байта. Транспорт задач
+			ставит сюда ожидание готовности дескриптора: задача спит до
+			события, а не крутится в занятом цикле. write = TRUE — ждём
+			готовности к записи, иначе — к чтению. Вне задач остаётся
+			занятый цикл. *)
+		onWait*: PROCEDURE (s: CommStreams.Stream; write: BOOLEAN);
+
 	PROCEDURE (SELF: Reader) Receive (VAR buf: ARRAY OF SHORTCHAR; ofs, size, min: AO.SIZE; VAR len: AO.SIZE; VAR res: INTEGER), NEW;
 		VAR time: LONGINT;
 	BEGIN
@@ -37,6 +45,7 @@ MODULE CryptoAosCommStreams;
 		len := 0;
 		WHILE SELF.s.IsConnected() & (len = 0) & ((Services.Ticks() - time) < (Services.resolution * SELF.readTimeoutSeconds)) DO
 			SELF.s.ReadBytes(SYSTEM.VAL(Bytes, buf), ofs, size, len);
+			IF (len = 0) & (onWait # NIL) THEN onWait(SELF.s, FALSE) END
 		END;
 		IF len >= min THEN res := Streams.Ok ELSE res := Streams.EOF (* end of file *) END
 	END Receive;
@@ -81,6 +90,7 @@ MODULE CryptoAosCommStreams;
 
 		WHILE SELF.s.IsConnected() & (len > 0) DO
 			SELF.s.WriteBytes(SYSTEM.VAL(Bytes, buf), ofs, len, lenWriten);
+			IF (lenWriten = 0) & (onWait # NIL) THEN onWait(SELF.s, TRUE) END;
 			INC(ofs, lenWriten); DEC(len, lenWriten);
 		END;
 

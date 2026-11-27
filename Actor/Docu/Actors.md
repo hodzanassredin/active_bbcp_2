@@ -769,6 +769,45 @@ written by `Export` reaches a peer as a file too (`<role>.cap`), so a node learn
 others before it sends the first frame. The script `tools/test-cluster.sh` runs this arrangement on
 loopback; the same files and fixed ports serve two machines.
 
+**Secure channel.** Frames on `ActorNetTcp` are plaintext, and the "from" field is not tied to the
+sender. `ActorNetTls` carries the same frames over TLS 1.3 with mutual authentication. Each node has
+a certificate from the cluster root: ECDSA P-256, the node name in the subject alternative name. The
+root is the only trusted certificate; the server requires a client certificate, so a peer without one
+does not complete the handshake. `Configure` loads the root, the node certificate and its key,
+`Attach` opens the listener, and `SetMembers` gives the transport the list of participants: a node
+name and the SHA-256 of its certificate.
+
+The receiver takes the node name from the SAN of the connection and checks it against the roster. The
+"from" field of every frame is compared with that name: a valid certificate does not allow a node to
+send under another name. A mismatch closes the connection, is counted in `forged` and is passed to
+the audit procedure `ActorNetTls.audit`; the owner points it at its log.
+
+**Revocation.** The membership service stores the node fingerprint as the join key
+(`RaftMembership.JoinCmd`). Removing a name from the roster with `SetMembers` closes its outgoing
+connections immediately, ends the watchers' addresses on that node with `Terminated`, and refuses a
+new handshake from it. An incoming connection of a removed node is closed by its reader on the first
+frame: the frame is not delivered, the `revoked` counter grows, the audit procedure gets a
+`revoked-frame` line, and the connection ends. `ActorNetTls` does not read the membership service
+itself: the owner applies the list, so the transport does not depend on `Raft`.
+
+The transport waits for a socket through `Poller`: a reader, a writer and the acceptor sleep until
+the descriptor is ready, and a queued frame wakes the writer with `Tasks.Unpark`. A handshake costs
+several ECDSA operations, so opening a connection takes about 0.1 s on the test machine while a
+frame in an established connection costs about 0.45 ms; the figures and their conditions are in
+`docs/measurements.md`.
+
+**Issuing certificates.** `tools/cluster-certs.sh` creates the root and the node certificates with
+`openssl` (ECDSA P-256, SAN) in the run directory. `tools/test-cluster.sh --tls` runs every scenario
+on these certificates and adds the negative cases: a certificate of a foreign root, a valid
+certificate with a forged "from" and a node removed from the roster are refused. The forged names
+share the first character with the certificate name (`E2` claiming `E`, `E` claiming `E2`, `e`
+claiming `E`), so the check compares whole names, not their first character or length; the removed
+node sends another frame and the test requires that the frame is not delivered and the audit log has
+a `revoked-frame` line. The same script
+routes one ask through `tools/tls-proxy.py`, keeps the bytes and searches them for the known string
+of the letter: the capture holds ciphertext only. The price of the channel is in
+`docs/measurements.md`.
+
 A process restart is a new incarnation of the node. `ActorNet.New` always numbers it 1, while the
 repeat window of a peer remembers the frame numbers of the old incarnation; frames of the new process
 would be dropped as duplicates. Therefore a node that lives in a process keeps its launch counter in
@@ -946,11 +985,14 @@ while a scan of the list cost 1.1–1.5 ms at 100000 (`docs/measurements.md`, se
   switch point of the executor (an executor yields every 64 mailboxes).
 - Persistence only for `ActorPersist.Actor`; a `Kv` write costs two `Sync` per batch; a batch is
   formed only from tasks writing at the same time (section 8).
-- Nodes: frames are neither signed nor encrypted, and the "from" field is not authenticated: the
+- Nodes: `ActorNetTcp` sends frames in plaintext and does not authenticate the "from" field: the
   holder of one valid capability can send under another name and move that name's repeat window.
-  Channel protection with mutual authentication is stage 5 of the cluster plan
-  (`docs/cluster-plan.md`) and is not implemented; the open keys in the membership record are not
-  checked. Delivery is at most once; the TCP transport is Linux only. `ActorGrain` itself does not
+  `ActorNetTls` encrypts the same frames with TLS 1.3, requires a client certificate, trusts only the
+  cluster root and compares "from" with the SAN of the connection (section 10). A node is admitted
+  while its name and certificate fingerprint are in the roster; the owner applies the roster, and the
+  transport does not query the membership service itself. There is no CRL, OCSP or certificate
+  rotation: removal from the roster is the only revocation. Both transports are Linux only. Delivery
+  is at most once. `ActorGrain` itself does not
   coordinate: on a network split two activations of a key are possible, and without a consensus
   journal both can write. With `RaftJournal` the second cannot write and catches up before reading
   (section 11, the `Raft` guide). Liveness of a node is known only by the break of its TCP
@@ -1014,7 +1056,7 @@ subsystem and where they are described.
 | Virtual actors on a consensus journal | present | the `Raft` guide |
 | Membership service with leases | present | the `Raft` guide |
 | Actors in different processes over TCP | present | section 10, `tools/test-cluster.sh` |
-| Protected channel of nodes: TLS, mutual authentication, check of member keys | absent | stage 5 of the cluster plan; the frames are plaintext and "from" is not authenticated (section 13) |
+| Protected channel of nodes: TLS, mutual authentication, check of member keys | present | section 10, `ActorNetTls`; `tools/test-cluster.sh --tls` |
 | Exactly once delivery | absent | delivery is at most once; the journal of a persistent actor removes repeated operations by their numbers (section 8) |
 | Durable event stream and replay for a returning subscriber | absent | the stream is a mailbox fan-out, not a journal |
 
@@ -1940,7 +1982,81 @@ frames go to node `n` (created on `net`).
 **PROCEDURE Close (net: Net)** — Post: the listener and connections are closed, the tasks end; other
 nodes see the break.
 
-### 15.13. ActorGrain
+### 15.13. ActorNetTls
+
+```
+DEFINITION ActorNetTls;
+
+	IMPORT ActorCore, ActorNet;
+
+	CONST
+		badRoot = 1; badCertificate = 2; badKey = 3;
+
+	TYPE
+		Fingerprint = ARRAY 32 OF BYTE;
+		Member = RECORD
+			name: ActorCore.Name;
+			fp: Fingerprint
+		END;
+		Net = POINTER TO LIMITED RECORD (ActorNet.Transport) END;
+
+	VAR
+		audit: PROCEDURE (IN text: ARRAY OF CHAR);
+
+	PROCEDURE New (IN listen: ARRAY OF CHAR; OUT net: Net; OUT res: INTEGER);
+	PROCEDURE (net: Net) Configure (IN rootFile, certFile, keyFile: ARRAY OF CHAR; OUT res: INTEGER);
+	PROCEDURE (net: Net) ConfigureNoClient (IN rootFile, certFile, keyFile: ARRAY OF CHAR; OUT res: INTEGER);
+	PROCEDURE Attach (net: Net; n: ActorNet.Node);
+	PROCEDURE Address (net: Net; OUT adr: ARRAY OF CHAR);
+	PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR);
+	PROCEDURE (net: Net) SetMembers (IN m: ARRAY OF Member; n: INTEGER);
+	PROCEDURE Close (net: Net);
+	PROCEDURE (net: Net) Stats (OUT sent, read, refused, forged, rejected, revoked: LONGINT);
+	PROCEDURE (net: Net) Detail (OUT accepts, acceptFails, hsOk, hsFail, hsStarted, accTicks: LONGINT);
+	PROCEDURE (net: Net) Counts (OUT links, readers: INTEGER);
+	PROCEDURE (net: Net) ConnAlive (): BOOLEAN;
+	PROCEDURE (net: Net) HandshakeState (): INTEGER;
+	PROCEDURE (net: Net) PeersText (OUT text: ARRAY OF CHAR);
+
+END ActorNetTls.
+```
+
+A TLS 1.3 transport with mutual authentication, Linux only. A frame goes over a connection opened by
+the first letter; `Send` does not wait for the network. The first message of a connection is not a
+name: the name of the peer is the SAN of its certificate. A handshake with a certificate of another
+root, without a client certificate or with a name outside the roster does not finish. A frame whose
+"from" differs from that name is dropped, counted in `forged`, reported to `audit`, and the connection
+is closed. The reader also checks the roster on every frame: the first frame from a removed node is
+not delivered, counted in `revoked`, reported as `revoked-frame`, and the connection is closed. A
+break gives `ActorNet.Lost`; queued frames of a broken connection are lost. Readers, writers and the
+acceptor wait for a descriptor through `Poller`, so the main loop sleeps instead of polling.
+
+**PROCEDURE New (IN listen: ARRAY OF CHAR; OUT net: Net; OUT res: INTEGER)** — Post:
+`res = CommStreams.done` — `net` created; `listen` is the address it will listen on after `Attach`.
+**PROCEDURE (net: Net) Configure (IN rootFile, certFile, keyFile: ARRAY OF CHAR; OUT res: INTEGER)** —
+Pre: `net # NIL` — 20. Post: `res = 0` — the root, the node certificate and its key are loaded, the
+server requires a client certificate; otherwise `badRoot`, `badCertificate` or `badKey`.
+**PROCEDURE (net: Net) ConfigureNoClient (IN rootFile, certFile, keyFile: ARRAY OF CHAR; OUT
+res: INTEGER)** — the same without a client certificate; a server accepting such a node refuses the
+handshake.
+**PROCEDURE Attach (net: Net; n: ActorNet.Node)** — Pre: `net`, `n` not NIL — 20; no node yet — 21;
+`Configure` was called — 22. Post: the listener is open and received frames go to node `n`.
+**PROCEDURE Address (net: Net; OUT adr: ARRAY OF CHAR)** — Post: the address given to `New`.
+**PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR)** — Post: frames to `name` go to `adr`; the
+connection verifies the certificate of `name` against the roster.
+**PROCEDURE (net: Net) SetMembers (IN m: ARRAY OF Member; n: INTEGER)** — Pre:
+`0 <= n <= 64` — 20. Post: the roster is `m[0 .. n-1]`; outgoing connections with names outside it
+are closed at once, an incoming connection is closed by its reader on the first frame, their
+watchers receive `Terminated`, and new handshakes from them are refused.
+**PROCEDURE Close (net: Net)** — Post: the listener and connections are closed; other nodes see the
+break.
+**PROCEDURE (net: Net) Stats**, **Detail**, **Counts**, **ConnAlive**, **HandshakeState**,
+**PeersText** — counters of frames, refusals, handshakes and open connections, the state of the
+underlying TCP connection, the handshake step and a line per peer, for diagnosis.
+**VAR audit** — called with a line when a frame "from" does not match the certificate; NIL ignores
+the record.
+
+### 15.14. ActorGrain
 
 ```
 DEFINITION ActorGrain;
@@ -2038,7 +2154,7 @@ owner node among the live members, in `cl`'s view.
 **PROCEDURE Tick (cl: Cluster)** — Post: activations of the node without letters for `idle` ticks in
 a row are passivated.
 
-### 15.14. ActorRouter
+### 15.15. ActorRouter
 
 ```
 DEFINITION ActorRouter;
@@ -2086,7 +2202,7 @@ router ignores it.
 Pre: `r # NIL` — trap 20. Post: the router receives a letter that changes the rule; an invalid rule
 changes nothing.
 
-### 15.15. ActorHash
+### 15.16. ActorHash
 
 ```
 DEFINITION ActorHash;
@@ -2101,7 +2217,7 @@ than `nameLen` — not checked. Post: the weight of the place
 `member` for the key `key` of kind `kind`; the same input gives the same weight. The owner is the
 live place with the greatest weight; on equal weights the lesser name wins.
 
-### 15.16. ActorEvent
+### 15.17. ActorEvent
 
 ```
 DEFINITION ActorEvent;

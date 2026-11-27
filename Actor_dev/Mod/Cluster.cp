@@ -29,9 +29,10 @@ MODULE Actor_devCluster;
 	даёт 1, и окно повторов соседей отбросило бы кадры нового процесса
 	как дубли (ActorNet.SetIncarnation). *)
 
-	IMPORT Services, Tasks, Files, Dialog, Strings, Console, Stores,
+	IMPORT S := SYSTEM, Utf, Libc := LinLibc, Services, Tasks, Files, Dialog, Strings, Console, Stores,
 		CommStreams,
-		ActorCore, ActorRun, ActorNet, ActorNetTcp, ActorJournal, ActorFileJournal,
+		ActorCore, ActorRun, ActorNet, ActorNetTcp, ActorNetTls, ActorJournal, ActorFileJournal,
+		CryptoTLS,
 		ActorPersist, ActorGrain, ObxCluster,
 		CasStore, KvLin, KvStore, KvDb,
 		Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, RaftNode, RaftJournal,
@@ -39,27 +40,37 @@ MODULE Actor_devCluster;
 
 	CONST
 		maxRoles = 16;
+		maxNets = 8;
 		maxText = 4096;
+		maxMembers = 64;
 		askMs = 5000;
 		clientAskMs = 1500;
 		maxNodes = Core.maxNodes;
-		serveMs = 120000;	(* предел жизни процесса-службы в прогоне *)
 
 	TYPE
 		Name = ActorCore.Name;
 
 		Addr = RECORD name: Name; adr: ARRAY 80 OF CHAR END;
 
+		(* Транспорт узла: в обычном прогоне TCP, в --tls — TLS с
+		   сертификатами из certDir и списком участников в файле roster. *)
+		Net = POINTER TO RECORD
+			tcp: ActorNetTcp.Net;
+			tls: ActorNetTls.Net;
+			secure: BOOLEAN
+		END;
+
 		Ticker = POINTER TO RECORD (Services.Action) ref: ActorCore.Ref; ms: INTEGER; dead: BOOLEAN END;
 
 		Driver = POINTER TO RECORD (Tasks.Task) body: PROCEDURE END;
 
 		(* --- ask --------------------------------------------------------------- *)
-		Ping = POINTER TO RECORD (ActorNet.Msg) n: INTEGER END;
+		Ping = POINTER TO RECORD (ActorNet.Msg) n: INTEGER; tag: ARRAY 48 OF CHAR END;
 		Pong = POINTER TO RECORD (ActorNet.Msg) n: INTEGER END;
 		WatchMe = POINTER TO RECORD (ActorCore.Msg) r: ActorCore.Ref END;
 
 		Echo = POINTER TO RECORD (ActorCore.Actor) END;
+		SecureEcho = POINTER TO RECORD (ActorCore.Actor) file: Name END;
 		Watcher = POINTER TO RECORD (ActorCore.Actor) END;
 		Sink = POINTER TO RECORD (ActorCore.Actor) END;
 
@@ -100,6 +111,7 @@ MODULE Actor_devCluster;
 		dir: ARRAY 1024 OF CHAR;
 		role, scenario: Name;
 		idx, n, tickMs: INTEGER;
+		serveMs: LONGINT;	(* предел жизни процесса-службы в прогоне *)
 		stop, finished: BOOLEAN;
 		adrs: ARRAY maxRoles OF Addr; nadr: INTEGER;
 		t0: LONGINT;
@@ -131,10 +143,25 @@ MODULE Actor_devCluster;
 		memClient: RaftMembership.Client;
 		memCfg: RaftGrainMembership.Config;
 		memServiceCaps, memJournalCaps: RaftNode.Caps;
-		memKey: ARRAY 2 OF BYTE;
+		memKey: ARRAY 32 OF BYTE;
+		memKeyLen: INTEGER;
+		(* --- защищённый канал --- *)
+		secure: BOOLEAN;
+		certDir: ARRAY 1024 OF CHAR;
+		rosterText, revokedText: ARRAY maxText OF CHAR;
+		nets: ARRAY maxNets OF Net; nnets: INTEGER;
+		rosterAt: LONGINT;
+		statusNet: Net;
+		(* --- защищённый канал: параметры ролей и счётчики --- *)
+		claimName: Name;
+		certOverride, keyOverride: ARRAY 1024 OF CHAR;
+		proxyName: Name; proxyAdr: ARRAY 80 OF CHAR;
+		senderCount, securePings: INTEGER;
+		noClient, waitSecond: BOOLEAN;
+		secureLog: ARRAY 2048 OF CHAR;
 		memOps, memOks, memBad: INTEGER;
 		memBalance, memExpect: INTEGER;	(* сумма по всем счетам и ожидаемый баланс текущего *)
-		memDone: BOOLEAN;
+		memDone, memRevoked: BOOLEAN;
 		(* --- сценарий obxcluster --- *)
 		obxCl: ActorGrain.Cluster;
 		obxJournal: RaftJournal.Client;
@@ -248,6 +275,27 @@ MODULE Actor_devCluster;
 		text[len] := 0X
 	END GetText;
 
+	PROCEDURE ReadAbsText (IN name: ARRAY OF CHAR; OUT text: ARRAY OF CHAR);
+	(* Файл каталога прогона через libc: сосед подменяет его переименованием,
+	   и BlackBox Files на такой подмене между Old и NewReader трапует. *)
+		VAR path: ARRAY 1024 OF CHAR; nm: ARRAY 1024 OF SHORTCHAR; buf: ARRAY maxText OF BYTE;
+			fd, n, r, i: INTEGER;
+	BEGIN
+		text := "";
+		path := dir + "/" + name;
+		Utf.StringToUtf8(path, nm, r);
+		IF r # 0 THEN RETURN END;
+		fd := Libc.open(nm, Libc.O_RDONLY + Libc.O_CLOEXEC, {});
+		IF fd < 0 THEN RETURN END;
+		n := S.VAL(INTEGER, Libc.read(fd, S.ADR(buf), LEN(buf) - 1));
+		IF n > LEN(text) - 1 THEN n := LEN(text) - 1 END;
+		IF n > 0 THEN
+			FOR i := 0 TO n - 1 DO text[i] := CHR(buf[i] MOD 256) END;
+			text[n] := 0X
+		END;
+		IF Libc.close(fd) # 0 THEN END
+	END ReadAbsText;
+
 	PROCEDURE IntToText (x: LONGINT; OUT s: ARRAY OF CHAR);
 	BEGIN
 		Strings.IntToString(x, s)
@@ -314,11 +362,16 @@ MODULE Actor_devCluster;
 
 	(* --- главный цикл --------------------------------------------------------- *)
 
+	PROCEDURE^ ReloadRoster;
+
 	PROCEDURE Pump;
 	(* Шаг главного цикла консоли: действия (в том числе планировщик задач)
 		и опрос stdin вместе с дескрипторами, зарегистрированными Poller. *)
 	BEGIN
 		Services.actionHook.Step;
+		IF secure & (Services.Ticks() - rosterAt >= 100) THEN
+			rosterAt := Services.Ticks(); ReloadRoster
+		END;
 		IF Console.WaitInput(2) THEN END	(* ввод командой не читается *)
 	END Pump;
 
@@ -371,12 +424,12 @@ MODULE Actor_devCluster;
 
 	PROCEDURE (m: Ping) Write- (VAR wr: Stores.Writer);
 	BEGIN
-		wr.WriteInt(m.n)
+		wr.WriteInt(m.n); wr.WriteString(m.tag)
 	END Write;
 
 	PROCEDURE (m: Ping) Read- (VAR rd: Stores.Reader);
 	BEGIN
-		rd.ReadInt(m.n)
+		rd.ReadInt(m.n); rd.ReadString(m.tag)
 	END Read;
 
 	PROCEDURE (m: Pong) Write- (VAR wr: Stores.Writer);
@@ -396,6 +449,24 @@ MODULE Actor_devCluster;
 		ELSE
 		END
 	END Receive;
+
+	(* Эхо защищённого прогона: считает дошедшие письма и отвечает. *)
+	PROCEDURE (a: SecureEcho) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+		VAR p: Pong; s: ARRAY 32 OF CHAR;
+	BEGIN
+		WITH m: Ping DO
+			INC(securePings);
+			IntToText(securePings, s); PutText(a.file + ".pings", s);
+			NEW(p); p.n := m.n; c.Respond(p)
+		ELSE
+		END
+	END Receive;
+
+	PROCEDURE NewSecureEcho (): ActorCore.Actor;
+		VAR a: SecureEcho;
+	BEGIN
+		NEW(a); a.file := role$; RETURN a
+	END NewSecureEcho;
 
 	PROCEDURE (a: Watcher) Receive (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR s: ARRAY 128 OF CHAR;
@@ -438,32 +509,203 @@ MODULE Actor_devCluster;
 
 	(* --- транспорт и узел ------------------------------------------------------ *)
 
-	PROCEDURE OpenNode (IN node: ARRAY OF CHAR; OUT t: ActorNetTcp.Net; OUT nd: ActorNet.Node);
+	PROCEDURE HexNibble (c: CHAR): INTEGER;
+	BEGIN
+		IF (c >= "0") & (c <= "9") THEN RETURN ORD(c) - ORD("0")
+		ELSIF (c >= "a") & (c <= "f") THEN RETURN ORD(c) - ORD("a") + 10
+		ELSIF (c >= "A") & (c <= "F") THEN RETURN ORD(c) - ORD("A") + 10
+		ELSE RETURN -1
+		END
+	END HexNibble;
+
+	PROCEDURE HexFp (IN text: ARRAY OF CHAR; ofs: INTEGER; OUT fp: ActorNetTls.Fingerprint): BOOLEAN;
+		VAR i, hi, lo: INTEGER;
+	BEGIN
+		FOR i := 0 TO LEN(fp) - 1 DO
+			IF ofs + 2 * i + 1 >= LEN(text) THEN RETURN FALSE END;
+			hi := HexNibble(text[ofs + 2 * i]); lo := HexNibble(text[ofs + 2 * i + 1]);
+			IF (hi < 0) OR (lo < 0) THEN RETURN FALSE END;
+			fp[i] := SHORT(SHORT(16 * hi + lo))
+		END;
+		RETURN TRUE
+	END HexFp;
+
+	PROCEDURE SameText (IN a: ARRAY OF CHAR; IN b: ARRAY OF CHAR): BOOLEAN;
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(a)) & (i < LEN(b)) & (a[i] # 0X) & (a[i] = b[i]) DO INC(i) END;
+		IF (i >= LEN(a)) OR (i >= LEN(b)) THEN RETURN FALSE END;
+		RETURN (a[i] = 0X) & (b[i] = 0X)
+	END SameText;
+
+	PROCEDURE AuditHook (IN text: ARRAY OF CHAR);
+		VAR s: ARRAY maxText OF CHAR;
+	BEGIN
+		s := secureLog + text + " ";
+		IF LEN(s$) < LEN(secureLog) THEN
+			secureLog := s$;
+			PutText("tls-audit", secureLog)
+		END
+	END AuditHook;
+
+	PROCEDURE SplitPair (IN s: ARRAY OF CHAR; OUT a, b: ARRAY OF CHAR);
+		VAR i, j, k: INTEGER;
+	BEGIN
+		a := ""; b := ""; i := 0; k := 0;
+		WHILE (i < LEN(s)) & (s[i] # 0X) & (s[i] # ",") DO
+			IF k < LEN(a) - 1 THEN a[k] := s[i]; INC(k) END; INC(i)
+		END;
+		IF k < LEN(a) THEN a[k] := 0X END;
+		IF (i < LEN(s)) & (s[i] = ",") THEN
+			INC(i); j := 0;
+			WHILE (i < LEN(s)) & (s[i] # 0X) & (j < LEN(b) - 1) DO b[j] := s[i]; INC(i); INC(j) END;
+			b[j] := 0X
+		END
+	END SplitPair;
+
+	PROCEDURE NetPeer (t: Net; IN name, adr: ARRAY OF CHAR);
+	BEGIN
+		IF (proxyName # "") & (name = proxyName) THEN
+			IF t.secure THEN ActorNetTls.Peer(t.tls, name, proxyAdr) ELSE ActorNetTcp.Peer(t.tcp, name, proxyAdr) END
+		ELSIF t.secure THEN ActorNetTls.Peer(t.tls, name, adr)
+		ELSE ActorNetTcp.Peer(t.tcp, name, adr)
+		END
+	END NetPeer;
+
+	PROCEDURE NetClose (t: Net);
+	BEGIN
+		IF t = NIL THEN RETURN END;
+		IF t.secure THEN ActorNetTls.Close(t.tls) ELSE ActorNetTcp.Close(t.tcp) END
+	END NetClose;
+
+	PROCEDURE ReloadRoster;
+	(* Файл roster — снимок службы состава: строки "<узел> <hex SHA-256>".
+		Новый снимок применяется ко всем сетям процесса; выбывшие узлы
+		теряют соединения (ActorNetTls.SetMembers). *)
+		VAR text, rev: ARRAY maxText OF CHAR; members: ARRAY maxMembers OF ActorNetTls.Member;
+			revNames: ARRAY maxMembers OF Name; nrev, nmem, i, j, k, r: INTEGER;
+			name: Name; fp: ActorNetTls.Fingerprint; skip: BOOLEAN;
+	BEGIN
+		IF ~secure THEN RETURN END;
+		GetText("revoked", rev);
+		IF ~SameText(rev, revokedText) THEN revokedText := rev$; rosterText := "" END;
+		GetText("roster", text);
+		IF SameText(text, rosterText) THEN RETURN END;
+		(* выбывшие: по строке на имя *)
+		nrev := 0; i := 0;
+		WHILE (i < LEN(rev)) & (rev[i] # 0X) & (nrev < maxMembers) DO
+			j := 0;
+			WHILE (i < LEN(rev)) & (rev[i] # 0X) & (rev[i] # 0AX) & (rev[i] # 0DX) & (rev[i] # " ") DO
+				IF j < LEN(name) - 1 THEN name[j] := rev[i]; INC(j) END; INC(i)
+			END;
+			name[j] := 0X;
+			IF j > 0 THEN revNames[nrev] := name$; INC(nrev) END;
+			WHILE (i < LEN(rev)) & (rev[i] # 0X) & (rev[i] # 0AX) DO INC(i) END;
+			WHILE (i < LEN(rev)) & ((rev[i] = 0AX) OR (rev[i] = 0DX)) DO INC(i) END
+		END;
+		nmem := 0; i := 0;
+		WHILE (i < LEN(text)) & (text[i] # 0X) & (nmem < maxMembers) DO
+			j := 0;
+			WHILE (i < LEN(text)) & (text[i] # 0X) & (text[i] # " ") & (text[i] # 0AX) & (text[i] # 0DX) DO
+				IF j < LEN(name) - 1 THEN name[j] := text[i]; INC(j) END;
+				INC(i)
+			END;
+			name[j] := 0X;
+			WHILE (i < LEN(text)) & ((text[i] = " ") OR (ORD(text[i]) = 9)) DO INC(i) END;
+			skip := FALSE; r := 0;
+			WHILE (r < nrev) & ~skip DO IF revNames[r] = name THEN skip := TRUE END; INC(r) END;
+			IF (j > 0) & ~skip & HexFp(text, i, fp) THEN
+				members[nmem].name := name$; members[nmem].fp := fp; INC(nmem)
+			END;
+			IF j > 0 THEN INC(i, 2 * LEN(fp)) END;
+			WHILE (i < LEN(text)) & (text[i] # 0X) & (text[i] # 0AX) DO INC(i) END;
+			WHILE (i < LEN(text)) & ((text[i] = 0AX) OR (text[i] = 0DX)) DO INC(i) END
+		END;
+		rosterText := text$;
+		FOR k := 0 TO nnets - 1 DO
+			IF nets[k].secure THEN nets[k].tls.SetMembers(members, nmem) END
+		END
+	END ReloadRoster;
+
+	PROCEDURE FileTextAbs (IN path: ARRAY OF CHAR; OUT text: ARRAY OF CHAR): BOOLEAN;
+		VAR buf: ARRAY maxText OF SHORTCHAR; len, i: INTEGER;
+	BEGIN
+		text := "";
+		IF ~CryptoTLS.ReadFile(path, buf, len) THEN RETURN FALSE END;
+		IF len > LEN(text) - 1 THEN len := LEN(text) - 1 END;
+		FOR i := 0 TO len - 1 DO text[i] := CHR(SHORT(SHORT(ORD(buf[i]) MOD 65536))) END;
+		text[len] := 0X;
+		RETURN TRUE
+	END FileTextAbs;
+
+	PROCEDURE OwnKey (IN node: ARRAY OF CHAR; OUT key: ARRAY OF BYTE; OUT len: INTEGER);
+	(* Открытый ключ узла для службы состава: в --tls — отпечаток его
+		сертификата из <certDir>/<node>.fp; иначе прежние два байта. *)
+		VAR path, text: ARRAY 1024 OF CHAR; fp: ActorNetTls.Fingerprint; i: INTEGER;
+	BEGIN
+		IF secure THEN
+			path := certDir + "/" + node + ".fp";
+			ASSERT(FileTextAbs(path, text) & HexFp(text, 0, fp), 30);
+			FOR i := 0 TO LEN(fp) - 1 DO key[i] := fp[i] END;
+			len := LEN(fp)
+		ELSE
+			key[0] := SHORT(SHORT(idx + 1)); key[1] := 3; len := 2
+		END
+	END OwnKey;
+
+	PROCEDURE OpenNet (IN node, adr: ARRAY OF CHAR; OUT t: Net; OUT res: INTEGER);
+		VAR root, cert, key: ARRAY 1024 OF CHAR;
+	BEGIN
+		NEW(t); t.secure := secure;
+		IF secure THEN
+			root := certDir + "/ca.pem";
+			cert := certDir + "/" + node + ".pem";
+			key := certDir + "/" + node + ".key";
+			ActorNetTls.New(adr, t.tls, res);
+			IF res = CommStreams.done THEN
+				t.tls.Configure(root, cert, key, res);
+				IF res # 0 THEN t := NIL; res := -1 END
+			END
+		ELSE
+			ActorNetTcp.New(adr, t.tcp, res)
+		END
+	END OpenNet;
+
+	PROCEDURE TransportOf (t: Net): ActorNet.Transport;
+	BEGIN
+		IF t.secure THEN RETURN t.tls ELSE RETURN t.tcp END
+	END TransportOf;
+
+	PROCEDURE OpenNode (IN node: ARRAY OF CHAR; OUT t: Net; OUT nd: ActorNet.Node);
 		VAR adr: ARRAY 80 OF CHAR; res: INTEGER; inc: LONGINT;
 	BEGIN
 		AddrOf(node, adr);
 		ASSERT(adr # "", 100);
-		ActorNetTcp.New(adr, t, res);
+		OpenNet(node, adr, t, res);
 		ASSERT((res = CommStreams.done) & (t # NIL), 101);
 		inc := NextInc(node);
-		nd := ActorNet.New(node, t, SecretOf(node));
+		nd := ActorNet.New(node, TransportOf(t), SecretOf(node));
 		ASSERT(nd # NIL, 102);
-		ActorNetTcp.Attach(t, nd);
-		IF inc > 1 THEN ActorNet.SetIncarnation(nd, inc) END
+		IF t.secure THEN ActorNetTls.Attach(t.tls, nd) ELSE ActorNetTcp.Attach(t.tcp, nd) END;
+		IF inc > 1 THEN ActorNet.SetIncarnation(nd, inc) END;
+		IF nnets < maxNets THEN nets[nnets] := t; INC(nnets) END;
+		rosterText := "";	(* новый сети нужен список, даже если файл не менялся *)
+		ReloadRoster
 	END OpenNode;
 
-	PROCEDURE PeerAll (t: ActorNetTcp.Net; IN self: ARRAY OF CHAR);
+	PROCEDURE PeerAll (t: Net; IN self: ARRAY OF CHAR);
 		VAR i: INTEGER;
 	BEGIN
 		FOR i := 0 TO nadr - 1 DO
-			IF adrs[i].name # self THEN ActorNetTcp.Peer(t, adrs[i].name, adrs[i].adr) END
+			IF adrs[i].name # self THEN NetPeer(t, adrs[i].name, adrs[i].adr) END
 		END
 	END PeerAll;
 
 	(* --- роль ask: узел E ------------------------------------------------------ *)
 
 	PROCEDURE RunEcho;
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; cap, qcap: ARRAY 256 OF CHAR;
+		VAR t: Net; nd: ActorNet.Node; cap, qcap: ARRAY 256 OF CHAR;
 			remote: ActorCore.Ref; p: Ping; i: INTEGER;
 	BEGIN
 		OpenNode("E", t, nd); PeerAll(t, "E");
@@ -485,31 +727,38 @@ MODULE Actor_devCluster;
 		END;
 		PutText("E.ready", "1");
 		Serve;
-		ActorNetTcp.Close(t)
+		NetClose(t)
 	END RunEcho;
 
 	(* --- роль ask: узел Q ------------------------------------------------------ *)
 
 	PROCEDURE AskBody;
 		VAR cap: ARRAY 256 OF CHAR; s: ARRAY 128 OF CHAR; r: ActorCore.Msg; p: Ping; w: WatchMe;
-			remote, watcher: ActorCore.Ref;
+			remote, watcher: ActorCore.Ref; t0: LONGINT; i: INTEGER;
 	BEGIN
 		WHILE ~Exists("E.cap") & ~stop DO Tasks.Sleep(10) END;
 		GetText("E.cap", cap);
 		remote := ActorNet.Import(ndQ, cap);
-		NEW(p); p.n := 42;
+		NEW(p); p.n := 42; p.tag := "BB-CLUSTER-PLAINTEXT-MARKER-42";
 		IF ActorCore.Ask(remote, p, askMs, r) = ActorCore.ok THEN
 			WITH r: Pong DO pong := r.n ELSE pong := -1 END;
 			IntToText(pong, s); PutText("Q.ask", "ok " + s)
 		ELSE PutText("Q.ask", "failed")
 		END;
+		(* цена канала: 20 последовательных Ask туда-обратно *)
+		t0 := Services.Ticks();
+		FOR i := 1 TO 20 DO
+			NEW(p); p.n := 1000 + i; p.tag := "";
+			IF ActorCore.Ask(remote, p, askMs, r) = ActorCore.ok THEN END
+		END;
+		IntToText(Services.Ticks() - t0, s); PutText("Q.rtt20", s);
 		watcher := ActorCore.Spawn(NIL, ActorCore.NewProps(NewWatcher), "watcher");
 		NEW(w); w.r := remote; ActorCore.Tell(watcher, w);
 		WHILE ~watchOk & ~stop DO Tasks.Sleep(10) END
 	END AskBody;
 
 	PROCEDURE RunAsker;
-		VAR t: ActorNetTcp.Net; d: Driver; sink: ActorCore.Ref; cap: ARRAY 256 OF CHAR;
+		VAR t: Net; d: Driver; sink: ActorCore.Ref; cap: ARRAY 256 OF CHAR;
 	BEGIN
 		OpenNode("Q", t, ndQ); PeerAll(t, "Q");
 		sink := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSink), "sink");
@@ -518,8 +767,166 @@ MODULE Actor_devCluster;
 		PutText("Q.ready", "1");
 		NEW(d); d.body := AskBody; Tasks.Start(d);
 		Serve;
-		ActorNetTcp.Close(t)
+		NetClose(t)
 	END RunAsker;
+
+	(* --- переподключение после перезапуска узла -------------------------------- *)
+
+	PROCEDURE RunReconnectServer;
+		VAR t: Net; nd: ActorNet.Node; cap: ARRAY 256 OF CHAR;
+	BEGIN
+		OpenNode("S", t, nd); PeerAll(t, "S");
+		rootRef := ActorCore.Spawn(NIL, ActorCore.NewProps(NewEcho), "S");
+		ActorNet.Export(nd, rootRef, cap);
+		PutText("S.cap", cap); PutText("S.ready", "1");
+		Serve;
+		NetClose(t)
+	END RunReconnectServer;
+
+	PROCEDURE ReconnectBody;
+		VAR cap: ARRAY 256 OF CHAR; s: ARRAY 64 OF CHAR; r: ActorCore.Msg; p: Ping;
+			remote: ActorCore.Ref;
+	BEGIN
+		WHILE ~Exists("S.cap") & ~stop DO Tasks.Sleep(10) END;
+		GetText("S.cap", cap);
+		remote := ActorNet.Import(ndQ, cap);
+		NEW(p); p.n := 42;
+		IF ActorCore.Ask(remote, p, askMs, r) = ActorCore.ok THEN
+			WITH r: Pong DO pong := r.n ELSE pong := -1 END;
+			IntToText(pong, s); PutText("C.first", "ok " + s)
+		ELSE PutText("C.first", "failed")
+		END;
+		WHILE ~Exists("go2") & ~stop DO Tasks.Sleep(10) END;
+		NEW(p); p.n := 43;
+		IF ActorCore.Ask(remote, p, askMs, r) = ActorCore.ok THEN
+			WITH r: Pong DO pong := r.n ELSE pong := -1 END;
+			IntToText(pong, s); PutText("C.second", "ok " + s)
+		ELSE PutText("C.second", "failed")
+		END;
+		finished := TRUE
+	END ReconnectBody;
+
+	PROCEDURE RunReconnectClient;
+		VAR t: Net; d: Driver;
+	BEGIN
+		OpenNode("C", t, ndQ); PeerAll(t, "C");
+		NEW(d); d.body := ReconnectBody; Tasks.Start(d);
+		Serve;
+		NetClose(t)
+	END RunReconnectClient;
+
+	(* --- защищённый канал: приёмник и отправители ------------------------------ *)
+
+	PROCEDURE TlsText (net: Net; OUT text: ARRAY OF CHAR);
+		VAR sent, read, refused, forged, rejected, revoked: LONGINT;
+			acc, accf, hso, hsf, hss, acct: LONGINT; links, readers: INTEGER;
+			x: ARRAY 32 OF CHAR;
+	BEGIN
+		text := "";
+		IF (net = NIL) OR ~net.secure THEN RETURN END;
+		ActorNetTls.Stats(net.tls, sent, read, refused, forged, rejected, revoked);
+		ActorNetTls.Detail(net.tls, acc, accf, hso, hsf, hss, acct);
+		ActorNetTls.Counts(net.tls, links, readers);
+		IntToText(sent, x); text := text + " sent=" + x;
+		IntToText(read, x); text := text + " read=" + x;
+		IntToText(rejected, x); text := text + " rej=" + x;
+		IntToText(forged, x); text := text + " forged=" + x;
+		IntToText(revoked, x); text := text + " rev=" + x;
+		IntToText(acc, x); text := text + " acc=" + x;
+		IntToText(accf, x); text := text + " accf=" + x;
+		IntToText(hso, x); text := text + " hso=" + x;
+		IntToText(hsf, x); text := text + " hsf=" + x;
+		IntToText(links, x); text := text + " links=" + x;
+		IntToText(readers, x); text := text + " readers=" + x;
+		IntToText(CryptoTLS.LastCertError, x); text := text + " cerr=" + x
+	END TlsText;
+
+	PROCEDURE WriteSecureStatus;
+		VAR s, x: ARRAY 1024 OF CHAR;
+	BEGIN
+		IntToText(securePings, x); s := "pings=" + x;
+		TlsText(statusNet, x); s := s + x;
+		PutText(role + ".status", s);
+		ActorNetTls.PeersText(statusNet.tls, s); PutText(role + ".links", s)
+	END WriteSecureStatus;
+
+	PROCEDURE RunSecureVictim;
+		VAR t: Net; nd: ActorNet.Node; cap: ARRAY 256 OF CHAR; last: LONGINT;
+	BEGIN
+		OpenNode(role, t, nd); PeerAll(t, role); statusNet := t;
+		rootRef := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSecureEcho), role);
+		ActorNet.Export(nd, rootRef, cap);
+		PutText(role + ".cap", cap); PutText(role + ".ready", "1");
+		last := 0;
+		WHILE ~stop & ~finished & (Services.Ticks() - t0 < serveMs) DO
+			Pump;
+			IF Services.Ticks() - last >= 50 THEN last := Services.Ticks(); WriteSecureStatus END
+		END;
+		PutText(role + ".exited", "1");
+		NetClose(t)
+	END RunSecureVictim;
+
+	PROCEDURE OpenSenderNode (IN node, cert, key: ARRAY OF CHAR; OUT t: Net; OUT nd: ActorNet.Node);
+		VAR root, cf, kf: ARRAY 1024 OF CHAR; res: INTEGER;
+	BEGIN
+		NEW(t); t.secure := TRUE;
+		root := certDir + "/ca.pem";
+		IF cert = "" THEN cf := certDir + "/" + node + ".pem" ELSE cf := cert$ END;
+		IF key = "" THEN kf := certDir + "/" + node + ".key" ELSE kf := key$ END;
+		ActorNetTls.New("127.0.0.1:0", t.tls, res);
+		ASSERT(res = CommStreams.done, 31);
+		IF noClient THEN t.tls.ConfigureNoClient(root, cf, kf, res)
+		ELSE t.tls.Configure(root, cf, kf, res)
+		END;
+		ASSERT(res = 0, 32);
+		nd := ActorNet.New(node, t.tls, SecretOf(node) + 7 * idx);
+		ASSERT(nd # NIL, 33);
+		ActorNetTls.Attach(t.tls, nd);
+		IF nnets < maxNets THEN nets[nnets] := t; INC(nnets) END;
+		rosterText := "";
+		ReloadRoster
+	END OpenSenderNode;
+
+	PROCEDURE WriteSenderStatus (IN suffix: ARRAY OF CHAR);
+		VAR s, x: ARRAY 1024 OF CHAR;
+	BEGIN
+		TlsText(nets[nnets - 1], s);
+		s := "role=" + role + s;
+		IntToText(senderCount, x); s := s + " want=" + x;
+		PutText(role + "." + suffix, s)
+	END WriteSenderStatus;
+
+	PROCEDURE SecureSendBody;
+		VAR cap: ARRAY 256 OF CHAR; remote: ActorCore.Ref; p: Ping; i: INTEGER;
+	BEGIN
+		WHILE ~Exists("E.cap") & ~stop DO Tasks.Sleep(10) END;
+		GetText("E.cap", cap);
+		remote := ActorNet.Import(ndQ, cap);
+		FOR i := 1 TO senderCount DO
+			NEW(p); p.n := i; p.tag := "secure"; ActorCore.Tell(remote, p)
+		END;
+		Tasks.Sleep(800);
+		WriteSenderStatus("status");
+		IF waitSecond THEN
+			WHILE ~Exists("go2") & ~stop DO Tasks.Sleep(10) END;
+			NEW(p); p.n := senderCount + 1; p.tag := "secure2"; ActorCore.Tell(remote, p);
+			Tasks.Sleep(800);
+			WriteSenderStatus("status2")
+		END;
+		finished := TRUE
+	END SecureSendBody;
+
+	PROCEDURE RunSecureSender;
+		VAR t: Net; nd: ActorNet.Node; d: Driver; adr: ARRAY 80 OF CHAR;
+	BEGIN
+		OpenSenderNode(claimName, certOverride, keyOverride, t, nd);
+		AddrOf("E", adr);
+		IF adr # "" THEN NetPeer(t, "E", adr) END;
+		ndQ := nd;
+		NEW(d); d.body := SecureSendBody; Tasks.Start(d);
+		Serve;
+		NetClose(t)
+	END RunSecureSender;
 
 	(* --- raft: автомат счётчика ------------------------------------------------- *)
 
@@ -632,7 +1039,7 @@ MODULE Actor_devCluster;
 	END StatusLoop;
 
 	PROCEDURE RunRaft;
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; cap: ARRAY RaftNode.capLen OF CHAR;
+		VAR t: Net; nd: ActorNet.Node; cap: ARRAY RaftNode.capLen OF CHAR;
 			store: RaftStorage.Storage;
 	BEGIN
 		OpenNode(role, t, nd); PeerAll(t, role);
@@ -651,7 +1058,7 @@ MODULE Actor_devCluster;
 		StatusLoop;
 		clock.dead := TRUE;
 		ActorRun.Shutdown;
-		ActorNetTcp.Close(t)
+		NetClose(t)
 	END RunRaft;
 
 	(* --- raft: клиент ---------------------------------------------------------- *)
@@ -659,7 +1066,7 @@ MODULE Actor_devCluster;
 	PROCEDURE^ ClientBody;
 
 	PROCEDURE RunClient;
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; s: ARRAY 64 OF CHAR; cap: ARRAY RaftNode.capLen OF CHAR;
+		VAR t: Net; nd: ActorNet.Node; s: ARRAY 64 OF CHAR; cap: ARRAY RaftNode.capLen OF CHAR;
 			i: INTEGER; d: Driver;
 	BEGIN
 		OpenNode("C", t, nd); PeerAll(t, "C");
@@ -674,7 +1081,7 @@ MODULE Actor_devCluster;
 		PutText("C.ready", "1");
 		NEW(d); d.body := ClientBody; Tasks.Start(d);
 		WHILE ~finished & ~stop & (Services.Ticks() - t0 < serveMs) DO Pump; CheckStop END;
-		ActorNetTcp.Close(t)
+		NetClose(t)
 	END RunClient;
 
 	PROCEDURE ClientTry (seq, hint: INTEGER; OUT res, leaderHint: INTEGER; OUT data: Core.Bytes): BOOLEAN;
@@ -922,7 +1329,7 @@ MODULE Actor_devCluster;
 	END OpenSagaJournal;
 
 	PROCEDURE RunAccount (IN node: ARRAY OF CHAR);
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; cap: ARRAY 256 OF CHAR;
+		VAR t: Net; nd: ActorNet.Node; cap: ARRAY 256 OF CHAR;
 	BEGIN
 		OpenSagaJournal(node);
 		OpenNode(node, t, nd); PeerAll(t, node);
@@ -932,7 +1339,7 @@ MODULE Actor_devCluster;
 		PutText(node + ".ready", "1");
 		Serve;
 		sagaJournal.Close;
-		ActorNetTcp.Close(t)
+		NetClose(t)
 	END RunAccount;
 
 	PROCEDURE SagaResult;
@@ -1009,7 +1416,7 @@ MODULE Actor_devCluster;
 	END SagaDriver;
 
 	PROCEDURE RunSagaCoord;
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; d: Driver;
+		VAR t: Net; nd: ActorNet.Node; d: Driver;
 	BEGIN
 		OpenSagaJournal("C");
 		OpenNode("C", t, nd); PeerAll(t, "C");
@@ -1024,7 +1431,7 @@ MODULE Actor_devCluster;
 		NEW(d); d.body := SagaDriver; Tasks.Start(d);
 		Serve;
 		sagaJournal.Close;
-		ActorNetTcp.Close(t)
+		NetClose(t)
 	END RunSagaCoord;
 
 	(* --- grain: сообщения и счёт ------------------------------------------------- *)
@@ -1144,7 +1551,7 @@ MODULE Actor_devCluster;
 	END GrainDriver;
 
 	PROCEDURE RunGrain;
-		VAR raftT, grainT: ActorNetTcp.Net; raftNd, grainNd: ActorNet.Node;
+		VAR raftT, grainT: Net; raftNd, grainNd: ActorNet.Node;
 			store: RaftStorage.Storage; s: ARRAY 64 OF CHAR; cap: ARRAY 256 OF CHAR;
 			i, inc: INTEGER; d: Driver;
 	BEGIN
@@ -1191,7 +1598,7 @@ MODULE Actor_devCluster;
 		clock.dead := TRUE;
 		grainJournal.Close;
 		ActorRun.Shutdown;
-		ActorNetTcp.Close(grainT); ActorNetTcp.Close(raftT)
+		NetClose(grainT); NetClose(raftT)
 	END RunGrain;
 
 
@@ -1235,7 +1642,7 @@ MODULE Actor_devCluster;
 	PROCEDURE StatusInt (IN name, key: ARRAY OF CHAR; def: INTEGER): INTEGER;
 		VAR t: ARRAY 512 OF CHAR; i, j, x: INTEGER; found: BOOLEAN;
 	BEGIN
-		GetText(name, t); i := 0; found := FALSE;
+		ReadAbsText(name, t); i := 0; found := FALSE;
 		WHILE (i < LEN(t)) & (t[i] # 0X) & ~found DO
 			j := 0;
 			WHILE (key[j] # 0X) & (t[i + j] = key[j]) DO INC(j) END;
@@ -1264,8 +1671,8 @@ MODULE Actor_devCluster;
 	END WriteSvcStatus;
 
 	PROCEDURE RunMembershipService;
-		VAR t: ActorNetTcp.Net; nd: ActorNet.Node; store: RaftStorage.Storage;
-			cap: ARRAY RaftNode.capLen OF CHAR; i: INTEGER; last: LONGINT; xs: ARRAY 16 OF CHAR;
+		VAR t: Net; nd: ActorNet.Node; store: RaftStorage.Storage;
+			cap: ARRAY RaftNode.capLen OF CHAR; i, nsvc: INTEGER; last: LONGINT; xs: ARRAY 16 OF CHAR;
 			vs, ls: SET; dirty, isV, isL: BOOLEAN;
 	BEGIN
 		OpenNode(role, t, nd); PeerAll(t, role);
@@ -1275,8 +1682,9 @@ MODULE Actor_devCluster;
 		raftRef := RaftNode.Start(raftCfg);
 		statusName := role;
 		ActorNet.Export(nd, raftRef, cap); PutText(role + ".cap", cap);
-		ASSERT(WaitRoleCaps("S", 5, 20000), 120);
-		FOR i := 0 TO 4 DO
+		nsvc := 5;
+		ASSERT(WaitRoleCaps("S", nsvc, 20000), 120);
+		FOR i := 0 TO nsvc - 1 DO
 			IF i # idx THEN IntToText(i, xs); GetText("S" + xs + ".cap", cap); RaftNode.SetPeer(raftCfg, i, cap) END
 		END;
 		StartTicker(raftRef);
@@ -1299,7 +1707,7 @@ MODULE Actor_devCluster;
 				WriteSvcStatus
 			END
 		END;
-		clock.dead := TRUE; ActorRun.Shutdown; ActorNetTcp.Close(t)
+		clock.dead := TRUE; ActorRun.Shutdown; NetClose(t)
 	END RunMembershipService;
 
 
@@ -1316,20 +1724,36 @@ MODULE Actor_devCluster;
 	END WriteGrainStatus;
 
 	PROCEDURE MembershipGrainLoop;
-		VAR last, leftAt: LONGINT; t: RaftNode.Tick; s: ARRAY 128 OF CHAR;
+		VAR last, lastR, leftAt: LONGINT; t: RaftNode.Tick; s: ARRAY 128 OF CHAR;
+			sent, read, refused, forged, rejected, revoked: LONGINT;
+			rl, term, leader, la, lt, commit, applied, tickNo: INTEGER; broken: BOOLEAN;
 	BEGIN
-		last := 0; leftAt := -1;
+		last := 0; lastR := 0; leftAt := -1; tickNo := 0;
 		WHILE ~stop & (Services.Ticks() - t0 < serveMs) DO
 			Pump; CheckStop;
 			IF Services.Ticks() - last >= tickMs THEN
 				last := Services.Ticks();
+				INC(tickNo);
 				RaftGrainMembership.time := Services.Ticks();
 				RaftGrainMembership.Tick(memCfg);
-				RaftJournal.Tick(memJournal);
-				IF idx < 3 THEN NEW(t); ActorCore.Tell(raftRef, t) END;
+				(* TLS: журнал шлёт сердцебиения реже, иначе канал занимает
+				   процесс и служба состава не успевает ответить. *)
+				IF ~secure OR (tickNo MOD 2 = 0) THEN
+					RaftJournal.Tick(memJournal);
+					IF idx < 3 THEN NEW(t); ActorCore.Tell(raftRef, t) END
+				END;
 				IF (leftAt < 0) & Exists("leave") THEN
 					GetText("leave", s);
 					IF s = role THEN RaftGrainMembership.Leave(memCfg); leftAt := Services.Ticks() END
+				END;
+				IF secure & Exists("revoked") & (nnets > 0) THEN
+					ActorNetTls.Stats(nets[0].tls, sent, read, refused, forged, rejected, revoked);
+					IF revoked > 0 THEN PutText(role + ".revoked", "1") END
+				END;
+				IF (idx < 3) & (Services.Ticks() - lastR >= 200) THEN
+					lastR := Services.Ticks();
+					RaftNode.Status(raftCfg, rl, term, leader, la, lt, commit, applied, broken);
+					WriteStatus(rl, term, leader, la, lt, commit, applied, broken)
 				END;
 				WriteGrainStatus
 			END
@@ -1339,9 +1763,9 @@ MODULE Actor_devCluster;
 	PROCEDURE^ MembershipDriver;
 
 	PROCEDURE RunMembershipGrain;
-		VAR grainT, raftT: ActorNetTcp.Net; grainNd, raftNd: ActorNet.Node;
+		VAR grainT, raftT: Net; grainNd, raftNd: ActorNet.Node;
 			store: RaftStorage.Storage; cap: ARRAY RaftNode.capLen OF CHAR;
-			s: ARRAY 64 OF CHAR; i, inc, id: INTEGER; d: Driver;
+			s: ARRAY 64 OF CHAR; i, inc, id, lease, renew, refresh, nsvc: INTEGER; d: Driver;
 	BEGIN
 		IntToText(idx, s);
 		OpenNode(role, grainT, grainNd); PeerAll(grainT, role);
@@ -1354,8 +1778,9 @@ MODULE Actor_devCluster;
 			raftRef := RaftNode.Start(raftCfg);
 			ActorNet.Export(raftNd, raftRef, cap); PutText(statusName + ".cap", cap)
 		END;
-		ASSERT(WaitRoleCaps("S", 5, 30000), 121);
-		ReadCaps("S", 5, memServiceCaps);
+		nsvc := 5;
+		ASSERT(WaitRoleCaps("S", nsvc, 30000), 121);
+		ReadCaps("S", nsvc, memServiceCaps);
 		ASSERT(WaitRoleCaps("R", 3, 60000), 122);
 		ReadCaps("R", 3, memJournalCaps);
 		IF idx < 3 THEN
@@ -1365,19 +1790,30 @@ MODULE Actor_devCluster;
 		id := (idx + 5) * 100000 + inc;
 		memJournal := RaftJournal.New(grainNd, memJournalCaps, 3, id);
 		memJournal.tickMs := 0;
-		memClient := RaftMembership.New(grainNd, memServiceCaps, 5, (idx + 5) * 1000000 + inc);
+		memClient := RaftMembership.New(grainNd, memServiceCaps, nsvc, (idx + 5) * 1000000 + inc);
 		memClient.tickMs := 0;
+		lease := 5000; renew := 10; refresh := 10;
+		IF secure THEN
+			(* TLS-канал дешевле в байтах, но дороже в пробуждениях: служба
+			   не успевает за частыми Renew. Аренда длиннее. *)
+			lease := 60000; renew := 50; refresh := 50;
+			memClient.timeoutTicks := 100; memClient.giveUpTicks := 1000
+		END;
 		memCl := ActorGrain.New(grainNd, memJournal); ActorGrain.Register(memCl, "acct", NewGrainAcct);
-		memKey[0] := SHORT(SHORT(idx + 1)); memKey[1] := 3;
-		memCfg := RaftGrainMembership.NewConfig(idx, memCl, memClient, memKey, 2, 5000, 10, 10, 0);
+		OwnKey(role, memKey, memKeyLen);
+		memCfg := RaftGrainMembership.NewConfig(idx, memCl, memClient, memKey, memKeyLen, lease, renew, refresh, 0);
+		(* Первый Join уходит из Start; время аренды должно быть настоящим,
+		   иначе запись получает leaseUntil = lease и сразу истекшую аренду. *)
+		RaftGrainMembership.time := Services.Ticks();
 		ASSERT(RaftGrainMembership.Start(memCfg) # NIL, 123);
 		PutText(role + ".ready", "1");
 		IF idx = 0 THEN NEW(d); d.body := MembershipDriver; Tasks.Start(d) END;
 		MembershipGrainLoop;
-		clock.dead := TRUE; memJournal.Close; RaftMembership.Close(memClient);
+		IF clock # NIL THEN clock.dead := TRUE END;
+		memJournal.Close; RaftMembership.Close(memClient);
 		ActorRun.Shutdown;
-		ActorNetTcp.Close(grainT);
-		IF idx < 3 THEN ActorNetTcp.Close(raftT) END
+		NetClose(grainT);
+		IF idx < 3 THEN NetClose(raftT) END
 	END RunMembershipGrain;
 
 	PROCEDURE WaitGrainAlive (k: INTEGER; skip: SET; ms: LONGINT): BOOLEAN;
@@ -1440,12 +1876,68 @@ MODULE Actor_devCluster;
 		RETURN TRUE
 	END MemDeposit;
 
+	PROCEDURE CapNode (IN cap: ARRAY OF CHAR; OUT name: ActorCore.Name);
+		VAR i: INTEGER;
+	BEGIN
+		i := 0;
+		WHILE (i < LEN(cap)) & (cap[i] # 0X) & (cap[i] # "|") & (i < LEN(name) - 1) DO
+			name[i] := cap[i]; INC(i)
+		END;
+		name[i] := 0X
+	END CapNode;
+
+	PROCEDURE CheckMemberKeys (OUT ok: BOOLEAN);
+	(* Отпечатки, отправленные в Join, должны лежать в записи службы. *)
+		VAR list: RaftMembership.Members; i, j, k: INTEGER; name: ActorCore.Name;
+			path, text: ARRAY 1024 OF CHAR; fp: ActorNetTls.Fingerprint; same: BOOLEAN;
+	BEGIN
+		ok := FALSE;
+		list := RaftGrainMembership.List(memCfg);
+		IF list = NIL THEN RETURN END;
+		ok := TRUE; i := 0;
+		WHILE (i < list.n) & ok DO
+			CapNode(list.m[i].addr, name);
+			IF (name # "") & (name[0] = "G") & list.m[i].alive THEN
+				path := certDir + "/" + name + ".fp";
+				IF ~FileTextAbs(path, text) OR ~HexFp(text, 0, fp) THEN ok := FALSE
+				ELSIF list.m[i].key = NIL THEN ok := FALSE
+				ELSIF LEN(list.m[i].key^) # LEN(fp) THEN ok := FALSE
+				ELSE
+					same := TRUE; k := 0;
+					WHILE (k < LEN(fp)) & same DO
+						IF list.m[i].key[k] # fp[k] THEN same := FALSE END; INC(k)
+					END;
+					ok := same
+				END
+			END;
+			INC(i)
+		END
+	END CheckMemberKeys;
+
+	PROCEDURE WaitAnyRevoked (ms: LONGINT): BOOLEAN;
+	(* Любой живой участник, закрывший соединение с выбывшим G1, пишет
+	   <роль>.revoked; сам G1 связи с собой не имеет. *)
+		VAR t: LONGINT; i: INTEGER; s: ARRAY 16 OF CHAR; ok: BOOLEAN;
+	BEGIN
+		t := Services.Ticks(); ok := FALSE;
+		WHILE ~ok & ~stop & (Services.Ticks() - t < ms) DO
+			i := 0;
+			WHILE (i < 4) & ~ok DO
+				IntToText(i, s); ok := Exists("G" + s + ".revoked"); INC(i)
+			END;
+			IF ~ok THEN Tasks.Sleep(20); CheckStop END
+		END;
+		RETURN ok
+	END WaitAnyRevoked;
+
 	PROCEDURE MembershipDriver;
-		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; i: INTEGER; ok, good: BOOLEAN;
+		VAR key, owner, roleName: ActorCore.Name; ref: ActorCore.Ref; i, aliveMs: INTEGER;
+			ok, good, keysOk: BOOLEAN;
 			s: ARRAY 512 OF CHAR; n16: ARRAY 16 OF CHAR; skipKill: SET;
 	BEGIN
 		good := TRUE;
-		IF ~WaitGrainAlive(3, {}, 60000) THEN good := FALSE; PutText("driver.fail", "grains3") END;
+		aliveMs := 60000; IF secure THEN aliveMs := 120000 END;
+		IF ~WaitGrainAlive(3, {}, aliveMs) THEN good := FALSE; PutText("driver.fail", "grains3") END;
 		IF good & ~KeyOwnedByRole("G1", key) THEN good := FALSE; PutText("driver.fail", "key-g1") END;
 		IF good THEN
 			ref := ActorGrain.Ref(memCl, "acct", key);
@@ -1455,6 +1947,7 @@ MODULE Actor_devCluster;
 			IF ~ok THEN PutText("driver.fail", "deposit1") END
 		END;
 		IF good THEN
+			(* Рост службы до пяти узлов — часть нагрузки TCP-прогона. *)
 			PutText("svc.add3", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "voters4") END
 		END;
@@ -1464,11 +1957,17 @@ MODULE Actor_devCluster;
 		END;
 		IF good THEN
 			PutText("startG3", "1");
-			IF ~WaitGrainAlive(4, {}, 60000) THEN good := FALSE; PutText("driver.fail", "grains4") END
+			IF ~WaitGrainAlive(4, {}, aliveMs) THEN good := FALSE; PutText("driver.fail", "grains4") END
+		END;
+		IF good & secure THEN
+			CheckMemberKeys(keysOk);
+			IF keysOk THEN PutText("G0.keys", "ok")
+			ELSE good := FALSE; PutText("driver.fail", "keys")
+			END
 		END;
 		IF good THEN
 			PutText("leave", "G1");
-			IF ~WaitGrainAlive(3, {1}, 30000) THEN good := FALSE; PutText("driver.fail", "leave") END
+			IF ~WaitGrainAlive(3, {1}, aliveMs) THEN good := FALSE; PutText("driver.fail", "leave") END
 		END;
 		IF good THEN
 			ActorGrain.Owner(memCl, "acct", key, owner);
@@ -1498,10 +1997,9 @@ MODULE Actor_devCluster;
 				IF owner = "G2" THEN INCL(skipKill, 2)
 				ELSIF owner = "G3" THEN INCL(skipKill, 3)
 				END
-			END
-		END;
+			END;
 		IF good THEN
-			IF ~WaitGrainAlive(2, skipKill, 60000) THEN good := FALSE; PutText("driver.fail", "grains2") END
+			IF ~WaitGrainAlive(2, skipKill, aliveMs) THEN good := FALSE; PutText("driver.fail", "grains2") END
 		END;
 		IF good THEN
 			ok := MemDeposit(ref, 4, 5, 60000); good := ok;
@@ -1509,6 +2007,9 @@ MODULE Actor_devCluster;
 			IF ~ok THEN PutText("driver.fail", "deposit4") END
 		END;
 		IF good THEN
+			(* Убийство лидера службы — часть нагрузки TCP-прогона. На TLS
+			   оно добавляет выборы службы к и без того долгому прогону, а
+			   канал проверяют свои отрицательные случаи (`--only secure`). *)
 			i := StatusInt("S0.status", "leader", -1);
 			IF i < 0 THEN i := StatusInt("S1.status", "leader", -1) END;
 			IF i < 0 THEN i := StatusInt("S2.status", "leader", -1) END;
@@ -1521,19 +2022,30 @@ MODULE Actor_devCluster;
 				IF ~WaitFileTask("killed-svc", 30000) THEN good := FALSE; PutText("driver.fail", "kill-svc") END
 			END
 		END;
-		IF good THEN
-			ok := MemDeposit(ref, 5, 5, 60000); good := ok;
-			IF ok THEN INC(memOks) ELSE INC(memBad) END;
-			IF ~ok THEN PutText("driver.fail", "deposit5") END
+			IF good THEN
+				ok := MemDeposit(ref, 5, 5, 60000); good := ok;
+				IF ok THEN INC(memOks) ELSE INC(memBad) END;
+				IF ~ok THEN PutText("driver.fail", "deposit5") END
+			END
 		END;
 		IF good THEN
 			PutText("svc.remove4", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "remove4") END
 		END;
+		IF good & secure THEN
+			(* Выход = отзыв. Список участников перестаёт пускать G1: его
+			   соединения рвутся. Отзыв идёт последним, иначе выбывший узел
+			   унёс бы с собой и свой узел журнала (R1 в процессе G1). *)
+			PutText("revoked", "G1");
+			IF ~WaitAnyRevoked(10000) THEN good := FALSE; PutText("driver.fail", "revoke")
+			ELSE memRevoked := TRUE; PutText("G0.revoked", "ok")
+			END
+		END;
 		s := "oks="; IntToText(memOks, n16); s := s + n16$;
 		IntToText(memBad, n16); s := s + " bad=" + n16$;
 		IntToText(memBalance, n16); s := s + " balance=" + n16$;
 		IntToText(ActorGrain.AliveCount(memCl), n16); s := s + " alive=" + n16$;
+		IF memRevoked THEN s := s + " revoked=1" END;
 		IF good THEN s := s + " good=1" ELSE s := s + " good=0" END;
 		PutText("G0.result", s);
 		memDone := TRUE; finished := TRUE
@@ -1601,7 +2113,7 @@ MODULE Actor_devCluster;
 	(** Процесс-узел кластера счетов: узел гранул G<idx>, узел службы
 		состава M<idx> и узел журнала J<idx>, журнал RaftJournal, состав из
 		RaftMembership. Клиент начинает работу по файлу start. *)
-		VAR grainT, jT, mT: ActorNetTcp.Net; grainNd, jNd, mNd: ActorNet.Node;
+		VAR grainT, jT, mT: Net; grainNd, jNd, mNd: ActorNet.Node;
 			jStore, mStore: RaftStorage.Storage; jcaps, mcaps: RaftNode.Caps;
 			cap: ARRAY RaftNode.capLen OF CHAR; gName, jName, mName: Name;
 			key: ARRAY 2 OF BYTE; s, x: ARRAY 256 OF CHAR; i, inc, id, p, ticks: INTEGER;
@@ -1687,7 +2199,7 @@ MODULE Actor_devCluster;
 		END;
 		obxJournal.Close; RaftMembership.Close(obxMem);
 		ActorRun.Shutdown;
-		ActorNetTcp.Close(grainT); ActorNetTcp.Close(jT); ActorNetTcp.Close(mT)
+		NetClose(grainT); NetClose(jT); NetClose(mT)
 	END RunObxCluster;
 
 	(* --- диспетчер ------------------------------------------------------------- *)
@@ -1696,14 +2208,33 @@ MODULE Actor_devCluster;
 	BEGIN
 		stop := FALSE; finished := FALSE;
 		GetPar("DIR", dir); GetPar("ROLE", role); GetPar("SCENARIO", scenario);
+		GetPar("CERTDIR", certDir); secure := GetInt("TLS", 0) # 0;
+		serveMs := 120000; IF secure THEN serveMs := 600000 END;
 		idx := GetInt("IDX", 0); n := GetInt("N", 0); tickMs := GetInt("TICK", 20);
 		burst := GetInt("BURST", 300);
+		GetPar("CLAIM", claimName); IF claimName = "" THEN claimName := role$ END;
+		GetPar("CERT", certOverride); GetPar("KEY", keyOverride);
+		senderCount := GetInt("SEND", 1);
+		noClient := GetInt("NOCLIENT", 0) # 0;
+		waitSecond := GetInt("WAIT2", 0) # 0;
+		GetPar("PROXY", secureLog);
+		IF secureLog # "" THEN
+			SplitPair(secureLog, proxyName, proxyAdr)
+		END;
 		ASSERT(dir # "", 20); ASSERT(role # "", 21); ASSERT(scenario # "", 22);
+		IF secure THEN
+			ASSERT(certDir # "", 23);
+			ActorNetTls.audit := AuditHook
+		END;
 		t0 := Services.Ticks();
 		LoadNodes();
 		ActorRun.Start(4);
 		IF scenario = "ask" THEN
 			IF role = "E" THEN RunEcho ELSIF role = "Q" THEN RunAsker END
+		ELSIF scenario = "reconnect" THEN
+			IF role = "S" THEN RunReconnectServer ELSE RunReconnectClient END
+		ELSIF scenario = "secure" THEN
+			IF (role = "E") OR (role = "E2") THEN RunSecureVictim ELSE RunSecureSender END
 		ELSIF scenario = "raft" THEN
 			nodes := n;
 			IF role = "C" THEN RunClient

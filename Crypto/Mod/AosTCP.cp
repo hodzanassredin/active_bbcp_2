@@ -110,6 +110,20 @@ MODULE CryptoAosTCP;
 		RETURN s.s.IsConnected();
 	END IsConnected;
 
+	PROCEDURE (s: Connection) Alive* (): BOOLEAN, NEW;
+	(** Пост: TRUE — поток соединения есть и не оборван; FALSE — соединение
+		уже закрыто или не открывалось. Не разыменовывает NIL при Close. *)
+	BEGIN
+		RETURN (s.s # NIL) & s.s.IsConnected()
+	END Alive;
+
+	PROCEDURE (c: Connection) ListenerHandle* (): INTEGER, NEW;
+	(** Пост: дескриптор слушателя для ожидания готовности; -1 — соединение
+		не слушает. *)
+	BEGIN
+		IF c.l # NIL THEN RETURN c.l.Handle() ELSE RETURN -1 END
+	END ListenerHandle;
+
 	PROCEDURE GetConnection* (): Connection;
 		VAR con: Connection;
 	BEGIN
