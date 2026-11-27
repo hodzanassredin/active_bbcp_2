@@ -1578,6 +1578,13 @@ MODULE Actor_devCluster;
 			t := t + " expect="; IntToText(m.expect, d); t := t + d;
 			t := t + " applied="; IntToText(m.applied, d); t := t + d;
 			t := t + " dups="; IntToText(m.dups, d); t := t + d;
+			t := t + " retries="; IntToText(m.retries, d); t := t + d;
+			t := t + " rejectedRetries="; IntToText(m.rejectedRetries, d); t := t + d;
+			t := t + " coordRetries="; IntToText(m.coordRetries, d); t := t + d;
+			t := t + " verified="; IntToText(m.verified, d); t := t + d;
+			t := t + " verifyBad="; IntToText(m.verifyBad, d); t := t + d;
+			t := t + " losses="; IntToText(m.losses, d); t := t + d;
+			IF m.conserved THEN t := t + " conserved=1" ELSE t := t + " conserved=0" END;
 			IF m.good THEN t := t + " good=1" ELSE t := t + " good=0" END;
 			PutText(s.name, t)
 		ELSE
@@ -1640,6 +1647,9 @@ MODULE Actor_devCluster;
 		ActorGrain.Register(obxCl, "acct", ObxCluster.NewAccount);
 		ActorGrain.Register(obxCl, "xfer", ObxCluster.NewCoord);
 		ObxCluster.SetCluster(obxCl);
+		obxCl.idle := GetInt("IDLE", 2);	(* счета засыпают между шагами *)
+		ObxCluster.SetRetry(GetInt("RETRY", 150));	(* тайм-аут ответа до повтора *)
+		ObxCluster.SetDropStep(GetInt("DROP", 0));	(* первый ответ шага теряется *)
 		key[0] := SHORT(SHORT(idx + 1)); key[1] := 11;
 		obxCfg := RaftGrainMembership.NewConfig(idx, obxCl, obxMem, key, 2,
 			GetInt("LEASE", 4000), GetInt("RENEW", 10), GetInt("REFRESH", 10), 0);
@@ -1659,6 +1669,7 @@ MODULE Actor_devCluster;
 				last := Services.Ticks(); INC(ticks);
 				RaftGrainMembership.time := Services.Ticks();
 				RaftGrainMembership.Tick(obxCfg);
+				ActorGrain.Tick(obxCl);	(* тик простоя: счета и координаторы пассивируются *)
 				IF ticks MOD 5 = 0 THEN
 					WriteObxRaft(obxJCfg, jName + ".status");
 					WriteObxRaft(obxMCfg, mName + ".status");

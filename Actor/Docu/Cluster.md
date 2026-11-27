@@ -55,6 +55,12 @@ The command on the account is idempotent, so the repeat is safe. If a client cra
 another node continues its work: `Begin` is idempotent, and `Tick` makes the coordinator send the
 current step.
 
+A repeated `Begin` is not the only source of repeats. The coordinator measures the time since the
+last `Cmd`; when `retryMs` passes without a `Done`, it sends the current step again. The scenario
+also loses the first `Reply` of step 0 (`SetDropStep`), so every transfer answers that step from the
+account's list of operation numbers. A repeat is safe only while the account remembers the number:
+the list holds `maxOps` entries, and an account that forgot it would move money twice.
+
 A credit is refused when the balance of the destination would exceed `limit`; a debit when the
 balance of the source would fall below zero. A refused credit moves the saga to `refunding`, and a
 refund always passes. Money therefore never stays debited without being credited.
@@ -62,6 +68,13 @@ refund always passes. Money therefore never stays debited without being credited
 Refused transfers do not disappear from the report: the client waits for the final state of every
 transfer and counts `done`, `failed` and `refunded` separately. The sum of these numbers equals the
 number of transfers.
+
+The accounts of the scenario passivate: after `IDLE` ticks without a message the host saves a
+snapshot and stops the activation. The next letter brings it up from the snapshot and the journal.
+The client checks this. When every transfer is final, it waits for the accounts to passivate, sends
+step 0 of each transfer again and compares every answer with the recorded result. It then reads the
+balances and checks each against the outcomes of the transfers. The run fails if a repeated step
+answers differently, if a balance does not follow the outcomes, or if no repeat happened at all.
 
 ## 3. Starting
 
@@ -74,8 +87,8 @@ tools/iso.sh tools/test-cluster.sh --only obxcluster --runs 1
 
 The scenario compiles `ObxCluster` and `Actor_devCluster`, creates the run directory and starts five
 processes with the external variables `--SCENARIO=obxcluster --IDX=<number> --N=5 --TICK=20
---OPS=<transfers>`. The scenario hands out addresses and ports; the file `nodes` in the run
-directory looks like this:
+--OPS=<transfers> --IDLE=2 --RETRY=150 --DROP=0`. The scenario hands out addresses and ports; the
+file `nodes` in the run directory looks like this:
 
 ```
 G0 127.0.0.1:20001
@@ -106,8 +119,9 @@ The scenario `obxcluster` in steps:
    service.
 5. After two seconds brings `P3` back from the split and starts the killed processes again, with the
    same storage.
-6. Waits for the result of every process and compares the sum, the absence of repeats and the count of
-   refusals.
+6. Waits for the result of every process and checks the sum, the absence of repeated events, the
+   count of refusals, positive retry and loss counts, and that every repeated step after passivation
+   returns the recorded result and every balance follows the outcomes.
 
 ## 4. Adding and removing a node
 
@@ -166,6 +180,8 @@ initial state; the report waits for the final states.
 **Refusals are counted.** The client counts `done`, `failed` and `refunded`; their sum equals the
 number of transfers. The scenario compares this number, the sum of the balances, the number of
 events `2*done + failed + 3*refunded` and the absence of repeated events (`dups = 0`) on every node.
+It also requires positive counts of repeated steps and lost answers, a matching answer for every
+repeated step after passivation, and a balance that follows the outcomes on every account.
 
 ## 6. What is not there
 

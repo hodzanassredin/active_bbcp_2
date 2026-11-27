@@ -29,9 +29,17 @@ MODULE ObxCluster;
 	записанного шага.
 
 	Клиент — актор узла: он рассылает Begin и Tick координаторам,
-	исполняет их команды и собирает итог. Tick повторяет шаг: пропавшее
-	письмо не останавливает перевод, а поднятое заново воплощение снова
-	присылает текущий шаг.
+	исполняет их команды и собирает итог. Tick — часы тайм-аута: если
+	ответа на шаг нет retryMs, координатор повторяет шаг, а поднятое
+	заново воплощение снова присылает текущий шаг. Сценарий может терять
+	первый ответ шага (SetDropStep): тогда шаг исполняется повторно, и
+	счёт обязан ответить прежним итогом из списка номеров.
+
+	Когда все переводы закончены, клиент выжидает тишину, чтобы счета
+	пассивировались, и повторяет первые шаги: ответ после восстановления
+	из снимка должен совпасть с записанным. Затем он собирает остатки и
+	сверяет их с итогами переводов (conserved), поэтому потеря остатка
+	или номеров при Restore видна.
 
 	Короткий прогон Do — два узла в памяти: счета и переводы идут через
 	ActorGrain на общем журнале, один узел теряется посреди работы.
@@ -49,6 +57,8 @@ MODULE ObxCluster;
 		(* состояния координатора *)
 		begun* = 0; withdrawn* = 1; done* = 2; refunding* = 3; refunded* = 4; failed* = 5;
 		notStarted = -1;
+		steps = 3;	(** шагов перевода: списание, зачисление, возврат *)
+		quietDrives = 3;	(** проходов клиента без работы до проверки повтором *)
 
 	TYPE
 		Name = ActorCore.Name;
@@ -60,7 +70,7 @@ MODULE ObxCluster;
 		Begin* = POINTER TO RECORD (ActorNet.Msg) id*: LONGINT; from*, to*, sum*: INTEGER END;
 		Tick* = POINTER TO RECORD (ActorNet.Msg) END;
 		Done* = POINTER TO RECORD (ActorNet.Msg) id*: LONGINT; op*: LONGINT; ok*: BOOLEAN END;
-		Cmd* = POINTER TO RECORD (ActorNet.Msg) id*: LONGINT; state*: INTEGER; op*: LONGINT; acc*, sum*: INTEGER END;
+		Cmd* = POINTER TO RECORD (ActorNet.Msg) id*: LONGINT; state*: INTEGER; op*: LONGINT; acc*, sum*: INTEGER; retry*: BOOLEAN END;
 		Finished* = POINTER TO RECORD (ActorNet.Msg) id*: LONGINT; state*: INTEGER END;
 		Stats* = POINTER TO RECORD (ActorNet.Msg) acc*: INTEGER END;
 		StatsReply* = POINTER TO RECORD (ActorNet.Msg) acc*, balance*, n*, dups*: INTEGER END;
@@ -69,7 +79,11 @@ MODULE ObxCluster;
 		Drive* = POINTER TO RECORD (Msg) END;
 		Report* = POINTER TO RECORD (Msg)
 			done*, failed*, refunded*, total*, sum*, expect*, applied*, dups*: INTEGER;
-			bal*: ARRAY accounts OF INTEGER; good*: BOOLEAN
+			retries*, rejectedRetries*, coordRetries*: INTEGER;
+			verified*, verifyBad*: INTEGER;
+			losses*: INTEGER;	(** сколько первых ответов шага потеряно *)
+			bal*: ARRAY accounts OF INTEGER;
+			conserved*, good*: BOOLEAN
 		END;
 
 		(* --- события --------------------------------------------------------- *)
@@ -89,7 +103,8 @@ MODULE ObxCluster;
 
 		(** Координатор перевода: шаг саги и его состояние. *)
 		Coord* = POINTER TO RECORD (ActorGrain.Actor)
-			started*: BOOLEAN; id*: LONGINT; from*, to*, sum*, state*: INTEGER
+			started*: BOOLEAN; id*: LONGINT; from*, to*, sum*, state*: INTEGER;
+			lastMs: LONGINT	(* время последней отдачи шага; тайм-аут повтора *)
 		END;
 
 		(** Клиент узла: рассылка Begin и Tick, исполнение команд, итог. *)
@@ -103,6 +118,14 @@ MODULE ObxCluster;
 			statBal*, statN*, statDups*: ARRAY accounts OF INTEGER;
 			drives*: INTEGER;
 			reporting*, reported*: BOOLEAN;
+			(* повтор шага: первый ответ шага dropStep теряется, ответ на
+			   повтор считается; тишина перед проверкой и её итог *)
+			dropStep, quiet*: INTEGER;
+			verifying*: BOOLEAN;
+			dropped, repeating: ARRAY maxTransfers OF SET;
+			verifyPending, verifyExpected: ARRAY maxTransfers OF BOOLEAN;
+			retries*, rejectedRetries*, coordRetries*: INTEGER;
+			verified*, verifyBad*, losses*: INTEGER;
 			acct*: ARRAY accounts OF ActorCore.Ref;
 			coord*: ARRAY maxTransfers OF ActorCore.Ref
 		END;
@@ -117,6 +140,8 @@ MODULE ObxCluster;
 		pendingSeq, pendingVerbose: BOOLEAN; pendingSink: ActorCore.Ref;
 		demoDone: BOOLEAN;	crashed: BOOLEAN;
 		net: ActorNetMem.Net;
+		retryMs: LONGINT;	(* тишина без ответа до повтора шага; 0 — повтор на каждый Tick *)
+		dropStep: INTEGER;	(* шаг, чей первый ответ теряется; -1 — не терять *)
 
 	(* --- номера --------------------------------------------------------------- *)
 
@@ -146,6 +171,21 @@ MODULE ObxCluster;
 		ASSERT(c # NIL, 20);
 		cl := c
 	END SetCluster;
+
+	PROCEDURE SetRetry* (ms: LONGINT);
+	(** Пост: координатор повторяет шаг, если ответа нет ms мс; 0 — повтор
+		на каждый Tick. *)
+	BEGIN
+		retryMs := ms
+	END SetRetry;
+
+	PROCEDURE SetDropStep* (step: INTEGER);
+	(** Пост: первый ответ шага step каждого перевода теряется, чтобы шаг
+		исполнился повторно; -1 — не терять. *)
+	BEGIN
+		ASSERT((step >= -1) & (step < steps), 20);
+		dropStep := step
+	END SetDropStep;
 
 	PROCEDURE Progress* (): INTEGER;
 	(** Пост: сколько переводов клиента узла уже закончено. *)
@@ -233,13 +273,13 @@ MODULE ObxCluster;
 	PROCEDURE (m: Cmd) Write- (VAR wr: Stores.Writer);
 	BEGIN
 		wr.WriteLong(m.id); wr.WriteInt(m.state); wr.WriteLong(m.op);
-		wr.WriteInt(m.acc); wr.WriteInt(m.sum)
+		wr.WriteInt(m.acc); wr.WriteInt(m.sum); wr.WriteBool(m.retry)
 	END Write;
 
 	PROCEDURE (m: Cmd) Read- (VAR rd: Stores.Reader);
 	BEGIN
 		rd.ReadLong(m.id); rd.ReadInt(m.state); rd.ReadLong(m.op);
-		rd.ReadInt(m.acc); rd.ReadInt(m.sum)
+		rd.ReadInt(m.acc); rd.ReadInt(m.sum); rd.ReadBool(m.retry)
 	END Read;
 
 	PROCEDURE (m: Finished) Write- (VAR wr: Stores.Writer);
@@ -311,14 +351,16 @@ MODULE ObxCluster;
 		RETURN i
 	END Seen;
 
-	PROCEDURE Fits (a: Account; op: LONGINT; sum: INTEGER): BOOLEAN;
-	(* Пост: проходит ли операция шага op MOD 3 по остатку: списание — не
-		ниже нуля, зачисление — не выше предела, возврат — всегда. *)
+	PROCEDURE Fits* (balance: INTEGER; op: LONGINT; sum: INTEGER): BOOLEAN;
+	(** Пост: проходит ли операция шага op MOD 3 по остатку balance:
+		списание — не ниже нуля, зачисление — не выше предела, возврат —
+		всегда. Границы входят в допуск: 0 после списания и ровно предел
+		после зачисления проходят. *)
 		VAR step: INTEGER;
 	BEGIN
-		step := SHORT(op MOD 3);
-		IF step = 0 THEN RETURN a.balance + sum >= 0
-		ELSIF step = 1 THEN RETURN a.balance + sum <= limit
+		step := SHORT(op MOD steps);
+		IF step = 0 THEN RETURN balance + sum >= 0
+		ELSIF step = 1 THEN RETURN balance + sum <= limit
 		ELSE RETURN TRUE
 		END
 	END Fits;
@@ -347,7 +389,7 @@ MODULE ObxCluster;
 		WITH m: Move DO
 			i := Seen(a, m.op);
 			IF i = a.n THEN
-				NEW(e); e.op := m.op; e.sum := m.sum; e.ok := Fits(a, m.op, m.sum);
+				NEW(e); e.op := m.op; e.sum := m.sum; e.ok := Fits(a.balance, m.op, m.sum);
 				a.Persist(c, e, m.op)
 			ELSE
 				NEW(r); r.op := m.op; r.ok := a.oks[i]; c.Respond(r)
@@ -413,16 +455,17 @@ MODULE ObxCluster;
 		k.Persist(c, e, k.id * 3 + s)
 	END Save;
 
-	PROCEDURE (k: Coord) Push (c: ActorCore.Context), NEW;
-	(* Отдать отправителю текущий шаг или итог. *)
+	PROCEDURE (k: Coord) Push (c: ActorCore.Context; retry: BOOLEAN), NEW;
+	(* Отдать отправителю текущий шаг или итог; retry — шаг повторяется. *)
 		VAR s: ActorCore.Ref; cmd: Cmd; f: Finished;
 	BEGIN
 		s := c.Sender();
 		IF (s = NIL) OR ~k.started THEN RETURN END;
+		k.lastMs := Services.Ticks();
 		IF Final(k.state) THEN
 			NEW(f); f.id := k.id; f.state := k.state; c.Tell(s, f)
 		ELSE
-			NEW(cmd); cmd.id := k.id; cmd.state := k.state;
+			NEW(cmd); cmd.id := k.id; cmd.state := k.state; cmd.retry := retry;
 			CASE k.state OF
 			| begun: cmd.op := k.id * 3; cmd.acc := k.from; cmd.sum := -k.sum
 			| withdrawn: cmd.op := k.id * 3 + 1; cmd.acc := k.to; cmd.sum := k.sum
@@ -438,9 +481,11 @@ MODULE ObxCluster;
 			IF ~k.started THEN
 				k.started := TRUE; k.id := m.id; k.from := m.from; k.to := m.to; k.sum := m.sum;
 				k.Save(c, begun)
-			ELSE k.Push(c)
+			ELSE k.Push(c, TRUE)
 			END
-		| m: Tick DO k.Push(c)
+		| m: Tick DO
+			(* тайм-аут ответа: молчим, пока шаг молод, и повторяем позже *)
+			IF (retryMs <= 0) OR (Services.Ticks() - k.lastMs >= retryMs) THEN k.Push(c, TRUE) END
 		| m: Done DO
 			IF (k.state = begun) & (m.id = k.id) & (m.op = k.id * 3) THEN
 				IF m.ok THEN k.Save(c, withdrawn) ELSE k.Save(c, failed) END
@@ -455,7 +500,7 @@ MODULE ObxCluster;
 
 	PROCEDURE (k: Coord) Persisted* (c: ActorCore.Context; e: ActorPersist.Event);
 	BEGIN
-		IF e IS Step THEN k.Push(c) END
+		IF e IS Step THEN k.Push(c, FALSE) END
 	END Persisted;
 
 	PROCEDURE (k: Coord) Externalize- (VAR wr: Stores.Writer);
@@ -542,7 +587,7 @@ MODULE ObxCluster;
 	END StartStats;
 
 	PROCEDURE (c: Client) SendReport (ctx: ActorCore.Context), NEW;
-		VAR i: INTEGER; r: Report;
+		VAR i, from, to, sum: INTEGER; r: Report; expected: ARRAY accounts OF INTEGER;
 	BEGIN
 		NEW(r);
 		r.total := SHORT(c.n);
@@ -553,14 +598,48 @@ MODULE ObxCluster;
 			END
 		END;
 		r.expect := 2 * r.done + r.failed + 3 * r.refunded;
+		(* Ожидаемый остаток: начальный плюс итог законченных переводов.
+			Отклонённый и возвращённый переводы денег не двигают. *)
+		FOR i := 0 TO accounts - 1 DO expected[i] := initial END;
+		FOR i := 0 TO SHORT(c.n) - 1 DO
+			IF c.state[i] = done THEN
+				Plan(i, from, to, sum);
+				DEC(expected[from], sum); INC(expected[to], sum)
+			END
+		END;
+		r.retries := c.retries; r.rejectedRetries := c.rejectedRetries;
+		r.coordRetries := c.coordRetries;
+		r.verified := c.verified; r.verifyBad := c.verifyBad; r.losses := c.losses;
+		r.conserved := TRUE;
 		FOR i := 0 TO accounts - 1 DO
 			r.bal[i] := c.statBal[i];
+			IF c.statBal[i] # expected[i] THEN r.conserved := FALSE END;
 			INC(r.sum, c.statBal[i]); INC(r.applied, c.statN[i]); INC(r.dups, c.statDups[i])
 		END;
 		r.good := (r.done + r.failed + r.refunded = r.total)
-			& (r.sum = accounts * initial) & (r.dups = 0) & (r.applied = r.expect);
+			& (r.sum = accounts * initial) & (r.dups = 0) & (r.applied = r.expect)
+			& r.conserved & (r.verified = r.total) & (r.verifyBad = 0);
 		ctx.Tell(c.sink, r); c.reported := TRUE
 	END SendReport;
+
+	PROCEDURE (c: Client) SendVerify (ctx: ActorCore.Context; id: INTEGER), NEW;
+	(* Повторить первый шаг перевода: счёт после пассивации должен ответить
+		прежним итогом из снимка и не двинуть деньги. *)
+		VAR from, to, sum: INTEGER; mv: Move;
+	BEGIN
+		Plan(id, from, to, sum);
+		NEW(mv); mv.op := id * 3; mv.sum := -sum;
+		c.verifyExpected[id] := (c.state[id] = done) OR (c.state[id] = refunded);
+		c.verifyPending[id] := TRUE;
+		ctx.Tell(c.acct[from], mv)
+	END SendVerify;
+
+	PROCEDURE (c: Client) StartVerify (ctx: ActorCore.Context), NEW;
+		VAR i: INTEGER;
+	BEGIN
+		c.verifying := TRUE;
+		FOR i := 0 TO SHORT(c.n) - 1 DO c.SendVerify(ctx, i) END
+	END StartVerify;
 
 	PROCEDURE (c: Client) Collect (ctx: ActorCore.Context), NEW;
 		VAR i: INTEGER; all: BOOLEAN;
@@ -586,7 +665,7 @@ MODULE ObxCluster;
 		IF ~c.begun[id] THEN c.Launch(ctx, id)
 		ELSIF c.state[id] = notStarted THEN	(* Begin пропал *)
 			IF c.drives MOD 5 = 0 THEN c.Launch(ctx, id) END
-		ELSIF c.drives MOD 5 = 0 THEN
+		ELSIF c.drives MOD 5 = 0 THEN	(* Tick — часы тайм-аута координатора *)
 			NEW(t); ctx.Tell(c.coord[id], t)
 		END
 	END DriveOne;
@@ -595,7 +674,15 @@ MODULE ObxCluster;
 		VAR i, k: INTEGER;
 	BEGIN
 		c.Ensure; INC(c.drives);
-		IF ~c.reporting THEN
+		IF c.reporting THEN
+			IF ~c.reported THEN c.Collect(ctx) END
+		ELSIF c.verifying THEN
+			(* проверка после пассивации: повторяем неотвеченные шаги *)
+			FOR i := 0 TO SHORT(c.n) - 1 DO
+				IF c.verifyPending[i] THEN c.SendVerify(ctx, i) END
+			END;
+			IF c.verified + c.verifyBad >= c.n THEN c.StartStats(ctx) END
+		ELSE
 			IF c.sequential THEN
 				WHILE (c.head < c.n) & Final(c.state[c.head]) DO INC(c.head) END;
 				IF c.head < c.n THEN c.DriveOne(ctx, SHORT(c.head)) END
@@ -610,14 +697,15 @@ MODULE ObxCluster;
 					END
 				END
 			END;
-			IF c.AllFinal() THEN c.StartStats(ctx) END
-		ELSE
-			IF ~c.reported THEN c.Collect(ctx) END
+			IF c.AllFinal() THEN	(* дать счетам заснуть, затем проверить повтор *)
+				INC(c.quiet);
+				IF c.quiet >= quietDrives THEN c.StartVerify(ctx) END
+			END
 		END
 	END Drive;
 
 	PROCEDURE (c: Client) Receive* (ctx: ActorCore.Context; m: Msg);
-		VAR id: INTEGER; d: Done; mv: Move;
+		VAR id, step: INTEGER; d: Done; mv: Move;
 	BEGIN
 		c.Ensure;
 		WITH m: Drive DO c.Drive(ctx)
@@ -626,6 +714,10 @@ MODULE ObxCluster;
 			IF (id >= 0) & (id < c.n) THEN
 				c.Note(id, m.state);
 				IF ~Final(m.state) & (m.acc >= 0) & (m.acc < accounts) THEN
+					IF m.retry THEN
+						INC(c.coordRetries);
+						INCL(c.repeating[id], SHORT(m.op MOD steps))
+					END;
 					NEW(mv); mv.op := m.op; mv.sum := m.sum;
 					ctx.Tell(c.acct[m.acc], mv)
 				END
@@ -634,10 +726,27 @@ MODULE ObxCluster;
 			id := SHORT(m.id);
 			IF (id >= 0) & (id < c.n) THEN c.Note(id, m.state) END
 		| m: Reply DO
-			id := SHORT(m.op DIV 3);
+			id := SHORT(m.op DIV steps); step := SHORT(m.op MOD steps);
 			IF (id >= 0) & (id < c.n) THEN
-				NEW(d); d.id := id; d.op := m.op; d.ok := m.ok;
-				ctx.Tell(c.coord[id], d)
+				IF c.verifying & c.verifyPending[id] & (step = 0) THEN
+					(* ответ на проверочный повтор: сверяем с итогом перевода *)
+					c.verifyPending[id] := FALSE;
+					INC(c.retries);	(* повтор шага после пассивации *)
+					IF ~m.ok THEN INC(c.rejectedRetries) END;
+					IF m.ok = c.verifyExpected[id] THEN INC(c.verified) ELSE INC(c.verifyBad) END
+				ELSIF ~c.verifying & (c.dropStep >= 0) & (step = c.dropStep)
+						& ~(step IN c.dropped[id]) THEN
+					INCL(c.dropped[id], step);	(* первый ответ потерян: ждём повтора *)
+					INC(c.losses)
+				ELSE
+					IF step IN c.repeating[id] THEN
+						EXCL(c.repeating[id], step);
+						INC(c.retries);
+						IF ~m.ok THEN INC(c.rejectedRetries) END
+					END;
+					NEW(d); d.id := id; d.op := m.op; d.ok := m.ok;
+					ctx.Tell(c.coord[id], d)
+				END
 			END
 		| m: StatsReply DO
 			IF (m.acc >= 0) & (m.acc < accounts) THEN
@@ -654,7 +763,14 @@ MODULE ObxCluster;
 		NEW(c); c.n := pendingN; c.pace := pendingPace;
 		c.sequential := pendingSeq; c.verbose := pendingVerbose; c.sink := pendingSink;
 		c.head := 0; c.finished := 0; c.drives := 0; c.reporting := FALSE; c.reported := FALSE;
-		FOR i := 0 TO maxTransfers - 1 DO c.state[i] := notStarted; c.begun[i] := FALSE END;
+		c.verifying := FALSE; c.quiet := 0; c.dropStep := dropStep;
+		c.retries := 0; c.rejectedRetries := 0; c.coordRetries := 0;
+		c.verified := 0; c.verifyBad := 0; c.losses := 0;
+		FOR i := 0 TO maxTransfers - 1 DO
+			c.state[i] := notStarted; c.begun[i] := FALSE;
+			c.dropped[i] := {}; c.repeating[i] := {};
+			c.verifyPending[i] := FALSE; c.verifyExpected[i] := FALSE
+		END;
 		FOR i := 0 TO accounts - 1 DO c.statsGot[i] := FALSE END;
 		lastClient := c;
 		RETURN c
@@ -753,6 +869,8 @@ MODULE ObxCluster;
 		WHILE ~demoDone DO Services.actionHook.Step END
 	END Do;
 
+BEGIN
+	dropStep := -1	(* терять ответы умеет только сценарий *)
 END ObxCluster.
 ```
 
@@ -804,6 +922,17 @@ What happened:
    dead, and the next letter brings the same state up on B from the journal.
 6. The final sum equals the initial one, the accounts hold no repeated event (`dup=0`), and every
    transfer has one of the three outcomes.
+
+The short run never loses an answer and never passivates an account. The cluster scenario does both.
+The coordinator repeats a step when no `Done` arrives within `retryMs`; the client loses the first
+answer of step 0 (`SetDropStep`), so the account answers that step from its list of operation numbers.
+When every transfer is final, the client waits `quietDrives` client drives until the accounts
+passivate, then sends step 0 of each transfer again; the answer must equal the recorded result. Only
+after that does it read the balances and compare each with the outcomes: a `done` transfer moves `sum`
+from the source to the destination, `failed` and `refunded` move nothing. The report carries `retries`,
+`rejectedRetries`, `coordRetries`, `verified`, `verifyBad`, `losses` and `conserved`; the scenario
+requires a positive `retries` on every node, a positive `losses` somewhere, zero `verifyBad`, and
+`conserved=1`.
 
 The example shows the state machine of a transfer and the client-driven saga; the cluster run adds
 the Raft journal, the membership service and the restarts, described in

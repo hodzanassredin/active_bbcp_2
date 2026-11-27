@@ -508,6 +508,8 @@ if [ "${INNER:-0}" = 1 ]; then
 
 	run_obxcluster() {
 		local dir=$1 i v1 v2 c sum dups total applied expect done failed refunded
+		local retries rejected coord verified verifybad conserved losses anycoord anyloss
+		local start; start=$(date +%s%3N)
 		mkdir -p "$dir"
 		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
 		PIDS=()
@@ -524,7 +526,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			echo "M$i $(addr_of "M$i")" >> "$dir/nodes"
 		done
 		for ((i = 0; i < 5; i++)); do
-			launch_role "$dir" "P$i" --SCENARIO=obxcluster --IDX="$i" --N=5 --TICK="$TICK" --OPS="$OBX_OPS"
+			launch_role "$dir" "P$i" --SCENARIO=obxcluster --IDX="$i" --N=5 --TICK="$TICK" --OPS="$OBX_OPS" --IDLE=2 --RETRY=150 --DROP=0
 			PIDS[P$i]=$LASTPID
 		done
 		for ((i = 0; i < 5; i++)); do
@@ -558,9 +560,11 @@ if [ "${INNER:-0}" = 1 ]; then
 		# перезапуск убитых узлов с тем же хранилищем
 		say "obxcluster: поднимаю P$v1 и P$v2"
 		for c in "$v1" "$v2"; do
-			launch_role "$dir" "P$c" --SCENARIO=obxcluster --IDX="$c" --N=5 --TICK="$TICK" --OPS="$OBX_OPS"
+			launch_role "$dir" "P$c" --SCENARIO=obxcluster --IDX="$c" --N=5 --TICK="$TICK" --OPS="$OBX_OPS" --IDLE=2 --RETRY=150 --DROP=0
 			PIDS[P$c]=$LASTPID
 		done
+		anycoord=0
+		anyloss=0
 		for ((i = 0; i < 5; i++)); do
 			waitfile "$dir/P$i.result" 6000 || { bad "$dir" "obxcluster: нет итога P$i"; return 1; }
 		done
@@ -571,6 +575,13 @@ if [ "${INNER:-0}" = 1 ]; then
 			expect=$(field "$dir/P$i.result" expect)
 			done=$(field "$dir/P$i.result" done); failed=$(field "$dir/P$i.result" failed)
 			refunded=$(field "$dir/P$i.result" refunded)
+			retries=$(field "$dir/P$i.result" retries)
+			rejected=$(field "$dir/P$i.result" rejectedRetries)
+			coord=$(field "$dir/P$i.result" coordRetries)
+			verified=$(field "$dir/P$i.result" verified)
+			verifybad=$(field "$dir/P$i.result" verifyBad)
+			conserved=$(field "$dir/P$i.result" conserved)
+			losses=$(field "$dir/P$i.result" losses)
 			[ "$sum" = "$OBX_SUM" ] \
 				|| { bad "$dir" "obxcluster: P$i сумма $sum"; return 1; }
 			[ "$dups" = 0 ] || { bad "$dir" "obxcluster: P$i повторов $dups"; return 1; }
@@ -581,9 +592,31 @@ if [ "${INNER:-0}" = 1 ]; then
 				|| { bad "$dir" "obxcluster: P$i учтено $done+$failed+$refunded из $total"; return 1; }
 			[ "${refunded:-0}" -ge 1 ] \
 				|| { bad "$dir" "obxcluster: P$i нет возвратов — сага не проверила откат"; return 1; }
-			MEAS="$MEAS obxcluster-P$i done=$done failed=$failed refunded=$refunded"
+			[ "${done:-0}" -ge 1 ] \
+				|| { bad "$dir" "obxcluster: P$i нет законченных переводов — нечего сверять"; return 1; }
+			[ "${failed:-0}" -ge 1 ] \
+				|| { bad "$dir" "obxcluster: P$i нет отказов списания — повтор отклонённого шага не проверен"; return 1; }
+			[ "${retries:-0}" -ge 1 ] \
+				|| { bad "$dir" "obxcluster: P$i нет повторов шага (retries=$retries)"; return 1; }
+			[ "${rejected:-0}" -ge 1 ] \
+				|| { bad "$dir" "obxcluster: P$i нет повторов отклонённого шага"; return 1; }
+			anycoord=$((anycoord + ${coord:-0}))
+			anyloss=$((anyloss + ${losses:-0}))
+			[ "${verified:-0}" = "$total" ] \
+				|| { bad "$dir" "obxcluster: P$i проверено $verified из $total"; return 1; }
+			[ "${verifybad:-1}" = 0 ] \
+				|| { bad "$dir" "obxcluster: P$i повтор после пассивации дал другой итог ($verifybad)"; return 1; }
+			[ "${conserved:-0}" = 1 ] \
+				|| { bad "$dir" "obxcluster: P$i остатки не сошлись с итогами переводов"; return 1; }
+			MEAS="$MEAS obxcluster-P$i done=$done failed=$failed refunded=$refunded retries=$retries losses=$losses coord=$coord"
 		done
+		[ "$anycoord" -ge 1 ] \
+			|| { bad "$dir" "obxcluster: координатор ни разу не повторил шаг по тайм-ауту"; return 1; }
+		[ "$anyloss" -ge 1 ] \
+			|| { bad "$dir" "obxcluster: ни один первый ответ шага не потерян — повтор не проверен"; return 1; }
 		check_no_traps "$dir" || { bad "$dir" "obxcluster: трап"; return 1; }
+		MEAS="$MEAS obxcluster-ms=$(( $(date +%s%3N) - start ))"
+		say "obxcluster: $(( $(date +%s%3N) - start )) мс"
 		stop_all "$dir"
 		return 0
 	}
