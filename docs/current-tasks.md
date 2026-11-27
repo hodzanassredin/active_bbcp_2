@@ -395,3 +395,9 @@
   (Protocol, CtxSleep, CtxChan, IO, Channels, Events) перенесены из `Mod64` в `Mod`. Рабочие нити
   ОС и компутоны (`AsyncWork`, `AsyncComputon`, `AsyncMpi`) и `RobustParallel` на i386 не
   переносятся: нужны `LinThreads`/`LinNative`, их i386-версий нет.
+- Actor и Raft на i386: `build32.sh` собирает `Async`, `Actor` (с `ActorNetTls`) и `Raft`; в
+  `test32.sh` — 7 модулей Actor_dev (без Bench) и 7 модулей Raft_dev. Правки исходников — только
+  шаги LCG через `Int64` (`ActorNetMem`, `ActorRouter`, `RaftCore`, симуляторы Raft_dev).
+  Порча i386: `Int64.Mul` без перекрёстного члена `wx[1]*wy[0]` — красные `System_devInt64`
+  (3 теста) и `Raft_devSim` (2 теста); без `Int64` (исходный `x * a + c`) — трап 143 в
+  `Async_devEvents.TestRandomTrees`. Прогоны: test32 59/59, test.sh 77/77, примеры 0, ссылки 0.

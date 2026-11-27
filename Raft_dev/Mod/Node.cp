@@ -18,7 +18,7 @@ MODULE Raft_devNode;
 	Мутации водителя (RaftNode.mutations) обязаны ловиться: отправка до
 	сохранения и ответ клиенту до фиксации. *)
 
-	IMPORT Services, Tasks, Strings, Log, AsyncIO,
+	IMPORT Int64, Services, Tasks, Strings, Log, AsyncIO,
 		ActorCore, ActorNet, ActorNetMem, ActorSim,
 		Core := RaftCore, RaftSm, RaftStorage, RaftNode, UnitAssert;
 
@@ -86,7 +86,7 @@ MODULE Raft_devNode;
 
 	PROCEDURE Rand (k: INTEGER): INTEGER;
 	BEGIN
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		RETURN SHORT(ASH(x, -33) MOD k)
 	END Rand;
 
@@ -486,7 +486,7 @@ MODULE Raft_devNode;
 		VAR i: INTEGER; s: ActorCore.Name; cut: Cut; st: Flaky; cap: ARRAY RaftNode.capLen OF CHAR; j: INTEGER;
 			trace: Trace;
 	BEGIN
-		n := size; x := seed * 2654435761 + 88172645463325252; INC(gen);
+		n := size; x := Int64.Mul(seed, 2654435761); INC(x, 88172645463325252); INC(gen);
 		ok := TRUE; why := ""; dlast := 0; maxCommit := 0; now := 0; nops := 0; NEW(ops, 256);
 		NEW(decided, 64); decided[0].term := 0;
 		NEW(leaderOf, maxTerm); FOR i := 0 TO maxTerm - 1 DO leaderOf[i] := Core.none END;

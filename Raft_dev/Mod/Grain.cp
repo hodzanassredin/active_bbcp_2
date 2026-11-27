@@ -15,7 +15,7 @@ MODULE Raft_devGrain;
 	mutAllAlive, mutNoRenew) и ActorGrain (mutNoApply, mutKeepAlive)
 	обязаны ломать те же проверки. *)
 
-	IMPORT Services, Tasks, Strings, Stores,
+	IMPORT Int64, Services, Tasks, Strings, Stores,
 		ActorCore, ActorJournal, ActorPersist, ActorNet, ActorNetMem, ActorSim, ActorGrain,
 		Core := RaftCore, RaftSm, RaftStorage, RaftNode, RaftMembership, RaftGrainMembership, UnitAssert;
 
@@ -102,7 +102,7 @@ MODULE Raft_devGrain;
 
 	PROCEDURE Rand (k: INTEGER): INTEGER;
 	BEGIN
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		RETURN SHORT(ASH(x, -33) MOD k)
 	END Rand;
 
@@ -577,7 +577,7 @@ MODULE Raft_devGrain;
 	PROCEDURE SeedBody (sd: LONGINT);
 		VAR key: ActorCore.Name; ref: ActorCore.Ref; r: INTEGER; expect: INTEGER;
 	BEGIN
-		Reset; seed := sd; clock := 0; x := sd * 2654435761 + 88172645463325252;
+		Reset; seed := sd; clock := 0; x := Int64.Mul(sd, 2654435761); INC(x, 88172645463325252);
 		SetupService; AddGrain(0); AddGrain(1);
 		IF ~AllAlive(2, -1, 1500) THEN Fail("состав не сошёлся") END;
 		KeyOwnedBy(1, key);

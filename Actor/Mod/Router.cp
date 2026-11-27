@@ -27,7 +27,7 @@ MODULE ActorRouter;
 	Выделений на письмо нет: массив маршрутов создан при рождении
 	маршрутизатора, пересылка только ставит письмо в ящик. *)
 
-	IMPORT ActorCore, ActorHash;
+	IMPORT Int64, ActorCore, ActorHash;
 
 	CONST
 		(** способ выбора маршрута *)
@@ -95,7 +95,7 @@ MODULE ActorRouter;
 			IF m IS Keyed THEN key := m(Keyed).key ELSE key := "" END;
 			RETURN HashOwner(r, key)
 		ELSIF r.kind = random THEN
-			r.seed := r.seed * 6364136223846793005 + 1442695040888963407;	(* LCG Кнута, как в ActorNetMem *)
+			r.seed := Int64.Mul(r.seed, 6364136223846793005); INC(r.seed, 1442695040888963407);	(* LCG Кнута, как в ActorNetMem *)
 			RETURN SHORT(ASH(r.seed, -33) MOD r.n)
 		ELSE
 			INC(r.idx);

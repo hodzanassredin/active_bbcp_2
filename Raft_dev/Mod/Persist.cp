@@ -32,7 +32,7 @@ MODULE Raft_devPersist;
 	RaftJournal.mutNoExpected — автомат не сверяет expected) обязаны
 	ловиться. *)
 
-	IMPORT Services, Tasks, Strings, Log, Stores,
+	IMPORT Int64, Services, Tasks, Strings, Log, Stores,
 		ActorCore, ActorJournal, ActorCodec, ActorPersist, ActorNet, ActorNetMem, ActorSim,
 		Core := RaftCore, RaftSm, RaftStorage, RaftNode, RaftJournal, UnitAssert;
 
@@ -111,7 +111,7 @@ MODULE Raft_devPersist;
 
 	PROCEDURE Rand (k: INTEGER): INTEGER;
 	BEGIN
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		RETURN SHORT(ASH(x, -33) MOD k)
 	END Rand;
 
@@ -575,7 +575,7 @@ MODULE Raft_devPersist;
 		VAR i, j: INTEGER; s: ActorCore.Name; cut: Cut; st: Flaky; cap: ARRAY RaftNode.capLen OF CHAR;
 			trace: Trace; nm: Named;
 	BEGIN
-		x := seed * 2654435761 + 88172645463325252; INC(gen);
+		x := Int64.Mul(seed, 2654435761); INC(x, 88172645463325252); INC(gen);
 		ok := TRUE; why := ""; dlast := 0; maxCommit := 0; now := 0; nj := 0; nextOp := 0; nacked := 0;
 		NEW(acked, 64); NEW(evs, 64); nev := 0; evs[0].sum := 0;
 		NEW(decided, 64); decided[0].term := 0;

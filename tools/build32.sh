@@ -63,10 +63,16 @@ echo "build32: компиляция подсистем"
 	echo "DevCompiler.CompileSubs @Lin $SUBS"
 	echo "DevCompiler.CompileThis Taskarch"
 	echo "DevCompiler.CompileThis Tasks"
-	# AsyncStm зависит только от Tasks и Kernel и собирается и для i386.
-	echo "DevCompiler.CompileThis AsyncStm"
+	# Async/Mod (каналы, выбор, события, Once, IO, Stm) переносим и
+	# собирается после Tasks. Рабочие нити ОС и компутоны (Async/Mod64:
+	# Work, WorkLin, Computon, Mpi) — только amd64: им нужны LinThreads и
+	# LinNative, которых для i386 нет.
+	echo "DevCompiler.CompileSubs @Lin Async"
 	# Kv использует Tasks (очередь писателей), поэтому собирается после них.
 	echo "DevCompiler.CompileSubs @Lin Kv"
+	# Actor (в т. ч. ActorNetTls поверх Crypto) и Raft — после Async и Kv.
+	echo "DevCompiler.CompileSubs @Lin Actor"
+	echo "DevCompiler.CompileSubs @Lin Raft"
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$DEV0" < "$LOG.cmd" > "$LOG" 2>&1; then

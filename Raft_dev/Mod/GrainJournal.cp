@@ -27,7 +27,7 @@ MODULE Raft_devGrainJournal;
 	Обычный прогон — 100 зёрен, длинный — Raft_devGrainJournal.Long
 	(2000 зёрен). *)
 
-	IMPORT Log, Services, Tasks, Strings, Stores,
+	IMPORT Int64, Log, Services, Tasks, Strings, Stores,
 		ActorCore, ActorJournal, ActorCodec, ActorPersist, ActorNet, ActorNetMem, ActorSim, ActorGrain,
 		Core := RaftCore, RaftSm, RaftStorage, RaftNode, RaftJournal, RaftMembership, RaftGrainMembership,
 		UnitAssert;
@@ -143,7 +143,7 @@ MODULE Raft_devGrainJournal;
 
 	PROCEDURE Rand (k: INTEGER): INTEGER;
 	BEGIN
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		RETURN SHORT(ASH(x, -33) MOD k)
 	END Rand;
 
@@ -806,7 +806,7 @@ MODULE Raft_devGrainJournal;
 	PROCEDURE RunSeed (sd: LONGINT; OUT good: BOOLEAN);
 		VAR d: Driver; t: LONGINT;
 	BEGIN
-		seed := sd; x := sd * 2654435761 + 88172645463325252; now := 0; time := 0;
+		seed := sd; x := Int64.Mul(sd, 2654435761); INC(x, 88172645463325252); now := 0; time := 0;
 		ok := TRUE; why := "";
 		Reset;
 		RaftJournal.mutations := mutJ; RaftNode.mutations := mutN; ActorPersist.mutations := mutP;
@@ -978,7 +978,7 @@ MODULE Raft_devGrainJournal;
 
 	PROCEDURE BeginScript (sd: LONGINT);
 	BEGIN
-		seed := sd; x := sd * 2654435761 + 88172645463325252; now := 0; time := 0;
+		seed := sd; x := Int64.Mul(sd, 2654435761); INC(x, 88172645463325252); now := 0; time := 0;
 		ok := TRUE; why := "";
 		Reset;
 		RaftJournal.mutations := mutJ; RaftNode.mutations := mutN; ActorPersist.mutations := mutP;

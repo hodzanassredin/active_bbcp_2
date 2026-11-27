@@ -11,7 +11,7 @@ MODULE ActorNetMem;
 	Сеть без плана (NewAuto) доставляет кадры сама — действием Services в
 	главном цикле, по порядку отправки, без потерь. *)
 
-	IMPORT Services, ActorCore, ActorJournal, ActorNet;
+	IMPORT Int64, Services, ActorCore, ActorJournal, ActorNet;
 
 	TYPE
 		Name = ActorCore.Name;
@@ -47,7 +47,7 @@ MODULE ActorNetMem;
 		VAR x: LONGINT;
 	BEGIN
 		ASSERT(k > 0, 20);
-		x := net.x * 6364136223846793005 + 1442695040888963407;	(* LCG Кнута, 64 бита *)
+		x := Int64.Mul(net.x, 6364136223846793005); INC(x, 1442695040888963407);	(* LCG Кнута, 64 бита *)
 		net.x := x;
 		RETURN SHORT(ASH(x, -33) MOD k)	(* старшие биты: у младших короткий период *)
 	END Rand;
@@ -164,7 +164,7 @@ MODULE ActorNetMem;
 	(** Сеть с планом сбоев (по умолчанию пустым), доставка — Pump. *)
 		VAR net: Net;
 	BEGIN
-		NEW(net); net.x := seed * 2654435761 + 88172645463325252;
+		NEW(net); net.x := Int64.Mul(seed, 2654435761); INC(net.x, 88172645463325252);
 		IF net.x = 0 THEN net.x := 1 END;
 		NEW(net.pump); net.pump.net := net;
 		RETURN net

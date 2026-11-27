@@ -42,11 +42,16 @@ Kv_devTasks|proc|300'
 # Модули, общие с tools/test.sh: пометки, таймаут и зависимости для
 # компиляции берутся из tools/tests.txt (столбцы 2–4), чтобы списки двух
 # миров не расходились. Порядок — как здесь.
-SHARED='Crypto_devArch Crypto_devHashes Crypto_devSHA512 Crypto_devHMAC Crypto_devHKDF
+SHARED='System_devInt64 Crypto_devArch Crypto_devHashes Crypto_devSHA512 Crypto_devHMAC Crypto_devHKDF
 Crypto_devCiphers Crypto_devGcm Crypto_devBigNumbers Crypto_devDH Crypto_devRSA
 Crypto_devX25519 Crypto_devX509 Crypto_devPKCS1 Crypto_devTLS13 Crypto_devPRF
 Crypto_devEC Crypto_devECDSA Crypto_devChaCha20 Crypto_devEd25519 Crypto_devPSS
-Crypto_devX509Modern'
+Crypto_devX509Modern
+Async_devProtocol Async_devCtxSleep Async_devCtxChan Async_devIO Async_devChannels
+Async_devEvents
+Actor_devMain Actor_devRouter Actor_devEvent Actor_devPersist Actor_devNet Actor_devGrain
+Actor_devBounded Raft_devSim Raft_devNode Raft_devMembership Raft_devGrain
+Raft_devGrainJournal Raft_devJournal Raft_devPersist'
 
 # Строка tools/tests.txt для модуля: <модуль>|<marks>|<таймаут>|<зависимости>.
 tests_line() {

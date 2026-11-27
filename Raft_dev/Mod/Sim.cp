@@ -22,7 +22,7 @@ MODULE Raft_devSim;
 	узлу (MembershipRun: начальный состав меньше числа узлов, узел входит
 	учеником и становится избирателем после догона). *)
 
-	IMPORT Strings, Dialog, Log, KvPages, KvDb, KvFault, Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, UnitAssert;
+	IMPORT Int64, Strings, Dialog, Log, KvPages, KvDb, KvFault, Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, UnitAssert;
 
 	CONST
 		maxN = Core.maxNodes;
@@ -79,7 +79,7 @@ MODULE Raft_devSim;
 
 	PROCEDURE Rand (k: INTEGER): INTEGER;
 	BEGIN
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		RETURN SHORT(ASH(x, -33) MOD k)
 	END Rand;
 
@@ -538,7 +538,7 @@ MODULE Raft_devSim;
 		VAR i: INTEGER;
 	BEGIN
 		ASSERT((initial > 0) & (initial <= size) & (size <= maxN), 70);
-		n := size; seed := s; x := s * 2654435761 + 88172645463325252;
+		n := size; seed := s; x := Int64.Mul(s, 2654435761); INC(x, 88172645463325252);
 		ok := TRUE; why := ""; np := 0; dlast := 0; maxCommit := 0; proposals := 0; commits := 0;
 		now := 0; nextCtx := 0; crashNext := -1; nops := 0; NEW(ops, 256);
 		initVoters := {}; FOR i := 0 TO initial - 1 DO INCL(initVoters, i) END;

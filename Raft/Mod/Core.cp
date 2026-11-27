@@ -34,6 +34,8 @@ MODULE RaftCore;
 	из разрыва узел не свергает лидера. CheckQuorum: лидер, не собравший
 	ответов большинства за тайм-аут выборов, слагает полномочия. *)
 
+	IMPORT Int64;
+
 	CONST
 		(** роль *)
 		follower* = 0; candidate* = 1; leader* = 2; preCandidate* = 3;
@@ -154,7 +156,7 @@ MODULE RaftCore;
 
 	PROCEDURE Rand (nd: Node): INTEGER;
 	BEGIN
-		nd.rnd := nd.rnd * 6364136223846793005 + 1442695040888963407;	(* LCG Кнута, 64 бита *)
+		nd.rnd := Int64.Mul(nd.rnd, 6364136223846793005); INC(nd.rnd, 1442695040888963407);	(* LCG Кнута, 64 бита *)
 		RETURN SHORT(ASH(nd.rnd, -33) MOD 1000000)
 	END Rand;
 
@@ -857,7 +859,7 @@ MODULE RaftCore;
 		NEW(nd.log, last - snapIndex + 16); nd.log[0].term := snapTerm;
 		FOR k := 1 TO last - snapIndex DO nd.log[k] := log[k] END;
 		nd.last := last; nd.stable := last; nd.commit := snapIndex; nd.applied := snapIndex;
-		nd.rnd := seed * 1000003 + id + 1;
+		nd.rnd := Int64.Mul(seed, 1000003); INC(nd.rnd, id + 1);
 		nd.base := electionTicks; nd.batch := 64; ResetTimeout(nd); nd.leaderElapsed := nd.timeout;
 		nd.voters := {}; FOR k := 0 TO n - 1 DO INCL(nd.voters, k) END;
 		nd.learners := {}; nd.preVotes := {};
