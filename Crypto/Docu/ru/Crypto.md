@@ -277,20 +277,29 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 ## Сборка
 
-Подсистема входит в мир AMD64, который собирает `tools/build64.sh`. Каталога `Mod64` у неё нет:
-64-битные помощники `CryptoAosCompat` написаны на Component Pascal, и один набор исходников
-обслуживает цель AMD64. Компилятор i386 не собирает `CryptoAosCompat`: на вложенном делении
-`LONGINT` в `AosCompat.cp` он останавливается с «not enough floating-point registers», поэтому
-`Crypto` нет в `tools/build32.sh` и `tools/test32.sh`.
+Подсистема входит и в мир AMD64 (`tools/build64.sh`), и в мир i386 (`tools/build32.sh`). Почти
+все исходники общие (`Crypto/Mod`); машинная часть — модуль `CryptoArch`, по файлу на цель:
+`Crypto/Mod64/Arch.cp` (AMD64) и `Crypto/Mod/Arch.cp` (i386). Он даёт широкое умножение
+`MulAdd` (32 × 32 + 32 + 32 → 64 бита), младшие 64 бита произведения `Mul64` и ядро
+умножения Монтгомери `MontCore`, на котором стоит `CryptoEC`.
+
+Причина раскладки: на AMD64 умножение `LONGINT` аппаратное и при переполнении заворачивается по
+модулю 2^64, а компилятор i386 умножает `LONGINT` на FPU, и произведение вне
+[-2^63, 2^63) даёт трап 143 «undefined real result». Поэтому на i386 произведение 32 × 32
+собирается из двух частичных 32 × 16 (< 2^48), которые FPU считает точно. На AMD64 ядро
+Монтгомери держит суммы в `LONGINT` без вызова на каждый разряд, как и раньше. Кроме того,
+`CryptoAosCompat.ADDRESS` — это `SYSTEM.ADDRESS` (4 байта на i386, 8 на AMD64), а остаток от
+деления в `UMod32Raw` идёт через переменные: на вложенном выражении компилятор i386
+останавливался с «not enough floating-point registers».
 
 ## Тесты
 
-Модульные тесты лежат в `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
+Модульные тесты лежат в `Crypto_dev`: `Crypto_devArch`, `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
 `Crypto_devX509Modern`,
 `Crypto_devPKCS1`, `Crypto_devPRF`, `Crypto_devTLS13`. Их
-запускает `tools/test.sh` по списку `tools/tests.txt`. Эталонные значения также лежат файлами с
+запускают `tools/test.sh` по списку `tools/tests.txt` и `tools/test32.sh` на i386 (те же векторы). Эталонные значения также лежат файлами с
 указанием источника и лицензии в `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их
 независимой реализацией на Python.
 

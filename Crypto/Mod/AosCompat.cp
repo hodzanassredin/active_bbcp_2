@@ -5,11 +5,11 @@ MODULE CryptoAosCompat;
 	PURPOSE: Helper utils for aos port, unsigned numbers support
 *)
 
-	IMPORT SYSTEM, StdLog;
+	IMPORT SYSTEM, StdLog, Arch := CryptoArch;
 
 TYPE
 		SIZE* = INTEGER;
-		ADDRESS* = LONGINT;
+		ADDRESS* = SYSTEM.ADDRESS;	(* размер указателя цели: 4 байта на i386, 8 на amd64 *)
 		UNSIGNED8* = BYTE;
 		UNSIGNED16* = SHORTINT;
 		UNSIGNED32* = INTEGER;
@@ -225,8 +225,12 @@ TYPE
 	END UDiv32;
 
 	PROCEDURE UMod32Raw (x, y: SIGNED32): SIGNED32;
+		VAR a, b: LONGINT;
 	BEGIN
-		RETURN LOW32(ZE32(x) MOD ZE32(y))
+		(* Через переменные: i386 считает LONGINT MOD на FPU, и выражение
+			целиком не помещается в его регистры. *)
+		a := ZE32(x); b := ZE32(y);
+		RETURN LOW32(a MOD b)
 	END UMod32Raw;
 		
 	PROCEDURE Bsr32Inline (x: SIGNED32): INTEGER;	(* index of highest set bit, x # 0 *)
@@ -590,10 +594,11 @@ TYPE
 		RETURN remainder;
 	END UMod64;
 	PROCEDURE UMul64Raw(n,m: SIGNED64) : SIGNED64;
-		(* Младшие 64 бита произведения: на amd64 LONGINT-умножение
-		   аппаратное и переполнение заворачивается, что и нужно. *)
+		(* Младшие 64 бита произведения. На amd64 LONGINT-умножение
+		   аппаратное и заворачивается само; на i386 компилятор умножает
+		   LONGINT на FPU и переполнение — трап, поэтому через CryptoArch. *)
 	BEGIN
-		RETURN n * m
+		RETURN Arch.Mul64(n, m)
 	END UMul64Raw;
 	
 	PROCEDURE UMul64*(n,m: UNSIGNED64) : UNSIGNED64;

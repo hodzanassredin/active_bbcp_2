@@ -27,7 +27,7 @@ for a in "$@"; do
 	esac
 done
 
-SUBS="Lin System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket Unit"
+SUBS="Lin System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket Unit Crypto"
 
 [ -x "$DEV0" ] || { echo "build32: нет $DEV0" >&2; exit 2; }
 clean_host_temp

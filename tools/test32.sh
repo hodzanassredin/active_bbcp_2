@@ -39,6 +39,35 @@ Kv_devTree|proc|600
 Kv_devCrash|proc|1200
 Kv_devTasks|proc|300'
 
+# Модули, общие с tools/test.sh: пометки, таймаут и зависимости для
+# компиляции берутся из tools/tests.txt (столбцы 2–4), чтобы списки двух
+# миров не расходились. Порядок — как здесь.
+SHARED='Crypto_devArch Crypto_devHashes Crypto_devSHA512 Crypto_devHMAC Crypto_devHKDF
+Crypto_devCiphers Crypto_devGcm Crypto_devBigNumbers Crypto_devDH Crypto_devRSA
+Crypto_devX25519 Crypto_devX509 Crypto_devPKCS1 Crypto_devTLS13 Crypto_devPRF
+Crypto_devEC Crypto_devECDSA Crypto_devChaCha20 Crypto_devEd25519 Crypto_devPSS
+Crypto_devX509Modern'
+
+# Строка tools/tests.txt для модуля: <модуль>|<marks>|<таймаут>|<зависимости>.
+tests_line() {
+	grep "^$1|" "$BB/tools/tests.txt" | head -1
+}
+for m in $SHARED; do
+	l=$(tests_line "$m")
+	[ -n "$l" ] || { echo "test32: $m нет в tools/tests.txt" >&2; exit 2; }
+	MANIFEST="$MANIFEST
+$(printf '%s\n' "$l" | cut -d'|' -f1-3)"
+done
+# Тестовые модули общих тестов и их зависимости по tools/tests.txt (без
+# повторов). Модули мира (Crypto*, Actor*, ...) build32.sh уже собрал;
+# повторная компиляция того же источника безвредна.
+SHARED_DEV=""
+for m in $SHARED; do
+	for d in $(tests_line "$m" | cut -d'|' -f4) "$m"; do
+		case " $SHARED_DEV " in *" $d "*) ;; *) SHARED_DEV="$SHARED_DEV $d";; esac
+	done
+done
+
 LIST=0; only=""
 for a in "$@"; do
 	case "$a" in
@@ -72,7 +101,8 @@ compile_dev32() {
 			System_devUnloadGuardCode System_devUnloadGuard \
 			AsyncProto AsyncSelect AsyncChan Async_devStm \
 			Cas_devHash Cas_devStore Cas_devChunk Cas_devTree Cas_devChange \
-			Kv_devModel Kv_devBasic Kv_devTree Kv_devCrash Kv_devTasks; do
+			Kv_devModel Kv_devBasic Kv_devTree Kv_devCrash Kv_devTasks \
+			$SHARED_DEV; do
 			echo "DevCompiler.CompileThis $m"
 		done
 		echo 'DevLibrarian.DisableDevLib'

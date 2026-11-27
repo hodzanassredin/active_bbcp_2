@@ -9,7 +9,7 @@ MODULE CryptoEC;
 	   противоположных точек, поэтому в умножении на скаляр нет особых
 	   случаев и ветвлений по секрету. *)
 
-	IMPORT SYSTEM, U := CryptoUtils, AO := CryptoAosCompat;
+	IMPORT SYSTEM, U := CryptoUtils, AO := CryptoAosCompat, Arch := CryptoArch;
 
 	CONST
 		MaxLimbs = 12;
@@ -201,87 +201,34 @@ MODULE CryptoEC;
 		END
 	END ModSub;
 
-	(* Умножение Монтгомери: r = a*b/R mod m. *)
+	(* Умножение Монтгомери: r = a*b/R mod m. Горячие циклы — в
+	   CryptoArch.MontCore: на amd64 промежуточные суммы держатся в
+	   LONGINT без вызовов на разряд, на i386 широкое умножение собрано
+	   без переполнения FPU (Crypto/Mod64/Arch.cp и Crypto/Mod/Arch.cp). *)
 	PROCEDURE MontMul (IN m : Modulus; IN a, b : BigInt; VAR r : BigInt);
-		(* Горячий цикл. Половинки 64-битных значений берутся через
-		   SYSTEM.VAL, а не вызовами CryptoAosCompat: на одно умножение
-		   приходится O(n^2) таких операций, и вызовы стоили больше
-		   самой арифметики. *)
 		VAR
-			t : ARRAY 2 * MaxLimbs + 1 OF LONGINT;
-			az, bz, pz : ARRAY MaxLimbs OF LONGINT;
-			tl : ARRAY MaxLimbs OF INTEGER;
+			t : ARRAY 2 * MaxLimbs + 1 OF INTEGER;
 			d : BigInt;
 			w : Words;
-			i, j, k, lo, hi, u, borrow, bm, hm, nm, mask : INTEGER;
-			acc, carry, uz : LONGINT;
+			i, borrow, bm, hm, nm, mask : INTEGER;
+			acc : LONGINT;
 	BEGIN
-		FOR i := 0 TO 2 * m.n DO
-			t[i] := 0
-		END;
-		(* Разряды — беззнаковые 32-битные в 64-битных словах. *)
-		FOR i := 0 TO m.n - 1 DO
-			w[0] := a[i]; w[1] := 0; az[i] := SYSTEM.VAL(LONGINT, w);
-			w[0] := b[i]; w[1] := 0; bz[i] := SYSTEM.VAL(LONGINT, w);
-			w[0] := m.p[i]; w[1] := 0; pz[i] := SYSTEM.VAL(LONGINT, w)
-		END;
-		(* Школьное умножение a*b в t. *)
-		FOR i := 0 TO m.n - 1 DO
-			carry := 0;
-			FOR j := 0 TO m.n - 1 DO
-				acc := az[i] * bz[j] + t[i + j] + carry;
-				w := SYSTEM.VAL(Words, acc);
-				lo := w[0]; hi := w[1];
-				w[0] := lo; w[1] := 0; t[i + j] := SYSTEM.VAL(LONGINT, w);
-				w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w)
-			END;
-			t[i + m.n] := carry
-		END;
-		(* Редукция Монтгомери; t переполняется в старшую сторону. *)
-		FOR i := 0 TO m.n - 1 DO
-			w := SYSTEM.VAL(Words, t[i]);
-			u := w[0] * m.n0;
-			w[0] := u; w[1] := 0; uz := SYSTEM.VAL(LONGINT, w);
-			carry := 0;
-			FOR j := 0 TO m.n - 1 DO
-				acc := uz * pz[j] + t[i + j] + carry;
-				w := SYSTEM.VAL(Words, acc);
-				lo := w[0]; hi := w[1];
-				w[0] := lo; w[1] := 0; t[i + j] := SYSTEM.VAL(LONGINT, w);
-				w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w)
-			END;
-			k := i + m.n;
-			acc := t[k] + carry;
-			w := SYSTEM.VAL(Words, acc);
-			lo := w[0]; hi := w[1];
-			w[0] := lo; w[1] := 0; t[k] := SYSTEM.VAL(LONGINT, w);
-			w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w);
-			INC(k);
-			WHILE k <= 2 * m.n DO
-				acc := t[k] + carry;
-				w := SYSTEM.VAL(Words, acc);
-				lo := w[0]; hi := w[1];
-				w[0] := lo; w[1] := 0; t[k] := SYSTEM.VAL(LONGINT, w);
-				w[0] := hi; w[1] := 0; carry := SYSTEM.VAL(LONGINT, w);
-				INC(k)
-			END
-		END;
+		Arch.MontCore(m.n, m.n0, a, b, m.p, t);
 		(* Результат в t[n..2n-1], возможный старший разряд — t[2n]. *)
 		borrow := 0;
 		FOR i := 0 TO m.n - 1 DO
-			w := SYSTEM.VAL(Words, t[m.n + i]);
-			tl[i] := w[0];
-			acc := t[m.n + i] - pz[i] - LONG(borrow);
+			w[0] := t[m.n + i]; w[1] := 0; acc := SYSTEM.VAL(LONGINT, w);
+			w[0] := m.p[i]; w[1] := 0; acc := acc - SYSTEM.VAL(LONGINT, w) - LONG(borrow);
 			w := SYSTEM.VAL(Words, acc);
 			d[i] := w[0];
 			bm := ASH(w[1], -31);
 			borrow := -bm
 		END;
-		hm := -SHORT(t[2 * m.n]);
+		hm := -t[2 * m.n];
 		nm := -borrow;
 		mask := ORD(BITS(hm) + BITS(-1 - nm));
 		FOR i := 0 TO m.n - 1 DO
-			r[i] := Sel(tl[i], d[i], mask)
+			r[i] := Sel(t[m.n + i], d[i], mask)
 		END;
 		FOR i := m.n TO MaxLimbs - 1 DO
 			r[i] := 0

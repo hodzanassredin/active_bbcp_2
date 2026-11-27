@@ -87,6 +87,8 @@ Async_devBench|proc slow|900|AsyncSelect AsyncChan System_devCRaw System_devCloc
 # Примеры Demo: задачи, мониторы-объекты, каналы, муравьи (amd64).
 Demo_devExamples|proc|900|DemoSupport DemoAnts DemoBarber DemoBoring DemoBuffer DemoGroup DemoModuleMonitor DemoPhilo DemoPipeline DemoPingPong DemoReaderWriter DemoSelectTimeout DemoSieve DemoWorkerPool
 # Криптография Crypto: хеши, HMAC, шифры, GCM, большие числа, DH, RSA, X25519.
+# Машинная часть: широкое умножение (amd64 и i386 — свои Arch.cp).
+Crypto_devArch||180|CryptoArch
 Crypto_devHashes||180|CryptoHashes CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoUtils CryptoAosCompat
 Crypto_devSHA512||180|CryptoHashes CryptoSHA512 CryptoSHA384 CryptoUtils CryptoAosCompat
 Crypto_devHMAC||180|CryptoHMAC CryptoHashes CryptoMD5 CryptoSHA1 CryptoSHA256 CryptoSHA512 CryptoSHA384 CryptoUtils CryptoAosCompat

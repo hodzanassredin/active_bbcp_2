@@ -279,20 +279,30 @@ ECDHE-ECDSA suites.
 
 ## Build
 
-The subsystem is part of the AMD64 world built by `tools/build64.sh`. It has no `Mod64` directory:
-the 64-bit helpers of `CryptoAosCompat` are written in Component Pascal and the same sources serve
-the AMD64 target. The i386 compiler does not build `CryptoAosCompat`; it stops with "not enough
-floating-point registers" at the nested `LONGINT` division in `AosCompat.cp`, so `Crypto` is absent
-from `tools/build32.sh` and `tools/test32.sh`.
+The subsystem is part of both the AMD64 world (`tools/build64.sh`) and the i386 world
+(`tools/build32.sh`). Almost all sources are shared (`Crypto/Mod`); the machine part is module
+`CryptoArch`, one file per target: `Crypto/Mod64/Arch.cp` (AMD64) and `Crypto/Mod/Arch.cp`
+(i386). It provides the wide multiplication `MulAdd` (32 × 32 + 32 + 32 → 64 bits), the low
+64 bits of a product `Mul64` and the Montgomery multiplication core `MontCore` used by
+`CryptoEC`.
+
+Why: on AMD64 `LONGINT` multiplication is done in hardware and wraps modulo 2^64, while the i386
+compiler multiplies `LONGINT` on the FPU, and a product outside [-2^63, 2^63) raises trap 143
+"undefined real result". On i386 a 32 × 32 product is therefore assembled from two partial
+32 × 16 products (< 2^48) that the FPU computes exactly. On AMD64 the Montgomery core keeps its
+sums in `LONGINT` without a call per digit, as before. In addition, `CryptoAosCompat.ADDRESS` is
+`SYSTEM.ADDRESS` (4 bytes on i386, 8 on AMD64), and the remainder in `UMod32Raw` goes through
+variables: on the nested expression the i386 compiler stopped with "not enough floating-point
+registers".
 
 ## Tests
 
-Unit tests live in `Crypto_dev`: `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
+Unit tests live in `Crypto_dev`: `Crypto_devArch`, `Crypto_devHashes`, `Crypto_devSHA512`, `Crypto_devHMAC`,
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
 `Crypto_devX509Modern`,
 `Crypto_devPKCS1`, `Crypto_devPRF` and `Crypto_devTLS13`.
-`tools/test.sh` runs them from `tools/tests.txt`. The reference values are also stored as files
+`tools/test.sh` runs them from `tools/tests.txt`, and `tools/test32.sh` runs them on i386 (same vectors). The reference values are also stored as files
 with their sources and licences in `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` verifies
 them with an independent Python implementation.
 
