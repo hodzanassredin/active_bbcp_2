@@ -78,6 +78,8 @@ Async_devChannels|proc|300|AsyncSelect AsyncChan AsyncOnce
 Async_devEvents|proc|300|AsyncSelect AsyncChan AsyncEvent
 # Примеры событий Obx: обмен, буфер, отмена, мультикаст, срок, философы.
 Obx_devEvents|proc|300|AsyncSelect AsyncChan AsyncEvent ObxEvent0 ObxEvent1 ObxEvent2 ObxEvent3 ObxEvent4 ObxEvent5
+# Счёт и координатор ObxCluster: границы Fits, снимок 128 номеров, повтор операции.
+Obx_devCluster||180|ObxCluster ActorCore
 # Транзакционная память: откат, Retry, OrElse, ожидание, цена.
 Async_devStm|proc slow|300|AsyncStm AsyncSelect AsyncChan
 # Парные замеры задач, каналов и свободного монитора-объекта (итог обмена).

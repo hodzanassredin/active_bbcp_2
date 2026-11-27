@@ -954,7 +954,9 @@ while a scan of the list cost 1.1–1.5 ms at 100000 (`docs/measurements.md`, se
   coordinate: on a network split two activations of a key are possible, and without a consensus
   journal both can write. With `RaftJournal` the second cannot write and catches up before reading
   (section 11, the `Raft` guide). Liveness of a node is known only by the break of its TCP
-  connection; the lease of the membership service is separate and lives in `Raft`.
+  connection; the lease of the membership service is separate and lives in `Raft`. The guide
+  [Cluster.md](Cluster.md) assembles an application from these parts: accounts on virtual actors, a
+  transfer saga, a membership service and restarts.
 - A router is an actor of one process; its routes are the addresses it was given, and a pool
   creates local children. A pool has at most `maxRoutes` (64) routes; a route
   stopped by supervision or by `StopActor` leaves the set and is not created again, `SetCount` is

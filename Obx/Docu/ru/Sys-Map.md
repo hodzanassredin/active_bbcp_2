@@ -51,6 +51,7 @@
 [ObxActor11](Actor11.md)  [docu](Actor11.md)/[sources](../../Mod64/Actor11.cp)		поток событий: подписки, предикат, мёртвые письма
 [ObxRaft0](Raft0.md)  [docu](Raft0.md)/[sources](../../Mod64/Raft0.cp)		Raft: три узла в памяти, выборы, запись, чтение, гибель лидера
 [ObxRaft1](Raft1.md)  [docu](Raft1.md)/[sources](../../Mod64/Raft1.cp)		стойкий счётчик на журнале Raft переживает гибель своего узла
+[ObxCluster](Cluster.md)  [docu](Cluster.md)/[sources](../../Mod64/Cluster.cp)		счета в кластере: виртуальные акторы, сага перевода, потеря узла
 [ObxBank0](Bank0.md)  [docu](Bank0.md)/[sources](../../Mod64/Bank0.cp)		учебник: действие и задача делают одну работу
 [ObxBank1](Bank1.md)  [docu](Bank1.md)/[sources](../../Mod64/Bank1.cp)		учебник: кассиры, Join, Sleep, отмена, группа
 [ObxBank2](Bank2.md)  [docu](Bank2.md)/[sources](../../Mod64/Bank2.cp)		учебник: ожидание денег без монитора и с монитором-объектом

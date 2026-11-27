@@ -19,7 +19,11 @@ MODULE Actor_devCluster;
 	  журнала;
 	- grain — виртуальные акторы ObxActor8 в трёх процессах: у каждого
 	  свой узел Raft (журнал RaftJournal) и свой узел ActorGrain; kill -9
-	  владельца ключа, ключ переезжает, состояние читается из журнала.
+	  владельца ключа, ключ переезжает, состояние читается из журнала;
+	- obxcluster — пример ObxCluster в пяти процессах: счета на
+	  виртуальных акторах, переводы сагой, служба состава; процесс на
+	  время замораживается (SIGSTOP, фейк разрыва сети), два узла-лидера
+	  убиваются и поднимаются снова с теми же хранилищами.
 
 	Номер воплощения узла процесс хранит в файле <узел>.inc: New всегда
 	даёт 1, и окно повторов соседей отбросило бы кадры нового процесса
@@ -28,7 +32,7 @@ MODULE Actor_devCluster;
 	IMPORT Services, Tasks, Files, Dialog, Strings, Console, Stores,
 		CommStreams,
 		ActorCore, ActorRun, ActorNet, ActorNetTcp, ActorJournal, ActorFileJournal,
-		ActorPersist, ActorGrain,
+		ActorPersist, ActorGrain, ObxCluster,
 		CasStore, KvLin, KvStore, KvDb,
 		Core := RaftCore, RaftSm, RaftStorage, RaftKvStorage, RaftNode, RaftJournal,
 		RaftMembership, RaftGrainMembership;
@@ -89,6 +93,9 @@ MODULE Actor_devCluster;
 			balance: INTEGER; ops: ARRAY 16 OF LONGINT; n: INTEGER
 		END;
 
+		(* --- obxcluster ---------------------------------------------------------- *)
+		ObxSink = POINTER TO RECORD (ActorCore.Actor) name: Name END;
+
 	VAR
 		dir: ARRAY 1024 OF CHAR;
 		role, scenario: Name;
@@ -128,6 +135,15 @@ MODULE Actor_devCluster;
 		memOps, memOks, memBad: INTEGER;
 		memBalance, memExpect: INTEGER;	(* сумма по всем счетам и ожидаемый баланс текущего *)
 		memDone: BOOLEAN;
+		(* --- сценарий obxcluster --- *)
+		obxCl: ActorGrain.Cluster;
+		obxJournal: RaftJournal.Client;
+		obxMem: RaftMembership.Client;
+		obxClient: ActorCore.Ref;
+		obxCfg: RaftGrainMembership.Config;
+		obxJCfg, obxMCfg: RaftNode.Config;
+		obxProgress, obxTransfers: INTEGER;
+		pendingSinkName: Name;
 
 	(* --- параметры ------------------------------------------------------------ *)
 
@@ -1203,10 +1219,16 @@ MODULE Actor_devCluster;
 	END WaitRoleCaps;
 
 	PROCEDURE ReadCaps (IN prefix: ARRAY OF CHAR; count: INTEGER; OUT caps: RaftNode.Caps);
-		VAR i: INTEGER; s: ARRAY 64 OF CHAR;
+	(* Файл пропуска переписывается через удаление и переименование: в это
+		окно читатель видит пустоту. Повторяем, пока пропуск не прочитан. *)
+		VAR i: INTEGER; s: ARRAY 64 OF CHAR; t: LONGINT;
 	BEGIN
 		FOR i := 0 TO count - 1 DO
-			IntToText(i, s); GetText(prefix + s + ".cap", caps[i]); ASSERT(caps[i] # "", 124)
+			IntToText(i, s); t := Services.Ticks();
+			REPEAT
+				GetText(prefix + s + ".cap", caps[i])
+			UNTIL (caps[i] # "") OR (Services.Ticks() - t > 5000);
+			ASSERT(caps[i] # "", 124)
 		END
 	END ReadCaps;
 
@@ -1517,6 +1539,157 @@ MODULE Actor_devCluster;
 		memDone := TRUE; finished := TRUE
 	END MembershipDriver;
 
+	(* --- obxcluster: счета и переводы в пяти процессах ------------------------ *)
+
+	PROCEDURE WriteObxRaft (cfg: RaftNode.Config; IN name: ARRAY OF CHAR);
+		VAR rl, term, leader, last, lastTerm, commit, applied: INTEGER; broken: BOOLEAN;
+			s, x: ARRAY 256 OF CHAR;
+	BEGIN
+		RaftNode.Status(cfg, rl, term, leader, last, lastTerm, commit, applied, broken);
+		s := "role="; IntToText(rl, x); s := s + x;
+		IntToText(term, x); s := s + " term=" + x;
+		IntToText(leader, x); s := s + " leader=" + x;
+		IntToText(applied, x); s := s + " applied=" + x;
+		IF broken THEN s := s + " broken=1" ELSE s := s + " broken=0" END;
+		PutText(name, s)
+	END WriteObxRaft;
+
+	PROCEDURE WriteObxGrain (IN name: ARRAY OF CHAR);
+		VAR joined: BOOLEAN; now, members, lists: INTEGER; s, x: ARRAY 256 OF CHAR;
+	BEGIN
+		RaftGrainMembership.Status(obxCfg, joined, now, members, lists);
+		s := "alive="; IntToText(ActorGrain.AliveCount(obxCl), x); s := s + x;
+		IntToText(members, x); s := s + " members=" + x;
+		IntToText(lists, x); s := s + " lists=" + x;
+		IF joined THEN s := s + " joined=1" ELSE s := s + " joined=0" END;
+		PutText(name, s)
+	END WriteObxGrain;
+
+	PROCEDURE (s: ObxSink) Receive (c: ActorCore.Context; m: ActorCore.Msg);
+		VAR d: ARRAY 32 OF CHAR; t: ARRAY 512 OF CHAR;
+	BEGIN
+		WITH m: ObxCluster.Report DO
+			t := "done="; IntToText(m.done, d); t := t + d;
+			t := t + " failed="; IntToText(m.failed, d); t := t + d;
+			t := t + " refunded="; IntToText(m.refunded, d); t := t + d;
+			t := t + " rejected="; IntToText(m.failed + m.refunded, d); t := t + d;
+			t := t + " total="; IntToText(m.total, d); t := t + d;
+			t := t + " sum="; IntToText(m.sum, d); t := t + d;
+			t := t + " expect="; IntToText(m.expect, d); t := t + d;
+			t := t + " applied="; IntToText(m.applied, d); t := t + d;
+			t := t + " dups="; IntToText(m.dups, d); t := t + d;
+			t := t + " retries="; IntToText(m.retries, d); t := t + d;
+			t := t + " rejectedRetries="; IntToText(m.rejectedRetries, d); t := t + d;
+			t := t + " coordRetries="; IntToText(m.coordRetries, d); t := t + d;
+			t := t + " verified="; IntToText(m.verified, d); t := t + d;
+			t := t + " verifyBad="; IntToText(m.verifyBad, d); t := t + d;
+			t := t + " losses="; IntToText(m.losses, d); t := t + d;
+			IF m.conserved THEN t := t + " conserved=1" ELSE t := t + " conserved=0" END;
+			IF m.good THEN t := t + " good=1" ELSE t := t + " good=0" END;
+			PutText(s.name, t)
+		ELSE
+		END
+	END Receive;
+
+	PROCEDURE NewObxSink (): ActorCore.Actor;
+		VAR s: ObxSink;
+	BEGIN
+		NEW(s); s.name := pendingSinkName$; RETURN s
+	END NewObxSink;
+
+	PROCEDURE RunObxCluster;
+	(** Процесс-узел кластера счетов: узел гранул G<idx>, узел службы
+		состава M<idx> и узел журнала J<idx>, журнал RaftJournal, состав из
+		RaftMembership. Клиент начинает работу по файлу start. *)
+		VAR grainT, jT, mT: ActorNetTcp.Net; grainNd, jNd, mNd: ActorNet.Node;
+			jStore, mStore: RaftStorage.Storage; jcaps, mcaps: RaftNode.Caps;
+			cap: ARRAY RaftNode.capLen OF CHAR; gName, jName, mName: Name;
+			key: ARRAY 2 OF BYTE; s, x: ARRAY 256 OF CHAR; i, inc, id, p, ticks: INTEGER;
+			last: LONGINT;
+			joined: BOOLEAN; now, members, lists: INTEGER; sink, client: ActorCore.Ref;
+			drive: ObxCluster.Drive;
+	BEGIN
+		IntToText(idx, s);
+		gName := "G" + s$; jName := "J" + s$; mName := "M" + s$;
+		OpenNode(gName, grainT, grainNd); PeerAll(grainT, gName);
+		OpenNode(jName, jT, jNd); PeerAll(jT, jName);
+		OpenNode(mName, mT, mNd); PeerAll(mT, mName);
+
+		OpenRaftStorage(jName, jStore);
+		obxJCfg := RaftNode.NewConfig(idx, 5, jNd, jStore, RaftJournal.NewMachine);
+		obxJCfg.electionTicks := 10; obxJCfg.seed := 9000 + idx * 37; obxJCfg.tickMs := tickMs;
+		ASSERT(RaftNode.Start(obxJCfg) # NIL, 125);
+		ActorNet.Export(jNd, obxJCfg.ref, cap); PutText(jName + ".cap", cap);
+
+		OpenRaftStorage(mName, mStore);
+		obxMCfg := RaftNode.NewConfig(idx, 5, mNd, mStore, RaftMembership.NewMachine);
+		obxMCfg.electionTicks := 10; obxMCfg.seed := 11000 + idx * 37; obxMCfg.tickMs := tickMs;
+		ASSERT(RaftNode.Start(obxMCfg) # NIL, 126);
+		ActorNet.Export(mNd, obxMCfg.ref, cap); PutText(mName + ".cap", cap);
+
+		ASSERT(WaitRoleCaps("J", 5, 30000), 127);
+		ReadCaps("J", 5, jcaps);
+		ASSERT(WaitRoleCaps("M", 5, 30000), 124);
+		ReadCaps("M", 5, mcaps);
+		FOR i := 0 TO 4 DO
+			IF i # idx THEN
+				RaftNode.SetPeer(obxJCfg, i, jcaps[i]);
+				RaftNode.SetPeer(obxMCfg, i, mcaps[i])
+			END
+		END;
+
+		inc := SHORT(FileInt(gName + ".inc")); IF inc < 1 THEN inc := 1 END;
+		id := (idx + 1) * 100000 + inc;
+		obxJournal := RaftJournal.New(grainNd, jcaps, 5, id);
+		id := (idx + 10) * 100000 + inc;
+		obxMem := RaftMembership.New(grainNd, mcaps, 5, id);
+		obxCl := ActorGrain.New(grainNd, obxJournal);
+		ActorGrain.Register(obxCl, "acct", ObxCluster.NewAccount);
+		ActorGrain.Register(obxCl, "xfer", ObxCluster.NewCoord);
+		ObxCluster.SetCluster(obxCl);
+		obxCl.idle := GetInt("IDLE", 2);	(* счета засыпают между шагами *)
+		ObxCluster.SetRetry(GetInt("RETRY", 150));	(* тайм-аут ответа до повтора *)
+		ObxCluster.SetDropStep(GetInt("DROP", 0));	(* первый ответ шага теряется *)
+		key[0] := SHORT(SHORT(idx + 1)); key[1] := 11;
+		obxCfg := RaftGrainMembership.NewConfig(idx, obxCl, obxMem, key, 2,
+			GetInt("LEASE", 4000), GetInt("RENEW", 10), GetInt("REFRESH", 10), 0);
+		ASSERT(RaftGrainMembership.Start(obxCfg) # NIL, 123);
+
+		obxTransfers := GetInt("OPS", 24);
+		pendingSinkName := role + ".result";
+		sink := ActorCore.Spawn(NIL, ActorCore.NewProps(NewObxSink), "$obxsink");
+		client := ObxCluster.SpawnClient(NIL, "$obxclient", obxTransfers,
+			GetInt("PACE", 1), FALSE, FALSE, sink);
+		obxClient := client; obxProgress := -1; ticks := 0;
+		PutText(role + ".ready", "1");
+		last := 0;
+		WHILE ~stop & (Services.Ticks() - t0 < serveMs) DO
+			Pump; CheckStop;
+			IF Services.Ticks() - last >= tickMs THEN
+				last := Services.Ticks(); INC(ticks);
+				RaftGrainMembership.time := Services.Ticks();
+				RaftGrainMembership.Tick(obxCfg);
+				ActorGrain.Tick(obxCl);	(* тик простоя: счета и координаторы пассивируются *)
+				IF ticks MOD 5 = 0 THEN
+					WriteObxRaft(obxJCfg, jName + ".status");
+					WriteObxRaft(obxMCfg, mName + ".status");
+					WriteObxGrain(role + ".status")
+				END;
+				RaftGrainMembership.Status(obxCfg, joined, now, members, lists);
+				IF (members >= 5) & Exists("start") & (ticks MOD 5 = 0) THEN
+					NEW(drive); ActorCore.Tell(obxClient, drive)
+				END;
+				p := ObxCluster.Progress();
+				IF p # obxProgress THEN
+					obxProgress := p; IntToText(p, x); PutText(role + ".progress", x)
+				END;
+			END
+		END;
+		obxJournal.Close; RaftMembership.Close(obxMem);
+		ActorRun.Shutdown;
+		ActorNetTcp.Close(grainT); ActorNetTcp.Close(jT); ActorNetTcp.Close(mT)
+	END RunObxCluster;
+
 	(* --- диспетчер ------------------------------------------------------------- *)
 
 	PROCEDURE Run*;
@@ -1546,6 +1719,9 @@ MODULE Actor_devCluster;
 		ELSIF scenario = "membership" THEN
 			idx := GetInt("IDX", 0);
 			IF role[0] = "S" THEN RunMembershipService ELSE RunMembershipGrain END
+		ELSIF scenario = "obxcluster" THEN
+			idx := GetInt("IDX", 0);
+			RunObxCluster
 		END
 	END Run;
 
