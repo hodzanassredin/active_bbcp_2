@@ -385,3 +385,13 @@
   — красные Arch/BigNumbers/RSA/EC; неверный перенос в `MontCore` — красный EC.
   Прогоны: test32 38/38 (FAIL только намеренный TestFailRu), test.sh 75/75 (+Crypto_devArch 1/1),
   примеры 0 расхождений, ссылки 0.
+- Int64 и Async на i386. Компилятор i386 считает на FPU не только `LONGINT *`, но и `+`/`-` в
+  выражении: переполнение — трап 143; заворачиваются только `INC`/`DEC` (add/adc,
+  `DevCPC486.LargeInc`). Новый модуль `Int64` (`System/Mod/Int64.cp` i386, `System/Mod64/Int64.cp`
+  amd64) с `Mul` по модулю 2^64; шаги LCG и перемешивание зерна переписаны как
+  `x := Int64.Mul(x, a); INC(x, c)` — на amd64 последовательности те же. Тест `System_devInt64`
+  (векторы, 5000 случайных пар против эталона по 16 бит, заворот INC/DEC). `build32.sh` собирает
+  `Async/Mod` целиком (`CompileSubs @Lin Async`); переносимые тесты `Async_dev`
+  (Protocol, CtxSleep, CtxChan, IO, Channels, Events) перенесены из `Mod64` в `Mod`. Рабочие нити
+  ОС и компутоны (`AsyncWork`, `AsyncComputon`, `AsyncMpi`) и `RobustParallel` на i386 не
+  переносятся: нужны `LinThreads`/`LinNative`, их i386-версий нет.

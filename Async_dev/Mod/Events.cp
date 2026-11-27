@@ -2,7 +2,7 @@ MODULE Async_devEvents;
 (** Тесты событий первого класса: базовые события, комбинаторы, nack,
 	отмена и трап, случайные деревья против простой модели. *)
 
-	IMPORT Kernel, Services, Tasks, AsyncSelect, AsyncChan, AsyncEvent, UnitAssert;
+	IMPORT Int64, Kernel, Services, Tasks, AsyncSelect, AsyncChan, AsyncEvent, UnitAssert;
 
 	CONST
 		nSeeds = 100;
@@ -922,7 +922,7 @@ MODULE Async_devEvents;
 
 	PROCEDURE Rand (VAR seed: LONGINT): INTEGER;
 	BEGIN
-		seed := (seed * 1103515245 + 12345) MOD 1073741824;
+		seed := Int64.Mul(seed, 1103515245); INC(seed, 12345); seed := seed MOD 1073741824;
 		RETURN SHORT(seed DIV 65536)
 	END Rand;
 
@@ -1209,7 +1209,7 @@ MODULE Async_devEvents;
 		FOR i := 1 TO 40 DO
 			ok := RunSeedReuse(seed, rounds);
 			UnitAssert.True(ok, "reused random tree matches the model");
-			seed := seed * 31 + 7
+			seed := Int64.Mul(seed, 31); INC(seed, 7)
 		END
 	END TestRandomTreesReuse;
 
@@ -1225,7 +1225,7 @@ MODULE Async_devEvents;
 		FOR i := 1 TO nSeeds DO
 			ok := RunSeed(seed);
 			UnitAssert.True(ok, "random tree matches the model");
-			seed := seed * 31 + 7
+			seed := Int64.Mul(seed, 31); INC(seed, 7)
 		END;
 		(* Деревья обязаны покрывать все случаи, иначе проверка пустая. *)
 		UnitAssert.True(statNackFired > 0, "random trees fire nacks");

@@ -10,6 +10,8 @@ Lin_devFiles|proc slow|600|
 System_devTasks|proc slow|900|System_devCRaw System_devClock
 System_devStackDirs|proc|600|
 System_devSchedTrap|proc|300|
+# Заворот умножения LONGINT (Int64: System/Mod i386, System/Mod64 amd64).
+System_devInt64||180|Int64
 Unit_devMain||180|Unit_devProbe Unit_devBadSetup Unit_devCyr
 Check_devMain|proc|600|CheckMath64 CheckRealFormat64 CheckCCallAlias
 # Многомерные открытые массивы-параметры и динамические массивы в куче.
