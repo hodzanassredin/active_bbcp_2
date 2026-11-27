@@ -7,7 +7,7 @@ MODULE Actor_devGrain;
 
 	IMPORT Kernel, Services, Tasks, Strings, Stores, Log := StdLog,
 		ActorCore, ActorRun, ActorJournal, ActorPersist, ActorNet, ActorNetMem, ActorSim, ActorGrain,
-		UnitAssert;
+		ActorHash, UnitAssert;
 
 	CONST
 		maxOps = 64;
@@ -46,6 +46,7 @@ MODULE Actor_devGrain;
 		seed: LONGINT; runOk: BOOLEAN; runMsg: ARRAY 256 OF CHAR;
 		acked: ARRAY 32 OF BOOLEAN;
 		traceSteps, traceDelivered: LONGINT; traceBal: INTEGER;
+		ownerBest, ownerGot: Name;
 
 	(* --- обвязка ----------------------------------------------------------- *)
 
@@ -484,6 +485,28 @@ MODULE Actor_devGrain;
 	BEGIN
 		UnitAssert.True(Seeds(1, 100, TRUE), runMsg)
 	END TestSeeds;
+
+	PROCEDURE OwnerBody;
+		VAR key: Name; i, best: INTEGER; w, bw: LONGINT;
+	BEGIN
+		Cluster(3, TRUE);
+		key := "key-42";
+		ActorGrain.Owner(cl[0], "acct", key, ownerGot);
+		best := -1; bw := -1;
+		FOR i := 0 TO nodes - 1 DO
+			w := ActorHash.Weight(nd[i].name, "acct", key);
+			IF (w > bw) OR (w = bw) & (nd[i].name < nd[best].name) THEN best := i; bw := w END
+		END;
+		ownerBest := nd[best].name
+	END OwnerBody;
+
+	PROCEDURE TestOwnerIsRendezvousMaximum*;
+	(* Владелец ключа — живой член с наибольшим ActorHash.Weight; этим же
+		весом размещает ключи маршрутизатор. *)
+	BEGIN
+		UnitAssert.True(Drive(OwnerBody, 5000), "run");
+		UnitAssert.EqualStr(ownerBest, ownerGot, "owner is the rendezvous maximum")
+	END TestOwnerIsRendezvousMaximum;
 
 	(* --- замер ---------------------------------------------------------------------- *)
 

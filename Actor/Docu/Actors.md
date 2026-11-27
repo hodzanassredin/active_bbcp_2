@@ -185,6 +185,44 @@ at once (`TestAskDeadWhenTargetStopsWithoutReply`: an actor silent on a question
 is stopped after 50 ms, and `Ask` returns in less than 1000 ms). An answer arriving after the
 timeout is lost.
 
+### Routers
+
+A service often has several equivalent workers: three accounts of one currency, four readers of one
+queue. The client wants to send one letter to "one of them" without knowing how many there are. A
+*router* is an actor that owns a set of routes and forwards each letter to one route, or to all of
+them, keeping the original sender. The sender of the forwarded letter sees the same `Sender` as if
+it had written to the route itself.
+
+`ActorRouter.NewGroup(refs, kind, seed)` takes ready addresses; `ActorRouter.NewPool(factory, n,
+kind, seed, strategy)` creates `n` children with the factory and keeps their addresses private. In a
+pool the router is the parent, so a trap in a child becomes a failure of the router and its
+`Props.strategy` decides the fate of the child. A restart keeps the address of the child, so the
+route does not change. A stopped route — by a `Stop` directive or by `StopActor` — is removed from
+the set when the router receives `Terminated`; a pool with no routes drops letters as dead. The
+command `ActorRouter.SetGroup(router, refs)` replaces the set, `SetCount(router, n)` grows or
+shrinks a pool, and `SetKind(router, kind)` changes the rule; all three are ordinary letters and
+take effect in mailbox order.
+
+The rule chooses the route:
+
+| Kind | Route |
+|---|---|
+| `roundRobin` | the next one in turn |
+| `random` | from a generator seeded with `seed`; the same seed and the same calls give the same sequence |
+| `broadcast` | every route |
+| `consistentHash` | the route with the greatest `ActorHash.Weight(name, "router", key)`; a letter without a key uses the empty key |
+
+The weight is the same rendezvous hash that places a virtual actor key (`ActorGrain`): for the same
+route name and key both choose the same place. When a route leaves, only the keys it owned move. A
+letter for consistent hashing extends `ActorRouter.Keyed` and fills its `key` field; the extension
+is a plain record, so routing a letter allocates nothing. The router's set is an array allocated at
+creation; forwarding only puts the letter into the mailbox of the route.
+
+The example `ObxActor10` sends six letters round-robin, one by broadcast and four with one key by
+consistent hashing. Tests: `TestRoundRobinCyclesOverGroup`, `TestBroadcastSendsToEveryRoute`,
+`TestRandomIsDeterministicFromSeed`, `TestConsistentHashKeepsKeyOnRoute`,
+`TestPoolRestartsFailedRoute`, `TestPoolDropsStoppedRoute`, `TestSetGroupChangesRoutes`.
+
 ## 5. Life Cycle
 
 An actor passes the states "running", "restarting", "stopping" and "stopped". The handler learns
@@ -1872,3 +1910,65 @@ letter that is not an `ActorNet.Msg` traps with `notNetMsg`; `Watch` has no effe
 owner node among the live members, in `cl`'s view.
 **PROCEDURE Tick (cl: Cluster)** — Post: activations of the node without letters for `idle` ticks in
 a row are passivated.
+
+### 14.14. ActorRouter
+
+```
+DEFINITION ActorRouter;
+
+	IMPORT ActorCore;
+
+	CONST
+		roundRobin = 0; random = 1; broadcast = 2; consistentHash = 3;
+		maxRoutes = 64;
+
+	TYPE
+		Keyed = POINTER TO EXTENSIBLE RECORD (ActorCore.Msg)
+			key: ActorCore.Name
+		END;
+
+	PROCEDURE NewPool (factory: ActorCore.Factory; n: INTEGER; kind: INTEGER;
+		seed: LONGINT; strategy: ActorCore.Strategy): ActorCore.Ref;
+	PROCEDURE NewGroup (IN refs: ARRAY OF ActorCore.Ref; kind: INTEGER; seed: LONGINT): ActorCore.Ref;
+	PROCEDURE SetGroup (r: ActorCore.Ref; IN refs: ARRAY OF ActorCore.Ref);
+	PROCEDURE SetCount (r: ActorCore.Ref; n: INTEGER);
+	PROCEDURE SetKind (r: ActorCore.Ref; kind: INTEGER);
+
+END ActorRouter.
+```
+
+**TYPE Keyed** — a letter with a key for `consistentHash`; the handler of the extension fills `key`.
+
+**PROCEDURE NewPool (factory: ActorCore.Factory; n: INTEGER; kind: INTEGER; seed: LONGINT; strategy: ActorCore.Strategy): ActorCore.Ref**
+Pre: `factory # NIL` — trap 20; `0 < n <= maxRoutes` — trap 21; `kind` is one of the four — trap 22.
+Post: a root router with `n` children made by `factory`; a child's failure is decided by `strategy`.
+
+**PROCEDURE NewGroup (IN refs: ARRAY OF ActorCore.Ref; kind: INTEGER; seed: LONGINT): ActorCore.Ref**
+Pre: `0 < LEN(refs) <= maxRoutes` — trap 20; every address is not `NIL` — trap 22; `kind` is one of
+the four — trap 23. Post: a root router with the given routes.
+
+**PROCEDURE SetGroup (r: ActorCore.Ref; IN refs: ARRAY OF ActorCore.Ref)**
+Pre: `r # NIL` — trap 20; `0 < LEN(refs) <= maxRoutes` — trap 21; every address is not `NIL` — trap
+22. Post: the router receives a letter that replaces its routes in mailbox order.
+
+**PROCEDURE SetCount (r: ActorCore.Ref; n: INTEGER)**
+Pre: `r # NIL` — trap 20. Post: a pool router receives a letter that makes `n` routes; a group
+router ignores it.
+
+**PROCEDURE SetKind (r: ActorCore.Ref; kind: INTEGER)**
+Pre: `r # NIL` — trap 20. Post: the router receives a letter that changes the rule; an invalid rule
+changes nothing.
+
+### 14.15. ActorHash
+
+```
+DEFINITION ActorHash;
+
+	PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT;
+
+END ActorHash.
+```
+
+**PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Post: the weight of the place
+`member` for the key `key` of kind `kind`; the same input gives the same weight. The owner is the
+live place with the greatest weight; on equal weights the lesser name wins.

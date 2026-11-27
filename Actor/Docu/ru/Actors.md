@@ -179,6 +179,44 @@ END ObxActor0.
 со сроком 2000 мс, останавливают через 50 мс, и `Ask` возвращается быстрее 1000 мс). Ответ,
 пришедший после тайм-аута, теряется.
 
+### Маршрутизаторы
+
+У службы часто несколько равноценных работников: три счёта одной валюты, четыре читателя одной
+очереди. Клиент хочет послать одно письмо «одному из них», не зная, сколько их. *Маршрутизатор* —
+актор, который владеет набором маршрутов и пересылает каждое письмо одному маршруту или всем,
+сохраняя исходного отправителя. Получатель пересланного письма видит тот же `Sender`, как если бы
+клиент писал маршруту сам.
+
+`ActorRouter.NewGroup(refs, kind, seed)` берёт готовые адреса; `ActorRouter.NewPool(factory, n,
+kind, seed, strategy)` рождает `n` детей фабрикой и держит их адреса у себя. В пуле
+маршрутизатор — родитель, поэтому трап ребёнка становится отказом маршрутизатора, и судьбу
+ребёнка решает `Props.strategy`. Перезапуск оставляет адрес ребёнка тем же, поэтому маршрут не
+меняется. Остановленный маршрут — директивой `Stop` или `StopActor` — снимается из набора, когда
+маршрутизатор получает `Terminated`; пустой пул теряет письма как мёртвые. Команда
+`ActorRouter.SetGroup(router, refs)` заменяет набор, `SetCount(router, n)` растит или сокращает
+пул, `SetKind(router, kind)` меняет правило; все три — обычные письма и действуют в порядке
+ящика.
+
+Правило выбирает маршрут:
+
+| Вид | Маршрут |
+|---|---|
+| `roundRobin` | следующий по кругу |
+| `random` | из генератора с зерном `seed`; то же зерно и те же вызовы дают ту же последовательность |
+| `broadcast` | все маршруты |
+| `consistentHash` | маршрут с наибольшим `ActorHash.Weight(имя, "router", ключ)`; письмо без ключа идёт по пустому ключу |
+
+Вес — тот же рандеву-хеш, которым размещается ключ виртуального актора (`ActorGrain`): для одного
+имени маршрута и ключа оба выбирают одно место. При уходе маршрута переезжают только его ключи.
+Письмо для рандеву-хеша расширяет `ActorRouter.Keyed` и заполняет поле `key`; расширение — простая
+запись, поэтому маршрутизация письма ничего не выделяет. Набор маршрутизатора — массив, созданный
+при рождении; пересылка только кладёт письмо в ящик маршрута.
+
+Пример `ObxActor10` посылает шесть писем по кругу, одно всем и четыре с одним ключом по
+рандеву-хешу. Тесты: `TestRoundRobinCyclesOverGroup`, `TestBroadcastSendsToEveryRoute`,
+`TestRandomIsDeterministicFromSeed`, `TestConsistentHashKeepsKeyOnRoute`,
+`TestPoolRestartsFailedRoute`, `TestPoolDropsStoppedRoute`, `TestSetGroupChangesRoutes`.
+
 ## 5. Жизненный цикл
 
 Актор проходит состояния «работает», «перезапускается», «останавливается» и «остановлен». О каждом
@@ -1822,3 +1860,66 @@ END ActorGrain.
 **PROCEDURE Owner (cl: Cluster; IN kind, key: ARRAY OF CHAR; OUT node: ARRAY OF CHAR)** — Пост: узел-
 владелец среди живых членов, по мнению `cl`.
 **PROCEDURE Tick (cl: Cluster)** — Пост: воплощения узла без писем `idle` тиков подряд пассивируются.
+
+### 14.14. ActorRouter
+
+```
+DEFINITION ActorRouter;
+
+	IMPORT ActorCore;
+
+	CONST
+		roundRobin = 0; random = 1; broadcast = 2; consistentHash = 3;
+		maxRoutes = 64;
+
+	TYPE
+		Keyed = POINTER TO EXTENSIBLE RECORD (ActorCore.Msg)
+			key: ActorCore.Name
+		END;
+
+	PROCEDURE NewPool (factory: ActorCore.Factory; n: INTEGER; kind: INTEGER;
+		seed: LONGINT; strategy: ActorCore.Strategy): ActorCore.Ref;
+	PROCEDURE NewGroup (IN refs: ARRAY OF ActorCore.Ref; kind: INTEGER; seed: LONGINT): ActorCore.Ref;
+	PROCEDURE SetGroup (r: ActorCore.Ref; IN refs: ARRAY OF ActorCore.Ref);
+	PROCEDURE SetCount (r: ActorCore.Ref; n: INTEGER);
+	PROCEDURE SetKind (r: ActorCore.Ref; kind: INTEGER);
+
+END ActorRouter.
+```
+
+**TYPE Keyed** — письмо с ключом для `consistentHash`; обработчик наследника заполняет `key`.
+
+**PROCEDURE NewPool (factory: ActorCore.Factory; n: INTEGER; kind: INTEGER; seed: LONGINT; strategy: ActorCore.Strategy): ActorCore.Ref**
+Пред: `factory # NIL` — трап 20; `0 < n <= maxRoutes` — трап 21; `kind` — один из четырёх —
+трап 22. Пост: корневой маршрутизатор с `n` детьми фабрики `factory`; отказ ребёнка решает
+`strategy`.
+
+**PROCEDURE NewGroup (IN refs: ARRAY OF ActorCore.Ref; kind: INTEGER; seed: LONGINT): ActorCore.Ref**
+Пред: `0 < LEN(refs) <= maxRoutes` — трап 20; каждый адрес не `NIL` — трап 22; `kind` — один из
+четырёх — трап 23. Пост: корневой маршрутизатор с заданными маршрутами.
+
+**PROCEDURE SetGroup (r: ActorCore.Ref; IN refs: ARRAY OF ActorCore.Ref)**
+Пред: `r # NIL` — трап 20; `0 < LEN(refs) <= maxRoutes` — трап 21; каждый адрес не `NIL` —
+трап 22. Пост: маршрутизатор получает письмо, заменяющее набор маршрутов в порядке ящика.
+
+**PROCEDURE SetCount (r: ActorCore.Ref; n: INTEGER)**
+Пред: `r # NIL` — трап 20. Пост: маршрутизатор-пул получает письмо о `n` маршрутах; группа его
+игнорирует.
+
+**PROCEDURE SetKind (r: ActorCore.Ref; kind: INTEGER)**
+Пред: `r # NIL` — трап 20. Пост: маршрутизатор получает письмо о смене правила; недопустимое
+правило ничего не меняет.
+
+### 14.15. ActorHash
+
+```
+DEFINITION ActorHash;
+
+	PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT;
+
+END ActorHash.
+```
+
+**PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Пост: вес места `member` для
+ключа `key` вида `kind`; тот же вход даёт тот же вес. Владелец — живое место с наибольшим весом;
+при равных весах выбирается меньшее имя.

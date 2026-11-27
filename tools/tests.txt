@@ -45,9 +45,10 @@ Cas_devChange||180|CasHash CasStore CasChange
 Cas_devBench|slow|300|CasHash CasChunk
 # Подсистема Actor: акторы, супервизор, исполнители (amd64).
 Actor_devMain|proc|300|ActorCore ActorSup ActorRun
+Actor_devRouter|proc|300|ActorCore ActorSup ActorRun ActorHash ActorRouter
 Actor_devPersist|proc|300|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal
 Actor_devNet|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorNetTcp AsyncIO
-Actor_devGrain|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorGrain
+Actor_devGrain|proc|600|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorNet ActorNetMem ActorSim ActorGrain ActorHash
 Actor_devBounded|proc|300|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash ActorSim
 Actor_devBench|proc slow|900|ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist ActorFileJournal CasHash CasStore KvPages KvStore KvFault KvLin KvTree KvDb ActorKvJournal System_devCRaw System_devClock
 # Согласованный журнал Raft: симуляция ядра по зёрнам, инварианты, мутации.

@@ -20,7 +20,7 @@ MODULE ActorGrain;
 	не мимо друг друга; запись со старым номером получает conflict
 	(ActorPersist.conflictTrap). *)
 
-	IMPORT CasHash, ActorCore, ActorJournal, ActorPersist, ActorNet, Stores;
+	IMPORT ActorHash, ActorCore, ActorJournal, ActorPersist, ActorNet, Stores;
 
 	CONST
 		maxMembers* = 32;
@@ -94,30 +94,13 @@ MODULE ActorGrain;
 
 	(* --- размещение -------------------------------------------------------- *)
 
-	PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT;
-		VAR b: ARRAY 3 * ActorCore.nameLen + 2 OF BYTE; n: INTEGER; id: CasHash.Id; w: LONGINT; i: INTEGER;
-
-		PROCEDURE Add (IN s: ARRAY OF CHAR);
-			VAR i: INTEGER;
-		BEGIN
-			i := 0; WHILE s[i] # 0X DO b[n] := SHORT(SHORT(ORD(s[i]) MOD 256)); INC(n); INC(i) END;
-			b[n] := 0; INC(n)
-		END Add;
-
-	BEGIN
-		n := 0; Add(member); Add(kind); Add(key);
-		CasHash.Of(b, 0, n, id);
-		w := 0; FOR i := 0 TO 6 DO w := w * 256 + id[i] MOD 256 END;
-		RETURN w
-	END Weight;
-
 	PROCEDURE OwnerIndex (cl: Cluster; IN kind, key: ARRAY OF CHAR): INTEGER;
 		VAR i, best: INTEGER; w, bw: LONGINT;
 	BEGIN
 		best := -1; bw := -1;
 		FOR i := 0 TO cl.n - 1 DO
 			IF cl.m[i].alive THEN
-				w := Weight(cl.m[i].name, kind, key);
+				w := ActorHash.Weight(cl.m[i].name, kind, key);
 				IF (w > bw) OR (w = bw) & (cl.m[i].name < cl.m[best].name) THEN best := i; bw := w END
 			END
 		END;
