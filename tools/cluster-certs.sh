@@ -10,7 +10,8 @@
 #   <узел>.fp                   — SHA-256 сертификата (hex, 64 знака);
 #   roster                      — строки "<узел> <hex-отпечаток>" для всех узлов;
 #   foreign-ca.pem, foreign.key — чужой корень (для отрицательного случая);
-#   foreign.pem, foreign.key    — узел, подписанный чужим корнем.
+#   foreign.pem, foreign.key    — узел, подписанный чужим корнем;
+#   M-second.pem, M-second.key  — второй ключ с именем M (отпечаток не тот).
 #
 # Отпечаток — SHA-256 DER сертификата; его же транспорт сверяет с
 # сертификатом соединения. openssl нужен только для выдачи, не для работы.
@@ -61,8 +62,10 @@ make_root "$DIR/ca.key" "$DIR/ca.pem" "BlackBox Cluster Root"
 make_root "$DIR/foreign-ca.key" "$DIR/foreign-ca.pem" "Foreign Root"
 make_node foreign "$DIR/foreign.key" "$DIR/foreign.pem" "$DIR/foreign-ca.pem" "$DIR/foreign-ca.key"
 "$OPENSSL" x509 -in "$DIR/foreign.pem" -outform DER | "$OPENSSL" dgst -sha256 -hex | awk '{print $NF}' > "$DIR/foreign.fp"
-# M2 — второй ключ с именем M в SAN и тем же корнем: отпечаток не тот.
-make_node_san M "$DIR/M2.key" "$DIR/M2.pem" "$DIR/ca.pem" "$DIR/ca.key"
+# M-second — второй ключ с именем M в SAN и тем же корнем: отпечаток не тот.
+# Имя файла не совпадает ни с одним узлом: прежнее M2 затирал узел M2
+# сценария obxcluster, и в полном прогоне --tls подделка шла с настоящим M2.
+make_node_san M "$DIR/M-second.key" "$DIR/M-second.pem" "$DIR/ca.pem" "$DIR/ca.key"
 
 : > "$DIR/roster"
 for node in "$@"; do
