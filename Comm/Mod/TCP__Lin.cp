@@ -385,7 +385,13 @@ MODULE CommTCP__Lin;
 		written := SHORT(long);
 		IF written = SOCKET_ERROR THEN
 			res := Errno();
-			IF (res # Libc.EAGAIN) & (res # Libc.ENOTCONN) THEN Error("send()", res) END;
+			IF (res # Libc.EAGAIN) & (res # Libc.ENOTCONN) & (res # Libc.EINTR) THEN
+				(* EPIPE, ECONNRESET и прочие: соединение мертво — закрыть, как
+				   ReadBytes. Иначе IsConnected верит непрочитанным байтам в
+				   приёмном буфере (FIONREAD > 0), и цикл записи выше
+				   (CryptoAosCommStreams.Writer.Send) крутится на EPIPE вечно. *)
+				Error("send()", res); s.Close
+			END;
 			written := 0
 		END
 	END WriteBytes;

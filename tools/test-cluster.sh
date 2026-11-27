@@ -358,7 +358,7 @@ if [ "${INNER:-0}" = 1 ]; then
 
 		# 3. верное имя, но чужой ключ: отпечаток не тот
 		launch_role "$dir" K --SCENARIO=secure --CLAIM=M --SEND=1 \
-			--CERT="$CERTDIR/M2.pem" --KEY="$CERTDIR/M2.key"
+			--CERT="$CERTDIR/M-second.pem" --KEY="$CERTDIR/M-second.key"
 		PIDS[K]=$LASTPID
 		waitfile "$dir/K.status" 5000 || { bad "$dir" "secure: K не закончил"; return 1; }
 		sleep 0.3
@@ -772,14 +772,21 @@ if [ "${INNER:-0}" = 1 ]; then
 	}
 
 	wait_members() {
-		# Ждать, пока служба состава покажет want участников.
-		local dir=$1 want=$2 ms=$3 t i v
+		# Ждать, пока каждый из пяти процессов вступит в службу состава и
+		# увидит want живых участников. Хватало одного процесса — и P3
+		# замораживался, ещё не получив ответа на своё вступление
+		# (на TLS вступление дольше): работа не начиналась никогда.
+		local dir=$1 want=$2 ms=$3 t i v a ok
 		t=0
 		while [ "$t" -lt "$ms" ]; do
+			ok=1
 			for ((i = 0; i < 5; i++)); do
 				v=$(sed -n 's/.*members=\([0-9]*\).*/\1/p' "$dir/P$i.status" 2>/dev/null)
-				[ "${v:-0}" -ge "$want" ] && return 0
+				a=$(sed -n 's/.*alive=\([0-9]*\).*/\1/p' "$dir/P$i.status" 2>/dev/null)
+				if [ "${v:-0}" -lt "$want" ] || [ "${a:-0}" -lt "$want" ] \
+					|| ! grep -q 'joined=1' "$dir/P$i.status" 2>/dev/null; then ok=0; break; fi
 			done
+			[ "$ok" = 1 ] && return 0
 			sleep 0.02; t=$((t + 20))
 		done
 		return 1
@@ -823,13 +830,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			echo "M$i $(addr_of "M$i")" >> "$dir/nodes"
 			echo "K$i $(addr_of "K$i")" >> "$dir/nodes"
 		done
-		# TLS: канал дороже. Меньше переводов, без пассивации (её проверяет
-		# прогон по TCP) и с более редким повтором шага.
 		local ops="$OBX_OPS" idle=2 retry=150
-		if [ "$TLS" = 1 ]; then
-			[ "$ops" -gt 8 ] && ops=8
-			idle=0; retry=1000
-		fi
 		for ((i = 0; i < 5; i++)); do
 			launch_role "$dir" "P$i" --SCENARIO=obxcluster --IDX="$i" --N=5 --TICK="$TICK" --OPS="$ops" --IDLE="$idle" --RETRY="$retry" --DROP=0
 			PIDS[P$i]=$LASTPID
@@ -840,17 +841,6 @@ if [ "${INNER:-0}" = 1 ]; then
 		done
 		local tmo; tmo=60000; [ "$TLS" = 1 ] && tmo=150000
 		wait_members "$dir" 5 "$tmo" || { bad "$dir" "obxcluster: не все вступили"; return 1; }
-		if [ "$TLS" = 1 ]; then
-			# TLS: полная доля отказов (разрыв и убийства) — в прогоне по
-			# TCP; на TLS цена канала делает такой прогон многосекундным,
-			# поэтому здесь нагрузка и все сверки итога, без отказов.
-			touch "$dir/start"
-			tmo=240000
-			for ((i = 0; i < 5; i++)); do
-				waitfile "$dir/P$i.result" "$tmo" || { bad "$dir" "obxcluster: нет итога P$i"; return 1; }
-			done
-			anycoord=0; anyloss=0
-		else
 		# разрыв сети: P3 заморожен до начала работы
 		kill -STOP "${PIDS[P3]}" 2>/dev/null
 		touch "$dir/start"
@@ -887,7 +877,6 @@ if [ "${INNER:-0}" = 1 ]; then
 		for ((i = 0; i < 5; i++)); do
 			waitfile "$dir/P$i.result" 6000 || { bad "$dir" "obxcluster: нет итога P$i"; return 1; }
 		done
-		fi
 		for ((i = 0; i < 5; i++)); do
 			grep -q 'good=1' "$dir/P$i.result" || { bad "$dir" "obxcluster: P$i $(cat "$dir/P$i.result" 2>/dev/null)"; return 1; }
 			sum=$(field "$dir/P$i.result" sum); dups=$(field "$dir/P$i.result" dups)
@@ -1026,8 +1015,7 @@ if [ "${INNER:-0}" = 1 ]; then
 			[ "$TLS" = 1 ] && { run_lease "$d/lease" || break; }
 		fi
 		if want obxcluster; then
-			if [ "$TLS" = 1 ]; then say "obxcluster: пропуск в --tls (зависает; задача в docs/current-tasks.md)"
-			else run_obxcluster "$d/obxcluster" || break; fi
+			run_obxcluster "$d/obxcluster" || break
 		fi
 		if want bench; then run_bench "$d/bench" || break; fi
 		if [ "$KEEP" = 0 ]; then rm -rf "$d"; fi

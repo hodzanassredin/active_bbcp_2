@@ -2214,6 +2214,23 @@ MODULE Actor_devCluster;
 		PutText(name, s)
 	END WriteObxGrain;
 
+	PROCEDURE WriteObxTls (g, j, m, k: Net);
+	(* Диагностика канала: счётчики четырёх сетей процесса и агента службы. *)
+		VAR s, x: ARRAY 2048 OF CHAR; sent, replies, now, target, cur: INTEGER;
+	BEGIN
+		IF ~secure THEN RETURN END;
+		TlsText(g, x); s := "G" + x + 0AX;
+		TlsText(j, x); s := s + "J" + x + 0AX;
+		TlsText(m, x); s := s + "M" + x + 0AX;
+		TlsText(k, x); s := s + "K" + x + 0AX;
+		RaftMembership.Trace(obxMem, sent, replies, now, target, cur);
+		IntToText(sent, x); s := s + "mem sent=" + x;
+		IntToText(replies, x); s := s + " replies=" + x;
+		IntToText(now, x); s := s + " now=" + x;
+		IntToText(cur, x); s := s + " cur=" + x + 0AX;
+		PutText(role + ".tls", s)
+	END WriteObxTls;
+
 	PROCEDURE (s: ObxSink) Receive (c: ActorCore.Context; m: ActorCore.Msg);
 		VAR d: ARRAY 32 OF CHAR; t: ARRAY 512 OF CHAR;
 	BEGIN
@@ -2337,7 +2354,8 @@ MODULE Actor_devCluster;
 				IF ticks MOD 5 = 0 THEN
 					WriteObxRaft(obxJCfg, jName + ".status");
 					WriteObxRaft(obxMCfg, mName + ".status");
-					WriteObxGrain(role + ".status")
+					WriteObxGrain(role + ".status");
+					WriteObxTls(grainT, jT, mT, cliT)
 				END;
 				RaftGrainMembership.Status(obxCfg, joined, now, members, lists);
 				(* Работа начинается, когда этот узел видит живыми всех пятерых:
