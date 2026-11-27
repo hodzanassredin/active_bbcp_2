@@ -302,6 +302,7 @@ code, and the checks to run before a commit.
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | `Tasks` module |
 | `Docu/ru/Async.md`, `Docu/Async.md` | channels, selection and events, transactions, workers, computons |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | actors, supervision, journals, nodes |
+| `Actor/Docu/ru/Cluster.md`, `Actor/Docu/Cluster.md` | a cluster application: accounts on virtual actors, a transfer saga, membership and restarts |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | content-addressed block store |
 | `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | key-value store |
 | `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | replicated log |

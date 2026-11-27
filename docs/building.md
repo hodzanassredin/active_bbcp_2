@@ -264,7 +264,9 @@ tools/bench-gc.sh System_devGcBench.Do        # с 50 млн
 tools/iso.sh tools/test-cluster.sh                  # 20 прогонов подряд
 tools/iso.sh tools/test-cluster.sh --quick          # один короткий прогон
 tools/iso.sh tools/test-cluster.sh --runs 3
-tools/iso.sh tools/test-cluster.sh --only raft      # ask, raft, saga, grain, membership, bench
+tools/iso.sh tools/test-cluster.sh --only raft      # ask, raft, saga, grain, membership, obxcluster, bench
+tools/iso.sh tools/test-cluster.sh --only obxcluster --runs 5
+tools/iso.sh tools/test-cluster.sh --obx-ops 16
 tools/iso.sh tools/test-cluster.sh --bench-ops 2000
 tools/iso.sh tools/test-cluster.sh --veth           # две «машины»: два netns с veth
 ```
@@ -287,6 +289,10 @@ tools/iso.sh tools/test-cluster.sh --veth           # две «машины»: �
 на трёх процессах с журналом `RaftJournal`, владелец ключа убит, ключ переезжает; `membership` —
 служба состава из пяти процессов: три избирателя, вступление S3 и S4, выход S4, участники G0..G2 и
 позже G3 берут состав из службы и пишут через `RaftJournal`, убиты владелец ключа и лидер службы;
+`obxcluster` — пример `ObxCluster` в пяти процессах: восемь счетов на виртуальных акторах поверх
+`RaftJournal`, переводы сагой, служба состава из пяти узлов; процесс `P3` на время останавливается
+(`SIGSTOP` — фейк разрыва сети), два процесса-лидера убиваются `kill -9` и поднимаются снова с теми
+же хранилищами; проверяются сумма остатков, отсутствие повторных событий и учёт отказов;
 `bench` — запись в секунду по TCP. Каталог удачного прогона удаляется, `--keep` оставляет его в
 `.work/cluster-keep` (и при запуске через `tools/iso.sh`).
 

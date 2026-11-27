@@ -97,6 +97,7 @@ tools/check-examples.sh --run                     # примеры в докум
 | `Docu/ru/Tasks.md`, `Docu/Tasks.md` | руководство по модулю `Tasks` |
 | `Docu/ru/Async.md`, `Docu/Async.md` | каналы, выбор, транзакции, рабочие нити и компутоны |
 | `Actor/Docu/ru/Actors.md`, `Actor/Docu/Actors.md` | акторы, надзор, журнал, узлы |
+| `Actor/Docu/ru/Cluster.md`, `Actor/Docu/Cluster.md` | приложение в кластере: счета на виртуальных акторах, сага перевода, состав и перезапуски |
 | `Cas/Docu/ru/Cas.md`, `Cas/Docu/Cas.md` | хранилище блоков по содержимому |
 | `Kv/Docu/ru/Kv.md`, `Kv/Docu/Kv.md` | хранилище «ключ → значение» |
 | `Raft/Docu/ru/Raft.md`, `Raft/Docu/Raft.md` | согласованный журнал |
