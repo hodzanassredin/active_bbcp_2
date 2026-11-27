@@ -2041,7 +2041,8 @@ DEFINITION ActorHash;
 END ActorHash.
 ```
 
-**PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Пост: вес места `member` для
+**PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Пред: каждая строка короче
+`nameLen` — не проверяется. Пост: вес места `member` для
 ключа `key` вида `kind`; тот же вход даёт тот же вес. Владелец — живое место с наибольшим весом;
 при равных весах выбирается меньшее имя.
 

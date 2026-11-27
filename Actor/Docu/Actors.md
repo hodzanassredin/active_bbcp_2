@@ -2094,7 +2094,8 @@ DEFINITION ActorHash;
 END ActorHash.
 ```
 
-**PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Post: the weight of the place
+**PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Pre: each string is shorter
+than `nameLen` — not checked. Post: the weight of the place
 `member` for the key `key` of kind `kind`; the same input gives the same weight. The owner is the
 live place with the greatest weight; on equal weights the lesser name wins.
 
