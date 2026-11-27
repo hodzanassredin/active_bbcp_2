@@ -28,6 +28,8 @@ for a in "$@"; do
 done
 
 SUBS="Lin System Std Cons Text Fig Form Dev Comm Cas Obx Xhtml Sql Paket Unit Crypto"
+# Переносимые модули из Mod64 (см. ниже, фильтр Mod64 при компиляции).
+MOD64_PORTABLE="LinThreads LinNative AsyncWork AsyncWorkLin AsyncComputon RobustParallel"
 
 [ -x "$DEV0" ] || { echo "build32: нет $DEV0" >&2; exit 2; }
 clean_host_temp
@@ -63,16 +65,23 @@ echo "build32: компиляция подсистем"
 	echo "DevCompiler.CompileSubs @Lin $SUBS"
 	echo "DevCompiler.CompileThis Taskarch"
 	echo "DevCompiler.CompileThis Tasks"
-	# Async/Mod (каналы, выбор, события, Once, IO, Stm) переносим и
-	# собирается после Tasks. Рабочие нити ОС и компутоны (Async/Mod64:
-	# Work, WorkLin, Computon, Mpi) — только amd64: им нужны LinThreads и
-	# LinNative, которых для i386 нет.
+	# Async/Mod (каналы, выбор, события, Once, IO, Stm) собирается после Tasks.
 	echo "DevCompiler.CompileSubs @Lin Async"
 	# Kv использует Tasks (очередь писателей), поэтому собирается после них.
 	echo "DevCompiler.CompileSubs @Lin Kv"
 	# Actor (в т. ч. ActorNetTls поверх Crypto) и Raft — после Async и Kv.
 	echo "DevCompiler.CompileSubs @Lin Actor"
 	echo "DevCompiler.CompileSubs @Lin Raft"
+	echo 'DevLibrarian.DisableDevLib'
+	# Переносимые модули, которые лежат в Mod64 вне обхода CompileSubs (так
+	# их держит и build64.sh): объявления pthread и POSIX (LinThreads,
+	# LinNative — размеры через SYSTEM.ADDRESS, записи мьютекса с запасом),
+	# рабочие нити ОС и компутоны (AsyncWork, AsyncWorkLin, AsyncComputon) и
+	# фасад RobustParallel. Фильтр 'Mod64' меняет только выбор исходника:
+	# компилятор и установка остаются i386. AsyncMpi не собирается — ему
+	# нужна C-библиотека MPI (tools/bbmpi.c, tools/test-mpi.sh).
+	echo "DevLibrarian.EnableDevLib('$INSTALL', 'Mod64')"
+	for m in $MOD64_PORTABLE; do echo "DevCompiler.CompileThis $m"; done
 	echo 'DevLibrarian.DisableDevLib'
 } > "$LOG.cmd"
 if ! "$DEV0" < "$LOG.cmd" > "$LOG" 2>&1; then

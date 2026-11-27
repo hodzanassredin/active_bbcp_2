@@ -401,3 +401,26 @@
   Порча i386: `Int64.Mul` без перекрёстного члена `wx[1]*wy[0]` — красные `System_devInt64`
   (3 теста) и `Raft_devSim` (2 теста); без `Int64` (исходный `x * a + c`) — трап 143 в
   `Async_devEvents.TestRandomTrees`. Прогоны: test32 59/59, test.sh 77/77, примеры 0, ссылки 0.
+- Кластер, TLS, рабочие нити и ядро на i386. `--world 32` у `tools/test-cluster.sh`,
+  `tools/test-crypto-tls.sh` и `tools/test-robust.sh`; новый `tools/compile32.sh` (CompileThis в
+  `build/BB32LIN`, `--mod64` — фильтр Mod64 для переносимых исходников). `build32.sh` с фильтром
+  Mod64 собирает `LinThreads`, `LinNative`, `AsyncWork`, `AsyncWorkLin`, `AsyncComputon`,
+  `RobustParallel` (как и build64 — вне обхода CompileSubs); `test32.sh` так же собирает
+  ObxEvent0..5, ObxCluster и тесты Obx_devEvents, Obx_devCluster, Async_devWorkers,
+  Async_devComputons, System_devTasksObj/TasksSim/StackDirs/SchedTrap; добавлен System_devMain.
+  `System_devTasksSim`: шаг LCG через `Int64` (на i386 падал трапом 143 в первом шаге).
+- Найдено в кластере: `lease --tls` на i386 падал всегда (`probe-before`): первая проба G1 → эхо
+  на G0 отвергалась «node is not a member» — список состава у G1 ещё не содержал G0 (обновление
+  раз в refresh тиков приходит на i386 позже пробы; аудит `rejected: G0`, причина снята
+  временной отладкой `VerifyPeer`). Проба до истечения аренды теперь повторяется до 5 раз
+  (`Actor_devCluster.Probe`), проба после истечения — нет. Порча: без повтора — `lease` красный
+  3 из 3 на i386.
+- Не гоняются на i386 (причины — в шапке `tools/test32.sh`): Check_devMain (проверки amd64),
+  замеры *Bench, AsyncMpi (C-библиотека MPI), System_devGcMany и Async_devStacks (не
+  компилируются: адрес 4 байта; API CRaw только в Mod64), System_devUnload (TestUnloadCode: -1
+  вместо 1009, не разобрано). `Async_devComputons` оставляет 83 файла odc в /tmp и на amd64 —
+  test32 считает их отдельно.
+- Прогоны: test32 68/68 (FAIL только намеренный TestFailRu); test.sh 77/77; check-examples 0
+  расхождений (122 прогона); ссылки 0; test-cluster `--world 32` 3/3, `--world 32 --tls` 2/2,
+  amd64 `--runs 1` и `--tls --runs 1` — ок; test-crypto-tls 64 и `--world 32` — PASS (по 175
+  случаев); test-robust 64 и `--world 32` — 1, 4, 16 процессов.

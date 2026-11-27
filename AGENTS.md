@@ -225,7 +225,8 @@ whose name contains `_dev`.
 tools/test.sh                 # all modules from tools/tests.txt
 tools/test.sh --list
 tools/test.sh System_devMain  # selected modules
-tools/test32.sh               # i386: Unit, Files, Tasks, Cas, Kv, CoTests, UnloadGuard, OpenArr, PtrInit
+tools/test32.sh               # i386: Unit, Tasks, Cas, Kv, Crypto, Async, Actor, Raft, ObxCluster
+tools/test-cluster.sh --world 32   # cluster on the i386 build (also test-crypto-tls/test-robust)
 tools/test-win64.sh           # Windows x64 under wine
 tools/test-gui.sh             # tasks in the window, gtk4-broadwayd
 tools/test-demo-gui.sh        # DemoAnts in the window, gtk4-broadwayd
@@ -251,6 +252,11 @@ subsystems: they are not in `CompileSubs`. Tests are built on demand by `tools/u
   `System/Mod64`; `Switch` is inlined at the call site. Task stacks come from
   `Kernel.AllocStack/FreeStack` (`mmap` with a guard page in `LinKernel` and `VirtualAlloc` with
   `PAGE_NOACCESS` in `WinKernel`).
+- i386 trap: the 32-bit `DevCompiler` evaluates `LONGINT` `*`, `+`, `-`, `DIV`, `MOD` in expressions
+  on the FPU; a result outside [-2^63, 2^63) is trap 143, not a wrap as on amd64. Only `INC`/`DEC`
+  wrap. Write LCG steps as `x := Int64.Mul(x, a); INC(x, c)` (`Int64`: `System/Mod` for i386,
+  `System/Mod64` for amd64); `Crypto` wide multiplication goes through `CryptoArch`
+  (`docs/building.md` §6.1).
 - `Tasks.Object` is a monitor object: `Do` passes `Tasks.Ctx` and a `Tasks.Op` request to the
   method `Exclusive-`; `Await`/`AwaitCond` wait for flags or a condition object. A `Tasks.Job`
   supplies the pass and calls `Body-`; a `Tasks.Task` writes its own `Run`. Both can be started

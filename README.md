@@ -81,7 +81,7 @@ tools/build64.sh                                  # мир в .work/BB64LIN
 echo 'System_devTasksObj.TestMutualExclusion' | tools/run64.sh
 echo 'ObxTasks0.Do' | tools/run64.sh
 tools/test.sh                                     # модульные тесты
-tools/test32.sh                                   # i386: сборка и тесты
+tools/test32.sh                                   # i386: сборка и тесты (Crypto, Actor, Raft — тоже)
 tools/check-examples.sh --run                     # примеры в документации
 ```
 

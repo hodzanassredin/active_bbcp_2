@@ -9,6 +9,7 @@
 #   tools/test-cluster.sh --tls           # узлы на TLS 1.3 со взаимной проверкой
 #   tools/test-cluster.sh --only raft     # один сценарий: ask, reconnect, secure, raft, saga, grain, membership, lease, obxcluster, bench
 #   tools/test-cluster.sh --obx-ops 16    # переводов в сценарии obxcluster
+#   tools/test-cluster.sh --world 32      # на i386-сборке build/BB32LIN (tools/build32.sh)
 #
 # Прогон: ask — Ask и Watch между процессами, kill -9 → byNodeLoss;
 # raft3/raft5 — выборы, запись, kill -9 лидера, перевыборы, перезапуск
@@ -53,6 +54,7 @@ BENCH_OPS=400
 OBX_OPS="${OBX_OPS:-24}"
 OBX_SUM=8000	# ObxCluster: accounts (8) * initial (1000)
 TICK=20
+WORLD=64
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -66,7 +68,8 @@ while [ $# -gt 0 ]; do
 		--kill-at) KILLAT="${2:-5}"; shift 2;;
 		--bench-ops) BENCH_OPS="${2:-400}"; shift 2;;
 		--obx-ops) OBX_OPS="${2:-24}"; shift 2;;
-		-h|--help) sed -n '2,36p' "$0"; exit 0;;
+		--world) WORLD="${2:-64}"; shift 2;;
+		-h|--help) sed -n '2,37p' "$0"; exit 0;;
 		--inner) shift; INNER=1; break;;
 		*) echo "test-cluster: неизвестный ключ $1" >&2; exit 2;;
 	esac
@@ -1039,7 +1042,12 @@ skip() {
 	exit 0
 }
 
-[ -x "$INTERP" ] || { echo "test-cluster: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
+case "$WORLD" in
+	64) ;;
+	32) INSTALL="${BB32INSTALL:-$BB/build/BB32LIN}"; INTERP="$INSTALL/blackbox-console";;
+	*) echo "test-cluster: --world 32 или 64, а не '$WORLD'" >&2; exit 2;;
+esac
+[ -x "$INTERP" ] || { echo "test-cluster: нет $INTERP — соберите tools/build$WORLD.sh" >&2; exit 2; }
 probe=$(unshare -rmn true 2>&1) || skip "unshare -rmn недоступен: $probe"
 if [ "$VETH" = 1 ]; then
 	command -v ip >/dev/null 2>&1 || skip "нет команды ip"
@@ -1062,7 +1070,12 @@ mods="ActorCore ActorSup ActorRun ActorJournal ActorCodec ActorPersist CasHash C
 pass=0
 while [ "$pass" -lt 3 ]; do
 	pass=$((pass + 1))
-	if "$BB/tools/go64.sh" $mods >"$work/compile.log" 2>&1; then break; fi
+	if [ "$WORLD" = 32 ]; then
+		# i386: мир (Actor, Raft, Kv, Crypto, Async) уже собран build32.sh;
+		# рабочих нитей ОС (LinNative, LinThreads) для i386 нет, и узлам они
+		# не нужны. ObxCluster — переносимый пример из Obx/Mod64.
+		if "$BB/tools/compile32.sh" --mod64 "ObxCluster Actor_devCluster" >"$work/compile.log" 2>&1; then break; fi
+	elif "$BB/tools/go64.sh" $mods >"$work/compile.log" 2>&1; then break; fi
 	if [ "$pass" -eq 3 ]; then
 		echo "test-cluster: компиляция не удалась (проход $pass):" >&2
 		tail -40 "$work/compile.log" >&2; exit 1
@@ -1101,7 +1114,7 @@ if [ "$TLS" = 1 ]; then
 fi
 
 export OBX_OPS
-echo "cluster: прогонов $RUNS, mark=quick:$QUICK veth:$VETH tls:$TLS"
+echo "cluster: прогонов $RUNS, mark=quick:$QUICK veth:$VETH tls:$TLS world:$WORLD"
 unshare -rmn bash "$0" --inner "$work" "$INSTALL" "$RUNS" "$VETH" "$OPS" "$KILLAT" "$BENCH_OPS" "$TICK" "$KEEP" "$ONLY" "$TLS" "$CERTDIR"
 rc=$?
 if [ -f "$work/measurements.txt" ]; then

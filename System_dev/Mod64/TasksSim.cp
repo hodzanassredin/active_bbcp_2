@@ -50,7 +50,7 @@ MODULE System_devTasksSim;
 	Для режима со сборщиком — Replay g42. Один прогон из теста —
 	One(seed, gc). *)
 
-	IMPORT S := SYSTEM, Kernel, Tasks, UnitAssert, Strings, Console,
+	IMPORT S := SYSTEM, Int64, Kernel, Tasks, UnitAssert, Strings, Console,
 		DevCommanders, TextModels;
 
 	CONST
@@ -302,7 +302,7 @@ MODULE System_devTasksSim;
 
 	PROCEDURE RandK (VAR x: LONGINT; k: INTEGER): INTEGER;
 	BEGIN
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		IF k <= 0 THEN RETURN 0 END;
 		RETURN SHORT(ASH(x, -33) MOD k)
 	END RandK;
@@ -310,8 +310,8 @@ MODULE System_devTasksSim;
 	PROCEDURE Mix (a, b: LONGINT): LONGINT;
 		VAR x: LONGINT;
 	BEGIN
-		x := a * 2654435761 + b * 40503 + 12345;
-		x := x * 6364136223846793005 + 1442695040888963407;
+		x := Int64.Mul(a, 2654435761); INC(x, Int64.Mul(b, 40503)); INC(x, 12345);
+		x := Int64.Mul(x, 6364136223846793005); INC(x, 1442695040888963407);
 		RETURN x
 	END Mix;
 

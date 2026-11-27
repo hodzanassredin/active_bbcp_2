@@ -182,15 +182,33 @@ tools/test.sh System_devTasksSim
 
 ```sh
 tools/build32.sh              # мир и консоль в build/BB32LIN
-tools/test32.sh               # Unit_devMain, задачи, Cas, Kv, CoTests, UnloadGuard, OpenArr, PtrInit
+tools/test32.sh               # Unit, задачи, Cas, Kv, Crypto, Async, Actor, Raft, ObxCluster
 tools/test32.sh --list
 tools/test32.sh System_devTasks   # только указанные модули (мир не собирается)
+tools/test-cluster.sh --world 32 [--tls]   # кластер в отдельных процессах на i386
+tools/test-crypto-tls.sh --world 32        # TLS против openssl на i386
+tools/test-robust.sh --world 32            # RobustParallel на 1, 4 и 16 процессах
+tools/compile32.sh [--mod64 "A B"] C D     # CompileThis в build/BB32LIN
 ```
 
 `build32.sh` компилирует `Mod`-исходники компилятором `DevCompiler` и линкует ELF32
-`blackbox-console` (`Kernel+ LinKernel Files LinFiles StdLoader LinIntInit`); `Tasks` и `AsyncStm`
-компилируются отдельными `CompileThis`, `Kv` — отдельным `CompileSubs`. `test32.sh` компилирует
-тестовые модули по требованию и запускает каждый отдельным процессом.
+`blackbox-console` (`Kernel+ LinKernel Files LinFiles StdLoader LinIntInit`). После общего
+`CompileSubs` (в нём и `Crypto`) идут `Taskarch` и `Tasks`, затем `CompileSubs` для `Async`,
+`Kv`, `Actor` и `Raft`, затем — с фильтром `Mod64` — переносимые модули, которые и `build64.sh`
+собирает вне обхода `CompileSubs`: `LinThreads`, `LinNative`, `AsyncWork`, `AsyncWorkLin`,
+`AsyncComputon`, `RobustParallel`. Фильтр `Mod64` меняет только выбор исходника; компилятор
+и установка остаются i386. `test32.sh` компилирует тестовые модули по требованию (зависимости
+общих с `test.sh` модулей — из `tools/tests.txt`) и запускает каждый отдельным процессом;
+чего на i386 нет и почему — в шапке сценария.
+
+Главная ловушка i386: компилятор `DevCompiler` считает `LONGINT` в выражениях (`*`, `+`, `-`,
+`DIV`, `MOD`) на FPU, и результат вне [-2^63, 2^63) — трап 143 «undefined real result», а не
+заворот, как на amd64. Заворачиваются только `INC`/`DEC` (целочисленные add/adc). Поэтому
+шаги генераторов псевдослучайных чисел пишутся `x := Int64.Mul(x, a); INC(x, c)` (`Int64`:
+`System/Mod/Int64.cp` для i386, `System/Mod64/Int64.cp` для amd64), а широкое умножение
+`Crypto` — через `CryptoArch` (`Crypto/Mod/Arch.cp`, `Crypto/Mod64/Arch.cp`). Длинное
+выражение над `LONGINT` может не поместиться в стек FPU («not enough floating-point
+registers») — его делят на шаги через переменные.
 
 ### 6.2. Сопрограммы i386
 

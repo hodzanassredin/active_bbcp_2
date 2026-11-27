@@ -4,7 +4,8 @@ The `Actor` subsystem builds a program from objects that exchange messages and s
 chapter describes actors of one process, their execution by a shared pool of tasks, and the
 supervision of children by their parent. Tasks, monitors and switch points are defined in
 `Docu/CP-Lang.md` and `Docu/Tasks.md`; messages and channels in `Docu/Async.md`. Like
-`Async`, the subsystem is built for AMD64 only.
+`Async`, the subsystem is built for AMD64 and i386; the cluster scenarios also run on the i386
+build (`tools/test-cluster.sh --world 32`).
 
 ## 1. An Account Everybody Touches
 

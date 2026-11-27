@@ -3,6 +3,7 @@
 # плюс отрицательные случаи (отказ без падения процесса).
 #
 #   tools/test-crypto-tls.sh
+#   tools/test-crypto-tls.sh --world 32   # на i386-сборке build/BB32LIN (tools/build32.sh)
 #
 # Создаёт во временном каталоге корневой CA, серверные сертификаты RSA,
 # ECDSA P-256/P-384 и Ed25519, просроченный сертификат и сертификат с
@@ -50,8 +51,20 @@ if [ ! -x "$OPENSSL" ]; then
 	echo "SKIP test-crypto-tls: нет $OPENSSL"
 	exit 0
 fi
+WORLD=64
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--world) WORLD="${2:-64}"; shift 2;;
+		*) echo "test-crypto-tls: неизвестный ключ $1" >&2; exit 2;;
+	esac
+done
+case "$WORLD" in
+	64) ;;
+	32) INSTALL="${BB32INSTALL:-$BB/build/BB32LIN}"; INTERP="$INSTALL/blackbox-console";;
+	*) echo "test-crypto-tls: --world 32 или 64, а не '$WORLD'" >&2; exit 2;;
+esac
 if [ ! -x "$INTERP" ]; then
-	echo "test-crypto-tls: нет $INTERP — соберите tools/build64.sh" >&2
+	echo "test-crypto-tls: нет $INTERP — соберите tools/build$WORLD.sh" >&2
 	exit 2
 fi
 
@@ -283,7 +296,12 @@ sign -in "$TMP/badcl.csr" -CA "$TMP/other-ca.pem" -CAkey "$TMP/other-ca.key" -CA
 
 # --- сборка тестовых модулей --------------------------------------------
 
-"$BB/tools/go64.sh" Crypto_devTLS Crypto_devTLSServer >"$TMP/compile.log" 2>&1 || {
+if [ "$WORLD" = 32 ]; then
+	# i386: Crypto и Unit уже собраны build32.sh.
+	"$BB/tools/compile32.sh" Crypto_devTLS Crypto_devTLSServer >"$TMP/compile.log" 2>&1
+else
+	"$BB/tools/go64.sh" Crypto_devTLS Crypto_devTLSServer >"$TMP/compile.log" 2>&1
+fi || {
 	tail -20 "$TMP/compile.log" >&2; fail "Crypto_devTLS/Crypto_devTLSServer не собрались"
 }
 

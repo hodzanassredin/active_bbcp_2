@@ -4,8 +4,8 @@ This is a guide to the `Async` subsystem. It is written for a programmer who kno
 and has already read the guide to tasks (`Docu/Tasks.md`). The library is built on the framework as
 it is: tasks, the monitor object `Tasks.Object` and the pass `Tasks.Ctx`.
 
-The subsystem is built for AMD64; tasks, monitor objects and `AsyncStm` transactions also work on
-i386. Every complete example of the guide lives in `Obx/Mod64` and
+The subsystem is built for AMD64 and for i386 (`tools/build32.sh`, `tools/test32.sh`); only the MPI
+transport `AsyncMpi` is AMD64-only. Every complete example of the guide lives in `Obx/Mod64` and
 runs with the command `Do`; each has its own page in `Obx/Docu`.
 
 ## 1. From Task to Channel
@@ -1170,7 +1170,7 @@ prints a refusal to the console.
 
 ## 12. Cost and Limits
 
-The library is built for AMD64, the module `AsyncStm` also for i386. Component Pascal code is run by one OS thread; worker threads
+The library is built for AMD64 and i386 (except `AsyncMpi`). Component Pascal code is run by one OS thread; worker threads
 and computon processes do not touch the shared heap. So an operation on a channel between two switch
 points is indivisible without any lock: the operation runs to completion, because there is one OS
 thread and no preemption.

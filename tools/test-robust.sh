@@ -2,6 +2,7 @@
 # Тест фасада RobustParallel (этап 9) на 1, 4 и 16 процессах.
 #
 #   tools/test-robust.sh
+#   tools/test-robust.sh --world 32   # на i386-сборке build/BB32LIN (tools/build32.sh)
 #
 # Клиент Robust_devClient написан только против опубликованного
 # определения RobustParallel в стиле MPI: rank 0 раздаёт работу, ранги
@@ -14,14 +15,32 @@ MARKS=proc
 TMO=180
 DEPS="RobustParallel Robust_devClient AsyncComputon AsyncIO AsyncSelect AsyncChan AsyncOnce LinNative LinThreads"
 
-[ -x "$INTERP" ] || { echo "test-robust: нет $INTERP — соберите tools/build64.sh" >&2; exit 2; }
+WORLD=64
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--world) WORLD="${2:-64}"; shift 2;;
+		*) echo "test-robust: неизвестный ключ $1" >&2; exit 2;;
+	esac
+done
+case "$WORLD" in
+	64) ;;
+	32) INSTALL="${BB32INSTALL:-$BB/build/BB32LIN}"; INTERP="$INSTALL/blackbox-console";;
+	*) echo "test-robust: --world 32 или 64, а не '$WORLD'" >&2; exit 2;;
+esac
+[ -x "$INTERP" ] || { echo "test-robust: нет $INTERP — соберите tools/build$WORLD.sh" >&2; exit 2; }
 
 # Компиляция: Unit, фасад, клиент, зависимости.
 mods="UnitAssert UnitRunner Unit_devProbe Unit_devMain $DEPS"
 pass=0
 while [ $pass -lt 3 ]; do
 	pass=$((pass + 1))
-	if "$BB/tools/go64.sh" $mods >"${TMPDIR:-/tmp}/robust-compile.log" 2>&1 \
+	if [ "$WORLD" = 32 ]; then
+		# i386: фасад, компутоны и Unit собраны build32.sh; клиент и тест
+		# лежат в Robust_dev/Mod64 — фильтр Mod64 (tools/compile32.sh).
+		if "$BB/tools/compile32.sh" --mod64 "Robust_devClient $MOD" >"${TMPDIR:-/tmp}/robust-compile.log" 2>&1; then
+			break
+		fi
+	elif "$BB/tools/go64.sh" $mods >"${TMPDIR:-/tmp}/robust-compile.log" 2>&1 \
 			&& "$BB/tools/go64.sh" "$MOD" >>"${TMPDIR:-/tmp}/robust-compile.log" 2>&1; then
 		break
 	fi

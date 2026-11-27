@@ -1741,9 +1741,14 @@ MODULE Actor_devCluster;
 
 	PROCEDURE Probe;
 	(* Проба из-под истёкшей аренды: письмо узлу-эху другого участника.
-	   Кадр уходит транспортом; принявший его обязан отказать. *)
+	   Кадр уходит транспортом; принявший его обязан отказать.
+	   Проба до истечения (метка "1") повторяется: список состава у G1
+	   приходит обновлением раз в refresh тиков, и первое соединение к
+	   узлу, которого в нём ещё нет, отвергается («node is not a member»).
+	   На i386 обновление приходит позже первой пробы. Проба после
+	   истечения не повторяется: там ждём отказ. *)
 		VAR cap: ARRAY 256 OF CHAR; r: ActorCore.Ref; m: Ping; rep: ActorCore.Msg;
-			s: ARRAY 128 OF CHAR;
+			s: ARRAY 128 OF CHAR; tries: INTEGER;
 	BEGIN
 		GetText("echo.cap", cap);
 		s := "";
@@ -1752,8 +1757,12 @@ MODULE Actor_devCluster;
 			r := ActorNet.Import(probeNd, cap);
 			IF r = NIL THEN s := "no-ref"
 			ELSE
-				NEW(m); m.n := 1;
-				IF ActorCore.Ask(r, m, 3000, rep) = ActorCore.ok THEN s := "ok" ELSE s := "no" END
+				IF probeTag = "1" THEN tries := 5 ELSE tries := 1 END;
+				REPEAT
+					NEW(m); m.n := 1;
+					IF ActorCore.Ask(r, m, 3000, rep) = ActorCore.ok THEN s := "ok" ELSE s := "no" END;
+					DEC(tries)
+				UNTIL (s = "ok") OR (tries = 0)
 			END
 		END;
 		PutText(role + ".probe-" + probeTag, s)
