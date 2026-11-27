@@ -68,10 +68,12 @@ MODULE AsyncIO;
 		END
 	END Write;
 
-	PROCEDURE WaitFdFor (fd: INTEGER; events: SET; ms: LONGINT);
+	PROCEDURE WaitFdFor* (fd: INTEGER; events: SET; ms: LONGINT);
 	(* Пред: в задаче, fd >= 0, ms > 0. Пост: дескриптор готов, истекли ms
 	   миллисекунд или задачу разбудил Unpark. Готовность будит Sleep
-	   (Unpark из Ready); регистрация снимается в любом случае. *)
+	   (Unpark из Ready); регистрация снимается в любом случае.
+	   Нужна и тем, кто ждёт дескриптор не через Read/Write: например,
+	   слою TLS, которому передан только поток CommStreams. *)
 		VAR w: Waiter;
 	BEGIN
 		NEW(w); w.task := Tasks.Current();

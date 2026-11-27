@@ -22,13 +22,14 @@ MODULE ActorNetTls;
 	onWait), поэтому читатель и писатель — обычные задачи. Только Linux
 	(как ActorNetTcp). *)
 
-	IMPORT S := SYSTEM, StdLog, Strings, Services, Tasks, CommStreams, TCP := CryptoAosTCP,
-		CryptoAosCommStreams, CryptoTLS, CryptoX509, CryptoSHA256,
+	IMPORT S := SYSTEM, StdLog, Strings, Services, Tasks, CommStreams, Poller, AsyncIO,
+		TCP := CryptoAosTCP, CryptoAosCommStreams, CryptoTLS, CryptoX509, CryptoSHA256,
 		ActorCore, ActorJournal, ActorNet;
 
 	CONST
 		maxFrame = 16 * 1024 * 1024;	(* больший кадр — обрыв соединения *)
-		idleMs = 1;	(* писатель без кадров: короткий опрос состояния соединения *)
+		idleMs = 20;	(* писатель без кадров проверяет обрыв так часто *)
+		waitMs = 1000;	(* одноразовое ожидание дескриптора: не дольше *)
 		tlsStack = 2 * 1024 * 1024;	(* рукопожатие TLS строит большие кадры на стеке *)
 		maxMembers = 64;
 		fpLen = 32;
@@ -75,7 +76,7 @@ MODULE ActorNetTls;
 
 		Writer = POINTER TO RECORD (Tasks.Task)
 			net: Net; peer: Link; tls: CryptoTLS.Connection;
-			head, tail: Item
+			head, tail: Item; parked: BOOLEAN
 		END;
 
 		Reader = POINTER TO RECORD (Tasks.Task)
@@ -92,11 +93,19 @@ MODULE ActorNetTls;
 
 	(* --- ожидание сокета ------------------------------------------------------- *)
 
-	PROCEDURE Wait;
+	PROCEDURE Wait (s: CommStreams.Stream; write: BOOLEAN);
 	(* CryptoAosCommStreams зовёт это, когда сокет не дал ни байта:
-	   задача уступает процессор, а не крутится в занятом цикле. *)
+	   задача ждёт готовности дескриптора, а не просыпается каждую
+	   миллисекунду. Событие приходит из главного цикла (Poller). *)
+		VAR fd: INTEGER;
 	BEGIN
-		IF Tasks.InTask() THEN Tasks.Sleep(1) END
+		IF Tasks.InTask() & (s # NIL) THEN
+			fd := s.Handle();
+			IF fd < 0 THEN Tasks.Sleep(1)
+			ELSIF write THEN AsyncIO.WaitFdFor(fd, Poller.Out, waitMs)
+			ELSE AsyncIO.WaitFdFor(fd, Poller.In, waitMs)
+			END
+		END
 	END Wait;
 
 	(* --- провод --------------------------------------------------------------- *)
@@ -143,10 +152,14 @@ MODULE ActorNetTls;
 	END WriteN;
 
 	PROCEDURE SendMsg (s: CryptoTLS.Connection; IN b: ARRAY OF BYTE; len: INTEGER): BOOLEAN;
-		VAR h: ARRAY 4 OF BYTE;
+	(* Заголовок и кадр — одна запись TLS и одна запись в сокет: меньше
+	   системных вызовов и записей, которые ждут подтверждения. *)
+		VAR buf: POINTER TO ARRAY OF BYTE; i: INTEGER;
 	BEGIN
-		PutLen(h, len);
-		RETURN WriteN(s, h, 4) & WriteN(s, b, len)
+		NEW(buf, len + 4);
+		PutLen(buf^, len);
+		FOR i := 0 TO len - 1 DO buf[i + 4] := b[i] END;
+		RETURN WriteN(s, buf^, len + 4)
 	END SendMsg;
 
 	PROCEDURE RecvMsg (s: CryptoTLS.Connection; OUT b: Bytes; OUT len: INTEGER): BOOLEAN;
@@ -274,32 +287,18 @@ MODULE ActorNetTls;
 		END
 	END CloseLink;
 
-	PROCEDURE (net: Net) CloseReader (name: ARRAY OF CHAR), NEW;
-		VAR r: Reader;
-	BEGIN
-		r := net.readers;
-		WHILE r # NIL DO
-			IF r.name = name THEN
-				r.allowed := FALSE;
-				IF ~r.closed THEN
-					r.closed := TRUE;
-					IF r.tls # NIL THEN r.tls.SafeClose END
-				END
-			END;
-			r := r.next
-		END
-	END CloseReader;
-
 	PROCEDURE (net: Net) SetMembers* (IN m: ARRAY OF Member; n: INTEGER), NEW;
-	(** Пост: список участников заменён; соединения с узлами, которых в
-		списке нет, закрыты, их наблюдатели получили Terminated. *)
+	(** Пост: список участников заменён. Исходящие связи с узлами, которых
+		в списке нет, закрыты сразу; входящее соединение выбывшего узла
+		закрывает его читатель при первом же кадре — кадр не доставляется,
+		в журнал пишется строка, наблюдатель получает Terminated. *)
 		VAR i: INTEGER; p: Link; r: Reader; known: ARRAY maxMembers OF Name;
 			nk: INTEGER; name: Name; found, drop: BOOLEAN;
 	BEGIN
 		ASSERT((n >= 0) & (n <= maxMembers), 20);
 		net.nmembers := n;
 		FOR i := 0 TO n - 1 DO net.members[i] := m[i] END;
-		(* закрыть исходящие и входящие связи выбывших *)
+		(* исходящие связи выбывших закрываем сразу *)
 		nk := 0;
 		p := net.peers;
 		WHILE p # NIL DO
@@ -311,19 +310,19 @@ MODULE ActorNetTls;
 			END;
 			p := p.next
 		END;
+		(* входящие соединения не трогаем: Reader сам отвергнет кадр *)
 		r := net.readers;
 		WHILE r # NIL DO
 			IF ~net.AllowedName(r.name) THEN
 				drop := TRUE; i := 0;
 				WHILE i < nk DO IF known[i] = r.name THEN drop := FALSE END; INC(i) END;
-				IF drop THEN known[nk] := r.name$; INC(nk) END;
-				net.CloseReader(r.name)
+				IF drop THEN known[nk] := r.name$; INC(nk) END
 			END;
 			r := r.next
 		END;
 		FOR i := 0 TO nk - 1 DO
 			INC(net.revoked);
-			Log("membership revoked node", known[i], " — connections closed");
+			Log("membership revoked node", known[i], " — outgoing closed, incoming refused");
 			IF net.node # NIL THEN ActorNet.Lost(net.node, known[i]) END
 		END
 	END SetMembers;
@@ -433,7 +432,8 @@ MODULE ActorNetTls;
 		NEW(it); NEW(it.b, MAX(len, 1)); it.len := len;
 		FOR i := 0 TO len - 1 DO it.b[i] := frame[i] END;
 		IF w.tail = NIL THEN w.head := it ELSE w.tail.next := it END;
-		w.tail := it
+		w.tail := it;
+		IF w.parked THEN w.parked := FALSE; Tasks.Unpark(w) END
 	END Send;
 
 	(* --- писатель -------------------------------------------------------------- *)
@@ -470,7 +470,9 @@ MODULE ActorNetTls;
 		IF ok THEN w.peer.nextTry := 0 ELSE w.peer.nextTry := Services.Ticks() + 500 END;
 		WHILE ok & ~w.net.closed & w.peer.allowed DO
 			IF w.head = NIL THEN
-				Tasks.Sleep(idleMs);
+				(* Сон до кадра: Send разбудит сразу; idleMs — только
+				   проверка, не оборвано ли соединение. *)
+				w.parked := TRUE; Tasks.Sleep(idleMs); w.parked := FALSE;
 				IF ~w.peer.allowed OR ~w.tls.ConnAlive() THEN ok := FALSE END
 			ELSE
 				it := w.head; w.head := it.next; IF w.head = NIL THEN w.tail := NIL END;
@@ -507,7 +509,10 @@ MODULE ActorNetTls;
 				StdLog.String("' — connection closed"); StdLog.Ln;
 				ok := FALSE
 			ELSIF ~r.net.AllowedName(r.name) THEN
-				INC(r.net.revoked); ok := FALSE
+				INC(r.net.revoked);
+				IF audit # NIL THEN audit("revoked-frame: node is no longer a member") END;
+				Log("frame from revoked node", r.name, " — connection closed");
+				ok := FALSE
 			ELSE
 				INC(r.net.readFrames);
 				IF r.net.node # NIL THEN ActorNet.Deliver(r.net.node, b^, len) END
@@ -521,7 +526,7 @@ MODULE ActorNetTls;
 	END Run;
 
 	PROCEDURE (a: Acceptor) Run;
-		VAR tc: TCP.Connection; tls: CryptoTLS.Connection; r: Reader; res: INTEGER;
+		VAR tc: TCP.Connection; tls: CryptoTLS.Connection; r: Reader; res, fd: INTEGER;
 			cert: CryptoX509.Certificate; name: Name; fp: Fingerprint; ok: BOOLEAN;
 	BEGIN
 		WHILE ~a.net.closed DO
@@ -554,7 +559,13 @@ MODULE ActorNetTls;
 					INC(a.net.rejected); INC(a.net.hsFail); INC(a.net.acceptFails);
 					IF tls # NIL THEN tls.SafeClose END
 				END
-			ELSE Tasks.Sleep(idleMs)
+			ELSE
+				(* Ждём соединения на слушающем дескрипторе: цикл
+				   просыпается по событию, а не каждую миллисекунду. *)
+				fd := a.net.l.ListenHandle();
+				IF fd >= 0 THEN AsyncIO.WaitFdFor(fd, Poller.In, waitMs)
+				ELSE Tasks.Sleep(idleMs)
+				END
 			END
 		END
 	END Run;
@@ -633,5 +644,8 @@ MODULE ActorNetTls;
 	END Stats;
 
 BEGIN
-	CryptoAosCommStreams.onWait := Wait
+	CryptoAosCommStreams.onWait := Wait;
+	(* Канал узлов шлёт мелкие кадры. Буферы расшифрованных данных
+	   уменьшены: сборщик мусора консервативно просматривает их слова. *)
+	CryptoTLS.AppBufferSize := 64 * 1024
 END ActorNetTls.

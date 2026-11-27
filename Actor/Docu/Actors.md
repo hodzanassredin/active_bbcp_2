@@ -783,15 +783,27 @@ send under another name. A mismatch closes the connection, is counted in `forged
 the audit procedure `ActorNetTls.audit`; the owner points it at its log.
 
 **Revocation.** The membership service stores the node fingerprint as the join key
-(`RaftMembership.JoinCmd`). Removing a name from the roster with `SetMembers` closes its outgoing and
-incoming connections, ends the watchers' addresses on that node with `Terminated`, and refuses a new
-handshake from it. `ActorNetTls` does not read the membership service itself: the owner applies the
-list, so the transport does not depend on `Raft`.
+(`RaftMembership.JoinCmd`). Removing a name from the roster with `SetMembers` closes its outgoing
+connections immediately, ends the watchers' addresses on that node with `Terminated`, and refuses a
+new handshake from it. An incoming connection of a removed node is closed by its reader on the first
+frame: the frame is not delivered, the `revoked` counter grows, the audit procedure gets a
+`revoked-frame` line, and the connection ends. `ActorNetTls` does not read the membership service
+itself: the owner applies the list, so the transport does not depend on `Raft`.
+
+The transport waits for a socket through `Poller`: a reader, a writer and the acceptor sleep until
+the descriptor is ready, and a queued frame wakes the writer with `Tasks.Unpark`. A handshake costs
+several ECDSA operations, so opening a connection takes about 0.1 s on the test machine while a
+frame in an established connection costs about 0.45 ms; the figures and their conditions are in
+`docs/measurements.md`.
 
 **Issuing certificates.** `tools/cluster-certs.sh` creates the root and the node certificates with
 `openssl` (ECDSA P-256, SAN) in the run directory. `tools/test-cluster.sh --tls` runs every scenario
 on these certificates and adds the negative cases: a certificate of a foreign root, a valid
-certificate with a forged "from" and a node removed from the roster are refused. The same script
+certificate with a forged "from" and a node removed from the roster are refused. The forged names
+share the first character with the certificate name (`E2` claiming `E`, `E` claiming `E2`, `e`
+claiming `E`), so the check compares whole names, not their first character or length; the removed
+node sends another frame and the test requires that the frame is not delivered and the audit log has
+a `revoked-frame` line. The same script
 routes one ask through `tools/tls-proxy.py`, keeps the bytes and searches them for the known string
 of the letter: the capture holds ciphertext only. The price of the channel is in
 `docs/measurements.md`.
@@ -2012,8 +2024,10 @@ the first letter; `Send` does not wait for the network. The first message of a c
 name: the name of the peer is the SAN of its certificate. A handshake with a certificate of another
 root, without a client certificate or with a name outside the roster does not finish. A frame whose
 "from" differs from that name is dropped, counted in `forged`, reported to `audit`, and the connection
-is closed. A break gives `ActorNet.Lost`; queued frames of a broken connection are lost. The reader
-waits for the socket cooperatively, so the main loop need not poll a descriptor.
+is closed. The reader also checks the roster on every frame: the first frame from a removed node is
+not delivered, counted in `revoked`, reported as `revoked-frame`, and the connection is closed. A
+break gives `ActorNet.Lost`; queued frames of a broken connection are lost. Readers, writers and the
+acceptor wait for a descriptor through `Poller`, so the main loop sleeps instead of polling.
 
 **PROCEDURE New (IN listen: ARRAY OF CHAR; OUT net: Net; OUT res: INTEGER)** — Post:
 `res = CommStreams.done` — `net` created; `listen` is the address it will listen on after `Attach`.
@@ -2029,8 +2043,9 @@ handshake.
 **PROCEDURE Peer (net: Net; IN name, adr: ARRAY OF CHAR)** — Post: frames to `name` go to `adr`; the
 connection verifies the certificate of `name` against the roster.
 **PROCEDURE (net: Net) SetMembers (IN m: ARRAY OF Member; n: INTEGER)** — Pre:
-`0 <= n <= 64` — 20. Post: the roster is `m[0 .. n-1]`; connections with names outside it are closed,
-their watchers receive `Terminated`, and new handshakes from them are refused.
+`0 <= n <= 64` — 20. Post: the roster is `m[0 .. n-1]`; outgoing connections with names outside it
+are closed at once, an incoming connection is closed by its reader on the first frame, their
+watchers receive `Terminated`, and new handshakes from them are refused.
 **PROCEDURE Close (net: Net)** — Post: the listener and connections are closed; other nodes see the
 break.
 **PROCEDURE (net: Net) Stats**, **Detail**, **Counts**, **ConnAlive**, **HandshakeState**,

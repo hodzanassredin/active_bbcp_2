@@ -117,6 +117,13 @@ MODULE CryptoAosTCP;
 		RETURN (s.s # NIL) & s.s.IsConnected()
 	END Alive;
 
+	PROCEDURE (c: Connection) ListenerHandle* (): INTEGER, NEW;
+	(** Пост: дескриптор слушателя для ожидания готовности; -1 — соединение
+		не слушает. *)
+	BEGIN
+		IF c.l # NIL THEN RETURN c.l.Handle() ELSE RETURN -1 END
+	END ListenerHandle;
+
 	PROCEDURE GetConnection* (): Connection;
 		VAR con: Connection;
 	BEGIN

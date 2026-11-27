@@ -372,6 +372,11 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	VAR
 		defaultCipherPolicy: Policy;
 		LastCertError*: AO.SIGNED32;
+		(** Размер буферов расшифрованных данных на соединение: труба
+			приложения и буфер записи в неё. Большой буфер дорог сборщику
+			мусора: он консервативно просматривает каждое слово. Транспорт
+			узлов уменьшает его; по умолчанию — 1 МиБ. *)
+		AppBufferSize*: AO.SIZE;
 
 
 	(* ------------------- группа ECDHE ------------------- *)
@@ -2063,9 +2068,9 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		SELF.tlsErrorCause := NoError;
 
 				NEW(SELF.asyncWriter); SELF.asyncWriter.conn := SELF;
-		NEW(SELF.applicationDataPipe); SELF.applicationDataPipe.Init(1024 * 1024,SELF.asyncWriter);
+		NEW(SELF.applicationDataPipe); SELF.applicationDataPipe.Init(AppBufferSize,SELF.asyncWriter);
 		NEW(SELF.appDataWriter);
-				SELF.appDataWriter.InitWriter(SELF.applicationDataPipe.sender, 1024 * 1024);
+				SELF.appDataWriter.InitWriter(SELF.applicationDataPipe.sender, AppBufferSize);
 		Streams.OpenReader(SELF.appDataReader, SELF.applicationDataPipe.receiver);
 		NEW(SELF.pendingWriteState);SELF.pendingWriteState.Init();
 		NEW(SELF.currentWriteState);SELF.currentWriteState.Init();
@@ -2449,6 +2454,13 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 	BEGIN
 		RETURN (SELF.conn # NIL) & SELF.conn.Alive()
 	END ConnAlive;
+
+	PROCEDURE (SELF: Connection) ListenHandle* (): INTEGER, NEW;
+	(** Пост: дескриптор слушателя для ожидания готовности; -1 — это
+		соединение не слушает. *)
+	BEGIN
+		IF SELF.conn = NIL THEN RETURN -1 ELSE RETURN SELF.conn.ListenerHandle() END
+	END ListenHandle;
 
 	PROCEDURE (SELF: Connection) SafeClose*, NEW;
 	(** Закрыть, не посылая close_notify в уже оборванное соединение:
@@ -5887,7 +5899,8 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		defaultSuites[8] := TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
 		NEW(defaultCipherPolicy);defaultCipherPolicy.Init();
 		defaultCipherPolicy.SetCipherSuites(defaultSuites, DefaultSuitesNbr);
-		defaultCipherPolicy.SetVersion(1, 3)
+		defaultCipherPolicy.SetVersion(1, 3);
+		AppBufferSize := 1024 * 1024
 	END InitDefaults;
 
 	PROCEDURE (SELF: Connection) Accept* (VAR client : TCP.Connection; VAR res : INTEGER);
