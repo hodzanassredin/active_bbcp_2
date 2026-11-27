@@ -21,6 +21,8 @@ MODULE Actor_devGrain;
 		Deposit = POINTER TO RECORD (ActorNet.Msg) op: LONGINT; sum: INTEGER END;
 		Reply = POINTER TO RECORD (ActorNet.Msg) op: LONGINT; balance: INTEGER END;
 		Send = POINTER TO RECORD (Msg) to: ActorCore.Ref; m: ActorNet.Msg END;
+		Read = POINTER TO RECORD (ActorNet.Msg) id: INTEGER END;
+		Dry = POINTER TO RECORD (ActorNet.Msg) END;
 
 		Deposited = POINTER TO RECORD (ActorPersist.Event) op: LONGINT; sum: INTEGER END;
 
@@ -40,6 +42,10 @@ MODULE Actor_devGrain;
 		cl: ARRAY nodes OF ActorGrain.Cluster;
 		client: ActorCore.Ref; key: Name;
 		benchT: ARRAY 6 OF LONGINT;
+		measKeys, measCount: ARRAY 3 OF INTEGER;
+		measLin, measHash: ARRAY 3 OF LONGINT;
+		dry: Dry;
+		badKeys: BOOLEAN; checkKeys: BOOLEAN;
 		j: ActorJournal.Journal;
 		replies, lastBalance, executed, restores: INTEGER; lastOp: LONGINT;
 		gen: INTEGER; driverDone: BOOLEAN;
@@ -150,6 +156,8 @@ MODULE Actor_devGrain;
 				NEW(e); e.op := m.op; e.sum := m.sum; a.Persist(c, e, m.op); INC(executed)
 			END;
 			NEW(r); r.op := m.op; r.balance := a.balance; c.Respond(r)
+		| m: Read DO
+			NEW(r); r.op := m.id; r.balance := a.balance; c.Respond(r)
 		ELSE
 		END
 	END Handle;
@@ -195,6 +203,7 @@ MODULE Actor_devGrain;
 		WITH m: Send DO c.Tell(m.to, m.m)
 		| m: Reply DO
 			INC(replies); lastBalance := m.balance; lastOp := m.op;
+			IF checkKeys & (m.op > 0) & (m.balance # m.op) THEN badKeys := TRUE END;
 			IF (m.op > 0) & (m.op < LEN(acked)) THEN acked[m.op] := TRUE END
 		ELSE
 		END
@@ -239,6 +248,13 @@ MODULE Actor_devGrain;
 		NEW(s); s.to := to; s.m := NewDeposit(op, sum); ActorCore.Tell(client, s)
 	END Ask;
 
+	PROCEDURE ReadAt (to: ActorCore.Ref; id: INTEGER);
+	(* Клиент читает остаток; Reply.op = id, баланс — состояние ключа. *)
+		VAR s: Send; rd: Read;
+	BEGIN
+		NEW(rd); rd.id := id; NEW(s); s.to := to; s.m := rd; ActorCore.Tell(client, s)
+	END ReadAt;
+
 	PROCEDURE Journal (IN key: ARRAY OF CHAR; OUT sum: Sum);
 		VAR last: LONGINT; res: INTEGER;
 	BEGIN
@@ -261,7 +277,9 @@ MODULE Actor_devGrain;
 
 	PROCEDURE Setup*;
 	BEGIN
-		replies := 0; lastBalance := 0; executed := 0; restores := 0; lastOp := -1; seed := 1
+		replies := 0; lastBalance := 0; executed := 0; restores := 0; lastOp := -1; seed := 1;
+		badKeys := FALSE; checkKeys := FALSE;
+		NEW(dry)
 	END Setup;
 
 	PROCEDURE Teardown*;
@@ -507,6 +525,141 @@ MODULE Actor_devGrain;
 		UnitAssert.True(Drive(OwnerBody, 5000), "run");
 		UnitAssert.EqualStr(ownerBest, ownerGot, "owner is the rendezvous maximum")
 	END TestOwnerIsRendezvousMaximum;
+
+	(* --- замер поиска воплощения -------------------------------------------- *)
+
+	PROCEDURE^ BenchKey (prefix: CHAR; i: INTEGER; OUT k: Name);
+
+	PROCEDURE Activate (n: INTEGER);
+		VAR i: INTEGER; k: Name;
+	BEGIN
+		FOR i := 0 TO n - 1 DO
+			BenchKey("m", i, k);
+			ActorCore.Tell(ActorGrain.Ref(cl[0], "acct", k), dry)
+		END;
+		Settle
+	END Activate;
+
+	PROCEDURE Touch (n, count: INTEGER);
+	(* Пост: count писем активным ключам, ключи разбросаны по всему набору. *)
+		VAR j, i: INTEGER; k: Name;
+	BEGIN
+		FOR j := 0 TO count - 1 DO
+			i := (j * 7919) MOD n;
+			BenchKey("m", i, k);
+			ActorCore.Tell(ActorGrain.Ref(cl[0], "acct", k), dry)
+		END;
+		Settle
+	END Touch;
+
+	PROCEDURE Timer (n, count: INTEGER): LONGINT;
+		VAR t: LONGINT;
+	BEGIN
+		t := Kernel.Time(); Touch(n, count); RETURN Kernel.Time() - t
+	END Timer;
+
+	PROCEDURE KeysApartBody;
+	(* 1000 ключей получают разные вклады; чтение каждого возвращает его
+		остаток — поиск не путает ключи одной корзины. *)
+		VAR i: INTEGER; k: Name;
+	BEGIN
+		Cluster(1, FALSE); Settle; badKeys := FALSE; checkKeys := TRUE; replies := 0;
+		FOR i := 1 TO 1000 DO
+			BenchKey("q", i, k); Ask(ActorGrain.Ref(cl[0], "acct", k), i, i)
+		END;
+		Settle;
+		FOR i := 1 TO 1000 DO BenchKey("q", i, k); ReadAt(ActorGrain.Ref(cl[0], "acct", k), i) END;
+		Settle;
+		checkKeys := FALSE
+	END KeysApartBody;
+
+	PROCEDURE TestHashTableKeepsKeysApart*;
+	BEGIN
+		UnitAssert.True(Drive(KeysApartBody, 120000), "run");
+		UnitAssert.True(~badKeys, "each key reads its own state");
+		UnitAssert.EqualInt(2000, replies, "a reply to every command")
+	END TestHashTableKeepsKeysApart;
+
+	PROCEDURE HashBody;
+	(* 1000 ключей активируются, затем каждому идёт второе письмо. *)		VAR i: INTEGER; k: Name;
+	BEGIN
+		Cluster(1, FALSE); Settle;
+		FOR i := 0 TO 999 DO BenchKey("h", i, k); ActorCore.Tell(ActorGrain.Ref(cl[0], "acct", k), dry) END;
+		Settle;
+		FOR i := 0 TO 999 DO BenchKey("h", i, k); ActorCore.Tell(ActorGrain.Ref(cl[0], "acct", k), dry) END;
+		Settle
+	END HashBody;
+
+	PROCEDURE TestHashTableKeepsActivations*;
+	(* Второе письмо ключу находит его воплощение в таблице, а не рождает
+		второе с тем же именем. *)
+	BEGIN
+		UnitAssert.True(Drive(HashBody, 120000), "run");
+		UnitAssert.EqualInt(1000, cl[0].activations, "second letter found the same activation");
+		UnitAssert.EqualInt(0, cl[0].passivations, "no passivation")
+	END TestHashTableKeepsActivations;
+
+	PROCEDURE HashPassivateBody;
+		VAR i: INTEGER; k: Name;
+	BEGIN
+		Cluster(1, FALSE); Settle; cl[0].idle := 1;
+		FOR i := 0 TO 999 DO BenchKey("p", i, k); ActorCore.Tell(ActorGrain.Ref(cl[0], "acct", k), dry) END;
+		Settle;
+		ActorGrain.Tick(cl[0]); Settle;	(* все воплощения уходят из таблицы *)
+		FOR i := 0 TO 999 DO BenchKey("p", i, k); ActorCore.Tell(ActorGrain.Ref(cl[0], "acct", k), dry) END;
+		Settle
+	END HashPassivateBody;
+
+	PROCEDURE TestHashTableRemovesPassivated*;
+	(* После пассивации имя снова свободно: ключ поднимается заново. *)
+	BEGIN
+		UnitAssert.True(Drive(HashPassivateBody, 120000), "run");
+		UnitAssert.EqualInt(1000, cl[0].passivations, "all activations passivated");
+		UnitAssert.EqualInt(2000, cl[0].activations, "keys activated again")
+	END TestHashTableRemovesPassivated;
+
+	PROCEDURE MeasLine (n, count: INTEGER; lin, hash: LONGINT);
+		VAR d, e, f: ARRAY 24 OF CHAR; u: LONGINT;
+	BEGIN
+		Strings.IntToString(n, d); Strings.IntToString(count, e);
+		Log.String("BENCH grain-lookup keys=" + d$ + " samples=" + e$);
+		u := hash * 1000 DIV count; Strings.IntToString(u, f);
+		Log.String(" hash=" + f$ + "us");
+		u := lin * 1000 DIV count; Strings.IntToString(u, f);
+		Log.String(" linear=" + f$ + "us"); Log.Ln
+	END MeasLine;
+
+	PROCEDURE MeasureBody;
+		(* до/после: перебор списка (старый поиск) и хеш-таблица; 1, 1000,
+		   100000 активных ключей, число обращений зависит от размера. *)
+		VAR keys: ARRAY 3 OF INTEGER; i, count: INTEGER; lin, hash: LONGINT;
+	BEGIN
+		keys[0] := 1; keys[1] := 1000; keys[2] := 100000;
+		FOR i := 0 TO 2 DO
+			Cluster(1, FALSE); Settle;
+			Activate(keys[i]);
+			IF keys[i] >= 100000 THEN count := 200 ELSE count := 2000 END;
+			hash := Timer(keys[i], count);
+			ActorGrain.mutations := {ActorGrain.mutLinearFind};
+			lin := Timer(keys[i], count);
+			ActorGrain.mutations := {};
+			measKeys[i] := keys[i]; measLin[i] := lin; measHash[i] := hash; measCount[i] := count
+		END
+	END MeasureBody;
+
+	PROCEDURE MeasureLookup*;
+	(** Строки BENCH grain-lookup: время письма активному ключу при поиске
+		воплощения хеш-таблицей и перебором списка (1, 1000, 100000 ключей,
+		один узел, журнал в памяти). *)
+	BEGIN
+		Setup;
+		IF Drive(MeasureBody, 3600000) THEN
+			MeasLine(measKeys[0], measCount[0], measLin[0], measHash[0]);
+			MeasLine(measKeys[1], measCount[1], measLin[1], measHash[1]);
+			MeasLine(measKeys[2], measCount[2], measLin[2], measHash[2])
+		ELSE Log.String("measure hung"); Log.Ln
+		END
+	END MeasureLookup;
 
 	(* --- замер ---------------------------------------------------------------------- *)
 

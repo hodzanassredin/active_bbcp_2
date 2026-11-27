@@ -30,6 +30,9 @@ MODULE ActorGrain;
 		mutNoApply* = 0;	(** ApplyMembers не меняет список членов *)
 		mutKeepAlive* = 1;	(** все записи списка считаются живыми *)
 		mutNoRejoin* = 2;	(** вернувшийся член не оживает *)
+		mutLinearFind* = 3;	(** поиск воплощения перебором списка, не хеш-таблицей *)
+		(* начальное число корзин таблицы воплощений; растёт вдвое *)
+		hashMin = 256;
 
 	TYPE
 		Name = ActorCore.Name;
@@ -79,10 +82,15 @@ MODULE ActorGrain;
 			ref: ActorCore.Ref; age: INTEGER;
 			asked: BOOLEAN;	(* попросили пассивироваться: письма — в held до Terminated *)
 			held, last: Held;
-			next: Act
+			next: Act;	(* список всех воплощений *)
+			hnext: Act	(* цепочка корзины таблицы имя -> воплощение *)
 		END;
 
-		Host = POINTER TO RECORD (ActorCore.Actor) cl: Cluster; acts: Act END;
+		Host = POINTER TO RECORD (ActorCore.Actor)
+			cl: Cluster; acts: Act;
+			table: POINTER TO ARRAY OF Act;	(* имя -> воплощение, растёт вдвое *)
+			nActs: INTEGER
+		END;
 
 		GRef = POINTER TO RECORD (ActorCore.Ref) cl: Cluster; kind, key: Name END;
 
@@ -139,15 +147,50 @@ MODULE ActorGrain;
 
 	(* --- хозяин ------------------------------------------------------------- *)
 
-	PROCEDURE (h: Host) Find (IN name: ARRAY OF CHAR): Act, NEW;
-		VAR x: Act;
+	PROCEDURE Hash (IN name: ARRAY OF CHAR; nb: INTEGER): INTEGER;
+		VAR x, i: INTEGER;
 	BEGIN
-		x := h.acts; WHILE (x # NIL) & (x.ref.name # name) DO x := x.next END;
+		x := 0; i := 0;
+		WHILE name[i] # 0X DO x := (x * 31 + ORD(name[i])) MOD nb; INC(i) END;
+		RETURN x
+	END Hash;
+
+	PROCEDURE Bucket (h: Host; IN name: ARRAY OF CHAR): INTEGER;
+	BEGIN
+		RETURN Hash(name, LEN(h.table^))
+	END Bucket;
+
+	PROCEDURE Grow (h: Host);
+	(* Пост: таблица вдвое больше, цепочки перестроены. *)
+		VAR nt: POINTER TO ARRAY OF Act; i, b, nb: INTEGER; x, nx: Act;
+	BEGIN
+		nb := 2 * LEN(h.table^); NEW(nt, nb);
+		FOR i := 0 TO LEN(h.table^) - 1 DO
+			x := h.table[i];
+			WHILE x # NIL DO
+				nx := x.hnext;
+				b := Hash(x.ref.name, nb);
+				x.hnext := nt[b]; nt[b] := x;
+				x := nx
+			END
+		END;
+		h.table := nt
+	END Grow;
+
+	PROCEDURE (h: Host) Find (IN name: ARRAY OF CHAR): Act, NEW;
+		VAR x: Act; b: INTEGER;
+	BEGIN
+		IF mutLinearFind IN mutations THEN	(* для замера: перебор списка *)
+			x := h.acts; WHILE (x # NIL) & (x.ref.name # name) DO x := x.next END;
+			RETURN x
+		END;
+		b := Bucket(h, name); x := h.table[b];
+		WHILE (x # NIL) & (x.ref.name # name) DO x := x.hnext END;
 		RETURN x
 	END Find;
 
 	PROCEDURE (h: Host) Deliver (c: ActorCore.Context; e: Envelope; sender: ActorCore.Ref), NEW;
-		VAR k: Kind; x: Act; name, full: Name; r: ActorCore.Ref; hd: Held;
+		VAR k: Kind; x: Act; name, full: Name; r: ActorCore.Ref; hd: Held; b: INTEGER;
 	BEGIN
 		k := h.cl.kinds; WHILE (k # NIL) & (k.name # e.kind) DO k := k.next END;
 		IF (k = NIL) OR (e.m = NIL) THEN RETURN END;	(* неизвестный вид: письмо пропадает *)
@@ -159,7 +202,9 @@ MODULE ActorGrain;
 			newCl := NIL; newKind := NIL;
 			IF r = NIL THEN RETURN END;
 			c.Watch(r); INC(h.cl.activations);
-			NEW(x); x.ref := r; x.next := h.acts; h.acts := x
+			NEW(x); x.ref := r; x.next := h.acts; h.acts := x;
+			b := Bucket(h, full); x.hnext := h.table[b]; h.table[b] := x; INC(h.nActs);
+			IF h.nActs > 2 * LEN(h.table^) THEN Grow(h) END
 		END;
 		IF x.asked THEN	(* воплощение уходит: письмо ждёт следующего *)
 			NEW(hd); hd.e := e; hd.sender := sender;
@@ -171,12 +216,19 @@ MODULE ActorGrain;
 	END Deliver;
 
 	PROCEDURE (h: Host) Ended (c: ActorCore.Context; t: ActorCore.Terminated), NEW;
-		VAR x, p: Act; i: INTEGER; hd: Held;
+		VAR x, p, y, py: Act; i, b: INTEGER; hd: Held;
 	BEGIN
 		p := NIL; x := h.acts;
 		WHILE (x # NIL) & (x.ref # t.who) DO p := x; x := x.next END;
 		IF x # NIL THEN
 			IF p = NIL THEN h.acts := x.next ELSE p.next := x.next END;
+			b := Bucket(h, x.ref.name);	(* снять из корзины *)
+			py := NIL; y := h.table[b];
+			WHILE (y # NIL) & (y # x) DO py := y; y := y.hnext END;
+			IF y # NIL THEN
+				IF py = NIL THEN h.table[b] := y.hnext ELSE py.hnext := y.hnext END;
+				DEC(h.nActs)
+			END;
 			hd := x.held;	(* письма, ждавшие конца пассивации, — новому воплощению по порядку *)
 			WHILE hd # NIL DO h.Deliver(c, hd.e, hd.sender); hd := hd.next END
 		ELSIF t.reason = ActorCore.byNodeLoss THEN
@@ -210,7 +262,7 @@ MODULE ActorGrain;
 	PROCEDURE NewHost (): ActorCore.Actor;
 		VAR h: Host;
 	BEGIN
-		NEW(h); h.cl := newCl; RETURN h
+		NEW(h); h.cl := newCl; NEW(h.table, hashMin); h.nActs := 0; RETURN h
 	END NewHost;
 
 	(* --- адрес ключа --------------------------------------------------------- *)

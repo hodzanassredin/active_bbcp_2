@@ -936,7 +936,8 @@ first letter to a key with activation and an event write costs 200–209 µs, a 
 activation 39–44 µs, passivation with a snapshot 47–51 µs per activation, activation from a snapshot
 189–193 µs, activation without a snapshot from 20 events 0.99–1.18 ms. Activation without a snapshot
 grows with the stream length; the passivation snapshot makes the activation cost constant. A call
-includes a scan of the host's activation list (2000 entries).
+finds the activation in a hash table: at 1000 keys a letter costs 4 µs and at 100000 keys 5–10 µs,
+while a scan of the list cost 1.1–1.5 ms at 100000 (`docs/measurements.md`, section 15).
 
 ## 13. Limitations
 
