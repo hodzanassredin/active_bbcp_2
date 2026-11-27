@@ -106,6 +106,10 @@ MODULE ActorCore;
 			ящике оставила бы актор ждать вечно. **)
 		Urgent* = POINTER TO ABSTRACT RECORD (Msg) END;
 
+		(** Приёмник мёртвых писем: узнаёт о каждом письме, которое не дошло
+			до адресата (ActorEvent ставит сюда поток событий). *)
+		DeadHook* = POINTER TO ABSTRACT RECORD END;
+
 		(** сообщения жизненного цикла, их получает Receive **)
 		Started* = POINTER TO RECORD (Msg) END;
 		Stopping* = POINTER TO RECORD (Msg) END;
@@ -194,6 +198,9 @@ MODULE ActorCore;
 		dir-, stdDir-: Directory;
 		node-: Name;	(** имя своего узла *)
 		deadLetters-: LONGINT;	(** число мёртвых писем с начала работы *)
+		deadHook: DeadHook;
+		hookMsg: Msg; hookSender, hookTo: Ref;
+		inDead: BOOLEAN;	(* идёт вызов приёмника: вложенное мёртвое письмо не повторяет вызов *)
 
 		seq: INTEGER;	(* номер следующего безымянного актора *)
 		askSeq: INTEGER;	(* номер следующего адреса ответа *)
@@ -206,6 +213,10 @@ MODULE ActorCore;
 		newS: NewMsg; deadM: DeadMsg;
 
 	(* --- абстрактные операции --------------------------------------------- *)
+
+	PROCEDURE (h: DeadHook) Dead* (m: Msg; sender, to: Ref), NEW, ABSTRACT;
+	(** Пред: m # NIL — не проверяется, зовёт ActorCore.
+		Пост: факт мёртвого письма учтён; to — адресат, NIL — адреса нет. *)
 
 	PROCEDURE (r: Ref) Post* (m: Msg; sender: Ref), NEW, ABSTRACT;
 	(** Пред: m # NIL — 20. Пост: m доставлено в ящик адресата или учтено
@@ -304,11 +315,27 @@ MODULE ActorCore;
 
 	(* --- мёртвые письма и пробуждение ------------------------------------- *)
 
-	PROCEDURE Dead (m: Msg; s: Ref);
-	(* Пост: письмо учтено; ждущий Ask узнаёт об этом сразу. *)
+	PROCEDURE HookCall (a, b, cc: S.ADDRESS);
+	(* Вызов приёмника под Kernel.Try: трап приёмника не должен стать
+	   отказом актора, пославшего мёртвое письмо. *)
 	BEGIN
+		deadHook.Dead(hookMsg, hookSender, hookTo)
+	END HookCall;
+
+	PROCEDURE Dead (m: Msg; sender, to: Ref);
+	(* Пост: письмо учтено; ждущий Ask узнаёт об этом сразу; приёмник
+	   мёртвых писем извещён. Вложенное мёртвое письмо (приёмник ставит
+	   письмо остановленному потоку) не повторяет вызов и не считается:
+	   иначе остановленный приёмник замкнул бы круг. *)
+	BEGIN
+		IF inDead THEN RETURN END;
 		INC(deadLetters);
-		IF (s # NIL) & (s IS Future) & (m # deadM) THEN s.Post(deadM, NIL) END
+		IF (sender # NIL) & (sender IS Future) & (m # deadM) THEN sender.Post(deadM, NIL) END;
+		IF deadHook # NIL THEN
+			inDead := TRUE; hookMsg := m; hookSender := sender; hookTo := to;
+			Kernel.Try(S.VAL(Kernel.TryHandler, S.ADR(HookCall)), 0, 0, 0);
+			hookMsg := NIL; hookSender := NIL; hookTo := NIL; inDead := FALSE
+		END
 	END Dead;
 
 	PROCEDURE UserReady (c: Context): BOOLEAN;
@@ -567,8 +594,8 @@ MODULE ActorCore;
 		ASSERT((c.state = stopping) & (c.nChildren = 0), 100);
 		Lifecycle(c, stoppedM);
 		c.state := stopped; c.actor := NIL; c.beh := NIL; DEC(live);
-		WHILE c.stash.count > 0 DO Pop(c.stash, m, s); Dead(m, s) END;
-		WHILE c.user.count > 0 DO Pop(c.user, m, s); Dead(m, s) END;
+		WHILE c.stash.count > 0 DO Pop(c.stash, m, s); Dead(m, s, c) END;
+		WHILE c.user.count > 0 DO Pop(c.user, m, s); Dead(m, s, c) END;
 		WHILE c.sys.count > 0 DO
 			Pop(c.sys, m, s);
 			IF m IS WatchMsg THEN Add(c.watchers, m(WatchMsg).watcher) END
@@ -830,7 +857,7 @@ MODULE ActorCore;
 		ASSERT(m # NIL, 20);
 		IF (c.state >= stopping)
 		OR (c.props.capacity > 0) & ~(m IS Urgent) & (c.user.count + c.stash.count >= c.props.capacity) THEN
-			Dead(m, sender)
+			Dead(m, sender, c)
 		ELSE
 			Push(c.user, m, sender); Wake(c)
 		END
@@ -897,7 +924,7 @@ MODULE ActorCore;
 		обработке; без отправителя — мёртвое письмо. *)
 	BEGIN
 		ASSERT(m # NIL, 20);
-		IF c.sender # NIL THEN c.sender.Post(m, c) ELSE Dead(m, NIL) END
+		IF c.sender # NIL THEN c.sender.Post(m, c) ELSE Dead(m, NIL, NIL) END
 	END Respond;
 
 	PROCEDURE (c: Context) Parent* (): Ref, NEW;
@@ -1142,6 +1169,14 @@ MODULE ActorCore;
 		dir := d;
 		IF stdDir = NIL THEN stdDir := d END
 	END SetDir;
+
+	PROCEDURE SetDeadHook* (h: DeadHook);
+	(** Пост: каждое мёртвое письмо с этого момента передаётся h.Dead;
+		h = NIL — приёмника нет. Трап приёмника не считается отказом
+		актора и не повторяет учёт письма. *)
+	BEGIN
+		deadHook := h
+	END SetDeadHook;
 
 	PROCEDURE Init;
 		VAR d: StdDirectory;

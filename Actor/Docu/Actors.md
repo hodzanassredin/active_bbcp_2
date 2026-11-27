@@ -223,6 +223,32 @@ consistent hashing. Tests: `TestRoundRobinCyclesOverGroup`, `TestBroadcastSendsT
 `TestRandomIsDeterministicFromSeed`, `TestConsistentHashKeepsKeyOnRoute`,
 `TestPoolRestartsFailedRoute`, `TestPoolDropsStoppedRoute`, `TestSetGroupChangesRoutes`.
 
+### Event stream
+
+Several actors often want the same news: a new order, a stopped account, a failed transfer.
+Sending it to each of them by hand means the sender knows every recipient, and a new recipient
+means a change in the sender. An *event stream* turns it around: actors subscribe to a stream, and
+the publisher writes once to the stream. `ActorEvent.New()` creates a stream actor; `Subscribe(s,
+r, filter)` adds subscriber `r` with an optional predicate `Filter`, `Unsubscribe(s, r)` removes
+it, and `Publish(s, m)` sends the letter to the stream. The stream forwards the letter to every
+subscriber whose filter is absent or whose `Match` returns `TRUE`, keeping the letter's sender.
+
+`Publish` allocates nothing: it is a `Tell` to the stream, and the stream only puts the letter into
+the mailboxes of the subscribers. `Subscribe`, `Unsubscribe` and the `DeadLetter` event allocate.
+The stream watches its subscribers, so a stopped subscriber leaves the list when the stream receives
+`Terminated`; there is no need to unsubscribe it.
+
+`ActorEvent.SetDefault(s)` makes the stream the receiver of dead letters: every letter that does not
+reach its addressee is published to `s` as `ActorEvent.DeadLetter` with fields `m` (the original
+letter), `to` (the addressee; `NIL` — none) and `sender`. A dead letter about a `DeadLetter` is not
+published, and a dead letter produced while the receiver is being called is not counted, so a
+stopped stream does not close a circle. `SetDefault(NIL)` removes the receiver.
+
+The example `ObxActor11` publishes orders and information to two subscribers, one with a filter,
+and shows a dead letter as an event. Tests: `TestPublishReachesSubscribers`,
+`TestFilterSelectsLetters`, `TestUnsubscribeStopsDelivery`, `TestStoppedSubscriberIsRemoved`,
+`TestDeadLetterPublished`, `TestDeadLetterIsNotRepublished`, `TestDeadLetterAboutDeadLetterIsNotPublished`.
+
 ## 5. Life Cycle
 
 An actor passes the states "running", "restarting", "stopping" and "stopped". The handler learns
@@ -989,6 +1015,9 @@ DEFINITION ActorCore;
 		END;
 
 		Urgent = POINTER TO ABSTRACT RECORD (Msg) END;
+		DeadHook = POINTER TO ABSTRACT RECORD
+			(h: DeadHook) Dead (m: Msg; sender, to: Ref), NEW, ABSTRACT
+		END;
 		Started = POINTER TO RECORD (Msg) END;
 		Stopping = POINTER TO RECORD (Msg) END;
 		Stopped = POINTER TO RECORD (Msg) END;
@@ -1032,6 +1061,7 @@ DEFINITION ActorCore;
 	PROCEDURE Terminate (w, who: Ref; reason: INTEGER);
 	PROCEDURE SetDispatcher (d: Dispatcher);
 	PROCEDURE SetDir (d: Directory);
+	PROCEDURE SetDeadHook (h: DeadHook);
 
 END ActorCore.
 ```
@@ -1050,6 +1080,15 @@ mailbox is full when its letters together with the stashed ones number at least 
 **TYPE Urgent**
 A service letter: it enters the mailbox bypassing `Props.capacity`. It answers an actor that cannot
 leave its waiting without it (the journal's answer to a persistent actor).
+
+**TYPE DeadHook**
+The receiver of dead letters. `ActorCore` calls `Dead` for every letter that did not reach its
+addressee; `to` is the addressee, `NIL` when there is none. A trap inside `Dead` is caught and
+does not become a failure of the actor that sent the dead letter; a dead letter produced during the
+call is not counted again, so a receiver that posts to a stopped actor does not close a circle.
+
+**PROCEDURE SetDeadHook (h: DeadHook)**
+Post: every dead letter from this moment is passed to `h.Dead`; `h = NIL` — no receiver.
 
 **PROCEDURE (r: Ref) AddWatcher (w: Ref)**
 Called by `c.Watch` and `Ask`.
@@ -1972,3 +2011,56 @@ END ActorHash.
 **PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Post: the weight of the place
 `member` for the key `key` of kind `kind`; the same input gives the same weight. The owner is the
 live place with the greatest weight; on equal weights the lesser name wins.
+
+### 14.16. ActorEvent
+
+```
+DEFINITION ActorEvent;
+
+	IMPORT ActorCore;
+
+	TYPE
+		Filter = POINTER TO ABSTRACT RECORD
+			(f: Filter) Match (m: ActorCore.Msg): BOOLEAN, NEW, ABSTRACT
+		END;
+
+		DeadLetter = POINTER TO RECORD (ActorCore.Msg)
+			m-: ActorCore.Msg;
+			to-, sender-: ActorCore.Ref
+		END;
+
+	PROCEDURE New (): ActorCore.Ref;
+	PROCEDURE Subscribe (s, r: ActorCore.Ref; f: Filter);
+	PROCEDURE Unsubscribe (s, r: ActorCore.Ref);
+	PROCEDURE Publish (s: ActorCore.Ref; m: ActorCore.Msg);
+	PROCEDURE SetDefault (s: ActorCore.Ref);
+	PROCEDURE Default (): ActorCore.Ref;
+
+END ActorEvent.
+```
+
+**TYPE Filter** — the subscription predicate; `Match` answers whether the letter goes to the
+subscriber.
+
+**TYPE DeadLetter** — the event of a dead letter: `m` is the original letter, `to` the addressee
+(`NIL` — none), `sender` the sender of the original letter.
+
+**PROCEDURE New (): ActorCore.Ref** — Post: a new stream actor without subscribers; it is not the
+receiver of dead letters.
+
+**PROCEDURE Subscribe (s, r: ActorCore.Ref; f: Filter)** — Pre: `s # NIL` — trap 20; `r # NIL` —
+trap 21. Post: the stream receives a letter: `r` is subscribed with `f` (`NIL` — all letters); a
+repeated subscription of the same `r` replaces the predicate.
+
+**PROCEDURE Unsubscribe (s, r: ActorCore.Ref)** — Pre: `s # NIL` — trap 20; `r # NIL` — trap 21.
+Post: the stream receives a letter: `r` is not subscribed.
+
+**PROCEDURE Publish (s: ActorCore.Ref; m: ActorCore.Msg)** — Pre: `s # NIL` — trap 20; `m # NIL` —
+trap 21. Post: `m` is sent to the stream; subscribers get it in the order of the stream's mailbox,
+with the sender of the letter to the stream. A stopped stream makes `m` a dead letter.
+
+**PROCEDURE SetDefault (s: ActorCore.Ref)** — Post: stream `s` is the receiver of dead letters;
+`s = NIL` — there is none.
+
+**PROCEDURE Default (): ActorCore.Ref** — Post: the stream set as the receiver of dead letters;
+`NIL` — none.

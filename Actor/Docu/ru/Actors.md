@@ -217,6 +217,33 @@ kind, seed, strategy)` рождает `n` детей фабрикой и дер�
 `TestRandomIsDeterministicFromSeed`, `TestConsistentHashKeepsKeyOnRoute`,
 `TestPoolRestartsFailedRoute`, `TestPoolDropsStoppedRoute`, `TestSetGroupChangesRoutes`.
 
+### Поток событий
+
+Нескольким акторам часто нужна одна и та же новость: новый заказ, остановленный счёт, неудачный
+перевод. Рассылать её каждому вручную значит, что отправитель знает всех получателей, а новый
+получатель требует правки отправителя. *Поток событий* переворачивает это: акторы подписываются
+на поток, а издатель пишет один раз в поток. `ActorEvent.New()` создаёт актор-поток;
+`Subscribe(s, r, filter)` подписывает `r` с необязательным предикатом `Filter`,
+`Unsubscribe(s, r)` снимает подписку, `Publish(s, m)` посылает письмо потоку. Поток пересылает
+письмо каждому подписчику, у которого предиката нет или `Match` вернул `TRUE`, сохраняя
+отправителя письма.
+
+`Publish` ничего не выделяет: это `Tell` потоку, а поток только ставит письмо в ящики
+подписчиков. Выделяют память `Subscribe`, `Unsubscribe` и событие `DeadLetter`. Поток наблюдает
+подписчиков, поэтому остановленный подписчик уходит из списка, когда поток получает `Terminated`;
+отписывать его не нужно.
+
+`ActorEvent.SetDefault(s)` делает поток приёмником мёртвых писем: каждое письмо, не дошедшее до
+адресата, публикуется в `s` как `ActorEvent.DeadLetter` с полями `m` (исходное письмо), `to`
+(адресат; `NIL` — нет) и `sender`. Мёртвое письмо о самом `DeadLetter` не публикуется, а мёртвое
+письмо, возникшее во время вызова приёмника, не считается, поэтому остановленный поток не
+замыкает круг. `SetDefault(NIL)` снимает приёмник.
+
+Пример `ObxActor11` публикует заказы и сведения двум подписчикам, один с предикатом, и
+показывает мёртвое письмо как событие. Тесты: `TestPublishReachesSubscribers`,
+`TestFilterSelectsLetters`, `TestUnsubscribeStopsDelivery`, `TestStoppedSubscriberIsRemoved`,
+`TestDeadLetterPublished`, `TestDeadLetterIsNotRepublished`, `TestDeadLetterAboutDeadLetterIsNotPublished`.
+
 ## 5. Жизненный цикл
 
 Актор проходит состояния «работает», «перезапускается», «останавливается» и «остановлен». О каждом
@@ -956,6 +983,9 @@ DEFINITION ActorCore;
 		END;
 
 		Urgent = POINTER TO ABSTRACT RECORD (Msg) END;
+		DeadHook = POINTER TO ABSTRACT RECORD
+			(h: DeadHook) Dead (m: Msg; sender, to: Ref), NEW, ABSTRACT
+		END;
 		Started = POINTER TO RECORD (Msg) END;
 		Stopping = POINTER TO RECORD (Msg) END;
 		Stopped = POINTER TO RECORD (Msg) END;
@@ -999,6 +1029,7 @@ DEFINITION ActorCore;
 	PROCEDURE Terminate (w, who: Ref; reason: INTEGER);
 	PROCEDURE SetDispatcher (d: Dispatcher);
 	PROCEDURE SetDir (d: Directory);
+	PROCEDURE SetDeadHook (h: DeadHook);
 
 END ActorCore.
 ```
@@ -1016,6 +1047,15 @@ END ActorCore.
 **TYPE Urgent**
 Служебное письмо: в ящик идёт мимо предела `Props.capacity`. Им отвечают актору, который без этого
 ответа из ожидания не выйдет (ответ журнала стойкому актору).
+
+**TYPE DeadHook**
+Приёмник мёртвых писем. `ActorCore` зовёт `Dead` на каждое письмо, не дошедшее до адресата;
+`to` — адресат, `NIL` — адреса нет. Трап внутри `Dead` перехватывается и не становится отказом
+актора, пославшего мёртвое письмо; мёртвое письмо, возникшее во время вызова, повторно не
+считается, поэтому приёмник, ставящий письмо остановленному актору, не замыкает круг.
+
+**PROCEDURE SetDeadHook (h: DeadHook)**
+Пост: каждое мёртвое письмо с этого момента передаётся `h.Dead`; `h = NIL` — приёмника нет.
 
 **PROCEDURE (r: Ref) AddWatcher (w: Ref)**
 Зовёт `c.Watch` и `Ask`.
@@ -1923,3 +1963,55 @@ END ActorHash.
 **PROCEDURE Weight (IN member, kind, key: ARRAY OF CHAR): LONGINT** — Пост: вес места `member` для
 ключа `key` вида `kind`; тот же вход даёт тот же вес. Владелец — живое место с наибольшим весом;
 при равных весах выбирается меньшее имя.
+
+### 14.16. ActorEvent
+
+```
+DEFINITION ActorEvent;
+
+	IMPORT ActorCore;
+
+	TYPE
+		Filter = POINTER TO ABSTRACT RECORD
+			(f: Filter) Match (m: ActorCore.Msg): BOOLEAN, NEW, ABSTRACT
+		END;
+
+		DeadLetter = POINTER TO RECORD (ActorCore.Msg)
+			m-: ActorCore.Msg;
+			to-, sender-: ActorCore.Ref
+		END;
+
+	PROCEDURE New (): ActorCore.Ref;
+	PROCEDURE Subscribe (s, r: ActorCore.Ref; f: Filter);
+	PROCEDURE Unsubscribe (s, r: ActorCore.Ref);
+	PROCEDURE Publish (s: ActorCore.Ref; m: ActorCore.Msg);
+	PROCEDURE SetDefault (s: ActorCore.Ref);
+	PROCEDURE Default (): ActorCore.Ref;
+
+END ActorEvent.
+```
+
+**TYPE Filter** — предикат подписки; `Match` отвечает, идти ли письмо подписчику.
+
+**TYPE DeadLetter** — событие мёртвого письма: `m` — исходное письмо, `to` — адресат (`NIL` —
+нет), `sender` — отправитель исходного письма.
+
+**PROCEDURE New (): ActorCore.Ref** — Пост: новый актор-поток без подписчиков; приёмником мёртвых
+писем он не становится.
+
+**PROCEDURE Subscribe (s, r: ActorCore.Ref; f: Filter)** — Пред: `s # NIL` — трап 20; `r # NIL` —
+трап 21. Пост: поток получает письмо: `r` подписан с `f` (`NIL` — все письма); повторная подписка
+того же `r` заменяет предикат.
+
+**PROCEDURE Unsubscribe (s, r: ActorCore.Ref)** — Пред: `s # NIL` — трап 20; `r # NIL` — трап 21.
+Пост: поток получает письмо: `r` больше не подписан.
+
+**PROCEDURE Publish (s: ActorCore.Ref; m: ActorCore.Msg)** — Пред: `s # NIL` — трап 20; `m # NIL` —
+трап 21. Пост: `m` ушло потоку; подписчики получат его в порядке ящика потока, с отправителем
+письма потоку. Поток остановлен — `m` мёртвое.
+
+**PROCEDURE SetDefault (s: ActorCore.Ref)** — Пост: поток `s` — приёмник мёртвых писем;
+`s = NIL` — приёмника нет.
+
+**PROCEDURE Default (): ActorCore.Ref** — Пост: поток, поставленный приёмником мёртвых писем;
+`NIL` — нет.

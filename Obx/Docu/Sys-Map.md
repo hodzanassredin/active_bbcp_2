@@ -121,6 +121,7 @@ Events
 [ObxActor8](Actor8.md)  [docu](Actor8.md)/[sources](../Mod64/Actor8.cp)		virtual account: by number, migration on node failure
 [ObxActor9](Actor9.md)  [docu](Actor9.md)/[sources](../Mod64/Actor9.cp)		group strategies: all-for-one and rest-for-one
 [ObxActor10](Actor10.md)  [docu](Actor10.md)/[sources](../Mod64/Actor10.cp)		routers: round-robin, broadcast, consistent hash
+[ObxActor11](Actor11.md)  [docu](Actor11.md)/[sources](../Mod64/Actor11.cp)		event stream: subscriptions, a filter, dead letters
 [ObxRaft0](Raft0.md)  [docu](Raft0.md)/[sources](../Mod64/Raft0.cp)		Raft: three in-memory nodes, elections, write, read, leader failure
 [ObxRaft1](Raft1.md)  [docu](Raft1.md)/[sources](../Mod64/Raft1.cp)		a durable counter on the Raft journal survives its node's failure
 [ObxBank0](Bank0.md)  [docu](Bank0.md)/[sources](../Mod64/Bank0.cp)		tutorial: an action and a task do one job
