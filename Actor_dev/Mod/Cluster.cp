@@ -66,7 +66,7 @@ MODULE Actor_devCluster;
 		WatchMe = POINTER TO RECORD (ActorCore.Msg) r: ActorCore.Ref END;
 
 		Echo = POINTER TO RECORD (ActorCore.Actor) END;
-		SecureEcho = POINTER TO RECORD (ActorCore.Actor) END;
+		SecureEcho = POINTER TO RECORD (ActorCore.Actor) file: Name END;
 		Watcher = POINTER TO RECORD (ActorCore.Actor) END;
 		Sink = POINTER TO RECORD (ActorCore.Actor) END;
 
@@ -440,7 +440,7 @@ MODULE Actor_devCluster;
 	BEGIN
 		WITH m: Ping DO
 			INC(securePings);
-			IntToText(securePings, s); PutText("E.pings", s);
+			IntToText(securePings, s); PutText(a.file + ".pings", s);
 			NEW(p); p.n := m.n; c.Respond(p)
 		ELSE
 		END
@@ -449,7 +449,7 @@ MODULE Actor_devCluster;
 	PROCEDURE NewSecureEcho (): ActorCore.Actor;
 		VAR a: SecureEcho;
 	BEGIN
-		NEW(a); RETURN a
+		NEW(a); a.file := role$; RETURN a
 	END NewSecureEcho;
 
 	PROCEDURE (a: Watcher) Receive (c: ActorCore.Context; m: ActorCore.Msg);
@@ -830,23 +830,23 @@ MODULE Actor_devCluster;
 	BEGIN
 		IntToText(securePings, x); s := "pings=" + x;
 		TlsText(statusNet, x); s := s + x;
-		PutText("E.status", s);
-		ActorNetTls.PeersText(statusNet.tls, s); PutText("E.links", s)
+		PutText(role + ".status", s);
+		ActorNetTls.PeersText(statusNet.tls, s); PutText(role + ".links", s)
 	END WriteSecureStatus;
 
 	PROCEDURE RunSecureVictim;
 		VAR t: Net; nd: ActorNet.Node; cap: ARRAY 256 OF CHAR; last: LONGINT;
 	BEGIN
-		OpenNode("E", t, nd); PeerAll(t, "E"); statusNet := t;
-		rootRef := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSecureEcho), "E");
+		OpenNode(role, t, nd); PeerAll(t, role); statusNet := t;
+		rootRef := ActorCore.Spawn(NIL, ActorCore.NewProps(NewSecureEcho), role);
 		ActorNet.Export(nd, rootRef, cap);
-		PutText("E.cap", cap); PutText("E.ready", "1");
+		PutText(role + ".cap", cap); PutText(role + ".ready", "1");
 		last := 0;
 		WHILE ~stop & ~finished & (Services.Ticks() - t0 < serveMs) DO
 			Pump;
 			IF Services.Ticks() - last >= 50 THEN last := Services.Ticks(); WriteSecureStatus END
 		END;
-		PutText("E.exited", "1");
+		PutText(role + ".exited", "1");
 		NetClose(t)
 	END RunSecureVictim;
 
@@ -1660,7 +1660,7 @@ MODULE Actor_devCluster;
 		raftRef := RaftNode.Start(raftCfg);
 		statusName := role;
 		ActorNet.Export(nd, raftRef, cap); PutText(role + ".cap", cap);
-		nsvc := 5; IF secure THEN nsvc := 3 END;
+		nsvc := 5;
 		ASSERT(WaitRoleCaps("S", nsvc, 20000), 120);
 		FOR i := 0 TO nsvc - 1 DO
 			IF i # idx THEN IntToText(i, xs); GetText("S" + xs + ".cap", cap); RaftNode.SetPeer(raftCfg, i, cap) END
@@ -1756,7 +1756,7 @@ MODULE Actor_devCluster;
 			raftRef := RaftNode.Start(raftCfg);
 			ActorNet.Export(raftNd, raftRef, cap); PutText(statusName + ".cap", cap)
 		END;
-		nsvc := 5; IF secure THEN nsvc := 3 END;
+		nsvc := 5;
 		ASSERT(WaitRoleCaps("S", nsvc, 30000), 121);
 		ReadCaps("S", nsvc, memServiceCaps);
 		ASSERT(WaitRoleCaps("R", 3, 60000), 122);
@@ -1924,12 +1924,12 @@ MODULE Actor_devCluster;
 			IF ok THEN ok := MemDeposit(ref, 2, 50, 30000); good := good & ok; IF ok THEN INC(memOks) ELSE INC(memBad) END END;
 			IF ~ok THEN PutText("driver.fail", "deposit1") END
 		END;
-		IF good & ~secure THEN
+		IF good THEN
 			(* Рост службы до пяти узлов — часть нагрузки TCP-прогона. *)
 			PutText("svc.add3", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "voters4") END
 		END;
-		IF good & ~secure THEN
+		IF good THEN
 			PutText("svc.add4", "1");
 			IF ~WaitSvcVoters(5, 30000) THEN good := FALSE; PutText("driver.fail", "voters5") END
 		END;
@@ -1956,7 +1956,7 @@ MODULE Actor_devCluster;
 			IF ok THEN INC(memOks) ELSE INC(memBad) END;
 			IF ~ok THEN PutText("driver.fail", "deposit3") END
 		END;
-		IF good & ~secure THEN
+		IF good THEN
 			IF owner = role THEN	(* владелец — сам водитель: взять ключ, которым владеет G2, и новый адрес *)
 				IF ~KeyOwnedByRole("G2", key) THEN good := FALSE; PutText("driver.fail", "key-g2")
 				ELSE
@@ -2006,7 +2006,7 @@ MODULE Actor_devCluster;
 				IF ~ok THEN PutText("driver.fail", "deposit5") END
 			END
 		END;
-		IF good & ~secure THEN
+		IF good THEN
 			PutText("svc.remove4", "1");
 			IF ~WaitSvcVoters(4, 30000) THEN good := FALSE; PutText("driver.fail", "remove4") END
 		END;
@@ -2061,7 +2061,7 @@ MODULE Actor_devCluster;
 		ELSIF scenario = "reconnect" THEN
 			IF role = "S" THEN RunReconnectServer ELSE RunReconnectClient END
 		ELSIF scenario = "secure" THEN
-			IF role = "E" THEN RunSecureVictim ELSE RunSecureSender END
+			IF (role = "E") OR (role = "E2") THEN RunSecureVictim ELSE RunSecureSender END
 		ELSIF scenario = "raft" THEN
 			nodes := n;
 			IF role = "C" THEN RunClient

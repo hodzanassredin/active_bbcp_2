@@ -292,8 +292,8 @@ if [ "${INNER:-0}" = 1 ]; then
 		mkdir -p "$dir"
 		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
 		PIDS=()
-		alloc_role E 1
-		printf 'E %s\n' "$(addr_of E)" > "$dir/nodes"
+		alloc_role E 1; alloc_role E2 1
+		printf 'E %s\nE2 %s\n' "$(addr_of E)" "$(addr_of E2)" > "$dir/nodes"
 		seed_dir "$dir"
 		# чужой корень: сертификат foreign кладём в список, чтобы
 		# решала именно проверка цепочки, а не отсутствие записи
@@ -306,6 +306,9 @@ if [ "${INNER:-0}" = 1 ]; then
 
 		launch_role "$dir" E --SCENARIO=secure; PIDS[E]=$LASTPID
 		waitfile "$dir/E.ready" 5000 || { bad "$dir" "secure: E не готов"; return 1; }
+		# E2 — второй действующий узел с тем же префиксом имени, что E.
+		launch_role "$dir" E2 --SCENARIO=secure; PIDS[E2]=$LASTPID
+		waitfile "$dir/E2.ready" 5000 || { bad "$dir" "secure: E2 не готов"; return 1; }
 
 		# 1. сертификат чужого корня не принимается
 		launch_role "$dir" F --SCENARIO=secure --CLAIM=F --SEND=1 \
@@ -355,6 +358,43 @@ if [ "${INNER:-0}" = 1 ]; then
 		field_at_least "$dir/E.status" forged 1 || { bad "$dir" "secure: подделка «от кого» принята"; return 1; }
 		field_at_least "$dir/X.status" hso 1 || { bad "$dir" "secure: X не прошёл рукопожатие"; return 1; }
 
+		# Тот же первый символ: сертификат E2, заявленное имя E.
+		# E2 — действующий узел, имя E — префикс E2.
+		f0=$(field "$dir/E.status" forged); [ -n "$f0" ] || f0=0
+		launch_role "$dir" F1 --SCENARIO=secure --CLAIM=E --SEND=1 \
+			--CERT="$CERTDIR/E2.pem" --KEY="$CERTDIR/E2.key"
+		PIDS[F1]=$LASTPID
+		waitfile "$dir/F1.status" 5000 || { bad "$dir" "secure: F1 не закончил"; return 1; }
+		sleep 0.3
+		f1=$(field "$dir/E.status" forged); [ -n "$f1" ] || f1=0
+		[ "$f1" -gt "$f0" ] || { bad "$dir" "secure: подделка E2→E (тот же префикс) принята"; return 1; }
+		field_at_least "$dir/F1.status" hso 1 || { bad "$dir" "secure: F1 не прошёл рукопожатие"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо E2→E доставлено"; return 1; }
+
+		# Заявленное имя длиннее сертификата: сертификат E, заявлено E2.
+		f1=$(field "$dir/E.status" forged); [ -n "$f1" ] || f1=0
+		launch_role "$dir" F2 --SCENARIO=secure --CLAIM=E2 --SEND=1 \
+			--CERT="$CERTDIR/E.pem" --KEY="$CERTDIR/E.key"
+		PIDS[F2]=$LASTPID
+		waitfile "$dir/F2.status" 5000 || { bad "$dir" "secure: F2 не закончил"; return 1; }
+		sleep 0.3
+		f2=$(field "$dir/E.status" forged); [ -n "$f2" ] || f2=0
+		[ "$f2" -gt "$f1" ] || { bad "$dir" "secure: подделка E→E2 (длиннее) принята"; return 1; }
+		field_at_least "$dir/F2.status" hso 1 || { bad "$dir" "secure: F2 не прошёл рукопожатие"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо E→E2 доставлено"; return 1; }
+
+		# Регистр: сертификат e, заявленное имя E.
+		f2=$(field "$dir/E.status" forged); [ -n "$f2" ] || f2=0
+		launch_role "$dir" F3 --SCENARIO=secure --CLAIM=E --SEND=1 \
+			--CERT="$CERTDIR/e.pem" --KEY="$CERTDIR/e.key"
+		PIDS[F3]=$LASTPID
+		waitfile "$dir/F3.status" 5000 || { bad "$dir" "secure: F3 не закончил"; return 1; }
+		sleep 0.3
+		f3=$(field "$dir/E.status" forged); [ -n "$f3" ] || f3=0
+		[ "$f3" -gt "$f2" ] || { bad "$dir" "secure: подделка e→E (регистр) принята"; return 1; }
+		field_at_least "$dir/F3.status" hso 1 || { bad "$dir" "secure: F3 не прошёл рукопожатие"; return 1; }
+		[ ! -f "$dir/E.pings" ] || { bad "$dir" "secure: письмо e→E доставлено"; return 1; }
+
 		# 3. узел, удалённый из состава: первое письмо доходит, после
 		#    отзыва — нет, действующее соединение рвётся
 		launch_role "$dir" M --SCENARIO=secure --CLAIM=M --SEND=1 --WAIT2=1 \
@@ -369,6 +409,10 @@ if [ "${INNER:-0}" = 1 ]; then
 		waitfile "$dir/M.status2" 8000 || { bad "$dir" "secure: M не закончил"; return 1; }
 		[ "$(cat "$dir/E.pings" 2>/dev/null)" = "1" ] || { bad "$dir" "secure: отозванный M принят"; return 1; }
 		field_at_least "$dir/E.status" rev 1 || { bad "$dir" "secure: соединение с M не разорвано"; return 1; }
+		[ "$(field "$dir/E.status" readers)" = "0" ] || { bad "$dir" "secure: читатель отозванного M не закрыт"; return 1; }
+		# отозванный кадр отвергнут читателем, а не только сменой списка
+		grep -q 'revoked-frame' "$dir/tls-audit" 2>/dev/null \
+			|| { bad "$dir" "secure: нет записи об отозванном кадре в журнале"; return 1; }
 
 		# запись в журнал о подделке (файл tls-audit ведёт транспорт)
 		grep -q 'forged-frame' "$dir/tls-audit" 2>/dev/null \
@@ -558,8 +602,8 @@ if [ "${INNER:-0}" = 1 ]; then
 		mkdir -p "$dir"
 		printf 'Actor_devCluster.Run\n' > "$dir/cmd"
 		PIDS=()
-		# TLS: служба из трёх узлов; рост до пяти проверяется по TCP.
-		nsvc=5; [ "$TLS" = 1 ] && nsvc=3
+		# Служба состава из пяти узлов; рост до пяти проверяется и на TLS.
+		nsvc=5
 		for ((i = 0; i < nsvc; i++)); do alloc_role "S$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 3; i++)); do alloc_role "R$i" "$((i % 2 + 1))"; done
 		for ((i = 0; i < 4; i++)); do alloc_role "G$i" "$((i % 2 + 1))"; done
@@ -613,9 +657,6 @@ if [ "${INNER:-0}" = 1 ]; then
 		echo "membership: $res ($(( $(date +%s%3N) - start )) мс)"
 		case "$res" in
 			*"oks=5"*"bad=0"*"balance=185"*"good=1"*) ;;
-			*"oks=3"*"bad=0"*"balance=175"*"good=1"*)
-				# TLS-прогон: без гибели узла журнала, три вклада
-				[ "$TLS" = 1 ] || { bad "$dir" "membership: итог $res"; return 1; };;
 			*) bad "$dir" "membership: итог $res"; return 1;;
 		esac
 		check_no_traps "$dir" || { bad "$dir" "membership: трап"; return 1; }
@@ -759,7 +800,7 @@ CERTDIR=""
 if [ "$TLS" = 1 ]; then
 	CERTDIR="$work/certs"
 	"$BB/tools/cluster-certs.sh" "$CERTDIR" \
-		E Q S A B C X M Y S0 S1 S2 S3 S4 R0 R1 R2 R3 R4 G0 G1 G2 G3 >/dev/null || exit 1
+		E Q S A B C X M Y E2 e S0 S1 S2 S3 S4 R0 R1 R2 R3 R4 G0 G1 G2 G3 >/dev/null || exit 1
 fi
 
 echo "cluster: прогонов $RUNS, mark=quick:$QUICK veth:$VETH tls:$TLS"
