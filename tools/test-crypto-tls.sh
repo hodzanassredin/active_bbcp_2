@@ -747,7 +747,7 @@ evil_server_case v2hello v2hello
 evil_server_case v2record v2record
 evil_server_case hstype hstype
 
-echo "test-crypto-tls: TLS 1.3 — схема CertificateVerify"
+echo "test-crypto-tls: TLS 1.3 — схема CertificateVerify и записи"
 # RFC 8446 §4.4.3: в CertificateVerify 1.3 RSA только PSS; схема
 # rsa_pkcs1_sha256 предложена клиентом, rsa_pkcs1_sha384 — нет.
 fake13_case badpkcs1 1
@@ -757,6 +757,18 @@ fake13_case badpkcs1sha384 1
 python_client13_case good13 good 0
 python_client13_case badcv13pkcs1 badpkcs1 1
 python_client13_case badsig13 badsig13 1
+
+# RFC 8446 §5.4: пустой TLSInnerPlaintext, одни нули, законные пустая
+# запись и нулевое дополнение; испорченный тег и чужой внутренний тип.
+fake13_case emptyrec 0 1
+fake13_case zeropad 0 1
+fake13_case emptyapp 0
+fake13_case paddedapp 0
+fake13_case badtag13 0 1
+fake13_case badinnertype 0 1
+
+python_client13_case emptyrec13 emptyrec 0 1
+python_client13_case zeropad13 zeropad 0 1
 
 echo "test-crypto-tls: PASS (TLS 1.3 и 1.2 в обе стороны, взаимные сертификаты, отказы)"
 exit 0

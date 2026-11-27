@@ -157,10 +157,12 @@ ECDHE-ECDSA suites.
 - `KeyUpdate` is handled after the handshake: the `traffic upd` secret replaces the read keys,
   and on `request_update=1` the peer first sends its own `KeyUpdate` under the old keys and then
   updates its write keys. The record sequence number restarts in every epoch.
-- TLS 1.3 records travel in an outer `application_data`: the plaintext is data || inner type,
-  the nonce is `iv XOR seq`, and the additional data is the outer type, version `0303` and the
-  ciphertext length including the tag. GCM and ChaCha20-Poly1305 tags are compared in constant
-  time.
+- TLS 1.3 records travel in an outer `application_data`: the plaintext is data || inner type ||
+  zero padding, the nonce is `iv XOR seq`, and the additional data is the outer type, version
+  `0303` and the ciphertext length including the tag. The inner type is the last non-zero byte;
+  a record of nothing but zeros has no type and is refused. A record shorter than the AEAD tag
+  plus the type byte is a decode error; an empty application-data record is legal and carries
+  no bytes. GCM and ChaCha20-Poly1305 tags are compared in constant time.
 - 0-RTT and PSK are not implemented: `pre_shared_key` and `early_data` are not sent or accepted,
   and `NewSessionTicket` is ignored (the session is not resumed).
 - The TLS 1.2 client and server use ECDHE on X25519, secp256r1 or secp384r1 and AEAD records.

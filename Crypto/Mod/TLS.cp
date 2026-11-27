@@ -688,7 +688,7 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			IN seq : ARRAY OF SHORTCHAR; IN tag : ARRAY OF SHORTCHAR;
 			VAR plain : ARRAY OF SHORTCHAR; plainOfs : AO.SIZE;
 			VAR innerType, plainLen : AO.SIZE): BOOLEAN;
-		VAR nonce, aad : ARRAY 13 OF SHORTCHAR; res : AO.SIZE;
+		VAR nonce, aad : ARRAY 13 OF SHORTCHAR; res, i : AO.SIZE;
 	BEGIN
 		plainLen := 0;
 		innerType := 0;
@@ -699,8 +699,15 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		a.mode.Decrypt(cipherText, aad, tag, cipherOfs, cipherLen, 5,
 			8 * a.tagLen, plain, plainOfs, res);
 		IF res # 0 THEN RETURN FALSE END;
-		innerType := ORD(plain[plainOfs + cipherLen - 1]);
-		plainLen := cipherLen - 1;
+		(* RFC 8446, 5.4: тип — последний ненулевой байт; нули после
+		   него — заполнение. Запись из одних нулей типа не содержит:
+		   innerType остаётся 0, и вызывающий отвергает её. *)
+		i := cipherLen - 1;
+		WHILE (i > 0) & (ORD(plain[plainOfs + i]) = 0) DO DEC(i) END;
+		IF ORD(plain[plainOfs + i]) # 0 THEN
+			innerType := ORD(plain[plainOfs + i]);
+			plainLen := i
+		END;
 		RETURN TRUE
 	END Open;
 
@@ -764,8 +771,14 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 		FOR i := 0 TO cipherLen - 1 DO
 			plain[plainOfs + i] := tmp2^[i]
 		END;
-		innerType := ORD(tmp2^[cipherLen - 1]);
-		plainLen := cipherLen - 1;
+		(* RFC 8446, 5.4: тип — последний ненулевой байт; хвост из нулей
+		   — заполнение. Одни нули типа не дают (innerType = 0). *)
+		i := cipherLen - 1;
+		WHILE (i > 0) & (ORD(tmp2^[i]) = 0) DO DEC(i) END;
+		IF ORD(tmp2^[i]) # 0 THEN
+			innerType := ORD(tmp2^[i]);
+			plainLen := i
+		END;
 		RETURN TRUE
 	END Open;
 
@@ -5517,8 +5530,11 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			SELF.SendError(UnexpectedMessage);
 			RETURN
 		END;
+		(* Минимум: байт внутреннего типа и тег AEAD. Пустой
+		   TLSInnerPlaintext (len = tagLen) — ошибка декодирования, а не
+		   запись, которую можно открыть. *)
 		IF len < SELF.readAEAD.tagLen + 1 THEN
-			SELF.SendError(BadRecordMac);
+			SELF.SendError(DecodeError);
 			RETURN
 		END;
 		FOR i := 0 TO SELF.readAEAD.tagLen - 1 DO
@@ -5536,8 +5552,12 @@ MODULE CryptoTLS;(** AUTHOR "F.N."; PURPOSE "RFC 2246: Transport Layer Security 
 			Handshake :
 				SELF.ReceiveHandshake(SELF.inbuf, 0, plainLen)
 		|       ApplicationData :
-				SELF.appDataWriter.Bytes(SELF.inbuf, 0, plainLen);
-				SELF.appDataWriter.Update
+				(* Пустая запись приложения законна (RFC 8446, 5.4):
+				   передавать в поток нечего. *)
+				IF plainLen > 0 THEN
+					SELF.appDataWriter.Bytes(SELF.inbuf, 0, plainLen);
+					SELF.appDataWriter.Update
+				END
 		|       Alert :
 				IF plainLen # 2 THEN
 					SELF.SendError(DecodeError);

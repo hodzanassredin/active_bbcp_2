@@ -32,6 +32,7 @@
 | TLS 1.3: ключевое расписание HKDF, HRR, EE/Cert/CV/Finished, KeyUpdate, сигнал понижения, три набора | сделано | `crypto-fix` | `Crypto_devTLS13` (RFC 8448 побайтно), `tools/test-crypto-tls.sh` (матрица 1.3 в обе стороны, HRR, KeyUpdate, отказы), `crypto_tls13_fake.py` |
 | TLS 1.3: версия и набор по умолчанию (1.3, затем 1.2 ECDHE-AEAD) | сделано | `crypto-fix` | матрица `test-crypto-tls.sh`, ручной прогон хостов |
 | TLS 1.3: схема `CertificateVerify`, только PSS/ECDSA/Ed25519 (RFC 8446 §4.4.3) | исправлено | `crypto-fix` | `fake13-badpkcs1`, `fake13-badpkcs1sha384`, `badcv13pkcs1`, `badsig13` |
+| TLS 1.3: пустой TLSInnerPlaintext, одни нули, нулевое дополнение (RFC 8446 §5.4) | исправлено | `crypto-fix` | `fake13-emptyrec/zeropad/emptyapp/paddedapp`, `emptyrec13`, `zeropad13` |
 | Публичные HTTPS-хосты | сделано, 8/8 | `crypto-fix` | `tools/test-crypto-hosts.sh` (ручной), исправления sha384/512 RSA, SameAnchor, SAN, PEM-набора — см. раздел ниже |
 | Эталонные векторы | — | `5a6eeefb` | `Crypto_dev/Vectors/check.py`, `Crypto_dev*` |
 | 64-битные помощники, Net64 | — | `262ba455` | `Test64`, `TestNet64`, `Crypto_devRSA` |
