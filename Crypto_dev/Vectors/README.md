@@ -17,6 +17,7 @@ Component Pascal. Те же значения зашиты в модулях `Cry
 | `ecdsa-wycheproof.txt` | Wycheproof `ecdsa_secp256r1_sha256_test.json`, выбранные случаи; плюс векторы NIST CAVP и RFC 6979 в `Crypto_devECDSA` | Apache License 2.0 |
 | `ecdh-wycheproof.txt` | Wycheproof `ecdh_secp256r1_test.json`, выбранные случаи; плюс независимо посчитанные векторы P-256/P-384 в `Crypto_devEC` | Apache License 2.0 |
 | `prf.txt` | RFC 5246, P_SHA256; значения посчитаны независимо на Python/hmac | IETF Trust |
+| `tls13-rfc8448.txt` | RFC 8448, раздел 3: сообщения простого рукопожатия, ключевое расписание, `Finished`; `make-tls13-rfc8448.py` пересоздаёт `Crypto_devTLS13Data` | IETF Trust |
 | `chacha.txt` | RFC 8439: блок ChaCha20, поток, Poly1305, AEAD | IETF Trust |
 | `pss-wycheproof.txt` | Wycheproof `rsa_pss_2048_sha256_mgf1_32_test.json`, выбранные случаи | Apache License 2.0 |
 | `pss-negative.txt` | отрицательные векторы структуры EMSA-PSS (разделитель, PS, 0xBC, старшие биты, длина соли); `make-pss-negative.py` пересоздаёт файл, ключ детерминирован из seed=8017 | CC0 / public domain |
@@ -24,6 +25,9 @@ Component Pascal. Те же значения зашиты в модулях `Cry
 | `x509/modern/` | сертификаты ECDSA P-256/P-384, RSA-PSS, Ed25519 и смешанная цепочка; `make-modern.py` и `make-modern-data.py` пересоздают `Crypto_devX509ModernData`; ключи удалены | CC0 / public domain |
 | `x509/` | сертификаты сгенерированы для этого репозитория (CA, лист, просроченный); ключи удалены | CC0 / public domain |
 | `x509/chains/` | цепочки для проверки пути: промежуточные CA, `CA:FALSE`-издатель, `pathLen`, `keyUsage`, критичное расширение, цикл; `generate-chains.sh` пересоздаёт их, `make-data.py` собирает `Crypto_devX509Data` | CC0 / public domain |
+
+`tls13-rfc8448.txt` сверяет `Crypto_devTLS13` (ключевое расписание и `Finished`), а не
+`check.py`: значения RFC 8448 проверяются побайтно в модульном тесте.
 
 `check.py` требует `cryptography` для AES, GCM, X25519, ChaCha20, Poly1305, ECDSA/ECDH,
 RSA-PSS и Ed25519;

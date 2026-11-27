@@ -6,7 +6,9 @@ MODULE Crypto_devTLSServer;
 	ключа), CRYPTO_TLS_CA (PEM доверенного корня для проверки клиента),
 	CRYPTO_TLS_REQUIRE_CLIENT=1 — требовать клиентский сертификат,
 	CRYPTO_TLS_EXPECT_REJECT=1 — ожидать, что ни одно рукопожатие не
-	завершится (отрицательный случай).
+	завершится (отрицательный случай), CRYPTO_TLS_EXPECT_BAD_APP=1 —
+	рукопожатие завершается, но запись после него (CCS, пустая или из
+	нулей) отвергается до прихода запроса.
 
 	Сервер принимает одно соединение, читает строку, возвращает её
 	перевёрнутой и закрывается. Запускается из tools/test-crypto-tls.sh. *)
@@ -32,7 +34,7 @@ MODULE Crypto_devTLSServer;
 	END Wait;
 
 	PROCEDURE TestProcServer*;
-		VAR addr, cert, key, ca, require, expectReject: ARRAY 256 OF CHAR;
+		VAR addr, cert, key, ca, require, expectReject, badApp: ARRAY 256 OF CHAR;
 			ctx: CryptoTLS.Context;
 			srv, tls: CryptoTLS.Connection;
 			cl: TCP.Connection;
@@ -47,6 +49,7 @@ MODULE Crypto_devTLSServer;
 		GetPar("CRYPTO_TLS_CA", ca);
 		GetPar("CRYPTO_TLS_REQUIRE_CLIENT", require);
 		GetPar("CRYPTO_TLS_EXPECT_REJECT", expectReject);
+		GetPar("CRYPTO_TLS_EXPECT_BAD_APP", badApp);
 		UnitAssert.True(addr[0] # 0X, "CRYPTO_TLS_ADDR is set");
 		UnitAssert.True(cert[0] # 0X, "CRYPTO_TLS_CERT is set");
 		UnitAssert.True(key[0] # 0X, "CRYPTO_TLS_KEY is set");
@@ -98,7 +101,14 @@ MODULE Crypto_devTLSServer;
 					tls.Receive(buf, got, LEN(buf) - got, 1, read, res);
 					INC(got, read)
 				UNTIL (got >= reqLen) OR (read = 0);
-				IF got > 0 THEN
+				IF badApp[0] = '1' THEN
+					(* Запись после рукопожатия (CCS, пустая или из нулей)
+					   отвергнута: до приложения не дошёл запрос, и
+					   соединение закрыто. *)
+					UnitAssert.True(got < reqLen, "corrupted record rejected");
+					UnitAssert.True(tls.State() # TCP.Established,
+						"connection closed after corrupted record")
+				ELSIF got > 0 THEN
 					FOR i := 0 TO got - 1 DO
 						rev[i] := buf[got - 1 - i]
 					END;

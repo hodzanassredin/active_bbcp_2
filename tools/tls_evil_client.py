@@ -8,6 +8,10 @@
              уходил за границу буфера; сервер обязан отказать без трапа.
   v2record — запись с типом 128 (SSLv2 ClientHello): сервер обязан отказать.
   hstype   — запись Handshake с неизвестным типом: сервер обязан отказать.
+  ccsfirst — ChangeCipherSpec {0x01} до первого ClientHello: по RFC 8446
+             §5 это unexpected_message; сервер обязан отказать.
+  ccsfirstbad — то же с байтом 0x02: отказ.
+  ccsfirstlong — CCS длиной 2 до ClientHello: отказ.
 
 Запускается из tools/test-crypto-tls.sh; адрес — аргумент host:port.
 Клиент ничего не проверяет: он только посылает данные и закрывается.
@@ -41,6 +45,12 @@ def serve(mode, host, port):
             s.sendall(bytes([128, 3, 3, 0, 0]))
         elif mode == "hstype":
             s.sendall(record(22, handshake(63, b"\x00")))
+        elif mode == "ccsfirst":
+            s.sendall(record(20, b"\x01"))
+        elif mode == "ccsfirstbad":
+            s.sendall(record(20, b"\x02"))
+        elif mode == "ccsfirstlong":
+            s.sendall(record(20, b"\x01\x01"))
         else:
             sys.stderr.write("unknown mode %s\n" % mode)
             return 2

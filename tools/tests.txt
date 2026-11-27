@@ -100,6 +100,9 @@ Crypto_devX25519||180|CryptoX25519 CryptoFieldElement CryptoAosBigNumbers Crypto
 Crypto_devX509||180|Crypto_devX509Data CryptoX509 CryptoRSA CryptoPKCS1 CryptoASN1 CryptoHashes CryptoAosBigNumbers CryptoAosStreams CryptoAosCompat CryptoBase64 CryptoUtils
 # PKCS#1 v1.5: подпись/проверка, отказы при подделке, шифрование/расшифровка.
 Crypto_devPKCS1|slow|900|CryptoPKCS1 CryptoRSA CryptoPrimes CryptoAosBigNumbers CryptoUtils CryptoAosCompat
+# Ключевое расписание TLS 1.3 по RFC 8448: HKDF-Expand-Label, Derive-Secret,
+# Finished, ключи записи; SHA-384 отдельно.
+Crypto_devTLS13||180|Crypto_devTLS13Data CryptoTLS CryptoHKDF CryptoHashes CryptoSHA256 CryptoSHA384 CryptoSHA512 CryptoHMAC CryptoUtils CryptoAosCompat
 # PRF TLS 1.2 (RFC 5246) по независимому вектору, постоянное время, энтропия ОС.
 Crypto_devPRF||180|CryptoTLS CryptoOsRandom CryptoUtils CryptoFortuna CryptoFortunaRng CryptoAosBigNumbers CryptoAosStreams CryptoAosRandom CryptoAosRealConversions CryptoAosCompat CryptoHashes CryptoSHA256 CryptoCiphers CryptoMD5 CryptoSHA1 CryptoSHA3 CryptoKeccakF1600 CryptoKeccakSponge CryptoHMAC CryptoRSA CryptoPKCS1 CryptoX509 CryptoASN1 CryptoBase64 CryptoX25519 CryptoFieldElement CryptoGcm CryptoAosTCP CryptoAosPipes CryptoAosDates CryptoAosStrings CryptoAosFileStreams CryptoAosIP CryptoAosCommStreams CryptoAosClock CryptoAosBIT
 # P-256/P-384: скалярное умножение, ECDH, отказ от чужих точек.

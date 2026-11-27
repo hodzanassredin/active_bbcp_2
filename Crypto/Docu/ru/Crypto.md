@@ -2,14 +2,16 @@
 
 `Crypto` — библиотека криптографии, перенесённая из системы ETH Oberon A2. Она даёт хеши,
 аутентификацию сообщений, блочные и потоковые шифры, аутентифицированное шифрование,
-арифметику больших чисел, Диффи — Хеллмана, RSA, X25519, разбор X.509 и клиент TLS 1.2. Клиент TLS
-используется через `CryptoTLSStream`, протокол `CommStreams`: `Paket` выбирает его по имени
-`"CryptoTLSStream"` для HTTPS.
+арифметику больших чисел, Диффи — Хеллмана, RSA, X25519, разбор X.509 и клиент и сервер TLS 1.3
+и 1.2. Клиент TLS используется через `CryptoTLSStream`, протокол `CommStreams`: `Paket`
+выбирает его по имени `"CryptoTLSStream"` для HTTPS.
 
-В подсистеме есть и клиент, и сервер TLS 1.2. Клиент проверяет цепочку сертификата
-сервера до настроенного доверенного корня, срок действия и имя сервера (SAN/CN), а также
-подпись `ServerKeyExchange`. Сервер может запросить и проверить клиентский сертификат; на
-этом держится взаимная проверка сертификатов узлов кластера.
+Клиент проверяет цепочку сертификата сервера до настроенного доверенного корня, срок
+действия и имя сервера (SAN/CN), а в TLS 1.2 — ещё и подпись `ServerKeyExchange`; в TLS 1.3
+подпись `CertificateVerify` проверяется по контекстной строке и хешу транскрипта. Сервер
+может запросить и проверить клиентский сертификат; на этом держится взаимная проверка
+сертификатов узлов кластера. Политика по умолчанию предлагает TLS 1.3, затем TLS 1.2 с
+ECDHE и AEAD; сервер выбирает 1.3, если клиент его предложил.
 
 ## Модули
 
@@ -126,6 +128,46 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 ## Безопасность
 
+- Клиент и сервер TLS 1.3 (RFC 8446) работают с наборами `TLS_AES_128_GCM_SHA256`,
+  `TLS_AES_256_GCM_SHA384` и `TLS_CHACHA20_POLY1305_SHA256`. Ключевое расписание целиком на
+  HKDF: `HKDF-Extract` и `HKDF-Expand-Label` с метками `derived`, `c hs traffic`,
+  `s hs traffic`, `c ap traffic`, `s ap traffic`, `finished`, `key`, `iv` и `traffic upd`.
+  Хеш расписания — SHA-256 или SHA-384 по набору. Клиент шлёт `key_share` для X25519, а после
+  `HelloRetryRequest` — для secp256r1 или secp384r1; сервер принимает долю для любой из трёх
+  групп. `supported_versions` содержит 1.3 и 1.2.
+- В TLS 1.3 `CertificateVerify` подписывает 64 пробела, строку
+  `TLS 1.3, server CertificateVerify` (или `client`), нулевой байт и хеш транскрипта без
+  самого `CertificateVerify`. Принимаются `rsa_pss_rsae_sha256/384`,
+  `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384` и `ed25519`; Ed25519 проверяется, но
+  не подписывается. RSA PKCS#1 v1.5 отвергается, даже когда `rsa_pkcs1_sha256` назван в
+  `signature_algorithms`: RFC 8446 §4.4.3 определяет его только для подписей сертификатов.
+  Схема, которую вторая сторона не предлагала, тоже отвергается. `Finished` — HMAC с ключом
+  `finished` по хешу транскрипта; клиентский `Finished` считается по транскрипту вместе с
+  серверным, application-секреты — тоже.
+- `HelloRetryRequest` распознаётся по случайному значению `SHA-256("HelloRetryRequest")`;
+  клиент повторяет `ClientHello` с той же случайной строкой и session id, но с `key_share`
+  запрошенной группы, второй HRR отвергается. Сервер при выборе группы сначала ищет
+  присланный `key_share`, иначе отвечает HRR, а на второй `ClientHello` проверяет, что набор
+  и группа не изменились.
+- Сигнал понижения RFC 8446 §4.1.3: сервер, умеющий 1.3, но согласовавший 1.2, ставит в
+  последние 8 байт `ServerHello.random` `DOWNGRD\x01` (`\x00` для 1.1 и ниже); клиент,
+  предлагавший 1.3, при виде этой метки прерывает рукопожатие с `illegal_parameter`.
+  Отсутствие метки — нормальный ответ сервера, который умеет только 1.2.
+- `KeyUpdate` принимается после рукопожатия: секрет `traffic upd` обновляет ключи чтения, а
+  на `request_update=1` клиент или сервер сначала отправляет свой `KeyUpdate` под старыми
+  ключами и затем обновляет ключи записи. Номер записи сбрасывается на каждой эпохе.
+- Записи TLS 1.3 идут во внешнем `application_data`: открытый текст — данные || внутренний
+  тип || нулевое дополнение, nonce — `iv XOR seq`, дополнительные данные — внешний тип,
+  версия `0303` и длина шифртекста с тегом. Внутренний тип — последний ненулевой байт;
+  запись из одних нулей типа не содержит и отвергается. Запись короче тега AEAD плюс байт
+  типа — ошибка декодирования; пустая запись приложения законна и не несёт байтов. Тег GCM
+  и ChaCha20-Poly1305 сравнивается постоянного времени.
+- `ChangeCipherSpec` в TLS 1.3 отбрасывается, только если это ровно один байт `0x01` и
+  рукопожатие ещё не завершено. Другое значение, другая длина, CCS в защищённой записи, а
+  также CCS после `Finished` или до первого `ClientHello` прерывают соединение с
+  `unexpected_message` (RFC 8446 §5).
+- 0-RTT и PSK не реализованы: `pre_shared_key` и `early_data` не отправляются, сервер их не
+  принимает, `NewSessionTicket` игнорируется (сессия не возобновляется).
 - Клиент и сервер TLS 1.2 используют ECDHE на X25519, secp256r1 или secp384r1 и AEAD-записи.
   Политика по умолчанию предлагает ECDHE-ECDSA и ECDHE-RSA с AES-128-GCM-SHA256,
   AES-256-GCM-SHA384 и ChaCha20-Poly1305-SHA256 (шесть наборов). CBC, 3DES, RC4, NULL и RSA
@@ -207,11 +249,14 @@ srv.Accept(client, res);                       (* завершает рукоп�
 
 ## Ограничения
 
-- TLS 1.3 не реализован.
-- Рукопожатие TLS 1.2 поддерживает несжатые точки на X25519, secp256r1 и secp384r1; P-521,
-  сжатые точки и остальные named groups не реализованы. Extended master secret, тикеты
-  сессий, безопасное пересогласование и 0-RTT/PSK не реализованы; отправляется пустой
-  `renegotiation_info`, любое пересогласование отвергается.
+- Рукопожатие TLS 1.2 и 1.3 поддерживает несжатые точки на X25519, secp256r1 и secp384r1;
+  P-521, сжатые точки и остальные named groups не реализованы. Extended master secret,
+  тикеты сессий, безопасное пересогласование, 0-RTT и PSK не реализованы; в 1.2
+  отправляется пустой `renegotiation_info`, любое пересогласование отвергается, в 1.3
+  `NewSessionTicket` игнорируется.
+- В TLS 1.3 нет 0-RTT, PSK, post-handshake authentication и ранних данных; клиентский
+  сертификат запрашивается только в основном рукопожатии. Сервер 1.3 обслуживает
+  RSA- и ECDSA-сертификаты.
 - Подпись Ed25519 не реализована (проверка есть). RSA-PSS использует фиксированную длину соли,
   равную длине хеша; другие длины соли не принимаются. Встроенный сервер подписывает
   RSA-PSS или ECDSA по своему сертификату и не обслуживает Ed25519-сертификат.
@@ -222,8 +267,8 @@ srv.Accept(client, res);                       (* завершает рукоп�
   степень по модулю в `CryptoAosBigNumbers` зависит от данных. Это отмечено в обзоре
   безопасности и приемлемо для модели угроз кластера; для общего сервера, доступного
   локальному атакующему с высоким разрешением таймингов, — нет.
-- Возобновление сессий и пересогласование поддержаны лишь в объёме исходного кода A2;
-  серверных тикетов TLS 1.3 нет.
+- Возобновление сессий и пересогласование в TLS 1.2 поддержаны лишь в объёме исходного кода
+  A2; в TLS 1.3 возобновления нет — серверный `NewSessionTicket` не сохраняется.
 - Сообщение рукопожатия должно помещаться в одну запись TLS; фрагментация по нескольким
   записям отвергается. У сервера нет таймаута рукопожатия: молчащий клиент занимает `Accept`.
 - Системного хранилища корневых CA нет. `CryptoTLSStream` использует контекст по умолчанию и
@@ -244,27 +289,45 @@ srv.Accept(client, res);                       (* завершает рукоп�
 `Crypto_devHKDF`, `Crypto_devCiphers`, `Crypto_devGcm`, `Crypto_devChaCha20`, `Crypto_devBigNumbers`, `Crypto_devDH`,
 `Crypto_devRSA`, `Crypto_devX25519`, `Crypto_devEC`, `Crypto_devECDSA`, `Crypto_devEd25519`, `Crypto_devPSS`, `Crypto_devX509`,
 `Crypto_devX509Modern`,
-`Crypto_devPKCS1`, `Crypto_devPRF`. Их
+`Crypto_devPKCS1`, `Crypto_devPRF`, `Crypto_devTLS13`. Их
 запускает `tools/test.sh` по списку `tools/tests.txt`. Эталонные значения также лежат файлами с
 указанием источника и лицензии в `Crypto_dev/Vectors`; `Crypto_dev/Vectors/check.py` сверяет их
 независимой реализацией на Python.
 
+`Crypto_devTLS13` сверяет ключевое расписание TLS 1.3 с простым рукопожатием RFC 8448
+побайтно: early/derived/handshake/master, client/server handshake и application traffic
+secrets, ключи и iv записи, `Finished` сервера и клиента. Сообщения RFC 8448 лежат в
+`Crypto_devTLS13Data` (генератор `Crypto_dev/Vectors/make-tls13-rfc8448.py`, исходные
+значения — `Vectors/tls13-rfc8448.txt`). Отдельно проверяются SHA-384, связывание секретов
+и `Finished` с транскриптом и разделение меток `key`/`iv`.
+
 Рукопожатию TLS нужен второй процесс, поэтому у него отдельный сценарий:
 `tools/test-crypto-tls.sh` создаёт во временном каталоге CA, промежуточный CA, издателя с
-`CA:FALSE`, серверные сертификаты RSA, ECDSA P-256 и P-384, клиентский, просроченные
-сертификаты и сертификат с чужим именем, гоняет клиент против `openssl s_server -rev`, сервер
-против `openssl s_client`, проверяет матрицу ECDHE-RSA/ECDHE-ECDSA × AES-128/256-GCM и
-ChaCha20-Poly1305 × x25519/secp256r1/secp384r1 в обе стороны, взаимную аутентификацию с RSA- и
+`CA:FALSE`, серверные сертификаты RSA, ECDSA P-256/P-384 и Ed25519, клиентский, просроченные
+сертификаты и сертификат с чужим именем. Он гоняет клиент против `openssl s_server -rev`,
+сервер против `openssl s_client`, проверяет матрицы TLS 1.3 (три набора × три группы клиента
+с HRR и сервера × RSA/ECDSA-сертификаты, Ed25519 `CertificateVerify`) и TLS 1.2
+(ECDHE-RSA/ECDHE-ECDSA × AES-128/256-GCM и ChaCha20-Poly1305 ×
+x25519/secp256r1/secp384r1) в обе стороны, взаимную аутентификацию с RSA- и
 ECDSA-сертификатом сервера и требует отказа (без трапа процесса) для чужого CA, просроченного
 сертификата, промежуточного или корня, неверного имени, издателя с `CA:FALSE`, подделанной
 подписи `ServerKeyExchange` (RSA PKCS#1, RSA-PSS и ECDSA), плохого `Finished`, неверного
 `ChangeCipherSpec`, испорченного тега AES-GCM или ChaCha20-Poly1305, группы, которой клиент не
 предлагал, точки secp256r1 вне кривой, чрезмерной длины подписи, неверной длины сертификата,
 невозможной длины расширений, отсутствующего `ServerKeyExchange`, нулевого открытого ключа
-X25519, SSLv2 `ClientHello` и неизвестного типа рукопожатия. `tools/crypto_tls_lib.py`,
-`crypto_tls_fake.py` и `crypto_tls_client.py` — Python-партнёры для случаев, где нужен
-корректный транскрипт рукопожатия: плохой `Finished`, плохой `ChangeCipherSpec`, испорченный
-тег записи, нулевая точка X25519 и плохая или хорошая подпись `CertificateVerify`.
+X25519, SSLv2 `ClientHello` и неизвестного типа рукопожатия. Для TLS 1.3 к этому добавлены
+`KeyUpdate`, `HelloRetryRequest` (и повторный HRR), `CertificateVerify` с чужим контекстом,
+испорченный `Finished`, ключи из испорченного транскрипта, метка понижения `DOWNGRD` в
+ответе 1.2, `rsa_pkcs1_*` и не предложенная схема в `CertificateVerify`, испорченный тег и
+внутренний тип записи 1.3, пустой TLSInnerPlaintext и запись из одних нулей, законная пустая
+запись приложения с нулевым дополнением, CCS с неверным значением или длиной, CCS после
+`Finished`, CCS до первого `ClientHello`, неверный `legacy_version` в ServerHello, испорченные
+EncryptedExtensions и Certificate, укороченный `Finished`, недопустимый `KeyUpdate`, нулевая и
+чрезмерная доля X25519 `key_share`. `tools/crypto_tls_lib.py`, `crypto_tls_fake.py`,
+`crypto_tls13_fake.py`, `crypto_tls13_client.py` и `crypto_tls_client.py` — Python-партнёры
+для случаев, где нужен корректный транскрипт рукопожатия: плохой `Finished`, плохой
+`ChangeCipherSpec`, испорченный тег записи, нулевая точка X25519, плохая или хорошая подпись
+`CertificateVerify`, `KeyUpdate` и HRR.
 Модулей `Crypto_devTLS` и `Crypto_devTLSServer` нет в `tools/tests.txt`, потому что без
 второго процесса они не проходят.
 
@@ -274,19 +337,19 @@ X25519, SSLv2 `ClientHello` и неизвестного типа рукопож�
 `tools/test-crypto-hosts.sh` (не входит в `tools/test.sh`) собирает `Crypto_devHosts`, загружает
 системный набор CA (`/etc/ssl/certs/ca-certificates.crt` по умолчанию), соединяется со списком
 публичных HTTPS-хостов и посылает `GET / HTTP/1.0`. Для каждого хоста печатаются версия, набор,
-группа ECDHE, схема подписи рукопожатия и первая строка ответа. Прогон 26.11.2026 соединился со
-всеми восемью хостами по TLS 1.2:
+группа ECDHE, схема подписи рукопожатия и первая строка ответа. Прогон 27.11.2026 соединился со всеми восемью хостами по TLS 1.3; microsoft.com запросил
+secp256r1 через `HelloRetryRequest`, потому что первая доля клиента — x25519:
 
-| Хост | Набор | Группа | Подпись |
-|---|---|---|---|
-| google.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| cloudflare.com | ECDHE-ECDSA-CHACHA20-POLY1305-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| github.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| letsencrypt.org | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| wikipedia.org | ECDHE-ECDSA-AES256-GCM-SHA384 | x25519 | ecdsa_secp256r1_sha256 |
-| microsoft.com | ECDHE-RSA-AES256-GCM-SHA384 | secp256r1 | rsa_pss_rsae_sha256 |
-| apple.com | ECDHE-ECDSA-AES128-GCM-SHA256 | x25519 | ecdsa_secp256r1_sha256 |
-| amazon.com | ECDHE-RSA-AES128-GCM-SHA256 | x25519 | rsa_pss_rsae_sha256 |
+| Хост | Версия | Набор | Группа | Подпись |
+|---|---|---|---|---|
+| google.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| cloudflare.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| github.com | TLS 1.3 | TLS_AES_128_GCM_SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| letsencrypt.org | TLS 1.3 | TLS_AES_128_GCM_SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| wikipedia.org | TLS 1.3 | TLS_AES_128_GCM_SHA256 | x25519 | ecdsa_secp256r1_sha256 |
+| microsoft.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | secp256r1 | rsa_pss_rsae_sha256 |
+| apple.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | ecdsa_secp256r1_sha256 |
+| amazon.com | TLS 1.3 | TLS_AES_256_GCM_SHA384 | x25519 | rsa_pss_rsae_sha256 |
 
 Прогон выявил и привёл к исправлению: отвергались подписи сертификатов
 `sha384WithRSAEncryption`/`sha512WithRSAEncryption`; DigestInfo в PKCS#1 знал только
